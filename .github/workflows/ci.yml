@@ -75,6 +75,30 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure -C Release
 
+      # === macOS: Import signing certificate ===
+      - name: Import code signing certificate
+        if: matrix.platform == 'macos'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+        run: |
+          # Create a temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PWD=$(openssl rand -hex 16)
+          security create-keychain -p "$KEYCHAIN_PWD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PWD" $KEYCHAIN_PATH
+          # Import certificate
+          echo "$MACOS_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -P "$MACOS_CERTIFICATE_PWD" \
+            -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PWD" $KEYCHAIN_PATH
+          security list-keychains -d user -s $KEYCHAIN_PATH login.keychain-db
+          # Extract identity name for codesign
+          IDENTITY=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep "Developer ID" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "CODESIGN_IDENTITY=$IDENTITY" >> $GITHUB_ENV
+          echo "Signing identity: $IDENTITY"
+
       # === macOS: Create .dmg ===
       - name: Package macOS .dmg
         if: matrix.platform == 'macos'
@@ -101,6 +125,15 @@ jobs:
             APP_PATH="BSFChat.app"
           fi
           macdeployqt "$APP_PATH" -always-overwrite || true
+          # Code sign the app
+          if [ -n "$CODESIGN_IDENTITY" ]; then
+            codesign --force --deep --sign "$CODESIGN_IDENTITY" \
+              --options runtime --timestamp "$APP_PATH"
+            echo "App signed with: $CODESIGN_IDENTITY"
+          else
+            echo "No signing identity found, using ad-hoc signing"
+            codesign --force --deep --sign - "$APP_PATH"
+          fi
           create-dmg \
             --volname "BSFChat" \
             --window-size 600 400 \
