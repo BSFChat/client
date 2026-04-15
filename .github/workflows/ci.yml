@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: macos
+            qt_arch: clang_64
+          - os: windows-latest
+            platform: windows
+            qt_arch: win64_msvc2022_64
+          - os: ubuntu-24.04
+            platform: linux
+            qt_arch: gcc_64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.0'
+          modules: 'qtmultimedia'
+          cache: true
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libgl1-mesa-dev libxkbcommon-dev \
+            libxcb-xkb-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-shape0-dev \
+            libxcb-randr0-dev libxcb-icccm4-dev libxcb-image0-dev libegl1-mesa-dev \
+            libpulse-dev libasound2-dev
+
+      - name: Install macOS dependencies
+        if: matrix.platform == 'macos'
+        run: brew install openssl@3 create-dmg
+
+      - name: Install Windows dependencies
+        if: matrix.platform == 'windows'
+        run: choco install nsis -y
+
+      - name: Configure (Unix)
+        if: matrix.platform != 'windows'
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
+
+      - name: Configure (Windows)
+        if: matrix.platform == 'windows'
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
+
+      - name: Build
+        run: cmake --build build --config Release -j4
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -C Release
+
+      # === macOS: Create .dmg ===
+      - name: Package macOS .dmg
+        if: matrix.platform == 'macos'
+        run: |
+          cd build
+          macdeployqt bsfchat-app.app -always-overwrite
+          create-dmg \
+            --volname "BSFChat" \
+            --window-size 600 400 \
+            --icon "bsfchat-app.app" 175 200 \
+            --app-drop-link 425 200 \
+            --no-internet-enable \
+            "BSFChat-macOS.dmg" "bsfchat-app.app" || true
+
+      - name: Upload macOS artifact
+        if: matrix.platform == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BSFChat-macOS
+          path: build/BSFChat-macOS.dmg
+
+      # === Windows: Create NSIS installer ===
+      - name: Package Windows installer
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          mkdir dist
+          copy build\Release\bsfchat-app.exe dist\
+          windeployqt --release --no-translations dist\bsfchat-app.exe
+          copy "${{ github.workspace }}\installer.nsi" dist\
+          cd dist
+          makensis installer.nsi
+
+      - name: Upload Windows artifact
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BSFChat-Windows
+          path: dist/BSFChat-Setup.exe
+
+      # === Linux: Create tarball ===
+      - name: Package Linux tarball
+        if: matrix.platform == 'linux'
+        run: |
+          mkdir -p BSFChat/bin BSFChat/lib BSFChat/plugins
+          cp build/bsfchat-app BSFChat/bin/
+          # Create a simple launch script
+          cat > BSFChat/bsfchat.sh << 'SCRIPT'
+          #!/bin/bash
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          export LD_LIBRARY_PATH="$DIR/lib:$LD_LIBRARY_PATH"
+          export QT_PLUGIN_PATH="$DIR/plugins"
+          exec "$DIR/bin/bsfchat-app" "$@"
+          SCRIPT
+          chmod +x BSFChat/bsfchat.sh
+          tar czf BSFChat-linux-x86_64.tar.gz BSFChat/
+
+      - name: Upload Linux artifact
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BSFChat-Linux
+          path: BSFChat-linux-x86_64.tar.gz
+
+  # Create GitHub Release on tag push
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/BSFChat-macOS/BSFChat-macOS.dmg
+            artifacts/BSFChat-Windows/BSFChat-Setup.exe
+            artifacts/BSFChat-Linux/BSFChat-linux-x86_64.tar.gz
+          generate_release_notes: true
