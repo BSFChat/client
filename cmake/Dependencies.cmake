@@ -18,7 +18,6 @@ if(BSFCHAT_ENABLE_VOICE)
         GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
         GIT_TAG        v0.22.4
         GIT_SHALLOW    TRUE
-        PATCH_COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch-plog.cmake
     )
     set(NO_MEDIA ON CACHE BOOL "" FORCE)
     set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)

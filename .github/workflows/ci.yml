@@ -43,10 +43,15 @@ jobs:
             libxcb-xkb-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-shape0-dev \
             libxcb-randr0-dev libxcb-icccm4-dev libxcb-image0-dev libegl1-mesa-dev \
             libpulse-dev libasound2-dev
+          pip3 install --break-system-packages cmake==3.30.5
 
       - name: Install macOS dependencies
         if: matrix.platform == 'macos'
-        run: brew install openssl@3 create-dmg
+        run: |
+          brew install openssl@3 create-dmg
+          # Pin CMake to 3.30 to avoid cmake_minimum_required compat issues
+          # with libdatachannel's vendored deps (plog, usrsctp)
+          pip3 install --break-system-packages cmake==3.30.5
 
       - name: Install Windows dependencies
         if: matrix.platform == 'windows'
@@ -58,12 +63,15 @@ jobs:
       - name: Configure (macOS)
         if: matrix.platform == 'macos'
         run: |
+          export PATH="$HOME/Library/Python/3.12/bin:$HOME/Library/Python/3.13/bin:$PATH"
           cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev \
             -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
 
       - name: Configure (Linux)
         if: matrix.platform == 'linux'
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
 
       - name: Configure (Windows)
         if: matrix.platform == 'windows'
