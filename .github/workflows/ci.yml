@@ -121,12 +121,16 @@ jobs:
       # === Windows: Create NSIS installer ===
       - name: Package Windows installer
         if: matrix.platform == 'windows'
-        shell: cmd
+        shell: pwsh
         run: |
           mkdir dist
-          copy build\Release\bsfchat-app.exe dist\
+          # Find the exe (could be in Release/ or directly in build/)
+          $exe = Get-ChildItem -Path build -Recurse -Filter "bsfchat-app.exe" | Select-Object -First 1
+          if (-not $exe) { Write-Error "bsfchat-app.exe not found"; exit 1 }
+          Write-Host "Found exe at: $($exe.FullName)"
+          Copy-Item $exe.FullName dist\
           windeployqt --release --no-translations dist\bsfchat-app.exe
-          copy "${{ github.workspace }}\installer.nsi" dist\
+          Copy-Item installer.nsi dist\
           cd dist
           makensis installer.nsi
 
