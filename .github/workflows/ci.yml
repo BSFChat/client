@@ -120,8 +120,8 @@ jobs:
             exit 1
           fi
           echo "Found app bundle: $APP_PATH"
-          # Deploy Qt frameworks into the bundle
-          macdeployqt "$APP_PATH" -always-overwrite
+          # Deploy Qt frameworks and QML modules into the bundle
+          macdeployqt "$APP_PATH" -always-overwrite -qmldir=${{ github.workspace }}/qml
           # Code sign
           if [ -n "$CODESIGN_IDENTITY" ]; then
             codesign --force --deep --sign "$CODESIGN_IDENTITY" \
