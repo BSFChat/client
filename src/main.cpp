@@ -6,7 +6,10 @@
 #include "core/App.h"
 #include "net/ServerManager.h"
 
-__attribute__((used)) static const char g_build_tag[] = "Bullshit Free Chat";
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((used))
+#endif
+static const char g_build_tag[] = "Bullshit Free Chat";
 
 int main(int argc, char *argv[])
 {
