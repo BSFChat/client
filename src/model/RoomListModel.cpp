@@ -109,10 +109,15 @@ void RoomListModel::incrementUnreadCount(const QString& roomId, int count)
 
 void RoomListModel::resetUnreadCount(const QString& roomId)
 {
+    setUnreadCount(roomId, 0);
+}
+
+void RoomListModel::setUnreadCount(const QString& roomId, int count)
+{
     int idx = findRoom(roomId);
     if (idx < 0) return;
-    if (m_rooms[idx].unreadCount == 0) return;
-    m_rooms[idx].unreadCount = 0;
+    if (m_rooms[idx].unreadCount == count) return;
+    m_rooms[idx].unreadCount = count;
     emit dataChanged(index(idx), index(idx), {UnreadCountRole});
 }
 

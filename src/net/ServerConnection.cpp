@@ -376,8 +376,12 @@ void ServerConnection::setActiveRoom(const QString& roomId)
     m_activeRoomName = m_roomListModel->roomDisplayName(roomId);
     m_activeRoomTopic = m_roomListModel->roomTopic(roomId);
 
-    // Reset unread count for this room
+    // Reset unread count for this room immediately (optimistic) and tell the
+    // server to advance the read marker so future syncs also report zero.
     m_roomListModel->resetUnreadCount(roomId);
+    if (!roomId.isEmpty()) {
+        m_client->sendReadMarker(roomId);
+    }
 
     emit activeRoomIdChanged();
     emit activeRoomNameChanged();
@@ -752,8 +756,10 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
         // Ensure room exists in the list
         m_roomListModel->ensureRoom(roomId);
 
-        // Count new messages for unread tracking
-        int newMessageCount = 0;
+        // Track whether any new message events arrived for the active room,
+        // so we can bump the server's read marker forward without waiting for
+        // the next time the user clicks the channel.
+        bool activeRoomHadNewMessage = false;
 
         // Process timeline events
         for (const auto& event : joinedRoom.timeline.events) {
@@ -812,10 +818,9 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 QString body = QString::fromStdString(event.content.data.value("body", ""));
                 m_roomListModel->updateLastMessage(roomId, body, event.origin_server_ts);
 
-                // Count messages not from us in non-active rooms
                 QString sender = QString::fromStdString(event.sender);
-                if (roomId != m_activeRoomId && sender != m_userId) {
-                    newMessageCount++;
+                if (roomId == m_activeRoomId && sender != m_userId) {
+                    activeRoomHadNewMessage = true;
                 }
             }
 
@@ -854,13 +859,19 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             }
         }
 
-        // Increment unread count for non-active rooms
-        if (newMessageCount > 0) {
-            m_roomListModel->incrementUnreadCount(roomId, newMessageCount);
-            if (!m_hasUnread) {
-                m_hasUnread = true;
-                emit hasUnreadChanged();
+        // Apply server-authoritative unread count. The server already accounts
+        // for the read marker, sender-is-self filtering, and backfill — so we
+        // just mirror whatever it tells us.
+        int serverUnread = joinedRoom.unread_count.value_or(0);
+        // If this is the active room, we've effectively read everything that
+        // just arrived — stay at zero locally and bump the server's marker.
+        if (roomId == m_activeRoomId) {
+            m_roomListModel->setUnreadCount(roomId, 0);
+            if (activeRoomHadNewMessage) {
+                m_client->sendReadMarker(roomId);
             }
+        } else {
+            m_roomListModel->setUnreadCount(roomId, serverUnread);
         }
 
         // Process ephemeral events (typing indicators)
@@ -947,4 +958,9 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
 
     // Rebuild categorized rooms after sync processing
     rebuildCategorizedRooms();
+
+    // Recalculate global hasUnread flag from the authoritative per-room counts.
+    bool hadUnread = m_hasUnread;
+    m_hasUnread = m_roomListModel->totalUnreadCount() > 0;
+    if (m_hasUnread != hadUnread) emit hasUnreadChanged();
 }

@@ -491,6 +491,19 @@ void MatrixClient::setTyping(const QString& roomId, const QString& userId,
     });
 }
 
+void MatrixClient::sendReadMarker(const QString& roomId)
+{
+    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
+                   + QUrl::toPercentEncoding(roomId) + "/read_marker";
+
+    // Empty body — server marks current max position as read for this user.
+    auto* reply = makeRequest("POST", path, "{}");
+    connect(reply, &QNetworkReply::finished, this, [reply]() {
+        reply->deleteLater();
+        // Fire and forget — server pushes new count via sync
+    });
+}
+
 void MatrixClient::joinVoice(const QString& roomId)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)

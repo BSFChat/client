@@ -55,6 +55,10 @@ public:
     // Typing
     void setTyping(const QString& roomId, const QString& userId, bool typing, int timeout = 5000);
 
+    // Read marker (server-tracked unread counts).
+    // Server marks everything currently in the room as read for this user.
+    void sendReadMarker(const QString& roomId);
+
     // Voice
     void joinVoice(const QString& roomId);
     void leaveVoice(const QString& roomId);

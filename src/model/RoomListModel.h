@@ -36,6 +36,8 @@ public:
     void updateLastMessage(const QString& roomId, const QString& message, qint64 timestamp);
     void incrementUnreadCount(const QString& roomId, int count);
     void resetUnreadCount(const QString& roomId);
+    // Absolute set — used when the server provides authoritative unread count.
+    void setUnreadCount(const QString& roomId, int count);
     int totalUnreadCount() const;
     Q_INVOKABLE QString roomDisplayName(const QString& roomId) const;
     QString roomTopic(const QString& roomId) const;
