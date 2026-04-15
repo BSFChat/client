@@ -121,7 +121,28 @@ jobs:
           fi
           echo "Found app bundle: $APP_PATH"
           # Deploy Qt frameworks and QML modules into the bundle
-          macdeployqt "$APP_PATH" -always-overwrite -qmldir=${{ github.workspace }}/qml
+          macdeployqt "$APP_PATH" -always-overwrite -qmldir=${{ github.workspace }}/qml -verbose=2
+          # Ensure QML modules are copied (macdeployqt sometimes misses them)
+          QT_QML_DIR=$(dirname $(dirname $(which macdeployqt)))/qml
+          if [ -d "$QT_QML_DIR" ]; then
+            echo "Copying QML modules from $QT_QML_DIR"
+            mkdir -p "$APP_PATH/Contents/Resources/qml"
+            for mod in QtQuick QtQuick/Controls QtQuick/Layouts QtQuick/Templates \
+                       QtQuick/Dialogs QtQml QtQml/WorkerScript Qt/labs/platform \
+                       QtQuick/Controls/Basic; do
+              if [ -d "$QT_QML_DIR/$mod" ]; then
+                mkdir -p "$APP_PATH/Contents/Resources/qml/$mod"
+                cp -R "$QT_QML_DIR/$mod/" "$APP_PATH/Contents/Resources/qml/$mod/"
+              fi
+            done
+          fi
+          # Set qt.conf to tell Qt where QML modules are
+          cat > "$APP_PATH/Contents/Resources/qt.conf" << 'QTCONF'
+          [Paths]
+          Plugins = PlugIns
+          Imports = Resources/qml
+          QmlImports = Resources/qml
+          QTCONF
           # Code sign
           if [ -n "$CODESIGN_IDENTITY" ]; then
             codesign --force --deep --sign "$CODESIGN_IDENTITY" \
