@@ -78,14 +78,38 @@ jobs:
         if: matrix.platform == 'macos'
         run: |
           cd build
-          macdeployqt bsfchat-app.app -always-overwrite
+          # Find the .app bundle (might be in a subdirectory)
+          APP_PATH=$(find . -name "bsfchat-app.app" -type d | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app bundle found, creating one from binary"
+            mkdir -p BSFChat.app/Contents/MacOS
+            cp bsfchat-app BSFChat.app/Contents/MacOS/
+            cat > BSFChat.app/Contents/Info.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleExecutable</key><string>bsfchat-app</string>
+          <key>CFBundleName</key><string>BSFChat</string>
+          <key>CFBundleIdentifier</key><string>com.bsfchat.app</string>
+          <key>CFBundleVersion</key><string>0.1.0</string>
+          <key>CFBundleShortVersionString</key><string>0.1.0</string>
+          <key>NSMicrophoneUsageDescription</key><string>BSFChat needs microphone access for voice chat.</string>
+          </dict></plist>
+          PLIST
+            APP_PATH="BSFChat.app"
+          fi
+          macdeployqt "$APP_PATH" -always-overwrite || true
           create-dmg \
             --volname "BSFChat" \
             --window-size 600 400 \
-            --icon "bsfchat-app.app" 175 200 \
+            --icon "$(basename $APP_PATH)" 175 200 \
             --app-drop-link 425 200 \
             --no-internet-enable \
-            "BSFChat-macOS.dmg" "bsfchat-app.app" || true
+            "BSFChat-macOS.dmg" "$APP_PATH" || true
+          # Fallback: if create-dmg failed, just zip the .app
+          if [ ! -f "BSFChat-macOS.dmg" ]; then
+            zip -r BSFChat-macOS.dmg "$APP_PATH"
+          fi
 
       - name: Upload macOS artifact
         if: matrix.platform == 'macos'
