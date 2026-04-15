@@ -122,19 +122,24 @@ jobs:
           echo "Found app bundle: $APP_PATH"
           # Deploy Qt frameworks and QML modules into the bundle
           macdeployqt "$APP_PATH" -always-overwrite -qmldir=${{ github.workspace }}/qml -verbose=2
-          # Ensure QML modules are copied (macdeployqt sometimes misses them)
-          QT_QML_DIR=$(dirname $(dirname $(which macdeployqt)))/qml
+          # Ensure QML modules are copied (macdeployqt often misses them)
+          QT_QML_DIR="${QML2_IMPORT_PATH:-$(dirname $(dirname $(which macdeployqt)))/qml}"
+          echo "Looking for QML modules in: $QT_QML_DIR"
           if [ -d "$QT_QML_DIR" ]; then
             echo "Copying QML modules from $QT_QML_DIR"
-            mkdir -p "$APP_PATH/Contents/Resources/qml"
-            for mod in QtQuick QtQuick/Controls QtQuick/Layouts QtQuick/Templates \
-                       QtQuick/Dialogs QtQml QtQml/WorkerScript Qt/labs/platform \
-                       QtQuick/Controls/Basic; do
+            QML_DEST="$APP_PATH/Contents/Resources/qml"
+            mkdir -p "$QML_DEST"
+            for mod in QtQuick QtQml Qt/labs; do
               if [ -d "$QT_QML_DIR/$mod" ]; then
-                mkdir -p "$APP_PATH/Contents/Resources/qml/$mod"
-                cp -R "$QT_QML_DIR/$mod/" "$APP_PATH/Contents/Resources/qml/$mod/"
+                cp -R "$QT_QML_DIR/$mod" "$QML_DEST/"
+                echo "  Copied $mod"
               fi
             done
+            echo "QML modules copied: $(ls $QML_DEST/)"
+          else
+            echo "WARNING: QML dir not found at $QT_QML_DIR"
+            # Try finding it
+            find /Users/runner -name "QtQuick" -type d -path "*/qml/*" 2>/dev/null | head -3
           fi
           # Set qt.conf to tell Qt where QML modules are
           cat > "$APP_PATH/Contents/Resources/qt.conf" << 'QTCONF'
