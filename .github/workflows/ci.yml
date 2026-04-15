@@ -132,7 +132,7 @@ jobs:
           if (-not $exe) { Write-Error "bsfchat-app.exe not found"; exit 1 }
           Write-Host "Found exe at: $($exe.FullName)"
           Copy-Item $exe.FullName dist\
-          windeployqt --release --no-translations dist\bsfchat-app.exe
+          windeployqt --release --no-translations --qmldir qml dist\bsfchat-app.exe
           Copy-Item installer.nsi dist\
           cd dist
           makensis installer.nsi
