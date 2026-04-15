@@ -13,8 +13,10 @@ class SyncLoop;
 class RoomListModel;
 class MessageModel;
 class MemberListModel;
+#ifdef BSFCHAT_VOICE_ENABLED
 class VoiceEngine;
 class NotificationSounds;
+#endif
 class IdentityClient;
 
 class ServerConnection : public QObject {
@@ -189,8 +191,10 @@ private:
     bool m_voiceDeafened = false;
     QJsonArray m_voiceMembers;
     QTimer* m_voicePollTimer = nullptr;
+#ifdef BSFCHAT_VOICE_ENABLED
     VoiceEngine* m_voiceEngine = nullptr;
     NotificationSounds* m_sounds = nullptr;
+#endif
 
     // Category/roles state
     int m_myPowerLevel = 0;

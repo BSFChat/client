@@ -8,6 +8,7 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(GAMECHAT_CLIENT_BUILD_TESTS "Build client tests" ON)
+option(BSFCHAT_ENABLE_VOICE "Enable voice chat (requires libdatachannel + opus)" ON)
 
 include(cmake/Dependencies.cmake)
 
@@ -32,13 +33,19 @@ qt_add_executable(bsfchat-app
     src/model/MemberListModel.cpp
     src/store/LocalCache.cpp
     src/util/MarkdownParser.cpp
-    src/voice/VoiceEngine.cpp
-    src/voice/PeerConnectionManager.cpp
-    src/voice/AudioEngine.cpp
-    src/voice/AudioMixer.cpp
-    src/voice/SoundGenerator.cpp
-    src/voice/NotificationSounds.cpp
 )
+
+if(BSFCHAT_ENABLE_VOICE)
+    target_sources(bsfchat-app PRIVATE
+        src/voice/VoiceEngine.cpp
+        src/voice/PeerConnectionManager.cpp
+        src/voice/AudioEngine.cpp
+        src/voice/AudioMixer.cpp
+        src/voice/SoundGenerator.cpp
+        src/voice/NotificationSounds.cpp
+    )
+    target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_VOICE_ENABLED)
+endif()
 
 set_source_files_properties(qml/theme/Theme.qml PROPERTIES
     QT_QML_SINGLETON_TYPE TRUE
@@ -71,9 +78,11 @@ target_include_directories(bsfchat-app PRIVATE src)
 target_link_libraries(bsfchat-app PRIVATE
     bsfchat_protocol
     Qt6::Core Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::QuickDialogs2 Qt6::Sql Qt6::Multimedia
-    datachannel-static
-    opus
 )
+
+if(BSFCHAT_ENABLE_VOICE)
+    target_link_libraries(bsfchat-app PRIVATE datachannel-static opus)
+endif()
 
 if(GAMECHAT_CLIENT_BUILD_TESTS)
     enable_testing()

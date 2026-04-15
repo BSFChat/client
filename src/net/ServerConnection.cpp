@@ -5,8 +5,10 @@
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
 #include "identity/IdentityClient.h"
+#ifdef BSFCHAT_VOICE_ENABLED
 #include "voice/VoiceEngine.h"
 #include "voice/NotificationSounds.h"
+#endif
 
 #include <QFile>
 #include <QJsonArray>
@@ -23,7 +25,9 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     : QObject(parent)
     , m_client(new MatrixClient(this))
     , m_syncLoop(new SyncLoop(m_client, this))
+#ifdef BSFCHAT_VOICE_ENABLED
     , m_sounds(new NotificationSounds(this))
+#endif
     , m_roomListModel(new RoomListModel(this))
     , m_messageModel(new MessageModel(this))
     , m_memberListModel(new MemberListModel(this))
@@ -115,20 +119,26 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         emit voiceMembersChanged();
         emit voiceMutedChanged();
         emit voiceDeafenedChanged();
+#ifdef BSFCHAT_VOICE_ENABLED
         m_sounds->playJoin();
+#endif
         // Fetch TURN config to start WebRTC
         m_client->getTurnConfig();
     });
 
     connect(m_client, &MatrixClient::turnConfigResult, this, [this](const QJsonObject& config) {
+#ifdef BSFCHAT_VOICE_ENABLED
         if (!m_activeVoiceRoomId.isEmpty() && !m_voiceEngine) {
             m_voiceEngine = new VoiceEngine(m_client, this);
             m_voiceEngine->start(m_activeVoiceRoomId, m_voiceMembers, config);
         }
+#endif
     });
 
     connect(m_client, &MatrixClient::voiceLeft, this, [this](const QString& /*roomId*/) {
+#ifdef BSFCHAT_VOICE_ENABLED
         m_sounds->playLeave();
+#endif
         m_activeVoiceRoomId.clear();
         m_voiceMembers = QJsonArray();
         m_voiceMuted = false;
@@ -504,19 +514,25 @@ void ServerConnection::joinVoiceChannel(const QString& roomId)
 void ServerConnection::leaveVoiceChannel()
 {
     if (m_activeVoiceRoomId.isEmpty()) return;
+#ifdef BSFCHAT_VOICE_ENABLED
     if (m_voiceEngine) {
         m_voiceEngine->stop();
         delete m_voiceEngine;
         m_voiceEngine = nullptr;
     }
+#endif
     m_client->leaveVoice(m_activeVoiceRoomId);
 }
 
 void ServerConnection::toggleMute()
 {
     m_voiceMuted = !m_voiceMuted;
+#ifdef BSFCHAT_VOICE_ENABLED
     m_sounds->playMute();
+#endif
+#ifdef BSFCHAT_VOICE_ENABLED
     if (m_voiceEngine) m_voiceEngine->setMuted(m_voiceMuted);
+#endif
     emit voiceMutedChanged();
     if (!m_activeVoiceRoomId.isEmpty()) {
         m_client->updateVoiceState(m_activeVoiceRoomId, m_voiceMuted, m_voiceDeafened);
@@ -526,7 +542,9 @@ void ServerConnection::toggleMute()
 void ServerConnection::toggleDeafen()
 {
     m_voiceDeafened = !m_voiceDeafened;
+#ifdef BSFCHAT_VOICE_ENABLED
     if (m_voiceEngine) m_voiceEngine->setDeafened(m_voiceDeafened);
+#endif
     emit voiceDeafenedChanged();
     if (!m_activeVoiceRoomId.isEmpty()) {
         m_client->updateVoiceState(m_activeVoiceRoomId, m_voiceMuted, m_voiceDeafened);
@@ -801,6 +819,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 }
             }
 
+#ifdef BSFCHAT_VOICE_ENABLED
             // Route call signaling events to VoiceEngine
             if (roomId == m_activeVoiceRoomId && m_voiceEngine) {
                 QString sender = QString::fromStdString(event.sender);
@@ -827,6 +846,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     }
                 }
             }
+#endif
 
             // Add messages to active room's message model
             if (roomId == m_activeRoomId) {
