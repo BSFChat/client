@@ -50,7 +50,10 @@ jobs:
 
       - name: Install Windows dependencies
         if: matrix.platform == 'windows'
-        run: choco install nsis -y
+        shell: pwsh
+        run: |
+          choco install nsis -y
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\Program Files (x86)\NSIS"
 
       - name: Configure (macOS)
         if: matrix.platform == 'macos'
