@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QSet>
 #include <QString>
 #include <QVariantList>
 #include <QVector>
@@ -44,6 +45,10 @@ public:
     void updateVoiceState(const QString& roomId, bool isVoice);
     void updateVoiceMemberCount(const QString& roomId, int count);
     void removeRoom(const QString& roomId);
+    // Remove any room whose ID is not in the given set. Used to drop rooms
+    // the server has made invisible to us (e.g. after permission change).
+    // Returns the list of removed IDs.
+    QStringList pruneRoomsNotIn(const QSet<QString>& keep);
     void clear();
 
     // Category support

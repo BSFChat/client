@@ -489,6 +489,25 @@ Rectangle {
         }
 
         MenuItem {
+            text: "Channel Settings…"
+            enabled: serverManager.activeServer &&
+                     serverManager.activeServer.canManageChannel(roomContextMenu.roomId)
+            contentItem: Text {
+                text: parent.text
+                font.pixelSize: Theme.fontSizeNormal
+                color: parent.enabled ? Theme.textPrimary : Theme.textMuted
+            }
+            background: Rectangle {
+                color: parent.hovered ? Theme.bgLight : "transparent"
+            }
+            onTriggered: {
+                channelSettingsPopup.roomId = roomContextMenu.roomId;
+                channelSettingsPopup.roomName = roomContextMenu.roomName;
+                channelSettingsPopup.open();
+            }
+        }
+
+        MenuItem {
             text: "Leave Room"
             contentItem: Text {
                 text: parent.text
@@ -504,6 +523,10 @@ Rectangle {
                 }
             }
         }
+    }
+
+    ChannelSettings {
+        id: channelSettingsPopup
     }
 
     // Create room dialog

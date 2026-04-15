@@ -59,6 +59,16 @@ public:
     // Server marks everything currently in the room as read for this user.
     void sendReadMarker(const QString& roomId);
 
+    // Permissions / roles
+    void setMemberRoles(const QString& roomId, const QString& userId, const QStringList& roleIds);
+    // targetKey is "role:<id>" or "user:<mxid>". Pass allow=0,deny=0 to clear.
+    void setChannelPermission(const QString& roomId, const QString& targetKey,
+                              quint64 allow, quint64 deny);
+    void setChannelSlowmode(const QString& roomId, int seconds);
+    void redactEvent(const QString& roomId, const QString& eventId, const QString& reason = {});
+    void kickUser(const QString& roomId, const QString& userId, const QString& reason = {});
+    void banUser(const QString& roomId, const QString& userId, const QString& reason = {});
+
     // Voice
     void joinVoice(const QString& roomId);
     void leaveVoice(const QString& roomId);

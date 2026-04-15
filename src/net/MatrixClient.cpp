@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QNetworkRequest>
 #include <QUrlQuery>
+#include <QUuid>
 
 #include <bsfchat/Constants.h>
 #include <nlohmann/json.hpp>
@@ -795,4 +796,70 @@ void MatrixClient::getRoomState(const QString& roomId, const QString& eventType,
         auto doc = QJsonDocument::fromJson(data);
         emit roomStateResult(roomId, eventType, doc.object());
     });
+}
+
+void MatrixClient::setMemberRoles(const QString& roomId, const QString& userId,
+                                   const QStringList& roleIds)
+{
+    QJsonArray arr;
+    for (const auto& id : roleIds) arr.append(id);
+    QJsonObject body{{"role_ids", arr}};
+    QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    setRoomState(roomId, QString::fromUtf8(bsfchat::event_type::kMemberRoles), userId, payload);
+}
+
+void MatrixClient::setChannelPermission(const QString& roomId, const QString& targetKey,
+                                         quint64 allow, quint64 deny)
+{
+    QString hexAllow = QStringLiteral("0x") + QString::number(allow, 16);
+    QString hexDeny = QStringLiteral("0x") + QString::number(deny, 16);
+    QJsonObject body{{"allow", hexAllow}, {"deny", hexDeny}};
+    QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    setRoomState(roomId, QString::fromUtf8(bsfchat::event_type::kChannelPermissions),
+                 targetKey, payload);
+}
+
+void MatrixClient::setChannelSlowmode(const QString& roomId, int seconds)
+{
+    QJsonObject body{{"slowmode_seconds", seconds}};
+    QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    setRoomState(roomId, QString::fromUtf8(bsfchat::event_type::kChannelSettings),
+                 QString(), payload);
+}
+
+void MatrixClient::redactEvent(const QString& roomId, const QString& eventId, const QString& reason)
+{
+    QString txn = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
+                   + QUrl::toPercentEncoding(roomId) + "/redact/"
+                   + QUrl::toPercentEncoding(eventId) + "/" + txn;
+
+    QJsonObject body;
+    if (!reason.isEmpty()) body["reason"] = reason;
+    QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
+
+    auto* reply = makeRequest("PUT", path, payload);
+    connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
+}
+
+void MatrixClient::kickUser(const QString& roomId, const QString& userId, const QString& reason)
+{
+    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
+                   + QUrl::toPercentEncoding(roomId) + "/kick";
+    QJsonObject body{{"user_id", userId}};
+    if (!reason.isEmpty()) body["reason"] = reason;
+    QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    auto* reply = makeRequest("POST", path, payload);
+    connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
+}
+
+void MatrixClient::banUser(const QString& roomId, const QString& userId, const QString& reason)
+{
+    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
+                   + QUrl::toPercentEncoding(roomId) + "/ban";
+    QJsonObject body{{"user_id", userId}};
+    if (!reason.isEmpty()) body["reason"] = reason;
+    QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    auto* reply = makeRequest("POST", path, payload);
+    connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
 }

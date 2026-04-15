@@ -1,10 +1,13 @@
 #pragma once
 
 #include <QJsonArray>
+#include <QMap>
 #include <QObject>
+#include <QSet>
 #include <QVariantList>
 #include <QString>
 #include <QTimer>
+#include <QVector>
 
 #include <bsfchat/MatrixTypes.h>
 
@@ -115,6 +118,37 @@ public:
     Q_INVOKABLE void updateUserPowerLevel(const QString& roomId, const QString& userId, int level);
     Q_INVOKABLE void updateServerRoles(const QJsonArray& rolesJson);
 
+    // Discord-style permissions API surface.
+    // Returns the effective permission bitfield for the given room, computed
+    // client-side using the same algorithm the server uses. For gating UI
+    // decisions; the server still enforces on every request.
+    Q_INVOKABLE quint64 myPermissions(const QString& roomId) const;
+    Q_INVOKABLE bool canSend(const QString& roomId) const;
+    Q_INVOKABLE bool canAttach(const QString& roomId) const;
+    Q_INVOKABLE bool canEmbed(const QString& roomId) const;
+    Q_INVOKABLE bool canManageChannel(const QString& roomId) const;
+    Q_INVOKABLE bool canManageRoles(const QString& roomId) const;
+    Q_INVOKABLE bool canKick(const QString& roomId) const;
+    Q_INVOKABLE bool canBan(const QString& roomId) const;
+    Q_INVOKABLE bool canManageMessages(const QString& roomId) const;
+    Q_INVOKABLE int channelSlowmode(const QString& roomId) const;
+
+    // Assign/unassign roles for a user (absolute list). Server-side requires MANAGE_ROLES.
+    Q_INVOKABLE void setMemberRoles(const QString& userId, const QStringList& roleIds);
+    // Returns the role IDs currently assigned to `userId`, empty list if none cached.
+    Q_INVOKABLE QStringList memberRoles(const QString& userId) const;
+    // All per-channel overrides (allow/deny hex strings keyed by "role:..."/"user:...").
+    Q_INVOKABLE QVariantList channelOverrides(const QString& roomId) const;
+    Q_INVOKABLE void setChannelOverride(const QString& roomId, const QString& targetKey,
+                                        quint64 allow, quint64 deny);
+    Q_INVOKABLE void setChannelSlowmode(const QString& roomId, int seconds);
+    Q_INVOKABLE void redactEvent(const QString& roomId, const QString& eventId,
+                                  const QString& reason = {});
+    Q_INVOKABLE void kickMember(const QString& roomId, const QString& userId,
+                                 const QString& reason = {});
+    Q_INVOKABLE void banMember(const QString& roomId, const QString& userId,
+                                const QString& reason = {});
+
     Q_INVOKABLE void updateDisplayName(const QString& name);
     Q_INVOKABLE void updateAvatarUrl(const QString& url);
     Q_INVOKABLE void uploadAvatar(const QString& fileUrl);
@@ -201,4 +235,36 @@ private:
     QJsonArray m_serverRoles;
     QVariantList m_categorizedRooms;
     void rebuildCategorizedRooms();
+
+    // Typed permission caches, populated from sync state events.
+    struct RoleInfo {
+        QString id;
+        QString name;
+        QString color;
+        int position = 0;
+        quint64 permissions = 0;
+        bool mentionable = false;
+        bool hoist = false;
+    };
+    struct Override {
+        QString targetKey; // "role:..." or "user:..."
+        quint64 allow = 0;
+        quint64 deny = 0;
+    };
+    QVector<RoleInfo> m_roles;                         // server-wide
+    QMap<QString, QStringList> m_memberRoles;          // userId -> role ids
+    QMap<QString, QVector<Override>> m_channelOverrides; // roomId -> list
+    QMap<QString, int> m_channelSlowmode;              // roomId -> seconds
+
+    // Helper: parse a JSON state event into typed caches.
+    void applyServerRolesEvent(const QJsonObject& content);
+    void applyMemberRolesEvent(const QString& userId, const QJsonObject& content);
+    void applyChannelPermissionsEvent(const QString& roomId, const QString& stateKey,
+                                       const QJsonObject& content);
+    void applyChannelSettingsEvent(const QString& roomId, const QJsonObject& content);
+
+    // Track first sync in this session — only prune hidden rooms once, since
+    // subsequent (incremental) syncs only include rooms with new activity.
+    bool m_firstSyncProcessed = false;
+    QSet<QString> m_knownRoomIds;
 };

@@ -79,6 +79,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/UserProfileCard.qml
         qml/components/UserSettings.qml
         qml/components/ServerSettings.qml
+        qml/components/ChannelSettings.qml
         qml/theme/Theme.qml
     RESOURCES
         qml/data/EmojiData.js

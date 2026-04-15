@@ -729,27 +729,25 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 }
                 m_roomListModel->updateSortOrder(roomId, order);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerRoles)) {
-                if (event.content.data.contains("roles")) {
-                    QByteArray rolesData = QByteArray::fromStdString(
-                        nlohmann::json(event.content.data["roles"]).dump());
-                    auto doc = QJsonDocument::fromJson(rolesData);
-                    if (doc.isArray()) {
-                        m_serverRoles = doc.array();
-                        emit serverRolesChanged();
-                    }
+                QByteArray data = QByteArray::fromStdString(event.content.data.dump());
+                applyServerRolesEvent(QJsonDocument::fromJson(data).object());
+            } else if (type == QString::fromUtf8(bsfchat::event_type::kMemberRoles)) {
+                if (event.state_key.has_value()) {
+                    QString targetUser = QString::fromStdString(*event.state_key);
+                    QByteArray data = QByteArray::fromStdString(event.content.data.dump());
+                    applyMemberRolesEvent(targetUser, QJsonDocument::fromJson(data).object());
+                }
+            } else if (type == QString::fromUtf8(bsfchat::event_type::kChannelSettings)) {
+                QByteArray data = QByteArray::fromStdString(event.content.data.dump());
+                applyChannelSettingsEvent(roomId, QJsonDocument::fromJson(data).object());
+            } else if (type == QString::fromUtf8(bsfchat::event_type::kChannelPermissions)) {
+                if (event.state_key.has_value()) {
+                    QString key = QString::fromStdString(*event.state_key);
+                    QByteArray data = QByteArray::fromStdString(event.content.data.dump());
+                    applyChannelPermissionsEvent(roomId, key, QJsonDocument::fromJson(data).object());
                 }
             } else if (type == QStringLiteral("m.room.power_levels")) {
-                if (event.content.data.contains("users")) {
-                    std::string myId = m_userId.toStdString();
-                    auto& users = event.content.data["users"];
-                    if (users.contains(myId)) {
-                        int level = users[myId].get<int>();
-                        if (level != m_myPowerLevel) {
-                            m_myPowerLevel = level;
-                            emit myPowerLevelChanged();
-                        }
-                    }
-                }
+                // Legacy: ignored for enforcement but kept for UI compat.
             }
         }
 
@@ -790,27 +788,25 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 }
                 m_roomListModel->updateSortOrder(roomId, order);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerRoles)) {
-                if (event.content.data.contains("roles")) {
-                    QByteArray rolesData = QByteArray::fromStdString(
-                        nlohmann::json(event.content.data["roles"]).dump());
-                    auto doc = QJsonDocument::fromJson(rolesData);
-                    if (doc.isArray()) {
-                        m_serverRoles = doc.array();
-                        emit serverRolesChanged();
-                    }
+                QByteArray data = QByteArray::fromStdString(event.content.data.dump());
+                applyServerRolesEvent(QJsonDocument::fromJson(data).object());
+            } else if (type == QString::fromUtf8(bsfchat::event_type::kMemberRoles)) {
+                if (event.state_key.has_value()) {
+                    QString targetUser = QString::fromStdString(*event.state_key);
+                    QByteArray data = QByteArray::fromStdString(event.content.data.dump());
+                    applyMemberRolesEvent(targetUser, QJsonDocument::fromJson(data).object());
+                }
+            } else if (type == QString::fromUtf8(bsfchat::event_type::kChannelSettings)) {
+                QByteArray data = QByteArray::fromStdString(event.content.data.dump());
+                applyChannelSettingsEvent(roomId, QJsonDocument::fromJson(data).object());
+            } else if (type == QString::fromUtf8(bsfchat::event_type::kChannelPermissions)) {
+                if (event.state_key.has_value()) {
+                    QString key = QString::fromStdString(*event.state_key);
+                    QByteArray data = QByteArray::fromStdString(event.content.data.dump());
+                    applyChannelPermissionsEvent(roomId, key, QJsonDocument::fromJson(data).object());
                 }
             } else if (type == QStringLiteral("m.room.power_levels")) {
-                if (event.content.data.contains("users")) {
-                    std::string myId = m_userId.toStdString();
-                    auto& users = event.content.data["users"];
-                    if (users.contains(myId)) {
-                        int level = users[myId].get<int>();
-                        if (level != m_myPowerLevel) {
-                            m_myPowerLevel = level;
-                            emit myPowerLevelChanged();
-                        }
-                    }
-                }
+                // Legacy: ignored for enforcement.
             }
 
             // Update last message for room list
@@ -963,4 +959,234 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
     bool hadUnread = m_hasUnread;
     m_hasUnread = m_roomListModel->totalUnreadCount() > 0;
     if (m_hasUnread != hadUnread) emit hasUnreadChanged();
+
+    // On the first sync of a session, the server returns every room we can
+    // see. Drop any locally-cached rooms that aren't in this set — this
+    // handles the "user lost VIEW_CHANNEL while offline" case.
+    if (!m_firstSyncProcessed) {
+        QSet<QString> visible;
+        for (const auto& [roomIdStr, _unused] : response.rooms.join) {
+            visible.insert(QString::fromStdString(roomIdStr));
+        }
+        auto removed = m_roomListModel->pruneRoomsNotIn(visible);
+        if (!removed.isEmpty() && removed.contains(m_activeRoomId)) {
+            // Active room was pruned; clear the view.
+            m_activeRoomId.clear();
+            m_activeRoomName.clear();
+            m_activeRoomTopic.clear();
+            emit activeRoomIdChanged();
+            emit activeRoomNameChanged();
+            emit activeRoomTopicChanged();
+        }
+        m_firstSyncProcessed = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Permissions / roles: typed caches + Q_INVOKABLE queries
+// ---------------------------------------------------------------------------
+
+namespace {
+quint64 parseHexFlags(const QString& s) {
+    QString v = s;
+    if (v.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) v = v.mid(2);
+    bool ok = false;
+    quint64 out = v.toULongLong(&ok, 16);
+    return ok ? out : 0;
+}
+quint64 parseFlagsValue(const QJsonValue& v) {
+    if (v.isString()) return parseHexFlags(v.toString());
+    if (v.isDouble()) return static_cast<quint64>(v.toDouble());
+    return 0;
+}
+} // namespace
+
+void ServerConnection::applyServerRolesEvent(const QJsonObject& content)
+{
+    auto rolesArr = content.value("roles").toArray();
+    m_roles.clear();
+    for (const auto& v : rolesArr) {
+        auto o = v.toObject();
+        RoleInfo r;
+        r.id = o.value("id").toString();
+        if (r.id.isEmpty()) r.id = o.value("name").toString();
+        r.name = o.value("name").toString();
+        r.color = o.value("color").toString();
+        r.position = o.value("position").toInt(0);
+        r.permissions = parseFlagsValue(o.value("permissions"));
+        r.mentionable = o.value("mentionable").toBool(false);
+        r.hoist = o.value("hoist").toBool(false);
+        m_roles.append(r);
+    }
+    // Keep m_serverRoles in sync for older QML that reads the raw array.
+    m_serverRoles = rolesArr;
+    emit serverRolesChanged();
+}
+
+void ServerConnection::applyMemberRolesEvent(const QString& userId, const QJsonObject& content)
+{
+    QStringList ids;
+    auto arr = content.value("role_ids").toArray();
+    for (const auto& v : arr) ids.append(v.toString());
+    m_memberRoles[userId] = ids;
+}
+
+void ServerConnection::applyChannelPermissionsEvent(const QString& roomId, const QString& stateKey,
+                                                    const QJsonObject& content)
+{
+    Override ov;
+    ov.targetKey = stateKey;
+    ov.allow = parseFlagsValue(content.value("allow"));
+    ov.deny = parseFlagsValue(content.value("deny"));
+
+    auto& list = m_channelOverrides[roomId];
+    // Replace any existing entry with the same target key.
+    for (int i = 0; i < list.size(); ++i) {
+        if (list[i].targetKey == stateKey) {
+            if (ov.allow == 0 && ov.deny == 0) {
+                list.removeAt(i);
+            } else {
+                list[i] = ov;
+            }
+            return;
+        }
+    }
+    if (ov.allow != 0 || ov.deny != 0) list.append(ov);
+}
+
+void ServerConnection::applyChannelSettingsEvent(const QString& roomId, const QJsonObject& content)
+{
+    m_channelSlowmode[roomId] = content.value("slowmode_seconds").toInt(0);
+}
+
+quint64 ServerConnection::myPermissions(const QString& roomId) const
+{
+    // Mirror the server's algorithm. See server/src/auth/Permissions.cpp.
+    const QStringList& ids = m_memberRoles.value(m_userId);
+
+    // Gather this user's roles, always including @everyone.
+    QVector<RoleInfo> userRoles;
+    auto findRole = [&](const QString& id) -> const RoleInfo* {
+        for (const auto& r : m_roles) if (r.id == id) return &r;
+        return nullptr;
+    };
+    if (auto* e = findRole(QStringLiteral("everyone"))) userRoles.append(*e);
+    for (const auto& id : ids) {
+        if (id == QStringLiteral("everyone")) continue;
+        if (auto* r = findRole(id)) userRoles.append(*r);
+    }
+    std::sort(userRoles.begin(), userRoles.end(),
+              [](const RoleInfo& a, const RoleInfo& b) { return a.position < b.position; });
+
+    constexpr quint64 kAdmin = 0x8000;
+    constexpr quint64 kAll = 0xffff;
+
+    quint64 base = 0;
+    for (const auto& r : userRoles) base |= r.permissions;
+    if (base & kAdmin) return kAll;
+
+    if (roomId.isEmpty()) return base;
+
+    auto it = m_channelOverrides.find(roomId);
+    if (it == m_channelOverrides.end()) return base;
+    const auto& overrides = it.value();
+
+    auto apply = [&](const QString& key) {
+        for (const auto& ov : overrides) {
+            if (ov.targetKey == key) {
+                base = (base & ~ov.deny) | ov.allow;
+                return;
+            }
+        }
+    };
+    apply(QStringLiteral("role:everyone"));
+    for (const auto& r : userRoles) {
+        if (r.id == QStringLiteral("everyone")) continue;
+        apply(QStringLiteral("role:") + r.id);
+    }
+    apply(QStringLiteral("user:") + m_userId);
+    return base;
+}
+
+bool ServerConnection::canSend(const QString& roomId) const {
+    return (myPermissions(roomId) & 0x2ULL) != 0; // SEND_MESSAGES
+}
+bool ServerConnection::canAttach(const QString& roomId) const {
+    return (myPermissions(roomId) & 0x4ULL) != 0; // ATTACH_FILES
+}
+bool ServerConnection::canEmbed(const QString& roomId) const {
+    return (myPermissions(roomId) & 0x8ULL) != 0; // EMBED_LINKS
+}
+bool ServerConnection::canManageChannel(const QString& roomId) const {
+    return (myPermissions(roomId) & 0x20ULL) != 0; // MANAGE_CHANNELS
+}
+bool ServerConnection::canManageRoles(const QString& roomId) const {
+    return (myPermissions(roomId) & 0x40ULL) != 0; // MANAGE_ROLES
+}
+bool ServerConnection::canKick(const QString& roomId) const {
+    return (myPermissions(roomId) & 0x80ULL) != 0; // KICK_MEMBERS
+}
+bool ServerConnection::canBan(const QString& roomId) const {
+    return (myPermissions(roomId) & 0x100ULL) != 0; // BAN_MEMBERS
+}
+bool ServerConnection::canManageMessages(const QString& roomId) const {
+    return (myPermissions(roomId) & 0x10ULL) != 0; // MANAGE_MESSAGES
+}
+int ServerConnection::channelSlowmode(const QString& roomId) const {
+    return m_channelSlowmode.value(roomId, 0);
+}
+
+void ServerConnection::setMemberRoles(const QString& userId, const QStringList& roleIds) {
+    // Write to the first visible room — the server reads member.roles globally.
+    QString targetRoom;
+    for (int i = 0; i < m_roomListModel->rowCount(); ++i) {
+        targetRoom = m_roomListModel->data(m_roomListModel->index(i),
+            RoomListModel::RoomIdRole).toString();
+        if (!targetRoom.isEmpty()) break;
+    }
+    if (targetRoom.isEmpty()) return;
+    m_client->setMemberRoles(targetRoom, userId, roleIds);
+}
+
+QStringList ServerConnection::memberRoles(const QString& userId) const {
+    return m_memberRoles.value(userId);
+}
+
+QVariantList ServerConnection::channelOverrides(const QString& roomId) const {
+    QVariantList out;
+    const auto& list = m_channelOverrides.value(roomId);
+    for (const auto& ov : list) {
+        QVariantMap m;
+        m[QStringLiteral("target")] = ov.targetKey;
+        m[QStringLiteral("allow")] = QString::number(ov.allow, 16);
+        m[QStringLiteral("deny")] = QString::number(ov.deny, 16);
+        m[QStringLiteral("allowFlags")] = static_cast<qulonglong>(ov.allow);
+        m[QStringLiteral("denyFlags")] = static_cast<qulonglong>(ov.deny);
+        out.append(m);
+    }
+    return out;
+}
+
+void ServerConnection::setChannelOverride(const QString& roomId, const QString& targetKey,
+                                           quint64 allow, quint64 deny) {
+    m_client->setChannelPermission(roomId, targetKey, allow, deny);
+}
+
+void ServerConnection::setChannelSlowmode(const QString& roomId, int seconds) {
+    m_client->setChannelSlowmode(roomId, seconds);
+}
+
+void ServerConnection::redactEvent(const QString& roomId, const QString& eventId,
+                                    const QString& reason) {
+    m_client->redactEvent(roomId, eventId, reason);
+}
+
+void ServerConnection::kickMember(const QString& roomId, const QString& userId,
+                                   const QString& reason) {
+    m_client->kickUser(roomId, userId, reason);
+}
+
+void ServerConnection::banMember(const QString& roomId, const QString& userId,
+                                  const QString& reason) {
+    m_client->banUser(roomId, userId, reason);
 }

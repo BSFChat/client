@@ -13,6 +13,26 @@ Popup {
 
     property int selectedSection: 0
 
+    // Permission bit definitions mirrored from protocol/include/bsfchat/Permissions.h.
+    // Each entry has {key, label, flag} where flag is the bit value.
+    readonly property var permissionFlags: [
+        {key: "view",     label: "View channels",      flag: 0x0001},
+        {key: "send",     label: "Send messages",      flag: 0x0002},
+        {key: "attach",   label: "Attach files",       flag: 0x0004},
+        {key: "embed",    label: "Embed links",        flag: 0x0008},
+        {key: "manmsg",   label: "Manage messages",    flag: 0x0010},
+        {key: "manchan",  label: "Manage channels",    flag: 0x0020},
+        {key: "manrole",  label: "Manage roles",       flag: 0x0040},
+        {key: "kick",     label: "Kick members",       flag: 0x0080},
+        {key: "ban",      label: "Ban members",        flag: 0x0100},
+        {key: "mentall",  label: "Mention @everyone",  flag: 0x0200},
+        {key: "manserv",  label: "Manage server",      flag: 0x0400},
+        {key: "admin",    label: "Administrator",      flag: 0x8000}
+    ]
+
+    property string editingRoleId: ""
+    property string editingMemberId: ""
+
     background: Rectangle {
         color: Theme.bgDark
         radius: Theme.radiusNormal
@@ -191,6 +211,14 @@ Popup {
                         color: Theme.textPrimary
                     }
 
+                    Text {
+                        Layout.fillWidth: true
+                        text: "Roles grant permissions server-wide. Assign them to members in the Members tab; override per-channel in each channel's settings."
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.textMuted
+                        wrapMode: Text.WordWrap
+                    }
+
                     // Roles list
                     ListView {
                         Layout.fillWidth: true
@@ -199,197 +227,292 @@ Popup {
                         model: serverManager.activeServer ? serverManager.activeServer.serverRoles : []
                         spacing: 4
 
-                        delegate: Rectangle {
-                            width: ListView.view ? ListView.view.width : 300
-                            height: 44
-                            radius: Theme.radiusSmall
-                            color: Theme.bgMedium
+                        delegate: Column {
+                            width: ListView.view ? ListView.view.width : 400
+                            spacing: 2
 
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: Theme.spacingNormal
-                                anchors.rightMargin: Theme.spacingNormal
-                                spacing: Theme.spacingNormal
+                            property var role: modelData
+                            property bool isEditing: serverSettingsPopup.editingRoleId === (role.id || role.name)
 
-                                // Color circle
-                                Rectangle {
-                                    width: 14
-                                    height: 14
-                                    radius: 7
-                                    color: modelData.color || Theme.accent
+                            Rectangle {
+                                width: parent.width
+                                height: 44
+                                radius: Theme.radiusSmall
+                                color: roleRowMouse.containsMouse ? Theme.bgLight : Theme.bgMedium
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: Theme.spacingNormal
+                                    anchors.rightMargin: Theme.spacingNormal
+                                    spacing: Theme.spacingNormal
+
+                                    Rectangle {
+                                        width: 14; height: 14; radius: 7
+                                        color: parent.parent.parent.role.color || Theme.accent
+                                    }
+                                    Text {
+                                        text: parent.parent.parent.role.name || ""
+                                        font.pixelSize: Theme.fontSizeNormal
+                                        color: Theme.textPrimary
+                                        Layout.fillWidth: true
+                                    }
+                                    Text {
+                                        text: parent.parent.parent.isEditing ? "Close ▾" : "Edit ▸"
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.accent
+                                    }
                                 }
 
-                                Text {
-                                    text: modelData.name || ""
-                                    font.pixelSize: Theme.fontSizeNormal
-                                    color: Theme.textPrimary
-                                    Layout.fillWidth: true
+                                MouseArea {
+                                    id: roleRowMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        var rid = parent.parent.parent.role.id || parent.parent.parent.role.name;
+                                        serverSettingsPopup.editingRoleId =
+                                            parent.parent.parent.isEditing ? "" : rid;
+                                    }
                                 }
+                            }
 
-                                Text {
-                                    text: "Level: " + (modelData.level !== undefined ? modelData.level : 0)
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    color: Theme.textMuted
+                            // Inline editor
+                            Rectangle {
+                                width: parent.width
+                                visible: parent.isEditing
+                                radius: Theme.radiusSmall
+                                color: Theme.bgDarkest
+                                border.color: Theme.bgLight
+                                border.width: 1
+                                height: visible ? roleEditCol.implicitHeight + Theme.spacingLarge * 2 : 0
+
+                                ColumnLayout {
+                                    id: roleEditCol
+                                    anchors.fill: parent
+                                    anchors.margins: Theme.spacingLarge
+                                    spacing: Theme.spacingNormal
+
+                                    property var editRole: parent.parent.role
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: Theme.spacingNormal
+
+                                        TextField {
+                                            id: editRoleName
+                                            Layout.fillWidth: true
+                                            text: roleEditCol.editRole.name || ""
+                                            color: Theme.textPrimary
+                                            font.pixelSize: Theme.fontSizeNormal
+                                            background: Rectangle {
+                                                color: Theme.bgMedium
+                                                radius: Theme.radiusSmall
+                                            }
+                                            padding: Theme.spacingNormal
+                                        }
+
+                                        SpinBox {
+                                            id: editRolePosition
+                                            from: 0; to: 1000
+                                            value: roleEditCol.editRole.position !== undefined ? roleEditCol.editRole.position : 0
+                                            background: Rectangle {
+                                                color: Theme.bgMedium
+                                                radius: Theme.radiusSmall
+                                                implicitWidth: 90
+                                            }
+                                        }
+                                    }
+
+                                    Row {
+                                        spacing: Theme.spacingSmall
+                                        property string selectedColor: roleEditCol.editRole.color || "#5865f2"
+
+                                        Repeater {
+                                            model: ["#5865f2", "#57f287", "#fee75c", "#ed4245", "#f47067",
+                                                    "#e0823d", "#39c5cf", "#dcbdfb", "#768390", "#f69d50"]
+                                            delegate: Rectangle {
+                                                width: 20; height: 20; radius: 10
+                                                color: modelData
+                                                border.color: parent.selectedColor === modelData ? Theme.textPrimary : "transparent"
+                                                border.width: 2
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: parent.parent.selectedColor = modelData
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: "Permissions"
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        font.bold: true
+                                        color: Theme.textSecondary
+                                    }
+
+                                    Grid {
+                                        Layout.fillWidth: true
+                                        columns: 2
+                                        columnSpacing: Theme.spacingLarge
+                                        rowSpacing: Theme.spacingSmall
+
+                                        property var perms: {
+                                            var p = roleEditCol.editRole.permissions;
+                                            if (typeof p === "string") {
+                                                var s = p;
+                                                if (s.indexOf("0x") === 0 || s.indexOf("0X") === 0) s = s.substr(2);
+                                                return parseInt(s, 16) || 0;
+                                            }
+                                            return p || 0;
+                                        }
+                                        property var permMap: ({})
+
+                                        Component.onCompleted: {
+                                            // Build a per-key state for the checkboxes.
+                                            var map = {};
+                                            var all = serverSettingsPopup.permissionFlags;
+                                            for (var i = 0; i < all.length; i++) {
+                                                map[all[i].key] = (perms & all[i].flag) !== 0;
+                                            }
+                                            permMap = map;
+                                        }
+
+                                        Repeater {
+                                            model: serverSettingsPopup.permissionFlags
+                                            delegate: Row {
+                                                spacing: 6
+                                                CheckBox {
+                                                    id: cb
+                                                    checked: parent.parent.permMap[modelData.key] || false
+                                                    onCheckedChanged: {
+                                                        var m = parent.parent.permMap;
+                                                        m[modelData.key] = checked;
+                                                        parent.parent.permMap = m;
+                                                    }
+                                                }
+                                                Text {
+                                                    text: modelData.label
+                                                    color: Theme.textPrimary
+                                                    font.pixelSize: Theme.fontSizeSmall
+                                                    anchors.verticalCenter: cb.verticalCenter
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Layout.topMargin: Theme.spacingNormal
+                                        spacing: Theme.spacingNormal
+
+                                        Button {
+                                            text: "Save"
+                                            contentItem: Text { text: parent.text; color: "white"; font.pixelSize: Theme.fontSizeNormal; horizontalAlignment: Text.AlignHCenter }
+                                            background: Rectangle {
+                                                color: parent.hovered ? Theme.accentHover : Theme.accent
+                                                radius: Theme.radiusSmall
+                                                implicitHeight: Theme.buttonHeight
+                                                implicitWidth: 100
+                                            }
+                                            onClicked: {
+                                                if (!serverManager.activeServer) return;
+                                                // Recompute permissions bitfield from checkbox state.
+                                                var permsVal = 0;
+                                                var colorRow = roleEditCol.children[1];
+                                                var gridCol = roleEditCol.children[3];
+                                                var flags = serverSettingsPopup.permissionFlags;
+                                                for (var i = 0; i < flags.length; i++) {
+                                                    if (gridCol.permMap[flags[i].key]) permsVal |= flags[i].flag;
+                                                }
+                                                // Build updated roles list, swapping the edited role.
+                                                var existing = serverManager.activeServer.serverRoles;
+                                                var out = [];
+                                                var edited = roleEditCol.editRole;
+                                                var myId = edited.id || edited.name;
+                                                for (var j = 0; j < existing.length; j++) {
+                                                    var r = existing[j];
+                                                    var rid = r.id || r.name;
+                                                    if (rid === myId) {
+                                                        out.push({
+                                                            id: myId,
+                                                            name: editRoleName.text.trim() || r.name,
+                                                            color: colorRow.selectedColor || r.color,
+                                                            position: editRolePosition.value,
+                                                            permissions: "0x" + permsVal.toString(16),
+                                                            mentionable: r.mentionable || false,
+                                                            hoist: r.hoist || false
+                                                        });
+                                                    } else {
+                                                        out.push(r);
+                                                    }
+                                                }
+                                                serverManager.activeServer.updateServerRoles(out);
+                                                serverSettingsPopup.editingRoleId = "";
+                                            }
+                                        }
+
+                                        Button {
+                                            visible: (roleEditCol.editRole.id || roleEditCol.editRole.name) !== "everyone"
+                                                  && (roleEditCol.editRole.id || roleEditCol.editRole.name) !== "admin"
+                                            text: "Delete"
+                                            contentItem: Text { text: parent.text; color: "#ed4245"; font.pixelSize: Theme.fontSizeNormal; horizontalAlignment: Text.AlignHCenter }
+                                            background: Rectangle { color: "transparent"; radius: Theme.radiusSmall; border.color: "#ed4245"; border.width: 1; implicitHeight: Theme.buttonHeight; implicitWidth: 100 }
+                                            onClicked: {
+                                                if (!serverManager.activeServer) return;
+                                                var existing = serverManager.activeServer.serverRoles;
+                                                var out = [];
+                                                var myId = roleEditCol.editRole.id || roleEditCol.editRole.name;
+                                                for (var j = 0; j < existing.length; j++) {
+                                                    var r = existing[j];
+                                                    var rid = r.id || r.name;
+                                                    if (rid !== myId) out.push(r);
+                                                }
+                                                serverManager.activeServer.updateServerRoles(out);
+                                                serverSettingsPopup.editingRoleId = "";
+                                            }
+                                        }
+
+                                        Item { Layout.fillWidth: true }
+                                    }
                                 }
                             }
                         }
 
-                        // Empty state
                         Text {
                             anchors.centerIn: parent
                             visible: parent.count === 0
-                            text: "No roles configured"
+                            text: "No roles configured — defaults will seed on first boot."
                             font.pixelSize: Theme.fontSizeNormal
                             color: Theme.textMuted
                         }
                     }
 
-                    // Add role form
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: addRoleExpanded ? 160 : 36
-                        radius: Theme.radiusSmall
-                        color: Theme.bgMedium
-                        clip: true
-
-                        property bool addRoleExpanded: false
-
-                        Behavior on Layout.preferredHeight {
-                            NumberAnimation { duration: 150 }
-                        }
-
-                        ColumnLayout {
-                            anchors.fill: parent
-                            anchors.margins: Theme.spacingNormal
-                            spacing: Theme.spacingNormal
-
-                            // Toggle bar
-                            Text {
-                                text: parent.parent.addRoleExpanded ? "- Cancel" : "+ Add Role"
-                                font.pixelSize: Theme.fontSizeNormal
-                                color: Theme.accent
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: parent.parent.parent.addRoleExpanded = !parent.parent.parent.addRoleExpanded
-                                }
+                    // Add-role footer
+                    Button {
+                        text: "+ Add Role"
+                        contentItem: Text { text: parent.text; color: "white"; font.pixelSize: Theme.fontSizeNormal; horizontalAlignment: Text.AlignHCenter }
+                        background: Rectangle { color: parent.hovered ? Theme.accentHover : Theme.accent; radius: Theme.radiusSmall; implicitHeight: Theme.buttonHeight; implicitWidth: 140 }
+                        onClicked: {
+                            if (!serverManager.activeServer) return;
+                            var existing = serverManager.activeServer.serverRoles || [];
+                            var out = [];
+                            var maxPos = 0;
+                            for (var i = 0; i < existing.length; i++) {
+                                out.push(existing[i]);
+                                if (existing[i].position > maxPos) maxPos = existing[i].position;
                             }
-
-                            // Form fields
-                            RowLayout {
-                                visible: parent.parent.addRoleExpanded
-                                Layout.fillWidth: true
-                                spacing: Theme.spacingNormal
-
-                                TextField {
-                                    id: newRoleNameField
-                                    Layout.fillWidth: true
-                                    placeholderText: "Role name"
-                                    placeholderTextColor: Theme.textMuted
-                                    color: Theme.textPrimary
-                                    font.pixelSize: Theme.fontSizeNormal
-                                    background: Rectangle {
-                                        color: Theme.bgDarkest
-                                        radius: Theme.radiusSmall
-                                        border.color: Theme.bgLight
-                                        border.width: 1
-                                    }
-                                    padding: Theme.spacingNormal
-                                }
-
-                                SpinBox {
-                                    id: newRoleLevelSpin
-                                    from: 0
-                                    to: 100
-                                    value: 0
-
-                                    background: Rectangle {
-                                        color: Theme.bgDarkest
-                                        radius: Theme.radiusSmall
-                                        border.color: Theme.bgLight
-                                        border.width: 1
-                                        implicitWidth: 100
-                                    }
-                                    contentItem: TextInput {
-                                        text: newRoleLevelSpin.textFromValue(newRoleLevelSpin.value, newRoleLevelSpin.locale)
-                                        font.pixelSize: Theme.fontSizeNormal
-                                        color: Theme.textPrimary
-                                        horizontalAlignment: Qt.AlignHCenter
-                                        verticalAlignment: Qt.AlignVCenter
-                                        readOnly: !newRoleLevelSpin.editable
-                                        validator: newRoleLevelSpin.validator
-                                    }
-                                }
-                            }
-
-                            // Color presets
-                            Row {
-                                visible: parent.parent.addRoleExpanded
-                                spacing: Theme.spacingSmall
-
-                                property string selectedColor: "#5865f2"
-
-                                Repeater {
-                                    model: ["#5865f2", "#57f287", "#fee75c", "#ed4245", "#f47067", "#e0823d",
-                                            "#39c5cf", "#dcbdfb", "#768390", "#f69d50"]
-                                    delegate: Rectangle {
-                                        width: 24
-                                        height: 24
-                                        radius: 12
-                                        color: modelData
-                                        border.color: parent.parent.selectedColor === modelData ? Theme.textPrimary : "transparent"
-                                        border.width: 2
-
-                                        MouseArea {
-                                            anchors.fill: parent
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: parent.parent.parent.selectedColor = modelData
-                                        }
-                                    }
-                                }
-                            }
-
-                            Button {
-                                visible: parent.parent.addRoleExpanded
-                                text: "Save Role"
-                                contentItem: Text {
-                                    text: parent.text
-                                    font.pixelSize: Theme.fontSizeNormal
-                                    color: "white"
-                                    horizontalAlignment: Text.AlignHCenter
-                                }
-                                background: Rectangle {
-                                    color: parent.hovered ? Theme.accentHover : Theme.accent
-                                    radius: Theme.radiusSmall
-                                    implicitWidth: 100
-                                    implicitHeight: Theme.buttonHeight
-                                }
-                                onClicked: {
-                                    if (!serverManager.activeServer) return;
-                                    var name = newRoleNameField.text.trim();
-                                    if (name.length === 0) return;
-
-                                    // Build updated roles array
-                                    var roles = [];
-                                    var existing = serverManager.activeServer.serverRoles;
-                                    for (var i = 0; i < existing.length; i++) {
-                                        roles.push(existing[i]);
-                                    }
-                                    // Find the color row's selectedColor
-                                    var colorRow = parent.children[2]; // color presets Row
-                                    roles.push({
-                                        "name": name,
-                                        "level": newRoleLevelSpin.value,
-                                        "color": colorRow.selectedColor || "#5865f2"
-                                    });
-
-                                    serverManager.activeServer.updateServerRoles(roles);
-                                    newRoleNameField.text = "";
-                                    newRoleLevelSpin.value = 0;
-                                    parent.parent.addRoleExpanded = false;
-                                }
-                            }
+                            var newId = "role-" + Date.now();
+                            out.push({
+                                id: newId,
+                                name: "New Role",
+                                color: "#5865f2",
+                                position: maxPos + 1,
+                                permissions: "0x080f", // everyone defaults
+                                mentionable: false,
+                                hoist: false
+                            });
+                            serverManager.activeServer.updateServerRoles(out);
                         }
                     }
                 }
@@ -434,11 +557,8 @@ Popup {
                         model: serverManager.activeServer ? serverManager.activeServer.memberListModel : null
                         spacing: 2
 
-                        delegate: Rectangle {
+                        delegate: Column {
                             width: ListView.view ? ListView.view.width : 400
-                            height: 48
-                            radius: Theme.radiusSmall
-                            color: memberItemMouse.containsMouse ? Theme.bgLight : Theme.bgMedium
                             visible: {
                                 var search = memberSearchField.text.toLowerCase();
                                 if (search.length === 0) return true;
@@ -446,51 +566,124 @@ Popup {
                                 var uid = model.userId ? model.userId.toLowerCase() : "";
                                 return dn.indexOf(search) >= 0 || uid.indexOf(search) >= 0;
                             }
-                            clip: true
+                            property string memberUserId: model.userId || ""
+                            property bool expanded: serverSettingsPopup.editingMemberId === memberUserId
 
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: Theme.spacingNormal
-                                anchors.rightMargin: Theme.spacingNormal
-                                spacing: Theme.spacingNormal
+                            Rectangle {
+                                width: parent.width
+                                height: 48
+                                radius: Theme.radiusSmall
+                                color: memberItemMouse.containsMouse ? Theme.bgLight : Theme.bgMedium
 
-                                // Avatar placeholder
-                                Rectangle {
-                                    width: 32
-                                    height: 32
-                                    radius: 16
-                                    color: Theme.accent
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: Theme.spacingNormal
+                                    anchors.rightMargin: Theme.spacingNormal
+                                    spacing: Theme.spacingNormal
+
+                                    Rectangle {
+                                        width: 32; height: 32; radius: 16
+                                        color: Theme.accent
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: model.displayName ? model.displayName.charAt(0).toUpperCase() : "?"
+                                            font.pixelSize: 14; font.bold: true; color: "white"
+                                        }
+                                    }
+
+                                    Column {
+                                        Layout.fillWidth: true
+                                        Text { text: model.displayName || ""; font.pixelSize: Theme.fontSizeNormal; color: Theme.textPrimary }
+                                        Text { text: model.userId || ""; font.pixelSize: Theme.fontSizeSmall; color: Theme.textMuted }
+                                    }
 
                                     Text {
-                                        anchors.centerIn: parent
-                                        text: model.displayName ? model.displayName.charAt(0).toUpperCase() : "?"
-                                        font.pixelSize: 14
-                                        font.bold: true
-                                        color: "white"
+                                        text: parent.parent.parent.expanded ? "Close ▾" : "Roles ▸"
+                                        color: Theme.accent
+                                        font.pixelSize: Theme.fontSizeSmall
                                     }
                                 }
 
-                                Column {
-                                    Layout.fillWidth: true
-
-                                    Text {
-                                        text: model.displayName || ""
-                                        font.pixelSize: Theme.fontSizeNormal
-                                        color: Theme.textPrimary
-                                    }
-
-                                    Text {
-                                        text: model.userId || ""
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        color: Theme.textMuted
+                                MouseArea {
+                                    id: memberItemMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        serverSettingsPopup.editingMemberId =
+                                            parent.parent.parent.expanded ? "" : parent.parent.parent.memberUserId;
                                     }
                                 }
                             }
 
-                            MouseArea {
-                                id: memberItemMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
+                            // Role checkboxes
+                            Rectangle {
+                                width: parent.width
+                                visible: parent.expanded
+                                radius: Theme.radiusSmall
+                                color: Theme.bgDarkest
+                                border.color: Theme.bgLight; border.width: 1
+                                height: visible ? roleAssignCol.implicitHeight + Theme.spacingLarge * 2 : 0
+
+                                ColumnLayout {
+                                    id: roleAssignCol
+                                    anchors.fill: parent
+                                    anchors.margins: Theme.spacingLarge
+                                    spacing: Theme.spacingSmall
+
+                                    property var assigned: (serverManager.activeServer
+                                        ? serverManager.activeServer.memberRoles(parent.parent.memberUserId)
+                                        : [])
+                                    property var assignedMap: {
+                                        var m = {};
+                                        for (var i = 0; i < assigned.length; i++) m[assigned[i]] = true;
+                                        return m;
+                                    }
+
+                                    Text {
+                                        text: "Assigned roles"
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        font.bold: true
+                                        color: Theme.textSecondary
+                                    }
+
+                                    Repeater {
+                                        model: serverManager.activeServer ? serverManager.activeServer.serverRoles : []
+                                        delegate: Row {
+                                            spacing: 6
+                                            visible: (modelData.id || modelData.name) !== "everyone"
+                                            CheckBox {
+                                                id: rolecb
+                                                checked: roleAssignCol.assignedMap[modelData.id || modelData.name] || false
+                                                onClicked: {
+                                                    var m = roleAssignCol.assignedMap;
+                                                    var rid = modelData.id || modelData.name;
+                                                    if (checked) m[rid] = true; else delete m[rid];
+                                                    roleAssignCol.assignedMap = m;
+                                                }
+                                            }
+                                            Rectangle { width: 10; height: 10; radius: 5; color: modelData.color || Theme.accent; anchors.verticalCenter: rolecb.verticalCenter }
+                                            Text { text: modelData.name || ""; color: Theme.textPrimary; anchors.verticalCenter: rolecb.verticalCenter; font.pixelSize: Theme.fontSizeSmall }
+                                        }
+                                    }
+
+                                    Button {
+                                        Layout.topMargin: Theme.spacingNormal
+                                        text: "Save"
+                                        contentItem: Text { text: parent.text; color: "white"; font.pixelSize: Theme.fontSizeNormal; horizontalAlignment: Text.AlignHCenter }
+                                        background: Rectangle { color: parent.hovered ? Theme.accentHover : Theme.accent; radius: Theme.radiusSmall; implicitHeight: Theme.buttonHeight; implicitWidth: 100 }
+                                        onClicked: {
+                                            if (!serverManager.activeServer) return;
+                                            var ids = [];
+                                            for (var k in roleAssignCol.assignedMap) {
+                                                if (roleAssignCol.assignedMap[k]) ids.push(k);
+                                            }
+                                            serverManager.activeServer.setMemberRoles(
+                                                parent.parent.parent.memberUserId, ids);
+                                            serverSettingsPopup.editingMemberId = "";
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

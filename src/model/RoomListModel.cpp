@@ -179,6 +179,21 @@ void RoomListModel::clear()
     endResetModel();
 }
 
+QStringList RoomListModel::pruneRoomsNotIn(const QSet<QString>& keep)
+{
+    QStringList removed;
+    // Walk backwards so indices stay valid as we delete.
+    for (int i = m_rooms.size() - 1; i >= 0; --i) {
+        if (!keep.contains(m_rooms[i].roomId)) {
+            removed.append(m_rooms[i].roomId);
+            beginRemoveRows(QModelIndex(), i, i);
+            m_rooms.removeAt(i);
+            endRemoveRows();
+        }
+    }
+    return removed;
+}
+
 void RoomListModel::updateParentId(const QString& roomId, const QString& parentId)
 {
     ensureRoom(roomId);

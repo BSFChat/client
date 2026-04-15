@@ -11,7 +11,33 @@ Rectangle {
     height: Math.max(38, Math.min(inputArea.implicitHeight + 16, 200))
 
     property string roomName: ""
+    property string activeRoomId: serverManager.activeServer ? serverManager.activeServer.activeRoomId : ""
     property bool uploading: false
+
+    // Permission-derived UX state. Recomputed when perms change or room changes.
+    property bool canSend: serverManager.activeServer
+        ? serverManager.activeServer.canSend(activeRoomId) : true
+    property bool canAttach: serverManager.activeServer
+        ? serverManager.activeServer.canAttach(activeRoomId) : true
+    property int slowmodeSeconds: serverManager.activeServer
+        ? serverManager.activeServer.channelSlowmode(activeRoomId) : 0
+    // Client-side slowmode tracker. Server is still authoritative.
+    property double lastSentAt: 0
+    property int _slowmodeTick: 0 // bumped by the timer to force re-eval
+    readonly property int slowmodeRemaining: {
+        _slowmodeTick; // dependency
+        if (slowmodeSeconds <= 0 || lastSentAt === 0) return 0;
+        var elapsed = (Date.now() - lastSentAt) / 1000;
+        var left = slowmodeSeconds - elapsed;
+        return left > 0 ? Math.ceil(left) : 0;
+    }
+
+    Timer {
+        running: inputRoot.slowmodeSeconds > 0 && inputRoot.lastSentAt > 0
+        interval: 500
+        repeat: true
+        onTriggered: inputRoot._slowmodeTick++
+    }
 
     RowLayout {
         anchors.fill: parent
@@ -19,7 +45,7 @@ Rectangle {
         anchors.rightMargin: Theme.spacingNormal
         spacing: Theme.spacingSmall
 
-        // Attachment button
+        // Attachment button — hidden if user lacks ATTACH_FILES.
         Rectangle {
             Layout.preferredWidth: 28
             Layout.preferredHeight: 28
@@ -27,6 +53,7 @@ Rectangle {
             radius: Theme.radiusSmall
             color: attachHover.containsMouse ? Theme.bgMedium : "transparent"
             opacity: inputRoot.uploading ? 0.4 : 1.0
+            visible: inputRoot.canAttach
 
             Text {
                 anchors.centerIn: parent
@@ -52,7 +79,13 @@ Rectangle {
 
             TextArea {
                 id: inputArea
-                placeholderText: inputRoot.uploading ? "Uploading..." : "Message #" + inputRoot.roomName
+                placeholderText: {
+                    if (!inputRoot.canSend) return "You don't have permission to send here";
+                    if (inputRoot.slowmodeRemaining > 0)
+                        return "Slowmode — " + inputRoot.slowmodeRemaining + "s";
+                    if (inputRoot.uploading) return "Uploading...";
+                    return "Message #" + inputRoot.roomName;
+                }
                 placeholderTextColor: Theme.textMuted
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontSizeNormal
@@ -62,7 +95,7 @@ Rectangle {
                 verticalAlignment: TextEdit.AlignVCenter
                 topPadding: 8
                 bottomPadding: 8
-                enabled: !inputRoot.uploading
+                enabled: !inputRoot.uploading && inputRoot.canSend && inputRoot.slowmodeRemaining === 0
 
                 onTextChanged: {
                     if (serverManager.activeServer && text.trim().length > 0) {
@@ -202,9 +235,11 @@ Rectangle {
     function sendCurrentMessage() {
         var text = inputArea.text.trim();
         if (text.length === 0) return;
+        if (!inputRoot.canSend || inputRoot.slowmodeRemaining > 0) return;
         if (serverManager.activeServer) {
             serverManager.activeServer.sendMessage(text);
             inputArea.text = "";
+            inputRoot.lastSentAt = Date.now();
         }
     }
 }
