@@ -47,6 +47,17 @@ if(BSFCHAT_ENABLE_VOICE)
     target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_VOICE_ENABLED)
 endif()
 
+# Ensure macOS .app bundle is created
+set_target_properties(bsfchat-app PROPERTIES
+    MACOSX_BUNDLE TRUE
+    MACOSX_BUNDLE_BUNDLE_NAME "BSFChat"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "com.bsfchat.app"
+    MACOSX_BUNDLE_BUNDLE_VERSION "0.0.2"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.0.2"
+    MACOSX_BUNDLE_INFO_STRING "BSFChat - Bullshit Free Chat"
+    WIN32_EXECUTABLE TRUE
+)
+
 set_source_files_properties(qml/theme/Theme.qml PROPERTIES
     QT_QML_SINGLETON_TYPE TRUE
 )

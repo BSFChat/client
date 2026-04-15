@@ -112,36 +112,25 @@ jobs:
         if: matrix.platform == 'macos'
         run: |
           cd build
-          # Find the .app bundle (might be in a subdirectory)
+          # Find the .app bundle
           APP_PATH=$(find . -name "bsfchat-app.app" -type d | head -1)
           if [ -z "$APP_PATH" ]; then
-            echo "No .app bundle found, creating one from binary"
-            mkdir -p BSFChat.app/Contents/MacOS
-            cp bsfchat-app BSFChat.app/Contents/MacOS/
-            cat > BSFChat.app/Contents/Info.plist << 'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-          <key>CFBundleExecutable</key><string>bsfchat-app</string>
-          <key>CFBundleName</key><string>BSFChat</string>
-          <key>CFBundleIdentifier</key><string>com.bsfchat.app</string>
-          <key>CFBundleVersion</key><string>0.1.0</string>
-          <key>CFBundleShortVersionString</key><string>0.1.0</string>
-          <key>NSMicrophoneUsageDescription</key><string>BSFChat needs microphone access for voice chat.</string>
-          </dict></plist>
-          PLIST
-            APP_PATH="BSFChat.app"
+            echo "ERROR: No .app bundle found!"
+            find . -name "bsfchat-app*" -type f
+            exit 1
           fi
-          macdeployqt "$APP_PATH" -always-overwrite || true
-          # Code sign the app
+          echo "Found app bundle: $APP_PATH"
+          # Deploy Qt frameworks into the bundle
+          macdeployqt "$APP_PATH" -always-overwrite
+          # Code sign
           if [ -n "$CODESIGN_IDENTITY" ]; then
             codesign --force --deep --sign "$CODESIGN_IDENTITY" \
               --options runtime --timestamp "$APP_PATH"
-            echo "App signed with: $CODESIGN_IDENTITY"
+            echo "Signed with: $CODESIGN_IDENTITY"
           else
-            echo "No signing identity found, using ad-hoc signing"
             codesign --force --deep --sign - "$APP_PATH"
           fi
+          # Create .dmg
           create-dmg \
             --volname "BSFChat" \
             --window-size 600 400 \
@@ -149,9 +138,9 @@ jobs:
             --app-drop-link 425 200 \
             --no-internet-enable \
             "BSFChat-macOS.dmg" "$APP_PATH" || true
-          # Fallback: if create-dmg failed, just zip the .app
+          # Fallback to zip
           if [ ! -f "BSFChat-macOS.dmg" ]; then
-            zip -r BSFChat-macOS.dmg "$APP_PATH"
+            ditto -c -k --keepParent "$APP_PATH" BSFChat-macOS.dmg
           fi
 
       - name: Upload macOS artifact
