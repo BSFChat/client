@@ -188,6 +188,43 @@ jobs:
           Write-Host "Found exe at: $($exe.FullName)"
           Copy-Item $exe.FullName dist\
           windeployqt --release --no-translations --qmldir qml dist\bsfchat-app.exe
+
+          # Copy runtime DLLs that windeployqt doesn't handle
+          # OpenSSL (from Qt installation or system)
+          $openssl_dlls = @("libssl-3-x64.dll", "libcrypto-3-x64.dll")
+          foreach ($dll in $openssl_dlls) {
+            $found = Get-ChildItem -Path "${env:Qt6_DIR}\..\.." -Recurse -Filter $dll -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $found) {
+              $found = Get-ChildItem -Path "C:\Program Files" -Recurse -Filter $dll -ErrorAction SilentlyContinue | Select-Object -First 1
+            }
+            if ($found) {
+              Copy-Item $found.FullName dist\
+              Write-Host "Copied $dll from $($found.FullName)"
+            } else {
+              Write-Warning "Could not find $dll"
+            }
+          }
+
+          # Opus (from our build - FetchContent puts it somewhere in build/_deps)
+          $opus_dll = Get-ChildItem -Path build -Recurse -Filter "opus.dll" | Select-Object -First 1
+          if ($opus_dll) {
+            Copy-Item $opus_dll.FullName dist\
+            Write-Host "Copied opus.dll from $($opus_dll.FullName)"
+          } else {
+            Write-Warning "Could not find opus.dll"
+          }
+
+          # libdatachannel DLL
+          $dc_dll = Get-ChildItem -Path build -Recurse -Filter "datachannel*.dll" | Select-Object -First 1
+          if ($dc_dll) {
+            Copy-Item $dc_dll.FullName dist\
+            Write-Host "Copied $($dc_dll.Name)"
+          }
+
+          # MSVC runtime (usually handled by windeployqt, but be safe)
+          Write-Host "Final dist contents:"
+          Get-ChildItem dist\ | Select-Object Name, Length
+
           Copy-Item installer.nsi dist\
           cd dist
           makensis installer.nsi
