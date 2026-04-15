@@ -13,10 +13,16 @@ FetchContent_MakeAvailable(bsfchat_protocol)
 
 # Voice chat dependencies (libdatachannel + opus)
 if(BSFCHAT_ENABLE_VOICE)
+    # Suppress CMake version warnings from libdatachannel's vendored dependencies
+    set(CMAKE_POLICY_DEFAULT_CMP0148 OLD CACHE STRING "" FORCE)
+    if(POLICY CMP0177)
+        cmake_policy(SET CMP0177 NEW)
+    endif()
+
     FetchContent_Declare(
         libdatachannel
         GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
-        GIT_TAG        v0.21.2
+        GIT_TAG        v0.22.4
         GIT_SHALLOW    TRUE
     )
     set(NO_MEDIA ON CACHE BOOL "" FORCE)
