@@ -14,13 +14,26 @@ Rectangle {
     property string activeRoomId: serverManager.activeServer ? serverManager.activeServer.activeRoomId : ""
     property bool uploading: false
 
-    // Permission-derived UX state. Recomputed when perms change or room changes.
-    property bool canSend: serverManager.activeServer
-        ? serverManager.activeServer.canSend(activeRoomId) : true
-    property bool canAttach: serverManager.activeServer
-        ? serverManager.activeServer.canAttach(activeRoomId) : true
-    property int slowmodeSeconds: serverManager.activeServer
-        ? serverManager.activeServer.channelSlowmode(activeRoomId) : 0
+    // Permission-derived UX state. The `serverRoles` touch makes these
+    // bindings reactive to applyServerRolesEvent / applyMemberRolesEvent /
+    // applyChannelPermissionsEvent / applyChannelSettingsEvent, all of which
+    // emit serverRolesChanged. Without it these Q_INVOKABLE calls would
+    // evaluate once and cache a stale (pre-sync) result.
+    property bool canSend: {
+        if (!serverManager.activeServer) return true;
+        serverManager.activeServer.serverRoles; // dep
+        return serverManager.activeServer.canSend(activeRoomId);
+    }
+    property bool canAttach: {
+        if (!serverManager.activeServer) return true;
+        serverManager.activeServer.serverRoles; // dep
+        return serverManager.activeServer.canAttach(activeRoomId);
+    }
+    property int slowmodeSeconds: {
+        if (!serverManager.activeServer) return 0;
+        serverManager.activeServer.serverRoles; // dep
+        return serverManager.activeServer.channelSlowmode(activeRoomId);
+    }
     // Client-side slowmode tracker. Server is still authoritative.
     property double lastSentAt: 0
     property int _slowmodeTick: 0 // bumped by the timer to force re-eval

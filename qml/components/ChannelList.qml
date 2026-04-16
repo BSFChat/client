@@ -501,8 +501,11 @@ Rectangle {
 
         MenuItem {
             text: "Channel Settings…"
-            enabled: serverManager.activeServer &&
-                     serverManager.activeServer.canManageChannel(roomContextMenu.roomId)
+            enabled: {
+                if (!serverManager.activeServer) return false;
+                serverManager.activeServer.serverRoles; // dep touch
+                return serverManager.activeServer.canManageChannel(roomContextMenu.roomId);
+            }
             contentItem: Text {
                 text: parent.text
                 font.pixelSize: Theme.fontSizeNormal
