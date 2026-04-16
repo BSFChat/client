@@ -40,6 +40,9 @@ signals:
 private:
     void onLoginSuccess(ServerConnection* conn);
     void onLoginFailed(ServerConnection* conn, const QString& error);
+    // Hooks up a ServerConnection so per-server UI state (unread dot, etc.)
+    // in the sidebar tracks the connection's state.
+    void wireConnection(ServerConnection* conn);
 
     Settings* m_settings;
     ServerListModel* m_serverListModel;

@@ -22,6 +22,7 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
         QUrl url(entry.url);
         QString serverName = url.host().isEmpty() ? entry.displayName : url.host();
         m_serverListModel->addServer(serverName, entry.url);
+        wireConnection(conn);
     }
 
     int savedIndex = m_settings->activeServerIndex();
@@ -37,6 +38,7 @@ void ServerManager::addServer(const QString& url, const QString& username, const
     auto* conn = new ServerConnection(url, this);
     m_connections.append(conn);
     m_serverListModel->addServer(url, url); // Temporary name until login
+    wireConnection(conn);
 
     int index = m_connections.size() - 1;
 
@@ -61,6 +63,7 @@ void ServerManager::registerServer(const QString& url, const QString& username, 
     auto* conn = new ServerConnection(url, this);
     m_connections.append(conn);
     m_serverListModel->addServer(url, url);
+    wireConnection(conn);
 
     int index = m_connections.size() - 1;
 
@@ -117,6 +120,7 @@ void ServerManager::addServerWithOidc(const QString& url)
     auto* conn = new ServerConnection(url, this);
     m_connections.append(conn);
     m_serverListModel->addServer(url, url);
+    wireConnection(conn);
 
     int index = m_connections.size() - 1;
 
@@ -193,6 +197,22 @@ void ServerManager::setActiveServer(int index)
     m_activeServer = (index >= 0) ? m_connections[index] : nullptr;
     m_settings->setActiveServerIndex(index);
     emit activeServerChanged();
+}
+
+void ServerManager::wireConnection(ServerConnection* conn)
+{
+    // Keep the sidebar's per-server unread dot in sync with this
+    // connection's hasUnread. The index can shift as servers are added or
+    // removed, so resolve it at signal-emission time.
+    auto push = [this, conn]() {
+        int idx = m_connections.indexOf(conn);
+        if (idx < 0) return;
+        m_serverListModel->setUnreadCount(idx, conn->hasUnread() ? 1 : 0);
+    };
+    connect(conn, &ServerConnection::hasUnreadChanged, this, push);
+    // Initial push in case the connection already has unread at wire-up
+    // (e.g. restored from disk with cached state).
+    push();
 }
 
 void ServerManager::onLoginSuccess(ServerConnection* conn)

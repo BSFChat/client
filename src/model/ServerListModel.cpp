@@ -58,3 +58,11 @@ void ServerListModel::updateServer(int index, const QString& displayName, const 
     m_servers[index].serverUrl = serverUrl;
     emit dataChanged(this->index(index), this->index(index));
 }
+
+void ServerListModel::setUnreadCount(int index, int count)
+{
+    if (index < 0 || index >= m_servers.size()) return;
+    if (m_servers[index].unreadCount == count) return;
+    m_servers[index].unreadCount = count;
+    emit dataChanged(this->index(index), this->index(index), {UnreadCountRole});
+}

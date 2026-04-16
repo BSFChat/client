@@ -24,6 +24,7 @@ public:
     void addServer(const QString& displayName, const QString& serverUrl);
     void removeServer(int index);
     void updateServer(int index, const QString& displayName, const QString& serverUrl);
+    void setUnreadCount(int index, int count);
 
 private:
     struct ServerEntry {

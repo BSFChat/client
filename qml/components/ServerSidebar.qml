@@ -12,25 +12,52 @@ Rectangle {
         anchors.topMargin: Theme.spacingNormal
         spacing: Theme.spacingNormal
 
-        // Server list
+        // Server list. Each row spans the full sidebar width; the icon is
+        // centered inside it and the state indicator is pinned to the
+        // sidebar's left edge.
         ListView {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.leftMargin: (sidebar.width - 48) / 2
-            Layout.rightMargin: Layout.leftMargin
             spacing: Theme.spacingNormal
             clip: true
             model: serverManager.servers
 
             delegate: Item {
-                width: 48
+                id: serverRow
+                width: ListView.view ? ListView.view.width : 72
                 height: 48
 
+                readonly property bool isActive: index === serverManager.activeServerIndex
+                readonly property bool hasUnread: (model.unreadCount || 0) > 0
+
+                // Active / unread indicator flush with the sidebar's left edge.
+                // Long pill = active server. Short pill = non-active server
+                // with unread. Hidden otherwise.
+                Rectangle {
+                    id: indicator
+                    width: 4
+                    radius: 2
+                    color: Theme.textPrimary
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: serverRow.isActive ? 36
+                          : serverRow.hasUnread ? 8
+                          : 0
+                    visible: height > 0
+
+                    Behavior on height {
+                        NumberAnimation { duration: 150 }
+                    }
+                }
+
+                // Icon, centered.
                 Rectangle {
                     id: serverIcon
-                    anchors.fill: parent
-                    radius: index === serverManager.activeServerIndex ? Theme.radiusLarge : 24
-                    color: index === serverManager.activeServerIndex ? Theme.accent : Theme.bgLight
+                    width: 48
+                    height: 48
+                    anchors.centerIn: parent
+                    radius: serverRow.isActive ? Theme.radiusLarge : 24
+                    color: serverRow.isActive ? Theme.accent : Theme.bgLight
                     border.width: 0
 
                     Behavior on radius {
@@ -39,45 +66,10 @@ Rectangle {
 
                     Text {
                         anchors.centerIn: parent
-                        text: model.displayName.charAt(0).toUpperCase()
+                        text: (model.displayName || "?").charAt(0).toUpperCase()
                         font.pixelSize: 20
                         font.bold: true
                         color: Theme.textPrimary
-                    }
-                }
-
-                // Active indicator
-                Rectangle {
-                    width: 4
-                    height: index === serverManager.activeServerIndex ? 36 : (hovered ? 20 : 8)
-                    radius: 2
-                    color: Theme.textPrimary
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.right: parent.left
-                    anchors.rightMargin: -14
-                    visible: true
-
-                    Behavior on height {
-                        NumberAnimation { duration: 150 }
-                    }
-                }
-
-                // Unread dot
-                Rectangle {
-                    width: 10
-                    height: 10
-                    radius: 5
-                    color: Theme.danger
-                    anchors.top: parent.top
-                    anchors.right: parent.right
-                    anchors.topMargin: -2
-                    anchors.rightMargin: -2
-                    visible: {
-                        // Show unread indicator for non-active servers that have unread messages
-                        if (index === serverManager.activeServerIndex) return false;
-                        // Check the connection's hasUnread property
-                        var conn = serverManager.activeServer; // We can't easily access other connections from QML
-                        return false; // Will be enhanced when ServerListModel gets unread support
                     }
                 }
 
@@ -88,7 +80,7 @@ Rectangle {
                 }
 
                 ToolTip.visible: hovered
-                ToolTip.text: model.displayName
+                ToolTip.text: model.displayName || ""
 
                 property bool hovered: false
                 HoverHandler {
