@@ -55,8 +55,10 @@ Rectangle {
                     visible: {
                         if (!serverManager.activeServer) return false;
                         var sc = serverManager.activeServer;
-                        // Use the active room (or empty — server-level check)
-                        // and ask whether this user can manage roles or channels.
+                        // Depend on serverRoles so that when
+                        // applyServerRolesEvent / applyMemberRolesEvent fire
+                        // serverRolesChanged, this binding re-evaluates.
+                        sc.serverRoles;
                         var rid = sc.activeRoomId || "";
                         return sc.canManageRoles(rid) || sc.canManageChannel(rid) || sc.canKick(rid) || sc.canBan(rid);
                     }
