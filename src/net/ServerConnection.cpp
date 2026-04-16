@@ -130,6 +130,11 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 #ifdef BSFCHAT_VOICE_ENABLED
         if (!m_activeVoiceRoomId.isEmpty() && !m_voiceEngine) {
             m_voiceEngine = new VoiceEngine(m_client, this);
+            connect(m_voiceEngine, &VoiceEngine::micLevelChanged, this, [this](float level) {
+                if (qAbs(level - m_micLevel) < 0.005f) return; // suppress sub-0.5% jitter
+                m_micLevel = level;
+                emit micLevelChanged();
+            });
             m_voiceEngine->start(m_activeVoiceRoomId, m_voiceMembers, config);
         }
 #endif
@@ -546,6 +551,12 @@ void ServerConnection::leaveVoiceChannel()
         m_voiceEngine = nullptr;
     }
 #endif
+    // Ensure UI drops the transmit indicator immediately, bypassing the
+    // jitter threshold in the micLevelChanged forwarder.
+    if (m_micLevel != 0.0f) {
+        m_micLevel = 0.0f;
+        emit micLevelChanged();
+    }
     m_client->leaveVoice(m_activeVoiceRoomId);
 }
 

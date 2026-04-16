@@ -52,11 +52,32 @@ set_target_properties(bsfchat-app PROPERTIES
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_BUNDLE_NAME "BSFChat"
     MACOSX_BUNDLE_GUI_IDENTIFIER "com.bsfchat.app"
-    MACOSX_BUNDLE_BUNDLE_VERSION "0.0.17"
-    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.0.17"
-    MACOSX_BUNDLE_INFO_STRING "BSFChat - Bullshit Free Chat"
+    MACOSX_BUNDLE_BUNDLE_VERSION "0.0.18"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.0.18"
+    MACOSX_BUNDLE_INFO_STRING "BSFChat"
     WIN32_EXECUTABLE TRUE
 )
+
+if(APPLE)
+    # CMake's generated Info.plist only covers the canonical MACOSX_BUNDLE_*
+    # keys. Inject the TCC usage descriptions we need after the bundle has
+    # been written — without NSMicrophoneUsageDescription, macOS denies mic
+    # access silently with no prompt, so voice chat opens the input device
+    # but only captures silence.
+    add_custom_command(TARGET bsfchat-app POST_BUILD
+        # CMake writes the plist read-only; plutil -replace refuses to edit
+        # it without write permission. Make it writable first.
+        COMMAND /bin/chmod u+w
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
+        COMMAND /usr/bin/plutil -replace NSMicrophoneUsageDescription
+                -string "BSFChat needs microphone access so you can talk in voice channels."
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
+        COMMAND /usr/bin/plutil -replace NSCameraUsageDescription
+                -string "BSFChat does not use the camera."
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
+        VERBATIM
+    )
+endif()
 
 set_source_files_properties(qml/theme/Theme.qml PROPERTIES
     QT_QML_SINGLETON_TYPE TRUE

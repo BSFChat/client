@@ -32,6 +32,11 @@ void VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
 
     // Start audio engine
     m_audioEngine = new AudioEngine(this);
+    connect(m_audioEngine, &AudioEngine::micLevelChanged,
+            this, [this](float level) {
+        m_micLevel = level;
+        emit micLevelChanged(level);
+    });
     if (!m_audioEngine->start()) {
         qWarning() << "Failed to start audio engine";
         emit error("Failed to initialize audio");
@@ -76,6 +81,13 @@ void VoiceEngine::stop() {
         m_audioEngine->stop();
         delete m_audioEngine;
         m_audioEngine = nullptr;
+    }
+
+    // Drop the mic indicator so listeners don't see a stale "transmitting"
+    // state after the call ends.
+    if (m_micLevel != 0.0f) {
+        m_micLevel = 0.0f;
+        emit micLevelChanged(0.0f);
     }
 }
 

@@ -30,6 +30,9 @@ public:
 
 signals:
     void audioFrameReady(const QByteArray& opusFrame);
+    // 0..1 smoothed RMS of the most recent 20ms mic frame. Emits zero
+    // when muted. Use as a UI transmit-level indicator.
+    void micLevelChanged(float level);
 
 private:
     void onMicDataReady();
@@ -58,4 +61,9 @@ private:
     bool m_deafened = false;
     uint16_t m_sequence = 0;
     bool m_running = false;
+
+    // EWMA of frame RMS so the UI dot doesn't flicker at the Opus tick rate.
+    // Updated per captured frame; reset to 0 when muted so listeners see the
+    // transmit indicator drop immediately on mute-toggle.
+    float m_smoothedLevel = 0.0f;
 };

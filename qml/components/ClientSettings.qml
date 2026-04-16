@@ -252,7 +252,7 @@ Popup {
                             anchors.fill: parent
                             anchors.margins: Theme.spacingNormal
                             Text {
-                                text: "Device selection persists but isn't yet wired to the voice engine — it still uses system defaults."
+                                text: "Device changes apply the next time you join a voice channel. Leave and rejoin to pick up a new selection mid-call. Volume sliders aren't applied yet."
                                 Layout.fillWidth: true
                                 color: Theme.textMuted
                                 font.pixelSize: Theme.fontSizeSmall

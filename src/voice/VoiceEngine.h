@@ -35,10 +35,13 @@ public:
     void setMuted(bool muted);
     void setDeafened(bool deafened);
 
+    float micLevel() const { return m_micLevel; }
+
 signals:
     void peerConnected(const QString& userId);
     void peerDisconnected(const QString& userId);
     void error(const QString& message);
+    void micLevelChanged(float level);
 
 private:
     void addPeer(const QString& userId, bool isOfferer);
@@ -62,4 +65,6 @@ private:
     // ICE candidate batching
     QTimer m_candidateBatchTimer;
     QMap<QString, std::vector<std::pair<std::string, std::string>>> m_pendingCandidates;
+
+    float m_micLevel = 0.0f;
 };

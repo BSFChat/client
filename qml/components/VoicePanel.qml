@@ -21,21 +21,54 @@ Rectangle {
         anchors.margins: Theme.spacingNormal
         spacing: Theme.spacingSmall
 
-        // Header: green dot + "Voice Connected"
+        // Header: green dot + "Voice Connected". The dot pulses brighter
+        // while the user is actively transmitting — linear on micLevel
+        // (0..1, smoothed and log-compressed server-side) so it reacts to
+        // real speech without flickering on room tone.
         RowLayout {
             Layout.fillWidth: true
             spacing: 6
 
+            readonly property real micLevel: serverManager.activeServer
+                ? serverManager.activeServer.micLevel : 0.0
+            readonly property bool transmitting: micLevel > 0.1
+
             Rectangle {
                 width: 8; height: 8; radius: 4
-                color: Theme.success
+                // At rest: default success green. While transmitting:
+                // brighter, fully saturated green with a subtle outer halo.
+                color: parent.transmitting
+                    ? Qt.lighter(Theme.success, 1.0 + parent.micLevel * 0.5)
+                    : Theme.success
+                opacity: parent.transmitting
+                    ? 0.7 + parent.micLevel * 0.3
+                    : 0.55
+                Behavior on color { ColorAnimation { duration: 80 } }
+                Behavior on opacity { NumberAnimation { duration: 80 } }
+
+                // Subtle outer glow when speaking.
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 8 + parent.parent.micLevel * 10
+                    height: width
+                    radius: width / 2
+                    color: "transparent"
+                    border.color: Theme.success
+                    border.width: 1
+                    opacity: parent.parent.transmitting ? 0.35 : 0.0
+                    visible: opacity > 0.01
+                    Behavior on opacity { NumberAnimation { duration: 80 } }
+                }
             }
 
             Text {
-                text: "Voice Connected"
+                text: parent.transmitting ? "Transmitting" : "Voice Connected"
                 font.pixelSize: Theme.fontSizeSmall
                 font.bold: true
-                color: Theme.success
+                color: parent.transmitting
+                    ? Qt.lighter(Theme.success, 1.1)
+                    : Theme.success
+                Behavior on color { ColorAnimation { duration: 80 } }
             }
         }
 

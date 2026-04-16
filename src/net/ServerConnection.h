@@ -47,6 +47,9 @@ class ServerConnection : public QObject {
     Q_PROPERTY(bool voiceDeafened READ voiceDeafened NOTIFY voiceDeafenedChanged)
     Q_PROPERTY(bool inVoiceChannel READ inVoiceChannel NOTIFY activeVoiceRoomIdChanged)
     Q_PROPERTY(QJsonArray voiceMembers READ voiceMembers NOTIFY voiceMembersChanged)
+    // Mic transmit level, 0..1. Non-zero when the mic is open AND capturing
+    // audio above the silence floor; zero when muted, disconnected, or idle.
+    Q_PROPERTY(float micLevel READ micLevel NOTIFY micLevelChanged)
     Q_PROPERTY(QString typingDisplay READ typingDisplay NOTIFY typingDisplayChanged)
     Q_PROPERTY(int myPowerLevel READ myPowerLevel NOTIFY myPowerLevelChanged)
     Q_PROPERTY(QJsonArray serverRoles READ serverRoles NOTIFY serverRolesChanged)
@@ -84,6 +87,7 @@ public:
     bool voiceDeafened() const { return m_voiceDeafened; }
     bool inVoiceChannel() const { return !m_activeVoiceRoomId.isEmpty(); }
     QJsonArray voiceMembers() const { return m_voiceMembers; }
+    float micLevel() const { return m_micLevel; }
     QString typingDisplay() const { return m_typingDisplay; }
     int myPowerLevel() const { return m_myPowerLevel; }
     QJsonArray serverRoles() const { return m_serverRoles; }
@@ -192,6 +196,7 @@ signals:
     void voiceMutedChanged();
     void voiceDeafenedChanged();
     void voiceMembersChanged();
+    void micLevelChanged();
     void avatarUrlChanged();
     void typingDisplayChanged();
     void profileFetched(const QString& userId, const QString& displayName, const QString& avatarUrl);
@@ -240,6 +245,7 @@ private:
 
     // Voice state
     QString m_activeVoiceRoomId;
+    float m_micLevel = 0.0f;
     bool m_voiceMuted = false;
     bool m_voiceDeafened = false;
     QJsonArray m_voiceMembers;

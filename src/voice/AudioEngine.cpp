@@ -4,8 +4,30 @@
 #include <QAudioFormat>
 #include <QMediaDevices>
 #include <QAudioDevice>
+#include <QSettings>
 #include <QtEndian>
+#include <cmath>
 #include <cstring>
+
+namespace {
+// Look up an audio device (input or output) by its human-readable
+// description. Returns a null QAudioDevice if nothing matches — caller
+// should fall back to QMediaDevices::defaultAudio{Input,Output}().
+QAudioDevice findInputByDescription(const QString& desc) {
+    if (desc.isEmpty()) return {};
+    for (const auto& d : QMediaDevices::audioInputs()) {
+        if (d.description() == desc) return d;
+    }
+    return {};
+}
+QAudioDevice findOutputByDescription(const QString& desc) {
+    if (desc.isEmpty()) return {};
+    for (const auto& d : QMediaDevices::audioOutputs()) {
+        if (d.description() == desc) return d;
+    }
+    return {};
+}
+} // namespace
 
 AudioEngine::AudioEngine(QObject* parent)
     : QObject(parent)
@@ -39,21 +61,49 @@ bool AudioEngine::start() {
     format.setChannelCount(kChannels);
     format.setSampleFormat(QAudioFormat::Int16);
 
-    // Start capture
-    auto inputDevice = QMediaDevices::defaultAudioInput();
+    // Honour the user's selection from Client Settings → Audio; fall back
+    // to the OS default if the saved preference isn't present (device
+    // unplugged, renamed, etc).
+    QSettings prefs("BSFChat", "BSFChat");
+    QString preferredIn  = prefs.value("audio/inputDevice").toString();
+    QString preferredOut = prefs.value("audio/outputDevice").toString();
+
+    auto inputDevice = findInputByDescription(preferredIn);
     if (inputDevice.isNull()) {
-        qWarning("No audio input device available");
+        if (!preferredIn.isEmpty()) {
+            qWarning("[voice] Preferred input '%s' not found — using system default",
+                     qPrintable(preferredIn));
+        }
+        inputDevice = QMediaDevices::defaultAudioInput();
+    }
+    if (inputDevice.isNull()) {
+        qWarning("[voice] No audio input device available");
     } else {
+        qInfo("[voice] Input device: %s", qPrintable(inputDevice.description()));
         m_audioSource = new QAudioSource(inputDevice, format, this);
         m_captureDevice = m_audioSource->start();
         if (m_captureDevice) {
             connect(m_captureDevice, &QIODevice::readyRead, this, &AudioEngine::onMicDataReady);
+        } else {
+            qWarning("[voice] QAudioSource::start() returned null — "
+                     "macOS likely still denying microphone access");
         }
+        // QAudioSource has a State enum we can peek at for a sanity check.
+        qInfo("[voice] QAudioSource initial state=%d error=%d",
+              int(m_audioSource->state()), int(m_audioSource->error()));
     }
 
-    // Start playback
-    auto outputDevice = QMediaDevices::defaultAudioOutput();
+    // Start playback — same device-selection logic as input.
+    auto outputDevice = findOutputByDescription(preferredOut);
+    if (outputDevice.isNull()) {
+        if (!preferredOut.isEmpty()) {
+            qWarning("[voice] Preferred output '%s' not found — using system default",
+                     qPrintable(preferredOut));
+        }
+        outputDevice = QMediaDevices::defaultAudioOutput();
+    }
     if (!outputDevice.isNull()) {
+        qInfo("[voice] Output device: %s", qPrintable(outputDevice.description()));
         m_audioSink = new QAudioSink(outputDevice, format, this);
         m_playbackDevice = m_audioSink->start();
     }
@@ -100,12 +150,62 @@ void AudioEngine::stop() {
 void AudioEngine::onMicDataReady() {
     if (!m_captureDevice || !m_encoder) return;
 
-    m_captureBuffer.append(m_captureDevice->readAll());
+    QByteArray chunk = m_captureDevice->readAll();
+    m_captureBuffer.append(chunk);
+
+    // Log the first N frames so we can confirm captured data actually has
+    // amplitude. macOS TCC-denied mic returns all zeros silently.
+    static int s_debugFrameCount = 0;
+    if (s_debugFrameCount < 5 && chunk.size() > 0) {
+        const int16_t* p = reinterpret_cast<const int16_t*>(chunk.constData());
+        int n = chunk.size() / 2;
+        int16_t mx = 0;
+        for (int i = 0; i < n; ++i) {
+            int16_t v = p[i] < 0 ? -p[i] : p[i];
+            if (v > mx) mx = v;
+        }
+        qInfo("[voice] mic frame #%d: %d bytes, peak |sample|=%d (0=silent, 32767=clip)",
+              s_debugFrameCount, int(chunk.size()), int(mx));
+        s_debugFrameCount++;
+    }
 
     while (m_captureBuffer.size() >= kFrameBytes) {
+        const int16_t* pcm = reinterpret_cast<const int16_t*>(m_captureBuffer.constData());
+
+        // ----- Mic transmit level -----
+        // Linear RMS in int16 units, normalized to 0..1 by int16 max, then
+        // log-compressed so the UI isn't dominated by the top 10 dB.
+        // We always publish the level so clients can display mic input even
+        // when muted (useful to confirm the device is live); but we also
+        // force it to zero when muted so "you're transmitting" indicators
+        // don't falsely light up.
+        float level = 0.0f;
         if (!m_muted) {
-            // Encode the frame
-            const int16_t* pcm = reinterpret_cast<const int16_t*>(m_captureBuffer.constData());
+            double acc = 0.0;
+            for (int i = 0; i < kFrameSamples; ++i) {
+                double s = pcm[i];
+                acc += s * s;
+            }
+            float rms = static_cast<float>(std::sqrt(acc / kFrameSamples) / 32768.0);
+            // Map to a perceptual 0..1: everything below ~-60 dBFS → 0,
+            // above ~-10 dBFS → 1, linear-in-dB in between.
+            constexpr float kFloor = -60.0f;
+            constexpr float kCeil = -10.0f;
+            float db = rms > 1e-6f ? 20.0f * std::log10(rms) : kFloor;
+            level = (db - kFloor) / (kCeil - kFloor);
+            if (level < 0.0f) level = 0.0f;
+            if (level > 1.0f) level = 1.0f;
+        }
+        // EWMA smoothing — fast attack, slow release so the indicator
+        // tracks voice onsets but doesn't twitch off between syllables.
+        constexpr float kAttack = 0.6f;
+        constexpr float kRelease = 0.15f;
+        float alpha = level > m_smoothedLevel ? kAttack : kRelease;
+        m_smoothedLevel = m_smoothedLevel + alpha * (level - m_smoothedLevel);
+        emit micLevelChanged(m_smoothedLevel);
+
+        // ----- Encode + transmit -----
+        if (!m_muted) {
             unsigned char opusBuf[kMaxOpusPacket];
             int encoded = opus_encode(m_encoder, pcm, kFrameSamples, opusBuf, kMaxOpusPacket);
 
