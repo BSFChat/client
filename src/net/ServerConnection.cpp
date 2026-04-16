@@ -1004,7 +1004,17 @@ quint64 parseFlagsValue(const QJsonValue& v) {
 void ServerConnection::applyServerRolesEvent(const QJsonObject& content)
 {
     auto rolesArr = content.value("roles").toArray();
-    m_roles.clear();
+
+    // Parse into a temporary vector first so we can decide whether to adopt
+    // it. Legacy server.roles events (written by old room-creation code on
+    // category rooms) have {name, level, color} shape with no permissions
+    // field — they parse fine but every role comes out with permissions=0.
+    // If we naively let those overwrite m_roles whenever sync happens to
+    // return them after the real event, every user loses every permission.
+    QVector<RoleInfo> parsed;
+    parsed.reserve(rolesArr.size());
+    bool any_perms = false;
+    bool any_id = false;
     for (const auto& v : rolesArr) {
         auto o = v.toObject();
         RoleInfo r;
@@ -1016,9 +1026,27 @@ void ServerConnection::applyServerRolesEvent(const QJsonObject& content)
         r.permissions = parseFlagsValue(o.value("permissions"));
         r.mentionable = o.value("mentionable").toBool(false);
         r.hoist = o.value("hoist").toBool(false);
-        m_roles.append(r);
+        if (r.permissions != 0) any_perms = true;
+        if (o.contains("id")) any_id = true;
+        parsed.append(r);
     }
-    // Keep m_serverRoles in sync for older QML that reads the raw array.
+
+    // A "real" (new-schema) event has at least one non-zero permission
+    // bitfield or at least one role carrying an explicit "id" field. Legacy
+    // events (just {name, level, color}) have neither. If we already hold a
+    // real set of roles, refuse to be clobbered by a legacy one — sync
+    // returns events in whatever order the map iterates, and losing that
+    // race means every user effectively loses every permission.
+    const bool incoming_is_real = any_perms || any_id;
+    bool current_is_real = false;
+    for (const auto& r : m_roles) {
+        if (r.permissions != 0) { current_is_real = true; break; }
+    }
+    if (current_is_real && !incoming_is_real) {
+        return;
+    }
+
+    m_roles = std::move(parsed);
     m_serverRoles = rolesArr;
     emit serverRolesChanged();
     ++m_permissionsGeneration;
