@@ -47,6 +47,11 @@ class ServerConnection : public QObject {
     Q_PROPERTY(int myPowerLevel READ myPowerLevel NOTIFY myPowerLevelChanged)
     Q_PROPERTY(QJsonArray serverRoles READ serverRoles NOTIFY serverRolesChanged)
     Q_PROPERTY(QVariantList categorizedRooms READ categorizedRooms NOTIFY categorizedRoomsChanged)
+    // Monotonically increases whenever any permission-relevant state changes
+    // (server roles, member roles, channel overrides, channel settings).
+    // QML bindings should reference this so they re-evaluate whenever the
+    // effective permission set could have changed.
+    Q_PROPERTY(int permissionsGeneration READ permissionsGeneration NOTIFY permissionsChanged)
 
 public:
     explicit ServerConnection(const QString& serverUrl, QObject* parent = nullptr);
@@ -78,6 +83,7 @@ public:
     int myPowerLevel() const { return m_myPowerLevel; }
     QJsonArray serverRoles() const { return m_serverRoles; }
     QVariantList categorizedRooms() const { return m_categorizedRooms; }
+    int permissionsGeneration() const { return m_permissionsGeneration; }
 
     RoomListModel* roomListModel() const { return m_roomListModel; }
     MessageModel* messageModel() const { return m_messageModel; }
@@ -180,6 +186,7 @@ signals:
     void profileFetched(const QString& userId, const QString& displayName, const QString& avatarUrl);
     void myPowerLevelChanged();
     void serverRolesChanged();
+    void permissionsChanged();
     void categorizedRoomsChanged();
 
 private:
@@ -232,6 +239,7 @@ private:
 
     // Category/roles state
     int m_myPowerLevel = 0;
+    int m_permissionsGeneration = 0;
     QJsonArray m_serverRoles;
     QVariantList m_categorizedRooms;
     void rebuildCategorizedRooms();

@@ -55,10 +55,10 @@ Rectangle {
                     visible: {
                         if (!serverManager.activeServer) return false;
                         var sc = serverManager.activeServer;
-                        // Depend on serverRoles so that when
-                        // applyServerRolesEvent / applyMemberRolesEvent fire
-                        // serverRolesChanged, this binding re-evaluates.
-                        sc.serverRoles;
+                        // permissionsGeneration is a real int dependency the
+                        // AOT compiler won't eliminate; bumped by every
+                        // apply*Event handler in ServerConnection.
+                        if (sc.permissionsGeneration < 0) return false;
                         var rid = sc.activeRoomId || "";
                         return sc.canManageRoles(rid) || sc.canManageChannel(rid) || sc.canKick(rid) || sc.canBan(rid);
                     }
@@ -503,7 +503,7 @@ Rectangle {
             text: "Channel Settings…"
             enabled: {
                 if (!serverManager.activeServer) return false;
-                serverManager.activeServer.serverRoles; // dep touch
+                if (serverManager.activeServer.permissionsGeneration < 0) return false;
                 return serverManager.activeServer.canManageChannel(roomContextMenu.roomId);
             }
             contentItem: Text {

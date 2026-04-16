@@ -14,25 +14,22 @@ Rectangle {
     property string activeRoomId: serverManager.activeServer ? serverManager.activeServer.activeRoomId : ""
     property bool uploading: false
 
-    // Permission-derived UX state. The `serverRoles` touch makes these
-    // bindings reactive to applyServerRolesEvent / applyMemberRolesEvent /
-    // applyChannelPermissionsEvent / applyChannelSettingsEvent, all of which
-    // emit serverRolesChanged. Without it these Q_INVOKABLE calls would
-    // evaluate once and cache a stale (pre-sync) result.
+    // Permission-derived UX state. Using permissionsGeneration as a real
+    // dependency (integer, read and compared) makes these bindings reactive
+    // across QML's AOT-compiled path; the bare `serverRoles` touch I tried
+    // earlier got dead-code-eliminated.
+    property int _permGen: serverManager.activeServer ? serverManager.activeServer.permissionsGeneration : 0
     property bool canSend: {
         if (!serverManager.activeServer) return true;
-        serverManager.activeServer.serverRoles; // dep
-        return serverManager.activeServer.canSend(activeRoomId);
+        return _permGen >= 0 && serverManager.activeServer.canSend(activeRoomId);
     }
     property bool canAttach: {
         if (!serverManager.activeServer) return true;
-        serverManager.activeServer.serverRoles; // dep
-        return serverManager.activeServer.canAttach(activeRoomId);
+        return _permGen >= 0 && serverManager.activeServer.canAttach(activeRoomId);
     }
     property int slowmodeSeconds: {
         if (!serverManager.activeServer) return 0;
-        serverManager.activeServer.serverRoles; // dep
-        return serverManager.activeServer.channelSlowmode(activeRoomId);
+        return _permGen >= 0 ? serverManager.activeServer.channelSlowmode(activeRoomId) : 0;
     }
     // Client-side slowmode tracker. Server is still authoritative.
     property double lastSentAt: 0

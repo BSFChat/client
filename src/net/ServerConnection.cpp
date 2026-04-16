@@ -1021,6 +1021,8 @@ void ServerConnection::applyServerRolesEvent(const QJsonObject& content)
     // Keep m_serverRoles in sync for older QML that reads the raw array.
     m_serverRoles = rolesArr;
     emit serverRolesChanged();
+    ++m_permissionsGeneration;
+    emit permissionsChanged();
 }
 
 void ServerConnection::applyMemberRolesEvent(const QString& userId, const QJsonObject& content)
@@ -1029,11 +1031,9 @@ void ServerConnection::applyMemberRolesEvent(const QString& userId, const QJsonO
     auto arr = content.value("role_ids").toArray();
     for (const auto& v : arr) ids.append(v.toString());
     m_memberRoles[userId] = ids;
-    // Emit serverRolesChanged so QML bindings reliant on the effective
-    // permission set re-evaluate. (serverRoles is the property QML already
-    // listens to; member-role changes shift a user's effective permissions
-    // even if the role list itself didn't change.)
     emit serverRolesChanged();
+    ++m_permissionsGeneration;
+    emit permissionsChanged();
 }
 
 void ServerConnection::applyChannelPermissionsEvent(const QString& roomId, const QString& stateKey,
@@ -1058,12 +1058,16 @@ void ServerConnection::applyChannelPermissionsEvent(const QString& roomId, const
     }
     if (ov.allow != 0 || ov.deny != 0) list.append(ov);
     emit serverRolesChanged();
+    ++m_permissionsGeneration;
+    emit permissionsChanged();
 }
 
 void ServerConnection::applyChannelSettingsEvent(const QString& roomId, const QJsonObject& content)
 {
     m_channelSlowmode[roomId] = content.value("slowmode_seconds").toInt(0);
     emit serverRolesChanged();
+    ++m_permissionsGeneration;
+    emit permissionsChanged();
 }
 
 quint64 ServerConnection::myPermissions(const QString& roomId) const
