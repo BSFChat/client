@@ -22,6 +22,7 @@ int main(int argc, char *argv[])
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("serverManager", application.serverManager());
+    engine.rootContext()->setContextProperty("appSettings", application.settings());
     engine.load(QUrl(QStringLiteral("qrc:/qt/qml/BSFChat/qml/main.qml")));
 
     if (engine.rootObjects().isEmpty())

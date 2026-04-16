@@ -493,6 +493,27 @@ void ServerConnection::leaveRoom(const QString& roomId)
     m_client->leaveRoom(roomId);
 }
 
+void ServerConnection::deleteChannel(const QString& roomId)
+{
+    // Optimistically clear the UI state for this room so the sidebar pops it
+    // immediately; server-side filtering on the next sync will keep it gone.
+    // Without clearing the per-room models the main pane kept rendering the
+    // last message list from the deleted room which made the UI look frozen
+    // until the long-poll sync came back.
+    if (roomId == m_activeRoomId) {
+        m_activeRoomId.clear();
+        m_activeRoomName.clear();
+        m_activeRoomTopic.clear();
+        m_messageModel->clear();
+        m_memberListModel->clear();
+        emit activeRoomIdChanged();
+        emit activeRoomNameChanged();
+        emit activeRoomTopicChanged();
+    }
+    m_roomListModel->removeRoom(roomId);
+    m_client->deleteRoom(roomId);
+}
+
 void ServerConnection::resetUnreadForRoom(const QString& roomId)
 {
     m_roomListModel->resetUnreadCount(roomId);
@@ -579,8 +600,24 @@ void ServerConnection::createCategory(const QString& name)
     m_client->createCategoryRoom(name);
 }
 
-void ServerConnection::createChannelInCategory(const QString& name, const QString& categoryId, bool isVoice)
+void ServerConnection::createChannelInCategory(const QString& name, const QString& categoryId, bool isVoice, bool makePrivate)
 {
+    if (!makePrivate) {
+        m_client->createChannelInCategory(name, categoryId, isVoice);
+        return;
+    }
+    // One-shot hook on the very next createRoomSuccess — once the server
+    // hands us the new room ID, apply @everyone DENY VIEW_CHANNEL so the
+    // channel is invisible to non-admin roles by default. Admins still see
+    // it because ADMINISTRATOR short-circuits to all flags.
+    auto* conn = new QMetaObject::Connection;
+    *conn = connect(m_client, &MatrixClient::createRoomSuccess, this,
+        [this, conn](const QString& roomId) {
+            disconnect(*conn);
+            delete conn;
+            m_client->setChannelPermission(roomId, "role:everyone",
+                /*allow=*/0, /*deny=*/0x0001 /*VIEW_CHANNEL*/);
+        });
     m_client->createChannelInCategory(name, categoryId, isVoice);
 }
 

@@ -35,6 +35,7 @@ public:
     void createRoom(const QString& name, const QString& topic, const QString& visibility = "private");
     void joinRoom(const QString& roomIdOrAlias);
     void leaveRoom(const QString& roomId);
+    void deleteRoom(const QString& roomId);
     void getJoinedRooms();
     void getRoomMembers(const QString& roomId);
 
@@ -79,6 +80,10 @@ public:
 
     // Categories & Channels
     void createCategoryRoom(const QString& name);
+    // Create a text or voice channel. Channels are always created public so
+    // they auto-join to everyone — privacy is later enforced by a per-channel
+    // @everyone DENY VIEW_CHANNEL override, applied separately by the caller
+    // listening on createRoomSuccess.
     void createChannelInCategory(const QString& name, const QString& categoryId, bool isVoice = false);
     void moveChannel(const QString& roomId, const QString& categoryId);
     void setChannelOrder(const QString& roomId, int order);

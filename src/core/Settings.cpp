@@ -1,5 +1,9 @@
 #include "core/Settings.h"
 
+#include <QMediaDevices>
+#include <QAudioDevice>
+#include <QVariantMap>
+
 Settings::Settings(QObject* parent)
     : QObject(parent)
     , m_settings("BSFChat", "BSFChat")
@@ -119,6 +123,87 @@ void Settings::setTheme(const QString& theme)
         m_settings.setValue("theme", theme);
         emit themeChanged();
     }
+}
+
+QString Settings::audioInputDevice() const {
+    return m_settings.value("audio/inputDevice").toString();
+}
+void Settings::setAudioInputDevice(const QString& desc) {
+    if (audioInputDevice() != desc) {
+        m_settings.setValue("audio/inputDevice", desc);
+        emit audioInputDeviceChanged();
+    }
+}
+QString Settings::audioOutputDevice() const {
+    return m_settings.value("audio/outputDevice").toString();
+}
+void Settings::setAudioOutputDevice(const QString& desc) {
+    if (audioOutputDevice() != desc) {
+        m_settings.setValue("audio/outputDevice", desc);
+        emit audioOutputDeviceChanged();
+    }
+}
+int Settings::inputVolume() const {
+    return m_settings.value("audio/inputVolume", 100).toInt();
+}
+void Settings::setInputVolume(int v) {
+    v = qBound(0, v, 100);
+    if (inputVolume() != v) {
+        m_settings.setValue("audio/inputVolume", v);
+        emit inputVolumeChanged();
+    }
+}
+int Settings::outputVolume() const {
+    return m_settings.value("audio/outputVolume", 100).toInt();
+}
+void Settings::setOutputVolume(int v) {
+    v = qBound(0, v, 100);
+    if (outputVolume() != v) {
+        m_settings.setValue("audio/outputVolume", v);
+        emit outputVolumeChanged();
+    }
+}
+bool Settings::notificationsEnabled() const {
+    return m_settings.value("notifications/enabled", true).toBool();
+}
+void Settings::setNotificationsEnabled(bool v) {
+    if (notificationsEnabled() != v) {
+        m_settings.setValue("notifications/enabled", v);
+        emit notificationsEnabledChanged();
+    }
+}
+bool Settings::notificationSound() const {
+    return m_settings.value("notifications/sound", true).toBool();
+}
+void Settings::setNotificationSound(bool v) {
+    if (notificationSound() != v) {
+        m_settings.setValue("notifications/sound", v);
+        emit notificationSoundChanged();
+    }
+}
+
+namespace {
+QVariantList devicesToList(const QList<QAudioDevice>& devices) {
+    QVariantList out;
+    QVariantMap def;
+    def["description"] = QStringLiteral("System default");
+    def["id"] = QString();
+    out.append(def);
+    for (const auto& d : devices) {
+        QVariantMap m;
+        m["description"] = d.description();
+        m["id"] = QString::fromLatin1(d.id());
+        out.append(m);
+    }
+    return out;
+}
+} // namespace
+
+QVariantList Settings::audioInputDevices() const {
+    return devicesToList(QMediaDevices::audioInputs());
+}
+QVariantList Settings::audioOutputDevices() const {
+    return devicesToList(QMediaDevices::audioOutputs());
 }
 
 QStringList Settings::collapsedCategories() const

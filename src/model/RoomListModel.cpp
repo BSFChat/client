@@ -274,8 +274,45 @@ QVariantList RoomListModel::getCategoriesWithChannels() const
         }
     }
 
-    // Build result
+    // Build result. Uncategorized comes first (Discord convention) so orphan
+    // channels sit above any named categories and can't be visually confused
+    // with channels that actually live inside the first category.
     QVariantList result;
+
+    auto roomToMap = [this](int idx) {
+        const auto& room = m_rooms[idx];
+        QVariantMap ch;
+        ch[QStringLiteral("roomId")] = room.roomId;
+        ch[QStringLiteral("displayName")] = room.displayName.isEmpty() ? room.roomId : room.displayName;
+        ch[QStringLiteral("roomType")] = room.roomType;
+        ch[QStringLiteral("isVoice")] = room.isVoice;
+        ch[QStringLiteral("unreadCount")] = room.unreadCount;
+        ch[QStringLiteral("voiceMemberCount")] = room.voiceMemberCount;
+        ch[QStringLiteral("topic")] = room.topic;
+        ch[QStringLiteral("sortOrder")] = room.sortOrder;
+        return ch;
+    };
+
+    // Uncategorized section first, if any.
+    {
+        auto indices = categoryChannels.value(QString());
+        if (!indices.isEmpty()) {
+            QVariantMap catMap;
+            catMap[QStringLiteral("categoryId")] = QString();
+            catMap[QStringLiteral("categoryName")] = QStringLiteral("Uncategorized");
+            catMap[QStringLiteral("sortOrder")] = -1;
+
+            QVariantList channels;
+            std::sort(indices.begin(), indices.end(),
+                      [this](int a, int b) {
+                          return m_rooms[a].sortOrder < m_rooms[b].sortOrder;
+                      });
+            for (int idx : indices) channels.append(roomToMap(idx));
+            catMap[QStringLiteral("channels")] = channels;
+            result.append(catMap);
+        }
+        Q_UNUSED(hasUncategorized);
+    }
 
     for (const auto& cat : categories) {
         QVariantMap catMap;
@@ -285,58 +322,13 @@ QVariantList RoomListModel::getCategoriesWithChannels() const
 
         QVariantList channels;
         auto indices = categoryChannels.value(cat.categoryId);
-        // Sort channels by sortOrder
         std::sort(indices.begin(), indices.end(),
                   [this](int a, int b) {
                       return m_rooms[a].sortOrder < m_rooms[b].sortOrder;
                   });
-        for (int idx : indices) {
-            const auto& room = m_rooms[idx];
-            QVariantMap ch;
-            ch[QStringLiteral("roomId")] = room.roomId;
-            ch[QStringLiteral("displayName")] = room.displayName.isEmpty() ? room.roomId : room.displayName;
-            ch[QStringLiteral("roomType")] = room.roomType;
-            ch[QStringLiteral("isVoice")] = room.isVoice;
-            ch[QStringLiteral("unreadCount")] = room.unreadCount;
-            ch[QStringLiteral("voiceMemberCount")] = room.voiceMemberCount;
-            ch[QStringLiteral("topic")] = room.topic;
-            ch[QStringLiteral("sortOrder")] = room.sortOrder;
-            channels.append(ch);
-        }
+        for (int idx : indices) channels.append(roomToMap(idx));
         catMap[QStringLiteral("channels")] = channels;
         result.append(catMap);
-    }
-
-    // Add uncategorized if any
-    if (hasUncategorized || categoryChannels.contains(QString())) {
-        auto indices = categoryChannels.value(QString());
-        if (!indices.isEmpty()) {
-            QVariantMap catMap;
-            catMap[QStringLiteral("categoryId")] = QString();
-            catMap[QStringLiteral("categoryName")] = QStringLiteral("Uncategorized");
-            catMap[QStringLiteral("sortOrder")] = 999999;
-
-            QVariantList channels;
-            std::sort(indices.begin(), indices.end(),
-                      [this](int a, int b) {
-                          return m_rooms[a].sortOrder < m_rooms[b].sortOrder;
-                      });
-            for (int idx : indices) {
-                const auto& room = m_rooms[idx];
-                QVariantMap ch;
-                ch[QStringLiteral("roomId")] = room.roomId;
-                ch[QStringLiteral("displayName")] = room.displayName.isEmpty() ? room.roomId : room.displayName;
-                ch[QStringLiteral("roomType")] = room.roomType;
-                ch[QStringLiteral("isVoice")] = room.isVoice;
-                ch[QStringLiteral("unreadCount")] = room.unreadCount;
-                ch[QStringLiteral("voiceMemberCount")] = room.voiceMemberCount;
-                ch[QStringLiteral("topic")] = room.topic;
-                ch[QStringLiteral("sortOrder")] = room.sortOrder;
-                channels.append(ch);
-            }
-            catMap[QStringLiteral("channels")] = channels;
-            result.append(catMap);
-        }
     }
 
     return result;

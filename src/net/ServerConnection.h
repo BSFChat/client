@@ -109,6 +109,9 @@ public:
     Q_INVOKABLE void createRoom(const QString& name, const QString& topic);
     Q_INVOKABLE void joinRoom(const QString& roomIdOrAlias);
     Q_INVOKABLE void leaveRoom(const QString& roomId);
+    // Delete a channel (server-side destructive). Requires MANAGE_CHANNELS;
+    // server enforces regardless.
+    Q_INVOKABLE void deleteChannel(const QString& roomId);
     Q_INVOKABLE void resetUnreadForRoom(const QString& roomId);
 
     Q_INVOKABLE void loginWithOidc(const QString& providerUrl);
@@ -123,7 +126,7 @@ public:
 
     // Category & channel management
     Q_INVOKABLE void createCategory(const QString& name);
-    Q_INVOKABLE void createChannelInCategory(const QString& name, const QString& categoryId, bool isVoice = false);
+    Q_INVOKABLE void createChannelInCategory(const QString& name, const QString& categoryId, bool isVoice = false, bool makePrivate = false);
     Q_INVOKABLE void moveChannelToCategory(const QString& roomId, const QString& categoryId);
     Q_INVOKABLE void setChannelOrder(const QString& roomId, int order);
     Q_INVOKABLE void updateUserPowerLevel(const QString& roomId, const QString& userId, int level);

@@ -52,8 +52,8 @@ set_target_properties(bsfchat-app PROPERTIES
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_BUNDLE_NAME "BSFChat"
     MACOSX_BUNDLE_GUI_IDENTIFIER "com.bsfchat.app"
-    MACOSX_BUNDLE_BUNDLE_VERSION "0.0.16"
-    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.0.16"
+    MACOSX_BUNDLE_BUNDLE_VERSION "0.0.17"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.0.17"
     MACOSX_BUNDLE_INFO_STRING "BSFChat - Bullshit Free Chat"
     WIN32_EXECUTABLE TRUE
 )
@@ -80,6 +80,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/UserSettings.qml
         qml/components/ServerSettings.qml
         qml/components/ChannelSettings.qml
+        qml/components/ClientSettings.qml
         qml/theme/Theme.qml
     RESOURCES
         qml/data/EmojiData.js

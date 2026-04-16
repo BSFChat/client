@@ -1,9 +1,11 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import BSFChat
 
 Rectangle {
+    id: channelListRoot
     color: Theme.bgDark
 
     // Category collapse state
@@ -14,9 +16,43 @@ Rectangle {
     }
 
     function toggleCategoryCollapsed(catId) {
-        var c = collapsedCategories;
-        c[catId] = !c[catId];
+        // Copy into a fresh object so QML notices the property change.
+        // Mutating-and-reassigning the same reference is a no-op as far as
+        // `property var` change signals are concerned, which is why the
+        // previous version silently did nothing.
+        var c = {};
+        for (var k in collapsedCategories) c[k] = collapsedCategories[k];
+        c[catId] = !(collapsedCategories[catId] === true);
         collapsedCategories = c;
+    }
+
+    // Kind of thing the create-prompt is about to create. "category" |
+    // "text" | "voice". Category ID scopes new channels; ignored for
+    // "category" since we don't support nesting.
+    function openCreatePrompt(kind, categoryId) {
+        createPrompt.kind = kind;
+        createPrompt.categoryId = categoryId || "";
+        createPrompt.nameField.text = "";
+        createPrompt.open();
+        createPrompt.nameField.forceActiveFocus();
+    }
+
+    // Popup menu used by right-click on empty sidebar and by every "+" button.
+    function openCreateMenu(x, y, categoryId) {
+        createMenu.categoryId = categoryId || "";
+        createMenu.popup(x, y);
+    }
+
+    // Root-level right-click handler: anywhere in the sidebar that isn't a
+    // channel/category row (those consume their own right-clicks) opens the
+    // create menu. acceptedButtons intentionally excludes LeftButton so
+    // left-clicks continue to reach the sidebar's children normally.
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.RightButton
+        onClicked: (mouse) => {
+            channelListRoot.openCreateMenu(mouse.x, mouse.y, "");
+        }
     }
 
     ColumnLayout {
@@ -101,19 +137,23 @@ Rectangle {
                     Layout.fillWidth: true
                 }
 
-                // Create room/category button
+                // Create room/category button — opens the same context menu
+                // as right-click on empty sidebar, for discoverability.
                 Text {
+                    id: topPlus
                     text: "+"
                     font.pixelSize: Theme.fontSizeLarge
-                    color: Theme.textMuted
+                    color: topPlusMouse.containsMouse ? Theme.textPrimary : Theme.textMuted
                     Layout.alignment: Qt.AlignVCenter
 
                     MouseArea {
+                        id: topPlusMouse
                         anchors.fill: parent
+                        hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            createRoomDialog.selectedCategoryId = "";
-                            createRoomDialog.open();
+                            var p = topPlus.mapToItem(channelListRoot, 0, topPlus.height);
+                            channelListRoot.openCreateMenu(p.x, p.y, "");
                         }
                     }
                 }
@@ -144,6 +184,28 @@ Rectangle {
                             height: modelData.categoryId !== "" ? 32 : 0
                             visible: modelData.categoryId !== ""
 
+                            // Backdrop click handler — left-click toggles
+                            // collapse/expand; right-click opens the create
+                            // menu scoped to this category so the new channel
+                            // lands inside it. Declared before RowLayout so
+                            // child MouseAreas (notably "+") still win on
+                            // their own hit tests.
+                            MouseArea {
+                                anchors.fill: parent
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                cursorShape: Qt.PointingHandCursor
+                                hoverEnabled: true
+                                onClicked: (mouse) => {
+                                    if (mouse.button === Qt.RightButton) {
+                                        var p = mapToItem(channelListRoot, mouse.x, mouse.y);
+                                        channelListRoot.openCreateMenu(
+                                            p.x, p.y, modelData.categoryId);
+                                    } else {
+                                        toggleCategoryCollapsed(modelData.categoryId);
+                                    }
+                                }
+                            }
+
                             RowLayout {
                                 anchors.fill: parent
                                 anchors.leftMargin: Theme.spacingNormal
@@ -166,6 +228,7 @@ Rectangle {
 
                                 // "+" to add channel in this category
                                 Text {
+                                    id: catPlus
                                     text: "+"
                                     font.pixelSize: Theme.fontSizeLarge
                                     color: catPlusMouse.containsMouse ? Theme.textPrimary : Theme.textMuted
@@ -176,8 +239,8 @@ Rectangle {
                                         hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: {
-                                            createRoomDialog.selectedCategoryId = modelData.categoryId;
-                                            createRoomDialog.open();
+                                            var p = catPlus.mapToItem(channelListRoot, 0, catPlus.height);
+                                            channelListRoot.openCreateMenu(p.x, p.y, modelData.categoryId);
                                         }
                                     }
                                 }
@@ -471,7 +534,47 @@ Rectangle {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: userSettingsPopup.open()
+                onClicked: {
+                    // Anchor the menu above the profile block so it opens
+                    // upward rather than clipping off-screen.
+                    userMenu.popup(0, -userMenu.implicitHeight);
+                }
+            }
+
+            // Menu for the bottom user-profile block.
+            Menu {
+                id: userMenu
+                background: Rectangle {
+                    color: Theme.bgDarkest
+                    radius: Theme.radiusSmall
+                    border.color: Theme.bgLight
+                    border.width: 1
+                    implicitWidth: 200
+                }
+                MenuItem {
+                    text: "Edit Server Profile"
+                    contentItem: Text {
+                        text: parent.text
+                        font.pixelSize: Theme.fontSizeNormal
+                        color: Theme.textPrimary
+                    }
+                    background: Rectangle {
+                        color: parent.hovered ? Theme.bgLight : "transparent"
+                    }
+                    onTriggered: Window.window.openUserSettings()
+                }
+                MenuItem {
+                    text: "Client Settings"
+                    contentItem: Text {
+                        text: parent.text
+                        font.pixelSize: Theme.fontSizeNormal
+                        color: Theme.textPrimary
+                    }
+                    background: Rectangle {
+                        color: parent.hovered ? Theme.bgLight : "transparent"
+                    }
+                    onTriggered: Window.window.openClientSettings()
+                }
             }
         }
     }
@@ -522,37 +625,41 @@ Rectangle {
         }
 
         MenuItem {
-            text: "Leave Room"
+            text: "Delete Channel"
+            enabled: {
+                if (!serverManager.activeServer) return false;
+                if (serverManager.activeServer.permissionsGeneration < 0) return false;
+                return serverManager.activeServer.canManageChannel(roomContextMenu.roomId);
+            }
             contentItem: Text {
                 text: parent.text
                 font.pixelSize: Theme.fontSizeNormal
-                color: Theme.danger
+                color: parent.enabled ? Theme.danger : Theme.textMuted
             }
             background: Rectangle {
                 color: parent.hovered ? Theme.bgLight : "transparent"
             }
             onTriggered: {
-                if (serverManager.activeServer && roomContextMenu.roomId !== "") {
-                    serverManager.activeServer.leaveRoom(roomContextMenu.roomId);
-                }
+                deleteChannelConfirm.roomId = roomContextMenu.roomId;
+                deleteChannelConfirm.roomName = roomContextMenu.roomName;
+                deleteChannelConfirm.open();
             }
         }
     }
 
-    ChannelSettings {
-        id: channelSettingsPopup
-    }
-
-    // Create room dialog
-    Dialog {
-        id: createRoomDialog
-        title: "Create Channel"
+    // Confirmation popup for channel deletion. Keeps us from nuking a
+    // channel with a misclick; MANAGE_CHANNELS already gates the action
+    // server-side but the UX still needs the prompt.
+    Popup {
+        id: deleteChannelConfirm
+        parent: Overlay.overlay
         anchors.centerIn: Overlay.overlay
         width: 360
         modal: true
-        standardButtons: Dialog.NoButton
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
-        property string selectedCategoryId: ""
+        property string roomId: ""
+        property string roomName: ""
 
         background: Rectangle {
             color: Theme.bgMedium
@@ -561,306 +668,293 @@ Rectangle {
             border.width: 1
         }
 
-        header: Rectangle {
-            color: "transparent"
-            height: 50
-            Text {
-                anchors.centerIn: parent
-                text: "Create Channel"
-                font.pixelSize: 18
-                font.bold: true
-                color: Theme.textPrimary
-            }
-        }
-
-        contentItem: Column {
+        contentItem: ColumnLayout {
             spacing: Theme.spacingNormal
-            padding: Theme.spacingLarge
 
             Text {
-                text: "CHANNEL NAME"
-                font.pixelSize: Theme.fontSizeSmall
+                text: "Delete #" + deleteChannelConfirm.roomName + "?"
+                font.pixelSize: 16
                 font.bold: true
-                color: Theme.textSecondary
-            }
-
-            TextField {
-                id: roomNameField
-                width: parent.width - parent.padding * 2
-                placeholderText: "general"
-                placeholderTextColor: Theme.textMuted
                 color: Theme.textPrimary
-                font.pixelSize: Theme.fontSizeNormal
-                background: Rectangle {
-                    color: Theme.bgDarkest
-                    radius: Theme.radiusSmall
-                    border.color: roomNameField.activeFocus ? Theme.accent : Theme.bgLight
-                    border.width: 1
-                }
-                padding: Theme.spacingNormal
-                Keys.onReturnPressed: createRoomDialog.doCreateRoom()
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
             }
-
-            // Voice channel toggle
-            Row {
-                spacing: Theme.spacingNormal
-                width: parent.width - parent.padding * 2
-                visible: !categoryCheck.checked
-
-                CheckBox {
-                    id: voiceChannelCheck
-                    checked: false
-                    indicator: Rectangle {
-                        implicitWidth: 20
-                        implicitHeight: 20
-                        y: parent.height / 2 - height / 2
-                        radius: Theme.radiusSmall
-                        color: voiceChannelCheck.checked ? Theme.accent : Theme.bgDarkest
-                        border.color: voiceChannelCheck.checked ? Theme.accent : Theme.bgLight
-                        border.width: 1
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "\u2713"
-                            font.pixelSize: 14
-                            font.bold: true
-                            color: "white"
-                            visible: voiceChannelCheck.checked
-                        }
-                    }
-                }
-
-                Text {
-                    text: "Voice Channel"
-                    font.pixelSize: Theme.fontSizeNormal
-                    color: Theme.textSecondary
-                    anchors.verticalCenter: parent.verticalCenter
-                }
-            }
-
-            // Create as category toggle
-            Row {
-                spacing: Theme.spacingNormal
-                width: parent.width - parent.padding * 2
-
-                CheckBox {
-                    id: categoryCheck
-                    checked: false
-                    indicator: Rectangle {
-                        implicitWidth: 20
-                        implicitHeight: 20
-                        y: parent.height / 2 - height / 2
-                        radius: Theme.radiusSmall
-                        color: categoryCheck.checked ? Theme.accent : Theme.bgDarkest
-                        border.color: categoryCheck.checked ? Theme.accent : Theme.bgLight
-                        border.width: 1
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "\u2713"
-                            font.pixelSize: 14
-                            font.bold: true
-                            color: "white"
-                            visible: categoryCheck.checked
-                        }
-                    }
-                }
-
-                Text {
-                    text: "Create as Category"
-                    font.pixelSize: Theme.fontSizeNormal
-                    color: Theme.textSecondary
-                    anchors.verticalCenter: parent.verticalCenter
-                }
-            }
-
-            // Category picker (for channels, not categories)
             Text {
-                text: "CATEGORY"
+                Layout.fillWidth: true
+                text: "This removes the channel and every message in it for everyone. Cannot be undone."
                 font.pixelSize: Theme.fontSizeSmall
-                font.bold: true
-                color: Theme.textSecondary
-                visible: !categoryCheck.checked
+                color: Theme.textMuted
+                wrapMode: Text.WordWrap
             }
-
-            ComboBox {
-                id: categoryPicker
-                width: parent.width - parent.padding * 2
-                visible: !categoryCheck.checked
-                model: {
-                    if (!serverManager.activeServer) return ["None"];
-                    var cats = serverManager.activeServer.categorizedRooms;
-                    var items = ["None"];
-                    for (var i = 0; i < cats.length; i++) {
-                        if (cats[i].categoryId !== "") {
-                            items.push(cats[i].categoryName);
-                        }
-                    }
-                    return items;
-                }
-                currentIndex: {
-                    if (createRoomDialog.selectedCategoryId === "") return 0;
-                    if (!serverManager.activeServer) return 0;
-                    var cats = serverManager.activeServer.categorizedRooms;
-                    for (var i = 0; i < cats.length; i++) {
-                        if (cats[i].categoryId === createRoomDialog.selectedCategoryId) {
-                            return i + 1;
-                        }
-                    }
-                    return 0;
-                }
-
-                background: Rectangle {
-                    color: Theme.bgDarkest
-                    radius: Theme.radiusSmall
-                    border.color: Theme.bgLight
-                    border.width: 1
-                }
-                contentItem: Text {
-                    leftPadding: Theme.spacingNormal
-                    text: categoryPicker.displayText
-                    font.pixelSize: Theme.fontSizeNormal
-                    color: Theme.textPrimary
-                    verticalAlignment: Text.AlignVCenter
-                }
-                popup: Popup {
-                    y: categoryPicker.height
-                    width: categoryPicker.width
-                    padding: 1
-                    contentItem: ListView {
-                        clip: true
-                        implicitHeight: contentHeight
-                        model: categoryPicker.delegateModel
-                    }
-                    background: Rectangle {
-                        color: Theme.bgDarkest
-                        radius: Theme.radiusSmall
-                        border.color: Theme.bgLight
-                    }
-                }
-                delegate: ItemDelegate {
-                    width: categoryPicker.width
-                    contentItem: Text {
-                        text: modelData
-                        font.pixelSize: Theme.fontSizeNormal
-                        color: Theme.textPrimary
-                    }
-                    background: Rectangle {
-                        color: parent.hovered ? Theme.bgLight : "transparent"
-                    }
-                }
-            }
-
-            Text {
-                text: "TOPIC (optional)"
-                font.pixelSize: Theme.fontSizeSmall
-                font.bold: true
-                color: Theme.textSecondary
-                visible: !voiceChannelCheck.checked && !categoryCheck.checked
-            }
-
-            TextField {
-                id: roomTopicField
-                visible: !voiceChannelCheck.checked && !categoryCheck.checked
-                width: parent.width - parent.padding * 2
-                placeholderText: "What's this channel about?"
-                placeholderTextColor: Theme.textMuted
-                color: Theme.textPrimary
-                font.pixelSize: Theme.fontSizeNormal
-                background: Rectangle {
-                    color: Theme.bgDarkest
-                    radius: Theme.radiusSmall
-                    border.color: roomTopicField.activeFocus ? Theme.accent : Theme.bgLight
-                    border.width: 1
-                }
-                padding: Theme.spacingNormal
-                Keys.onReturnPressed: createRoomDialog.doCreateRoom()
-            }
-
-            Row {
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.spacingSmall
                 spacing: Theme.spacingNormal
-                width: parent.width - parent.padding * 2
+
+                Item { Layout.fillWidth: true }
 
                 Button {
                     text: "Cancel"
-                    width: (parent.width - parent.spacing) / 2
                     contentItem: Text {
                         text: parent.text
                         font.pixelSize: Theme.fontSizeNormal
                         color: Theme.textSecondary
                         horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle {
                         color: parent.hovered ? Theme.bgLight : Theme.bgDark
                         radius: Theme.radiusSmall
+                        implicitWidth: 90
+                        implicitHeight: Theme.buttonHeight
                     }
-                    onClicked: createRoomDialog.close()
+                    onClicked: deleteChannelConfirm.close()
                 }
-
                 Button {
-                    text: "Create"
-                    width: (parent.width - parent.spacing) / 2
+                    text: "Delete"
                     contentItem: Text {
                         text: parent.text
                         font.pixelSize: Theme.fontSizeNormal
                         color: "white"
                         horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle {
-                        color: parent.hovered ? Theme.accentHover : Theme.accent
+                        color: parent.hovered ? Qt.lighter(Theme.danger, 1.1) : Theme.danger
                         radius: Theme.radiusSmall
+                        implicitWidth: 90
+                        implicitHeight: Theme.buttonHeight
                     }
-                    onClicked: createRoomDialog.doCreateRoom()
-                }
-            }
-        }
-
-        function doCreateRoom() {
-            var name = roomNameField.text.trim();
-            if (name.length === 0) return;
-            if (!serverManager.activeServer) return;
-
-            if (categoryCheck.checked) {
-                serverManager.activeServer.createCategory(name);
-            } else {
-                // Determine selected category ID
-                var catId = "";
-                if (categoryPicker.currentIndex > 0) {
-                    var cats = serverManager.activeServer.categorizedRooms;
-                    var catIdx = 0;
-                    for (var i = 0; i < cats.length; i++) {
-                        if (cats[i].categoryId !== "") {
-                            catIdx++;
-                            if (catIdx === categoryPicker.currentIndex) {
-                                catId = cats[i].categoryId;
-                                break;
-                            }
+                    onClicked: {
+                        if (serverManager.activeServer && deleteChannelConfirm.roomId !== "") {
+                            serverManager.activeServer.deleteChannel(deleteChannelConfirm.roomId);
                         }
+                        deleteChannelConfirm.close();
                     }
                 }
-                if (catId === "" && selectedCategoryId !== "") {
-                    catId = selectedCategoryId;
-                }
-
-                serverManager.activeServer.createChannelInCategory(name, catId, voiceChannelCheck.checked);
             }
-
-            roomNameField.text = "";
-            roomTopicField.text = "";
-            voiceChannelCheck.checked = false;
-            categoryCheck.checked = false;
-            selectedCategoryId = "";
-            createRoomDialog.close();
         }
     }
 
-    // User settings popup
-    UserSettings {
-        id: userSettingsPopup
+    ChannelSettings {
+        id: channelSettingsPopup
+        // Must reparent to the application Overlay so width/height bindings
+        // resolve against the full window, not the 240-px channel-list pane.
         parent: Overlay.overlay
     }
 
-    // Server settings popup
+    // Create-item context menu: category / text channel / voice channel.
+    // Category context (if any) is set by the caller; "Create Category" ignores
+    // it because categories can't nest in our model.
+    Menu {
+        id: createMenu
+        property string categoryId: ""
+
+        background: Rectangle {
+            color: Theme.bgDarkest
+            radius: Theme.radiusSmall
+            border.color: Theme.bgLight
+            border.width: 1
+            implicitWidth: 200
+        }
+
+        MenuItem {
+            text: "Create Category"
+            contentItem: Text {
+                text: parent.text
+                font.pixelSize: Theme.fontSizeNormal
+                color: Theme.textPrimary
+            }
+            background: Rectangle {
+                color: parent.hovered ? Theme.bgLight : "transparent"
+            }
+            onTriggered: channelListRoot.openCreatePrompt("category", "")
+        }
+        MenuItem {
+            text: "Create Text Channel"
+            contentItem: Text {
+                text: parent.text
+                font.pixelSize: Theme.fontSizeNormal
+                color: Theme.textPrimary
+            }
+            background: Rectangle {
+                color: parent.hovered ? Theme.bgLight : "transparent"
+            }
+            onTriggered: channelListRoot.openCreatePrompt("text", createMenu.categoryId)
+        }
+        MenuItem {
+            text: "Create Voice Channel"
+            contentItem: Text {
+                text: parent.text
+                font.pixelSize: Theme.fontSizeNormal
+                color: Theme.textPrimary
+            }
+            background: Rectangle {
+                color: parent.hovered ? Theme.bgLight : "transparent"
+            }
+            onTriggered: channelListRoot.openCreatePrompt("voice", createMenu.categoryId)
+        }
+    }
+
+    // Minimal "just give it a name" prompt used for all three create flows.
+    // The type was already chosen in the context menu so we don't re-ask here.
+    Popup {
+        id: createPrompt
+        parent: Overlay.overlay
+        anchors.centerIn: Overlay.overlay
+        width: 340
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        property string kind: "text"            // category|text|voice
+        property string categoryId: ""          // where to place a text/voice channel
+        property alias nameField: nameInput
+        property bool makePrivate: false        // only used for text/voice
+
+        readonly property string promptTitle: kind === "category" ? "Create Category"
+                                             : kind === "voice"   ? "Create Voice Channel"
+                                             :                      "Create Text Channel"
+        readonly property string placeholder: kind === "category" ? "Announcements"
+                                            : kind === "voice"    ? "General Voice"
+                                            :                       "general"
+
+        background: Rectangle {
+            color: Theme.bgMedium
+            radius: Theme.radiusNormal
+            border.color: Theme.bgLight
+            border.width: 1
+        }
+
+        function submit() {
+            var name = nameInput.text.trim();
+            if (!name || !serverManager.activeServer) return;
+            if (createPrompt.kind === "category") {
+                serverManager.activeServer.createCategory(name);
+            } else {
+                var voice = createPrompt.kind === "voice";
+                serverManager.activeServer.createChannelInCategory(
+                    name, createPrompt.categoryId, voice, createPrompt.makePrivate);
+            }
+            createPrompt.close();
+        }
+
+        onOpened: {
+            // Reset transient state whenever a fresh prompt opens.
+            makePrivate = false;
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Theme.spacingNormal
+
+            Text {
+                text: createPrompt.promptTitle
+                font.pixelSize: 16
+                font.bold: true
+                color: Theme.textPrimary
+            }
+
+            TextField {
+                id: nameInput
+                Layout.fillWidth: true
+                placeholderText: createPrompt.placeholder
+                placeholderTextColor: Theme.textMuted
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontSizeNormal
+                background: Rectangle {
+                    color: Theme.bgDarkest
+                    radius: Theme.radiusSmall
+                    border.color: nameInput.activeFocus ? Theme.accent : Theme.bgLight
+                    border.width: 1
+                }
+                padding: Theme.spacingNormal
+                Keys.onReturnPressed: createPrompt.submit()
+                Keys.onEscapePressed: createPrompt.close()
+            }
+
+            // Privacy toggle. Only meaningful for text/voice — categories
+            // don't carry overrides themselves. When on, we apply an
+            // @everyone DENY VIEW_CHANNEL on the new room so it's hidden
+            // from non-admin roles until explicitly allowed.
+            RowLayout {
+                Layout.fillWidth: true
+                visible: createPrompt.kind !== "category"
+                spacing: Theme.spacingNormal
+
+                Column {
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Text {
+                        text: "Private channel"
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontSizeNormal
+                    }
+                    Text {
+                        text: "Only roles that explicitly allow View channel will see it."
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                        width: 260
+                    }
+                }
+                Switch {
+                    checked: createPrompt.makePrivate
+                    onToggled: createPrompt.makePrivate = checked
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.spacingSmall
+                spacing: Theme.spacingNormal
+
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    text: "Cancel"
+                    contentItem: Text {
+                        text: parent.text
+                        font.pixelSize: Theme.fontSizeNormal
+                        color: Theme.textSecondary
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: parent.hovered ? Theme.bgLight : Theme.bgDark
+                        radius: Theme.radiusSmall
+                        implicitWidth: 90
+                        implicitHeight: Theme.buttonHeight
+                    }
+                    onClicked: createPrompt.close()
+                }
+                Button {
+                    text: "Create"
+                    enabled: nameInput.text.trim().length > 0
+                    contentItem: Text {
+                        text: parent.text
+                        font.pixelSize: Theme.fontSizeNormal
+                        color: "white"
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        opacity: parent.enabled ? 1.0 : 0.5
+                    }
+                    background: Rectangle {
+                        color: parent.enabled
+                            ? (parent.hovered ? Theme.accentHover : Theme.accent)
+                            : Theme.bgLight
+                        radius: Theme.radiusSmall
+                        implicitWidth: 90
+                        implicitHeight: Theme.buttonHeight
+                    }
+                    onClicked: createPrompt.submit()
+                }
+            }
+        }
+    }
+
+
+    // Per-server settings popup — stays local since only the gear in this
+    // component reaches it. UserSettings / ClientSettings live in main.qml
+    // so the File menu and this pane share a single instance.
     ServerSettings {
         id: serverSettings
         parent: Overlay.overlay

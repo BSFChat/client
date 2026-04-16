@@ -281,6 +281,7 @@ Popup {
 
                             // Inline editor
                             Rectangle {
+                                id: roleEditCard
                                 width: parent.width
                                 visible: parent.isEditing
                                 radius: Theme.radiusSmall
@@ -289,13 +290,38 @@ Popup {
                                 border.width: 1
                                 height: visible ? roleEditCol.implicitHeight + Theme.spacingLarge * 2 : 0
 
+                                // Single source of truth for the form.
+                                // editRole binds to the delegate's role, so
+                                // scratch values reset whenever the user opens
+                                // a different role.
+                                readonly property var editRole: parent.parent.role
+                                property string scratchColor: editRole.color || "#5865f2"
+                                property int scratchPos: editRole.position !== undefined
+                                    ? editRole.position : 0
+                                // Permissions as a raw bitfield (QML number).
+                                // Parsed from the role's hex string.
+                                property double scratchPerms: {
+                                    var p = editRole.permissions;
+                                    if (typeof p === "string") {
+                                        var s = p;
+                                        if (s.indexOf("0x") === 0 || s.indexOf("0X") === 0) s = s.substr(2);
+                                        return parseInt(s, 16) || 0;
+                                    }
+                                    return p || 0;
+                                }
+                                function togglePerm(flag) {
+                                    // XOR the flag in/out of the bitfield.
+                                    scratchPerms = (Number(scratchPerms) ^ flag);
+                                }
+                                function hasPerm(flag) {
+                                    return (Number(scratchPerms) & flag) !== 0;
+                                }
+
                                 ColumnLayout {
                                     id: roleEditCol
                                     anchors.fill: parent
                                     anchors.margins: Theme.spacingLarge
                                     spacing: Theme.spacingNormal
-
-                                    property var editRole: parent.parent.role
 
                                     RowLayout {
                                         Layout.fillWidth: true
@@ -304,7 +330,7 @@ Popup {
                                         TextField {
                                             id: editRoleName
                                             Layout.fillWidth: true
-                                            text: roleEditCol.editRole.name || ""
+                                            text: roleEditCard.editRole.name || ""
                                             color: Theme.textPrimary
                                             font.pixelSize: Theme.fontSizeNormal
                                             background: Rectangle {
@@ -317,7 +343,8 @@ Popup {
                                         SpinBox {
                                             id: editRolePosition
                                             from: 0; to: 1000
-                                            value: roleEditCol.editRole.position !== undefined ? roleEditCol.editRole.position : 0
+                                            value: roleEditCard.scratchPos
+                                            onValueModified: roleEditCard.scratchPos = value
                                             background: Rectangle {
                                                 color: Theme.bgMedium
                                                 radius: Theme.radiusSmall
@@ -328,20 +355,19 @@ Popup {
 
                                     Row {
                                         spacing: Theme.spacingSmall
-                                        property string selectedColor: roleEditCol.editRole.color || "#5865f2"
-
                                         Repeater {
                                             model: ["#5865f2", "#57f287", "#fee75c", "#ed4245", "#f47067",
                                                     "#e0823d", "#39c5cf", "#dcbdfb", "#768390", "#f69d50"]
                                             delegate: Rectangle {
                                                 width: 20; height: 20; radius: 10
                                                 color: modelData
-                                                border.color: parent.selectedColor === modelData ? Theme.textPrimary : "transparent"
+                                                border.color: roleEditCard.scratchColor === modelData
+                                                    ? Theme.textPrimary : "transparent"
                                                 border.width: 2
                                                 MouseArea {
                                                     anchors.fill: parent
                                                     cursorShape: Qt.PointingHandCursor
-                                                    onClicked: parent.parent.selectedColor = modelData
+                                                    onClicked: roleEditCard.scratchColor = modelData
                                                 }
                                             }
                                         }
@@ -360,39 +386,18 @@ Popup {
                                         columnSpacing: Theme.spacingLarge
                                         rowSpacing: Theme.spacingSmall
 
-                                        property var perms: {
-                                            var p = roleEditCol.editRole.permissions;
-                                            if (typeof p === "string") {
-                                                var s = p;
-                                                if (s.indexOf("0x") === 0 || s.indexOf("0X") === 0) s = s.substr(2);
-                                                return parseInt(s, 16) || 0;
-                                            }
-                                            return p || 0;
-                                        }
-                                        property var permMap: ({})
-
-                                        Component.onCompleted: {
-                                            // Build a per-key state for the checkboxes.
-                                            var map = {};
-                                            var all = serverSettingsPopup.permissionFlags;
-                                            for (var i = 0; i < all.length; i++) {
-                                                map[all[i].key] = (perms & all[i].flag) !== 0;
-                                            }
-                                            permMap = map;
-                                        }
-
                                         Repeater {
                                             model: serverSettingsPopup.permissionFlags
                                             delegate: Row {
                                                 spacing: 6
                                                 CheckBox {
                                                     id: cb
-                                                    checked: parent.parent.permMap[modelData.key] || false
-                                                    onCheckedChanged: {
-                                                        var m = parent.parent.permMap;
-                                                        m[modelData.key] = checked;
-                                                        parent.parent.permMap = m;
-                                                    }
+                                                    // Bind directly to the bitfield. The .scratchPerms
+                                                    // access registers the dep so checkbox state stays
+                                                    // in sync with togglePerm() mutations and role
+                                                    // switches.
+                                                    checked: roleEditCard.hasPerm(modelData.flag)
+                                                    onToggled: roleEditCard.togglePerm(modelData.flag)
                                                 }
                                                 Text {
                                                     text: modelData.label
@@ -420,19 +425,10 @@ Popup {
                                             }
                                             onClicked: {
                                                 if (!serverManager.activeServer) return;
-                                                // Recompute permissions bitfield from checkbox state.
-                                                var permsVal = 0;
-                                                var colorRow = roleEditCol.children[1];
-                                                var gridCol = roleEditCol.children[3];
-                                                var flags = serverSettingsPopup.permissionFlags;
-                                                for (var i = 0; i < flags.length; i++) {
-                                                    if (gridCol.permMap[flags[i].key]) permsVal |= flags[i].flag;
-                                                }
-                                                // Build updated roles list, swapping the edited role.
+                                                var permsVal = Number(roleEditCard.scratchPerms) | 0;
                                                 var existing = serverManager.activeServer.serverRoles;
                                                 var out = [];
-                                                var edited = roleEditCol.editRole;
-                                                var myId = edited.id || edited.name;
+                                                var myId = roleEditCard.editRole.id || roleEditCard.editRole.name;
                                                 for (var j = 0; j < existing.length; j++) {
                                                     var r = existing[j];
                                                     var rid = r.id || r.name;
@@ -440,8 +436,8 @@ Popup {
                                                         out.push({
                                                             id: myId,
                                                             name: editRoleName.text.trim() || r.name,
-                                                            color: colorRow.selectedColor || r.color,
-                                                            position: editRolePosition.value,
+                                                            color: roleEditCard.scratchColor || r.color,
+                                                            position: roleEditCard.scratchPos,
                                                             permissions: "0x" + permsVal.toString(16),
                                                             mentionable: r.mentionable || false,
                                                             hoist: r.hoist || false
@@ -456,8 +452,8 @@ Popup {
                                         }
 
                                         Button {
-                                            visible: (roleEditCol.editRole.id || roleEditCol.editRole.name) !== "everyone"
-                                                  && (roleEditCol.editRole.id || roleEditCol.editRole.name) !== "admin"
+                                            visible: (roleEditCard.editRole.id || roleEditCard.editRole.name) !== "everyone"
+                                                  && (roleEditCard.editRole.id || roleEditCard.editRole.name) !== "admin"
                                             text: "Delete"
                                             contentItem: Text { text: parent.text; color: "#ed4245"; font.pixelSize: Theme.fontSizeNormal; horizontalAlignment: Text.AlignHCenter }
                                             background: Rectangle { color: "transparent"; radius: Theme.radiusSmall; border.color: "#ed4245"; border.width: 1; implicitHeight: Theme.buttonHeight; implicitWidth: 100 }
@@ -465,7 +461,7 @@ Popup {
                                                 if (!serverManager.activeServer) return;
                                                 var existing = serverManager.activeServer.serverRoles;
                                                 var out = [];
-                                                var myId = roleEditCol.editRole.id || roleEditCol.editRole.name;
+                                                var myId = roleEditCard.editRole.id || roleEditCard.editRole.name;
                                                 for (var j = 0; j < existing.length; j++) {
                                                     var r = existing[j];
                                                     var rid = r.id || r.name;

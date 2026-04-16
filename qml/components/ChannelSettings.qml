@@ -3,243 +3,430 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import BSFChat
 
-// Channel-level settings popup: slowmode + privacy (DENY VIEW_CHANNEL for
-// @everyone) + per-role allow/deny overrides. Minimal UX — a single role picker
-// plus a small Allow/Deny toggle list for key permissions.
+// Channel-level settings: slowmode, privacy shortcut, per-role allow/deny
+// overrides. Sectioned layout with a ScrollView so it degrades on short
+// screens, plus a reusable TriToggle for Allow / Neutral / Deny.
 Popup {
     id: channelSettings
     anchors.centerIn: Overlay.overlay
-    width: parent ? Math.min(parent.width * 0.7, 620) : 620
-    height: parent ? Math.min(parent.height * 0.8, 700) : 700
+    width: Math.min(parent ? parent.width * 0.9 : 780, 780)
+    height: Math.min(parent ? parent.height * 0.88 : 720, 720)
     modal: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     property string roomId: ""
     property string roomName: ""
 
-    // Permission flags surfaced here (subset of the full set — view/send/attach/embed are
-    // the ones that matter per-channel).
+    // Flags that actually make sense per-channel. Members / role-admin flags
+    // (MANAGE_ROLES, MANAGE_SERVER, ADMINISTRATOR) are intentionally omitted —
+    // those are server-wide concepts.
     readonly property var channelFlags: [
-        {key: "view",   label: "View channel",  flag: 0x0001},
-        {key: "send",   label: "Send messages", flag: 0x0002},
-        {key: "attach", label: "Attach files",  flag: 0x0004},
-        {key: "embed",  label: "Embed links",   flag: 0x0008},
-        {key: "manmsg", label: "Manage msgs",   flag: 0x0010}
+        {key: "view",    label: "View channel",    flag: 0x0001,
+         hint: "Whether members with this role can see this channel at all."},
+        {key: "send",    label: "Send messages",   flag: 0x0002, hint: ""},
+        {key: "attach",  label: "Attach files",    flag: 0x0004, hint: ""},
+        {key: "embed",   label: "Embed links",     flag: 0x0008, hint: ""},
+        {key: "manmsg",  label: "Manage messages", flag: 0x0010,
+         hint: "Delete anyone's message. Also bypasses slowmode."}
     ]
+
+    // Depend on permissionsGeneration so override state updates immediately
+    // after we write one.
+    readonly property int _gen: serverManager.activeServer
+        ? serverManager.activeServer.permissionsGeneration : 0
+
+    readonly property var allOverrides: {
+        if (!serverManager.activeServer) return [];
+        _gen; // dependency
+        return serverManager.activeServer.channelOverrides(roomId);
+    }
+
+    function overrideFor(targetKey) {
+        for (var i = 0; i < allOverrides.length; i++) {
+            if (allOverrides[i].target === targetKey) {
+                return {
+                    allow: Number(allOverrides[i].allowFlags),
+                    deny:  Number(allOverrides[i].denyFlags)
+                };
+            }
+        }
+        return {allow: 0, deny: 0};
+    }
 
     background: Rectangle {
         color: Theme.bgDark
         radius: Theme.radiusNormal
-        border.color: Theme.bgLight; border.width: 1
+        border.color: Theme.bgLight
+        border.width: 1
     }
+
+    // ----- Reusable subcomponents -----
+
+    component SectionHeader: Item {
+        property alias text: label.text
+        Layout.fillWidth: true
+        Layout.preferredHeight: 32
+        Text {
+            id: label
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            font.pixelSize: Theme.fontSizeSmall
+            font.bold: true
+            color: Theme.textMuted
+            font.letterSpacing: 0.5
+        }
+        Rectangle {
+            anchors.left: label.right
+            anchors.leftMargin: Theme.spacingNormal
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            height: 1
+            color: Theme.bgLight
+            opacity: 0.5
+        }
+    }
+
+    // Row with a title/description on the left and an arbitrary control slot
+    // (default property) on the right. Used for the slowmode and private
+    // channel rows.
+    component SettingRow: RowLayout {
+        property string title: ""
+        property string description: ""
+        default property alias rightControl: rightContainer.children
+        Layout.fillWidth: true
+        spacing: Theme.spacingLarge
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 2
+            Text {
+                text: title
+                font.pixelSize: Theme.fontSizeNormal
+                font.bold: true
+                color: Theme.textPrimary
+            }
+            Text {
+                visible: description.length > 0
+                Layout.fillWidth: true
+                text: description
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.textMuted
+                wrapMode: Text.WordWrap
+            }
+        }
+        Item {
+            id: rightContainer
+            Layout.alignment: Qt.AlignVCenter
+            implicitWidth: childrenRect.width
+            implicitHeight: childrenRect.height
+        }
+    }
+
+    // 3-segment Allow / Neutral / Deny control. `state` is -1 deny, 0 neutral,
+    // 1 allow. Emits stateChangeRequested(newState).
+    component TriToggle: Row {
+        id: tri
+        property int state: 0
+        signal stateChangeRequested(int newState)
+
+        spacing: 4
+        Repeater {
+            model: [
+                {label: "Allow",   value:  1, active: "#57f287"},
+                {label: "Neutral", value:  0, active: "#768390"},
+                {label: "Deny",    value: -1, active: "#ed4245"}
+            ]
+            delegate: Rectangle {
+                width: 72
+                height: 28
+                radius: 4
+                readonly property bool isSelected: tri.state === modelData.value
+                color: isSelected ? modelData.active : Theme.bgMedium
+                border.color: isSelected ? Qt.lighter(modelData.active, 1.2) : "transparent"
+                border.width: 1
+
+                Text {
+                    anchors.centerIn: parent
+                    text: modelData.label
+                    color: parent.isSelected ? "white" : Theme.textMuted
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.bold: parent.isSelected
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: tri.stateChangeRequested(modelData.value)
+                }
+            }
+        }
+    }
+
+    // ----- Layout -----
 
     contentItem: ColumnLayout {
         anchors.fill: parent
-        anchors.margins: Theme.spacingLarge
-        spacing: Theme.spacingLarge
+        spacing: 0
 
-        Text {
-            text: "Channel settings — " + channelSettings.roomName
-            font.pixelSize: 18
-            font.bold: true
-            color: Theme.textPrimary
-        }
-
-        // --- Slowmode ---
-        RowLayout {
+        // Header bar
+        Rectangle {
             Layout.fillWidth: true
-            spacing: Theme.spacingNormal
-
-            Column {
-                Layout.fillWidth: true
-                Text { text: "Slowmode"; font.pixelSize: Theme.fontSizeNormal; font.bold: true; color: Theme.textPrimary }
-                Text { text: "Members wait this long between messages."; font.pixelSize: Theme.fontSizeSmall; color: Theme.textMuted }
-            }
-
-            ComboBox {
-                id: slowmodeCombo
-                Layout.preferredWidth: 180
-                model: [
-                    {label: "Off", seconds: 0},
-                    {label: "5 seconds", seconds: 5},
-                    {label: "10 seconds", seconds: 10},
-                    {label: "30 seconds", seconds: 30},
-                    {label: "1 minute", seconds: 60},
-                    {label: "5 minutes", seconds: 300},
-                    {label: "10 minutes", seconds: 600},
-                    {label: "1 hour", seconds: 3600}
-                ]
-                textRole: "label"
-                valueRole: "seconds"
-
-                Component.onCompleted: {
-                    if (!serverManager.activeServer) return;
-                    var cur = serverManager.activeServer.channelSlowmode(channelSettings.roomId);
-                    for (var i = 0; i < model.length; i++) {
-                        if (model[i].seconds === cur) { currentIndex = i; return; }
-                    }
-                    currentIndex = 0;
-                }
-
-                onActivated: {
-                    if (!serverManager.activeServer) return;
-                    serverManager.activeServer.setChannelSlowmode(
-                        channelSettings.roomId, model[currentIndex].seconds);
-                }
-            }
-        }
-
-        // --- Privacy shortcut ---
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: Theme.spacingNormal
-
-            Column {
-                Layout.fillWidth: true
-                Text { text: "Private channel"; font.pixelSize: Theme.fontSizeNormal; font.bold: true; color: Theme.textPrimary }
+            Layout.preferredHeight: 56
+            color: "transparent"
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Theme.spacingLarge
+                anchors.rightMargin: Theme.spacingLarge
                 Text {
-                    text: "When on, only members with a role that explicitly allows VIEW_CHANNEL can see this channel."
-                    font.pixelSize: Theme.fontSizeSmall
-                    color: Theme.textMuted
-                    wrapMode: Text.WordWrap
-                    width: parent.width - 60
+                    Layout.fillWidth: true
+                    text: channelSettings.roomName
+                        ? ("Channel settings — #" + channelSettings.roomName)
+                        : "Channel settings"
+                    font.pixelSize: 18
+                    font.bold: true
+                    color: Theme.textPrimary
+                    elide: Text.ElideRight
                 }
-            }
-
-            Switch {
-                id: privateSwitch
-                // Consider channel "private" if @everyone has DENY VIEW_CHANNEL.
-                checked: {
-                    if (!serverManager.activeServer) return false;
-                    var overrides = serverManager.activeServer.channelOverrides(channelSettings.roomId);
-                    for (var i = 0; i < overrides.length; i++) {
-                        if (overrides[i].target === "role:everyone" &&
-                            (Number(overrides[i].denyFlags) & 0x1) !== 0) return true;
-                    }
-                    return false;
-                }
-                onToggled: {
-                    if (!serverManager.activeServer) return;
-                    if (checked) {
-                        // DENY VIEW_CHANNEL (0x1) for @everyone.
-                        serverManager.activeServer.setChannelOverride(
-                            channelSettings.roomId, "role:everyone", 0, 0x1);
-                    } else {
-                        // Clear by setting to 0/0 (server treats empty as removal).
-                        serverManager.activeServer.setChannelOverride(
-                            channelSettings.roomId, "role:everyone", 0, 0);
+                Text {
+                    text: "✕"
+                    font.pixelSize: 20
+                    color: closeXMouse.containsMouse ? Theme.textPrimary : Theme.textMuted
+                    Layout.alignment: Qt.AlignVCenter
+                    MouseArea {
+                        id: closeXMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: channelSettings.close()
                     }
                 }
             }
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width
+                height: 1
+                color: Theme.bgLight
+            }
         }
 
-        // --- Per-role overrides ---
-        Text {
-            text: "Role overrides"
-            font.pixelSize: Theme.fontSizeNormal
-            font.bold: true
-            color: Theme.textPrimary
-        }
-        Text {
-            Layout.fillWidth: true
-            text: "Allow = grants the permission in this channel. Deny = removes it. Neutral = inherits from role."
-            font.pixelSize: Theme.fontSizeSmall
-            color: Theme.textMuted
-            wrapMode: Text.WordWrap
-        }
-
-        // Role picker
-        ComboBox {
-            id: roleCombo
-            Layout.fillWidth: true
-            model: serverManager.activeServer ? serverManager.activeServer.serverRoles : []
-            textRole: "name"
-            currentIndex: 0
-        }
-
-        // Allow/neutral/deny toggles for each channel flag against the selected role
-        ListView {
+        // Scrollable body
+        ScrollView {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
-            model: channelSettings.channelFlags
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-            // Lookup current allow/deny for selected role
-            function findOverride(targetKey) {
-                if (!serverManager.activeServer) return {allow: 0, deny: 0};
-                var list = serverManager.activeServer.channelOverrides(channelSettings.roomId);
-                for (var i = 0; i < list.length; i++) {
-                    if (list[i].target === targetKey) {
-                        return { allow: Number(list[i].allowFlags), deny: Number(list[i].denyFlags) };
+            ColumnLayout {
+                width: channelSettings.width - Theme.spacingLarge * 2
+                x: Theme.spacingLarge
+                y: Theme.spacingLarge
+                spacing: Theme.spacingLarge * 1.25
+
+                // ====== OVERVIEW ======
+                SectionHeader { text: "OVERVIEW" }
+
+                SettingRow {
+                    title: "Slowmode"
+                    description: "Members must wait this long between messages. Users with Manage messages bypass."
+                    ComboBox {
+                        id: slowmodeCombo
+                        implicitWidth: 160
+                        model: [
+                            {label: "Off",        seconds: 0},
+                            {label: "5 seconds",  seconds: 5},
+                            {label: "10 seconds", seconds: 10},
+                            {label: "30 seconds", seconds: 30},
+                            {label: "1 minute",   seconds: 60},
+                            {label: "5 minutes",  seconds: 300},
+                            {label: "10 minutes", seconds: 600},
+                            {label: "1 hour",     seconds: 3600}
+                        ]
+                        textRole: "label"
+                        valueRole: "seconds"
+
+                        Component.onCompleted: syncIndex()
+                        Connections {
+                            target: channelSettings
+                            function on_GenChanged() { slowmodeCombo.syncIndex(); }
+                        }
+                        function syncIndex() {
+                            if (!serverManager.activeServer) return;
+                            var cur = serverManager.activeServer.channelSlowmode(
+                                channelSettings.roomId);
+                            for (var i = 0; i < model.length; i++) {
+                                if (model[i].seconds === cur) {
+                                    currentIndex = i;
+                                    return;
+                                }
+                            }
+                            currentIndex = 0;
+                        }
+                        onActivated: {
+                            if (!serverManager.activeServer) return;
+                            serverManager.activeServer.setChannelSlowmode(
+                                channelSettings.roomId, model[currentIndex].seconds);
+                        }
                     }
                 }
-                return {allow: 0, deny: 0};
-            }
 
-            delegate: Row {
-                width: ListView.view.width
-                height: 40
-                spacing: Theme.spacingNormal
+                SettingRow {
+                    id: privateRow
+                    title: "Private channel"
+                    description: "When on, @everyone is denied View Channel here. Only roles with an explicit Allow override can see it."
+
+                    readonly property var _evOverride: channelSettings.overrideFor("role:everyone")
+                    readonly property bool isPrivate: (_evOverride.deny & 0x1) !== 0
+
+                    Switch {
+                        id: privateSwitch
+                        checked: privateRow.isPrivate
+                        onToggled: {
+                            if (!serverManager.activeServer) return;
+                            var ov = privateRow._evOverride;
+                            var deny = ov.deny;
+                            if (checked) deny |= 0x1; else deny &= ~0x1;
+                            serverManager.activeServer.setChannelOverride(
+                                channelSettings.roomId, "role:everyone", ov.allow, deny);
+                        }
+                    }
+                }
+
+                // ====== PERMISSIONS ======
+                SectionHeader { text: "ROLE OVERRIDES" }
 
                 Text {
-                    text: modelData.label
-                    font.pixelSize: Theme.fontSizeNormal
-                    color: Theme.textPrimary
-                    width: 180
-                    anchors.verticalCenter: parent.verticalCenter
+                    Layout.fillWidth: true
+                    text: "Pick a role, then tune its permissions in this channel. Allow grants, Deny revokes, Neutral inherits from the role's server-wide permissions."
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.textMuted
+                    wrapMode: Text.WordWrap
                 }
 
-                property var selectedRole: roleCombo.currentIndex >= 0 && roleCombo.model.length > 0
-                    ? roleCombo.model[roleCombo.currentIndex]
-                    : null
-                property string targetKey: selectedRole
-                    ? ("role:" + (selectedRole.id || selectedRole.name))
-                    : ""
-                property var current: parent.findOverride(targetKey)
-                property int state:
-                    (current.allow & modelData.flag) !== 0 ? 1 :
-                    (current.deny & modelData.flag) !== 0 ? -1 : 0
-
-                function setState(newState) {
-                    if (!serverManager.activeServer) return;
-                    var allow = current.allow & ~modelData.flag;
-                    var deny = current.deny & ~modelData.flag;
-                    if (newState === 1) allow |= modelData.flag;
-                    else if (newState === -1) deny |= modelData.flag;
-                    serverManager.activeServer.setChannelOverride(
-                        channelSettings.roomId, targetKey, allow, deny);
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingNormal
+                    Text {
+                        text: "Role"
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+                    ComboBox {
+                        id: roleCombo
+                        Layout.fillWidth: true
+                        model: serverManager.activeServer
+                            ? serverManager.activeServer.serverRoles : []
+                        textRole: "name"
+                        currentIndex: 0
+                    }
                 }
 
-                Button {
-                    text: "Allow"
-                    anchors.verticalCenter: parent.verticalCenter
-                    contentItem: Text { text: parent.text; color: parent.parent.state === 1 ? "white" : Theme.textMuted; font.pixelSize: Theme.fontSizeSmall; horizontalAlignment: Text.AlignHCenter }
-                    background: Rectangle { color: parent.parent.parent.state === 1 ? "#57f287" : Theme.bgMedium; radius: Theme.radiusSmall; implicitWidth: 64; implicitHeight: 28 }
-                    onClicked: parent.setState(parent.state === 1 ? 0 : 1)
+                // Permission grid
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    Repeater {
+                        model: channelSettings.channelFlags
+                        delegate: Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: permRow.implicitHeight + 16
+                            radius: Theme.radiusSmall
+                            color: Theme.bgMedium
+
+                            readonly property var flagInfo: modelData
+                            // Use activeServer + currentIndex + permissionsGeneration as deps
+                            readonly property int _gen: channelSettings._gen
+                            readonly property var selectedRole:
+                                roleCombo.currentIndex >= 0 && roleCombo.model.length > 0
+                                    ? roleCombo.model[roleCombo.currentIndex] : null
+                            readonly property string targetKey: selectedRole
+                                ? ("role:" + (selectedRole.id || selectedRole.name)) : ""
+                            readonly property var current: channelSettings.overrideFor(targetKey)
+                            readonly property int triState:
+                                (current.allow & flagInfo.flag) !== 0 ?  1 :
+                                (current.deny  & flagInfo.flag) !== 0 ? -1 : 0
+
+                            function apply(newState) {
+                                if (!serverManager.activeServer) return;
+                                if (!targetKey) return;
+                                var allow = current.allow & ~flagInfo.flag;
+                                var deny  = current.deny  & ~flagInfo.flag;
+                                if (newState === 1)  allow |= flagInfo.flag;
+                                if (newState === -1) deny  |= flagInfo.flag;
+                                serverManager.activeServer.setChannelOverride(
+                                    channelSettings.roomId, targetKey, allow, deny);
+                            }
+
+                            RowLayout {
+                                id: permRow
+                                anchors.fill: parent
+                                anchors.leftMargin: Theme.spacingNormal
+                                anchors.rightMargin: Theme.spacingNormal
+                                spacing: Theme.spacingNormal
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 2
+                                    Text {
+                                        text: flagInfo.label
+                                        color: Theme.textPrimary
+                                        font.pixelSize: Theme.fontSizeNormal
+                                    }
+                                    Text {
+                                        visible: flagInfo.hint.length > 0
+                                        Layout.fillWidth: true
+                                        text: flagInfo.hint
+                                        color: Theme.textMuted
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        wrapMode: Text.WordWrap
+                                    }
+                                }
+                                TriToggle {
+                                    state: triState
+                                    onStateChangeRequested: function(s) { apply(s); }
+                                }
+                            }
+                        }
+                    }
                 }
-                Button {
-                    text: "Neutral"
-                    anchors.verticalCenter: parent.verticalCenter
-                    contentItem: Text { text: parent.text; color: parent.parent.state === 0 ? "white" : Theme.textMuted; font.pixelSize: Theme.fontSizeSmall; horizontalAlignment: Text.AlignHCenter }
-                    background: Rectangle { color: parent.parent.parent.state === 0 ? "#768390" : Theme.bgMedium; radius: Theme.radiusSmall; implicitWidth: 64; implicitHeight: 28 }
-                    onClicked: parent.setState(0)
-                }
-                Button {
-                    text: "Deny"
-                    anchors.verticalCenter: parent.verticalCenter
-                    contentItem: Text { text: parent.text; color: parent.parent.state === -1 ? "white" : Theme.textMuted; font.pixelSize: Theme.fontSizeSmall; horizontalAlignment: Text.AlignHCenter }
-                    background: Rectangle { color: parent.parent.parent.state === -1 ? "#ed4245" : Theme.bgMedium; radius: Theme.radiusSmall; implicitWidth: 64; implicitHeight: 28 }
-                    onClicked: parent.setState(parent.state === -1 ? 0 : -1)
-                }
+
+                Item { Layout.preferredHeight: Theme.spacingNormal }
             }
         }
 
-        Button {
-            Layout.alignment: Qt.AlignRight
-            text: "Close"
-            contentItem: Text { text: parent.text; color: "white"; font.pixelSize: Theme.fontSizeNormal; horizontalAlignment: Text.AlignHCenter }
-            background: Rectangle { color: parent.hovered ? Theme.accentHover : Theme.accent; radius: Theme.radiusSmall; implicitHeight: Theme.buttonHeight; implicitWidth: 100 }
-            onClicked: channelSettings.close()
+        // Footer
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 56
+            color: Theme.bgDarkest
+            Rectangle {
+                anchors.top: parent.top
+                width: parent.width
+                height: 1
+                color: Theme.bgLight
+            }
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Theme.spacingLarge
+                anchors.rightMargin: Theme.spacingLarge
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "Close"
+                    contentItem: Text {
+                        text: parent.text
+                        color: "white"
+                        font.pixelSize: Theme.fontSizeNormal
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: parent.hovered ? Theme.accentHover : Theme.accent
+                        radius: Theme.radiusSmall
+                        implicitHeight: Theme.buttonHeight
+                        implicitWidth: 100
+                    }
+                    onClicked: channelSettings.close()
+                }
+            }
         }
     }
 }

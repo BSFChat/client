@@ -260,6 +260,14 @@ void MatrixClient::joinRoom(const QString& roomIdOrAlias)
     });
 }
 
+void MatrixClient::deleteRoom(const QString& roomId)
+{
+    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
+                   + QUrl::toPercentEncoding(roomId);
+    auto* reply = makeRequest("DELETE", path);
+    connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
+}
+
 void MatrixClient::leaveRoom(const QString& roomId)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
@@ -695,7 +703,9 @@ void MatrixClient::createChannelInCategory(const QString& name, const QString& c
 {
     json content;
     content["name"] = name.toStdString();
-    content["visibility"] = "private";
+    // Public = auto-joined by every user. Channel-level visibility is
+    // enforced by VIEW_CHANNEL overrides, not by Matrix invite-only semantics.
+    content["visibility"] = "public";
     if (!categoryId.isEmpty()) {
         content["parent_id"] = categoryId.toStdString();
     }
@@ -766,9 +776,14 @@ void MatrixClient::setChannelOrder(const QString& roomId, int order)
 void MatrixClient::setRoomState(const QString& roomId, const QString& eventType,
                                  const QString& stateKey, const QByteArray& content)
 {
+    // Encode every user-supplied path segment. state_key in particular can
+    // be a user ID (@user:host) or "role:<id>" / "user:<mxid>" — the ":" and
+    // "@" need to survive the trip through Qt's URL parser and httplib's
+    // server-side route regex without being interpreted as URL syntax.
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                    + QUrl::toPercentEncoding(roomId) + "/state/"
-                   + eventType + "/" + stateKey;
+                   + QUrl::toPercentEncoding(eventType) + "/"
+                   + QUrl::toPercentEncoding(stateKey);
 
     auto* reply = makeRequest("PUT", path, content);
     connect(reply, &QNetworkReply::finished, this, [this, reply, roomId, eventType]() {
