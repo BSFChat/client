@@ -204,15 +204,22 @@ void ServerManager::wireConnection(ServerConnection* conn)
     // Keep the sidebar's per-server unread dot in sync with this
     // connection's hasUnread. The index can shift as servers are added or
     // removed, so resolve it at signal-emission time.
-    auto push = [this, conn]() {
+    auto pushUnread = [this, conn]() {
         int idx = m_connections.indexOf(conn);
         if (idx < 0) return;
         m_serverListModel->setUnreadCount(idx, conn->hasUnread() ? 1 : 0);
     };
-    connect(conn, &ServerConnection::hasUnreadChanged, this, push);
-    // Initial push in case the connection already has unread at wire-up
-    // (e.g. restored from disk with cached state).
-    push();
+    connect(conn, &ServerConnection::hasUnreadChanged, this, pushUnread);
+    pushUnread();
+
+    // Keep the sidebar's label and tooltip in sync with the server-wide
+    // name. serverName() falls back to hostname when no name is set.
+    auto pushName = [this, conn]() {
+        int idx = m_connections.indexOf(conn);
+        if (idx < 0) return;
+        m_serverListModel->updateServer(idx, conn->serverName(), conn->serverUrl());
+    };
+    connect(conn, &ServerConnection::serverNameChanged, this, pushName);
 }
 
 void ServerManager::onLoginSuccess(ServerConnection* conn)

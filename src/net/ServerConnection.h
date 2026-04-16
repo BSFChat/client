@@ -27,6 +27,10 @@ class ServerConnection : public QObject {
     Q_PROPERTY(QString displayName READ displayName NOTIFY displayNameChanged)
     Q_PROPERTY(QString avatarUrl READ avatarUrl NOTIFY avatarUrlChanged)
     Q_PROPERTY(QString serverUrl READ serverUrl CONSTANT)
+    // Human-readable name of the BSFChat server (e.g. "BSFChat"). Set
+    // server-side via a bsfchat.server.info state event, gated on
+    // MANAGE_SERVER. Falls back to the server's host if unset.
+    Q_PROPERTY(QString serverName READ serverName NOTIFY serverNameChanged)
     Q_PROPERTY(QString userId READ userId NOTIFY userIdChanged)
     Q_PROPERTY(RoomListModel* roomListModel READ roomListModel CONSTANT)
     Q_PROPERTY(MessageModel* messageModel READ messageModel CONSTANT)
@@ -61,6 +65,7 @@ public:
     QString displayName() const { return m_displayName; }
     QString avatarUrl() const { return m_avatarUrl; }
     QString serverUrl() const { return m_serverUrl; }
+    QString serverName() const;
     QString userId() const { return m_userId; }
     QString accessToken() const { return m_accessToken; }
     QString deviceId() const { return m_deviceId; }
@@ -156,6 +161,8 @@ public:
                                 const QString& reason = {});
 
     Q_INVOKABLE void updateDisplayName(const QString& name);
+    // Update the server-wide name (bsfchat.server.info). Requires MANAGE_SERVER.
+    Q_INVOKABLE void updateServerName(const QString& name);
     Q_INVOKABLE void updateAvatarUrl(const QString& url);
     Q_INVOKABLE void uploadAvatar(const QString& fileUrl);
     Q_INVOKABLE void fetchProfile(const QString& userId);
@@ -163,6 +170,7 @@ public:
 
 signals:
     void displayNameChanged();
+    void serverNameChanged();
     void userIdChanged();
     void activeRoomIdChanged();
     void activeRoomNameChanged();
@@ -204,6 +212,7 @@ private:
     QString m_accessToken;
     QString m_deviceId;
     QString m_displayName;
+    QString m_serverName; // set by bsfchat.server.info state event
     QString m_avatarUrl;
     QString m_activeRoomId;
     QString m_activeRoomName;

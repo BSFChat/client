@@ -644,6 +644,34 @@ void ServerConnection::updateDisplayName(const QString& name)
     m_client->setDisplayName(m_userId, name);
 }
 
+QString ServerConnection::serverName() const {
+    if (!m_serverName.isEmpty()) return m_serverName;
+    // Fall back to the server's hostname so the UI has something to show
+    // before the first server.info state event arrives (or if one was never
+    // set).
+    QUrl url(m_serverUrl);
+    QString host = url.host();
+    return host.isEmpty() ? m_serverUrl : host;
+}
+
+void ServerConnection::updateServerName(const QString& name)
+{
+    // bsfchat.server.info lives on the same room we write other server-wide
+    // state into — reuse the active room as a canonical-enough location.
+    // The server reads the latest event by stream_position globally.
+    QString targetRoom = m_activeRoomId;
+    if (targetRoom.isEmpty() && m_roomListModel->rowCount() > 0) {
+        targetRoom = m_roomListModel->data(
+            m_roomListModel->index(0), RoomListModel::RoomIdRole).toString();
+    }
+    if (targetRoom.isEmpty()) return;
+
+    QJsonObject content{{"name", name}};
+    QByteArray body = QJsonDocument(content).toJson(QJsonDocument::Compact);
+    m_client->setRoomState(targetRoom,
+        QString::fromUtf8(bsfchat::event_type::kServerInfo), QString(), body);
+}
+
 void ServerConnection::updateAvatarUrl(const QString& url)
 {
     if (m_userId.isEmpty()) return;
@@ -728,6 +756,12 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     order = event.content.data["order"].get<int>();
                 }
                 m_roomListModel->updateSortOrder(roomId, order);
+            } else if (type == QString::fromUtf8(bsfchat::event_type::kServerInfo)) {
+                QString name = QString::fromStdString(event.content.data.value("name", ""));
+                if (name != m_serverName) {
+                    m_serverName = name;
+                    emit serverNameChanged();
+                }
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerRoles)) {
                 QByteArray data = QByteArray::fromStdString(event.content.data.dump());
                 applyServerRolesEvent(QJsonDocument::fromJson(data).object());
@@ -787,6 +821,12 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     order = event.content.data["order"].get<int>();
                 }
                 m_roomListModel->updateSortOrder(roomId, order);
+            } else if (type == QString::fromUtf8(bsfchat::event_type::kServerInfo)) {
+                QString name = QString::fromStdString(event.content.data.value("name", ""));
+                if (name != m_serverName) {
+                    m_serverName = name;
+                    emit serverNameChanged();
+                }
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerRoles)) {
                 QByteArray data = QByteArray::fromStdString(event.content.data.dump());
                 applyServerRolesEvent(QJsonDocument::fromJson(data).object());

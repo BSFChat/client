@@ -160,7 +160,10 @@ Popup {
                         id: serverNameField
                         Layout.fillWidth: true
                         Layout.maximumWidth: 400
-                        text: serverManager.activeServer ? serverManager.activeServer.displayName : ""
+                        // Shown to all users across the server (channel-list
+                        // header, tooltips, etc.). Only editable by users
+                        // with MANAGE_SERVER; server enforces regardless.
+                        text: serverManager.activeServer ? serverManager.activeServer.serverName : ""
                         color: Theme.textPrimary
                         font.pixelSize: Theme.fontSizeNormal
                         background: Rectangle {
@@ -188,7 +191,7 @@ Popup {
                         }
                         onClicked: {
                             if (serverManager.activeServer) {
-                                serverManager.activeServer.updateDisplayName(serverNameField.text.trim());
+                                serverManager.activeServer.updateServerName(serverNameField.text.trim());
                             }
                         }
                     }

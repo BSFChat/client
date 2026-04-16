@@ -38,7 +38,7 @@ Rectangle {
                 Text {
                     Layout.fillWidth: true
                     verticalAlignment: Text.AlignVCenter
-                    text: serverManager.activeServer ? serverManager.activeServer.displayName : "BSFChat"
+                    text: serverManager.activeServer ? serverManager.activeServer.serverName : "BSFChat"
                     font.pixelSize: Theme.fontSizeLarge
                     font.bold: true
                     color: Theme.textPrimary
