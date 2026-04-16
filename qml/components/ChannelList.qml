@@ -45,12 +45,21 @@ Rectangle {
                     elide: Text.ElideRight
                 }
 
-                // Settings gear icon (visible for admins/mods)
+                // Settings gear icon — visible whenever the user has any
+                // admin-level permission (ADMINISTRATOR short-circuits to all
+                // flags, so admins always see it).
                 Text {
                     text: "\u2699"
                     font.pixelSize: Theme.fontSizeLarge
                     color: settingsGearMouse.containsMouse ? Theme.textPrimary : Theme.textMuted
-                    visible: serverManager.activeServer && serverManager.activeServer.myPowerLevel >= 50
+                    visible: {
+                        if (!serverManager.activeServer) return false;
+                        var sc = serverManager.activeServer;
+                        // Use the active room (or empty — server-level check)
+                        // and ask whether this user can manage roles or channels.
+                        var rid = sc.activeRoomId || "";
+                        return sc.canManageRoles(rid) || sc.canManageChannel(rid) || sc.canKick(rid) || sc.canBan(rid);
+                    }
                     Layout.alignment: Qt.AlignVCenter
 
                     MouseArea {
