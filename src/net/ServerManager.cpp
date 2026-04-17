@@ -4,6 +4,7 @@
 #include "model/ServerListModel.h"
 #include "core/Settings.h"
 
+#include <QDesktopServices>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QUrl>
@@ -220,6 +221,29 @@ void ServerManager::wireConnection(ServerConnection* conn)
         m_serverListModel->updateServer(idx, conn->serverName(), conn->serverUrl());
     };
     connect(conn, &ServerConnection::serverNameChanged, this, pushName);
+}
+
+void ServerManager::loginWithIdentity(const QString& identityUrl) {
+    // Open the identity portal in the browser — the user logs in there,
+    // and can see their server list. Future: auto-fetch the list and
+    // connect each server programmatically.
+    QString url = identityUrl.isEmpty() ? QStringLiteral("https://id.bsfchat.com") : identityUrl;
+    QDesktopServices::openUrl(QUrl(url + "/profile.html"));
+}
+
+void ServerManager::registerServerMembership(const QString& identityUrl,
+                                              const QString& serverUrl,
+                                              const QString& serverName) {
+    // Fire-and-forget POST to register this server with the identity provider.
+    // Uses the identity session cookie (HttpOnly, set during OIDC).
+    // In practice, QNetworkAccessManager doesn't share cookies with the
+    // browser session, so this POST won't have the session. For a proper
+    // implementation, the client would need its own identity access token.
+    // Deferred to a follow-up — for now the identity portal's UI is the
+    // source of truth for server membership.
+    Q_UNUSED(identityUrl);
+    Q_UNUSED(serverUrl);
+    Q_UNUSED(serverName);
 }
 
 void ServerManager::onLoginSuccess(ServerConnection* conn)

@@ -26,6 +26,15 @@ public:
     Q_INVOKABLE void addServerWithOidc(const QString& url);
     Q_INVOKABLE void checkLoginFlows(const QString& url);
     Q_INVOKABLE void registerServer(const QString& url, const QString& username, const QString& password);
+
+    // Identity-first login: authenticate to the identity provider directly,
+    // then fetch the user's server-membership list and auto-connect each.
+    Q_INVOKABLE void loginWithIdentity(const QString& identityUrl);
+    // After successfully connecting to a server via OIDC, register the
+    // membership with the identity provider so future logins restore it.
+    Q_INVOKABLE void registerServerMembership(const QString& identityUrl,
+                                               const QString& serverUrl,
+                                               const QString& serverName);
     Q_INVOKABLE void removeServer(int index);
     Q_INVOKABLE void setActiveServer(int index);
 
@@ -36,6 +45,8 @@ signals:
     void loginError(const QString& serverUrl, const QString& error);
     void loginSuccess(const QString& serverUrl);
     void loginFlowsChecked(const QString& url, bool oidcAvailable, const QString& providerUrl, bool passwordAvailable);
+    void identityLoginComplete(const QStringList& serverUrls);
+    void identityLoginFailed(const QString& error);
 
 private:
     void onLoginSuccess(ServerConnection* conn);

@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import Qt.labs.platform as Platform
 import BSFChat
 
 ApplicationWindow {
@@ -165,43 +164,11 @@ ApplicationWindow {
         serverManager.activeServer.setActiveRoom(flat[next]);
     }
 
-    // Native menu bar. On macOS appears in the system menu bar; on Linux/
-    // Windows shows at the top of the window. Mirrors the per-user popup in
-    // the profile block so both entry points reach the same dialogs.
-    Platform.MenuBar {
-        Platform.Menu {
-            title: qsTr("File")
-            Platform.MenuItem {
-                text: qsTr("Manage Account…")
-                enabled: serverManager.activeServer !== null
-                onTriggered: {
-                    var base = serverManager.activeServer
-                        ? serverManager.activeServer.identityProviderUrl()
-                        : "";
-                    if (!base) base = "https://id.bsfchat.com";
-                    Qt.openUrlExternally(base + "/profile.html");
-                }
-            }
-            Platform.MenuItem {
-                text: qsTr("Edit Server Profile…")
-                shortcut: "Ctrl+,"
-                enabled: serverManager.activeServer !== null
-                onTriggered: userSettingsGlobal.open()
-            }
-            Platform.MenuItem {
-                text: qsTr("Client Settings…")
-                shortcut: "Ctrl+Shift+,"
-                onTriggered: clientSettingsGlobal.open()
-            }
-            Platform.MenuSeparator {}
-            Platform.MenuItem {
-                text: qsTr("Quit")
-                role: Platform.MenuItem.QuitRole
-                shortcut: StandardKey.Quit
-                onTriggered: Qt.quit()
-            }
-        }
-    }
+    // Keyboard shortcuts for actions that were previously in the platform
+    // menu bar. The menu bar itself is removed — it looked wrong on
+    // Windows/Linux and all actions are in the user-profile popup anyway.
+    Shortcut { sequence: "Ctrl+,"; onActivated: userSettingsGlobal.open() }
+    Shortcut { sequence: "Ctrl+Shift+,"; onActivated: clientSettingsGlobal.open() }
 
     // Global popup instances. ChannelList reaches these via
     // ApplicationWindow.window.openUserSettings() / openClientSettings()
