@@ -4,15 +4,39 @@ import QtQuick.Layouts
 import Qt.labs.platform as Platform
 import BSFChat
 
+// MessageInput is an implicitHeight-driven Rectangle so it can grow the
+// vertical banner strip (when editing) without forcing the parent to
+// re-layout around a fixed height.
 Rectangle {
     id: inputRoot
     color: Theme.bgLight
     radius: Theme.radiusNormal
-    height: Math.max(38, Math.min(inputArea.implicitHeight + 16, 200))
+    implicitHeight: editingHeader.visible
+        ? editingHeader.height + inputCore.implicitHeight + 8
+        : inputCore.implicitHeight
+    height: implicitHeight
 
     property string roomName: ""
     property string activeRoomId: serverManager.activeServer ? serverManager.activeServer.activeRoomId : ""
     property bool uploading: false
+
+    // Editing state. When `editingEventId` is non-empty, pressing Enter
+    // sends an edit event referencing that event_id rather than a new
+    // m.room.message. Called from MessageView → MessageBubble.
+    property string editingEventId: ""
+    property string editingOriginalBody: ""
+    function beginEditing(eventId, currentBody) {
+        editingEventId = eventId;
+        editingOriginalBody = currentBody;
+        inputArea.text = currentBody;
+        inputArea.forceActiveFocus();
+        inputArea.cursorPosition = currentBody.length;
+    }
+    function cancelEditing() {
+        editingEventId = "";
+        editingOriginalBody = "";
+        inputArea.text = "";
+    }
 
     // Permission-derived UX state. Using permissionsGeneration as a real
     // dependency (integer, read and compared) makes these bindings reactive
@@ -49,8 +73,56 @@ Rectangle {
         onTriggered: inputRoot._slowmodeTick++
     }
 
+    // Banner shown above the composer while editing an existing message.
+    // Occupies the top of the implicit height when visible.
+    Rectangle {
+        id: editingHeader
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: visible ? 28 : 0
+        color: Theme.bgDarkest
+        radius: Theme.radiusNormal
+        visible: inputRoot.editingEventId !== ""
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Theme.spacingNormal
+            anchors.rightMargin: Theme.spacingNormal
+            spacing: Theme.spacingSmall
+            Text {
+                text: "Editing message"
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSizeSmall
+                font.bold: true
+            }
+            Text {
+                text: "— press Esc to cancel"
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontSizeSmall
+                Layout.fillWidth: true
+            }
+            Text {
+                text: "\u2715" // ✕
+                color: cancelMouse.containsMouse ? Theme.textPrimary : Theme.textMuted
+                font.pixelSize: 14
+                MouseArea {
+                    id: cancelMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: inputRoot.cancelEditing()
+                }
+            }
+        }
+    }
+
     RowLayout {
-        anchors.fill: parent
+        id: inputCore
+        anchors.top: editingHeader.visible ? editingHeader.bottom : parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.topMargin: editingHeader.visible ? 4 : 0
         anchors.leftMargin: Theme.spacingNormal
         anchors.rightMargin: Theme.spacingNormal
         spacing: Theme.spacingSmall
@@ -118,6 +190,12 @@ Rectangle {
                         event.accepted = false; // Allow newline
                     } else {
                         sendCurrentMessage();
+                        event.accepted = true;
+                    }
+                }
+                Keys.onEscapePressed: (event) => {
+                    if (inputRoot.editingEventId !== "") {
+                        inputRoot.cancelEditing();
                         event.accepted = true;
                     }
                 }
@@ -245,11 +323,24 @@ Rectangle {
     function sendCurrentMessage() {
         var text = inputArea.text.trim();
         if (text.length === 0) return;
-        if (!inputRoot.canSend || inputRoot.slowmodeRemaining > 0) return;
-        if (serverManager.activeServer) {
-            serverManager.activeServer.sendMessage(text);
-            inputArea.text = "";
-            inputRoot.lastSentAt = Date.now();
+        if (!serverManager.activeServer) return;
+
+        if (inputRoot.editingEventId !== "") {
+            // Edit path — server still gates on sender match. Don't apply
+            // slowmode / canSend checks to edits; they're intentionally
+            // allowed during cooldown (you're refining, not flooding).
+            if (text === inputRoot.editingOriginalBody) {
+                inputRoot.cancelEditing();
+                return;
+            }
+            serverManager.activeServer.editMessage(inputRoot.editingEventId, text);
+            inputRoot.cancelEditing();
+            return;
         }
+
+        if (!inputRoot.canSend || inputRoot.slowmodeRemaining > 0) return;
+        serverManager.activeServer.sendMessage(text);
+        inputArea.text = "";
+        inputRoot.lastSentAt = Date.now();
     }
 }

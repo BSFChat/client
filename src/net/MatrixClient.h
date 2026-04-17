@@ -43,6 +43,10 @@ public:
     void sendMessage(const QString& roomId, const QString& body);
     void sendRoomEvent(const QString& roomId, const QString& eventType, const QByteArray& content);
     void getRoomMessages(const QString& roomId, const QString& from, const QString& dir = "b", int limit = 50);
+    // Edit a previously-sent m.room.message by the current user. Sends a
+    // new m.room.message with m.relates_to {rel_type: m.replace,
+    // event_id: targetEventId}; the server accepts it only if sender matches.
+    void editMessage(const QString& roomId, const QString& targetEventId, const QString& newBody);
 
     // Media
     void uploadMedia(const QByteArray& data, const QString& contentType, const QString& filename);

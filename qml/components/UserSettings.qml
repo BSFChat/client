@@ -7,13 +7,18 @@ import BSFChat
 Popup {
     id: userSettings
 
-    width: 350
-    height: 300
+    width: 380
+    // Let height derive from the content so nothing gets clipped. The
+    // contentItem is a ColumnLayout that reports its implicitHeight — add
+    // padding + a comfortable margin.
+    height: Math.min(
+        contentCol.implicitHeight + Theme.spacingLarge * 2 + padding * 2,
+        parent ? parent.height * 0.9 : 600
+    )
+    anchors.centerIn: Overlay.overlay
     modal: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-
-    x: (parent.width - width) / 2
-    y: (parent.height - height) / 2
+    padding: Theme.spacingLarge
 
     enter: Transition {
         NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 150; easing.type: Easing.OutCubic }
@@ -38,8 +43,7 @@ Popup {
     }
 
     contentItem: ColumnLayout {
-        anchors.fill: parent
-        anchors.margins: Theme.spacingLarge
+        id: contentCol
         spacing: Theme.spacingLarge
 
         // Title

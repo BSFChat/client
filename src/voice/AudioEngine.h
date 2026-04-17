@@ -63,7 +63,6 @@ private:
     bool m_running = false;
 
     // EWMA of frame RMS so the UI dot doesn't flicker at the Opus tick rate.
-    // Updated per captured frame; reset to 0 when muted so listeners see the
-    // transmit indicator drop immediately on mute-toggle.
     float m_smoothedLevel = 0.0f;
+    int m_silentFrameCount = 0; // consecutive frames where peak == 0 (true silence)
 };

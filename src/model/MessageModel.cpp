@@ -48,6 +48,7 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
     case MediaUrlRole: return msg.mediaUrl;
     case MediaFileNameRole: return msg.mediaFileName;
     case MediaFileSizeRole: return msg.mediaFileSize;
+    case EditedRole: return msg.edited;
     default: return {};
     }
 }
@@ -67,7 +68,8 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {ShowDateSeparator, "showDateSeparator"},
         {MediaUrlRole, "mediaUrl"},
         {MediaFileNameRole, "mediaFileName"},
-        {MediaFileSizeRole, "mediaFileSize"}
+        {MediaFileSizeRole, "mediaFileSize"},
+        {EditedRole, "edited"}
     };
 }
 
@@ -84,7 +86,7 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
     MessageEntry entry;
     entry.eventId = QString::fromStdString(event.event_id);
     entry.sender = QString::fromStdString(event.sender);
-    entry.senderDisplayName = entry.sender; // TODO: resolve display names
+    entry.senderDisplayName = resolveDisplayName(entry.sender);
     entry.timestamp = event.origin_server_ts;
     entry.isOwnMessage = (entry.sender == ownUserId);
 
@@ -119,7 +121,57 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
     if (event.type != std::string(bsfchat::event_type::kRoomMessage))
         return;
 
-    // Check for duplicates
+    // Detect edit: m.relates_to.rel_type == "m.replace" + target event_id.
+    // The edit's "body" has an asterisk prefix for clients that don't
+    // understand edits; the real replacement lives under "m.new_content".
+    const auto& data = event.content.data;
+    bool isEdit = false;
+    QString targetId;
+    if (data.contains("m.relates_to") && data["m.relates_to"].is_object()) {
+        const auto& rel = data["m.relates_to"];
+        if (rel.value("rel_type", "") == "m.replace") {
+            isEdit = true;
+            targetId = QString::fromStdString(rel.value("event_id", ""));
+        }
+    }
+
+    if (isEdit && !targetId.isEmpty()) {
+        // Look up the target. If we don't have it yet (edit arrived before
+        // the original via out-of-order sync), silently drop — a future
+        // sync/backfill will bring the original, and we'll see this edit
+        // again or via its own m_new_content chain. Keeping edits in the
+        // timeline would double-render the message.
+        for (int i = 0; i < m_messages.size(); ++i) {
+            if (m_messages[i].eventId != targetId) continue;
+            // Prefer m.new_content; fall back to stripping the "* " prefix.
+            QString newBody;
+            QString newFormatted;
+            if (data.contains("m.new_content") && data["m.new_content"].is_object()) {
+                const auto& nc = data["m.new_content"];
+                newBody = QString::fromStdString(nc.value("body", ""));
+                newFormatted = QString::fromStdString(nc.value("formatted_body", ""));
+            } else {
+                QString raw = QString::fromStdString(data.value("body", ""));
+                if (raw.startsWith("* ")) raw = raw.mid(2);
+                newBody = raw;
+            }
+            if (newFormatted.isEmpty() && !newBody.isEmpty()
+                && m_messages[i].msgtype == "m.text") {
+                newFormatted = MarkdownParser::toHtml(newBody);
+            }
+            m_messages[i].body = newBody;
+            m_messages[i].formattedBody = newFormatted;
+            m_messages[i].edited = true;
+            m_messages[i].editedAt = event.origin_server_ts;
+            auto idx = index(i);
+            emit dataChanged(idx, idx, {BodyRole, FormattedBodyRole, EditedRole});
+            return;
+        }
+        // Target not found — ignore silently.
+        return;
+    }
+
+    // Regular new message — dedupe + append.
     QString eventId = QString::fromStdString(event.event_id);
     for (const auto& msg : m_messages) {
         if (msg.eventId == eventId) return;
@@ -170,4 +222,34 @@ void MessageModel::clear()
     m_messages.clear();
     endResetModel();
     emit countChanged();
+}
+
+QString MessageModel::resolveDisplayName(const QString& userId) const
+{
+    // 1. Check the global cache (populated from m.room.member events).
+    if (m_dnCache) {
+        auto it = m_dnCache->find(userId);
+        if (it != m_dnCache->end() && !it->isEmpty()) return *it;
+    }
+    // 2. Fallback: strip @localpart:host → localpart.
+    if (userId.startsWith('@')) {
+        int colon = userId.indexOf(':');
+        if (colon > 1) return userId.mid(1, colon - 1);
+    }
+    return userId;
+}
+
+void MessageModel::refreshDisplayNames()
+{
+    bool any = false;
+    for (int i = 0; i < m_messages.size(); ++i) {
+        QString resolved = resolveDisplayName(m_messages[i].sender);
+        if (resolved != m_messages[i].senderDisplayName) {
+            m_messages[i].senderDisplayName = resolved;
+            any = true;
+        }
+    }
+    if (any && !m_messages.isEmpty()) {
+        emit dataChanged(index(0), index(m_messages.size() - 1), {SenderDisplayNameRole});
+    }
 }

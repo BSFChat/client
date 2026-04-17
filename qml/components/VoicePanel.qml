@@ -86,12 +86,46 @@ Rectangle {
             Layout.fillWidth: true
         }
 
-        // Member list
+        // Mic-silent warning — shown when the local device has been capturing
+        // zero-level audio for ~3 seconds. Usually a device-selection or
+        // permission problem; the user should check Client Settings → Audio.
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: visible ? micSilentCol.implicitHeight + 10 : 0
+            visible: serverManager.activeServer
+                     && serverManager.activeServer.micSilent
+            radius: Theme.radiusSmall
+            color: Qt.rgba(1, 0.3, 0.3, 0.15)
+            border.color: Theme.danger; border.width: 1
+
+            ColumnLayout {
+                id: micSilentCol
+                anchors.fill: parent
+                anchors.margins: 5
+                spacing: 2
+                Text {
+                    text: "Your mic is silent"
+                    color: Theme.danger
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.bold: true
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: "Others can't hear you. Check your input device in Client Settings → Audio."
+                    color: Theme.textMuted
+                    font.pixelSize: 10
+                    wrapMode: Text.WordWrap
+                }
+            }
+        }
+
+        // Member list — each member shows a colored dot for their
+        // peer-connection state so you know who's actually reachable.
         ListView {
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(contentHeight, 80)
+            Layout.preferredHeight: Math.min(contentHeight, 100)
             clip: true
-            interactive: contentHeight > 80
+            interactive: contentHeight > 100
             spacing: 2
             model: serverManager.activeServer ? serverManager.activeServer.voiceMembers : []
 
@@ -99,10 +133,25 @@ Rectangle {
                 width: ListView.view ? ListView.view.width : 100
                 height: 24
 
+                readonly property string peerState: modelData.peerState || "new"
+                readonly property color stateColor:
+                    peerState === "connected"    ? Theme.success :
+                    peerState === "connecting"   ? "#fee75c" :
+                    peerState === "failed"       ? Theme.danger :
+                    peerState === "disconnected" ? Theme.danger :
+                    Theme.textMuted // "new"
+
                 RowLayout {
                     anchors.fill: parent
                     anchors.leftMargin: 2
                     spacing: 6
+
+                    // Peer-connection indicator dot
+                    Rectangle {
+                        width: 6; height: 6; radius: 3
+                        color: parent.parent.stateColor
+                        Layout.alignment: Qt.AlignVCenter
+                    }
 
                     Rectangle {
                         width: 18; height: 18; radius: 9
@@ -123,7 +172,9 @@ Rectangle {
                     Text {
                         text: modelData.user_id || "Unknown"
                         font.pixelSize: Theme.fontSizeSmall
-                        color: Theme.textSecondary
+                        color: parent.parent.peerState === "connected"
+                               ? Theme.textSecondary
+                               : parent.parent.stateColor
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                     }

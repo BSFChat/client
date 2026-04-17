@@ -354,6 +354,49 @@ void MatrixClient::sendMessage(const QString& roomId, const QString& body)
     });
 }
 
+void MatrixClient::editMessage(const QString& roomId, const QString& targetEventId, const QString& newBody)
+{
+    static int txnCounter = 0;
+    QString txnId = QString("e%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
+
+    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
+                   + QUrl::toPercentEncoding(roomId)
+                   + "/send/m.room.message/" + txnId;
+
+    // Matrix edits: the top-level body/msgtype is a fallback for clients
+    // that don't understand m.replace relations (prefixed with "* " by
+    // convention). The authoritative replacement lives under m.new_content.
+    json newContent;
+    newContent["msgtype"] = "m.text";
+    newContent["body"] = newBody.toStdString();
+
+    json content;
+    content["msgtype"] = "m.text";
+    content["body"] = ("* " + newBody).toStdString();
+    content["m.new_content"] = newContent;
+    content["m.relates_to"] = {
+        {"rel_type", "m.replace"},
+        {"event_id", targetEventId.toStdString()},
+    };
+
+    QByteArray reqBody = QByteArray::fromStdString(content.dump());
+    auto* reply = makeRequest("PUT", path, reqBody);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        auto data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit sendMessageError(QString::fromUtf8(data));
+            return;
+        }
+        try {
+            auto j = json::parse(data.toStdString());
+            emit messageSent(QString::fromStdString(j.value("event_id", "")));
+        } catch (const std::exception& e) {
+            emit sendMessageError(QString::fromStdString(e.what()));
+        }
+    });
+}
+
 void MatrixClient::sendRoomEvent(const QString& roomId, const QString& eventType, const QByteArray& content)
 {
     static int txnCounter = 0;

@@ -18,6 +18,9 @@ Dialog {
     property string oidcProviderUrl: ""
     property bool passwordAvailable: true
     property bool oidcInProgress: false
+    // When OIDC is available, password fields collapse behind a toggle
+    // so OIDC is the obvious default. Click "Use password instead" to expand.
+    property bool showPasswordFallback: false
 
     background: Rectangle {
         color: Theme.bgMedium
@@ -64,6 +67,7 @@ Dialog {
         dialog.oidcAvailable = false;
         dialog.oidcProviderUrl = "";
         dialog.passwordAvailable = true;
+        dialog.showPasswordFallback = false;
     }
 
     contentItem: ColumnLayout {
@@ -170,34 +174,30 @@ Dialog {
             }
         }
 
-        // Separator between OIDC and password
-        RowLayout {
+        // When OIDC is available, collapse password behind a link.
+        // When OIDC is NOT available, show password fields directly.
+        Text {
             Layout.fillWidth: true
+            Layout.topMargin: -Theme.spacingSmall
+            text: dialog.showPasswordFallback ? "Hide password login" : "Use password instead"
+            font.pixelSize: Theme.fontSizeSmall
+            color: Theme.accent
+            horizontalAlignment: Text.AlignHCenter
             visible: dialog.oidcAvailable && dialog.passwordAvailable && !dialog.checkingFlows
-            spacing: Theme.spacingNormal
 
-            Rectangle {
-                Layout.fillWidth: true
-                height: 1
-                color: Theme.bgLight
-            }
-            Text {
-                text: "or"
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.textMuted
-            }
-            Rectangle {
-                Layout.fillWidth: true
-                height: 1
-                color: Theme.bgLight
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: dialog.showPasswordFallback = !dialog.showPasswordFallback
             }
         }
 
-        // Username (only when password auth is available or flows haven't been checked yet)
+        // Username (only when password auth is relevant and not collapsed)
         ColumnLayout {
             spacing: Theme.spacingSmall
             Layout.fillWidth: true
             visible: dialog.passwordAvailable && !dialog.checkingFlows
+                     && (!dialog.oidcAvailable || dialog.showPasswordFallback)
 
             Text {
                 text: "USERNAME"
@@ -229,6 +229,7 @@ Dialog {
             spacing: Theme.spacingSmall
             Layout.fillWidth: true
             visible: dialog.passwordAvailable && !dialog.checkingFlows
+                     && (!dialog.oidcAvailable || dialog.showPasswordFallback)
 
             Text {
                 text: "PASSWORD"
@@ -282,6 +283,7 @@ Dialog {
             Layout.fillWidth: true
             spacing: Theme.spacingNormal
             visible: dialog.passwordAvailable && !dialog.checkingFlows
+                     && (!dialog.oidcAvailable || dialog.showPasswordFallback)
 
             Button {
                 text: "Register"

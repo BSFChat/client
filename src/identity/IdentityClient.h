@@ -15,6 +15,7 @@ public:
     void startLogin(const QString& providerUrl);
     void cancel();
     bool isActive() const;
+    QString providerUrl() const { return m_providerUrl; }
 
 signals:
     void loginCompleted(const QString& idToken, const QString& accessToken, const QString& refreshToken);

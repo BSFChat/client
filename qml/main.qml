@@ -96,12 +96,92 @@ ApplicationWindow {
         onActivated: root.showMemberList = !root.showMemberList
     }
 
+    // Cmd+1..9 (Ctrl+1..9 on Win/Linux) selects servers 0..8.
+    // Qt maps "Ctrl+N" to the platform's primary modifier automatically,
+    // so a single sequence works cross-platform.
+    function activateServer(index) {
+        if (!serverManager.servers) return;
+        if (index < 0 || index >= serverManager.servers.rowCount()) return;
+        serverManager.setActiveServer(index);
+    }
+    // Ctrl+Tab / Ctrl+Shift+Tab — cycle servers forward/backward.
+    // On macOS, Qt maps "Ctrl" to Cmd (which is the app-switcher and
+    // intercepted by the OS). Physical Ctrl is "Meta" in Qt's macOS
+    // mapping. We bind both so the same physical key works cross-platform.
+    function cycleServer(dir) {
+        if (!serverManager.servers) return;
+        var count = serverManager.servers.rowCount();
+        if (count < 2) return;
+        var next = (serverManager.activeServerIndex + dir + count) % count;
+        serverManager.setActiveServer(next);
+    }
+    Shortcut { sequence: "Ctrl+Tab";       onActivated: root.cycleServer(1) }
+    Shortcut { sequence: "Meta+Tab";       onActivated: root.cycleServer(1) }
+    Shortcut { sequence: "Ctrl+Shift+Tab"; onActivated: root.cycleServer(-1) }
+    Shortcut { sequence: "Meta+Shift+Tab"; onActivated: root.cycleServer(-1) }
+
+    Shortcut { sequence: "Ctrl+1"; onActivated: root.activateServer(0) }
+    Shortcut { sequence: "Ctrl+2"; onActivated: root.activateServer(1) }
+    Shortcut { sequence: "Ctrl+3"; onActivated: root.activateServer(2) }
+    Shortcut { sequence: "Ctrl+4"; onActivated: root.activateServer(3) }
+    Shortcut { sequence: "Ctrl+5"; onActivated: root.activateServer(4) }
+    Shortcut { sequence: "Ctrl+6"; onActivated: root.activateServer(5) }
+    Shortcut { sequence: "Ctrl+7"; onActivated: root.activateServer(6) }
+    Shortcut { sequence: "Ctrl+8"; onActivated: root.activateServer(7) }
+    Shortcut { sequence: "Ctrl+9"; onActivated: root.activateServer(8) }
+
+    // Alt+Up / Alt+Down — cycle through text channels of the active server,
+    // skipping categories and voice channels. Wraps at both ends.
+    Shortcut {
+        sequence: "Alt+Up"
+        onActivated: root.cycleTextChannel(-1)
+    }
+    Shortcut {
+        sequence: "Alt+Down"
+        onActivated: root.cycleTextChannel(1)
+    }
+
+    // Flattens the currently visible categorized channel list into an
+    // ordered array of text channels, locates the active room, and hops
+    // `dir` (-1 / +1) with wrap.
+    function cycleTextChannel(dir) {
+        if (!serverManager.activeServer) return;
+        var groups = serverManager.activeServer.categorizedRooms;
+        var flat = [];
+        for (var i = 0; i < groups.length; i++) {
+            var ch = groups[i].channels || [];
+            for (var j = 0; j < ch.length; j++) {
+                if (!ch[j].isVoice) flat.push(ch[j].roomId);
+            }
+        }
+        if (flat.length === 0) return;
+        var active = serverManager.activeServer.activeRoomId || "";
+        var idx = flat.indexOf(active);
+        if (idx < 0) {
+            // Nothing active yet — pick the first/last in the direction.
+            idx = dir > 0 ? -1 : flat.length;
+        }
+        var next = (idx + dir + flat.length) % flat.length;
+        serverManager.activeServer.setActiveRoom(flat[next]);
+    }
+
     // Native menu bar. On macOS appears in the system menu bar; on Linux/
     // Windows shows at the top of the window. Mirrors the per-user popup in
     // the profile block so both entry points reach the same dialogs.
     Platform.MenuBar {
         Platform.Menu {
             title: qsTr("File")
+            Platform.MenuItem {
+                text: qsTr("Manage Account…")
+                enabled: serverManager.activeServer !== null
+                onTriggered: {
+                    var base = serverManager.activeServer
+                        ? serverManager.activeServer.identityProviderUrl()
+                        : "";
+                    if (!base) base = "https://id.bsfchat.com";
+                    Qt.openUrlExternally(base + "/profile.html");
+                }
+            }
             Platform.MenuItem {
                 text: qsTr("Edit Server Profile…")
                 shortcut: "Ctrl+,"

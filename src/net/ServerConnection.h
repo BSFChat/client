@@ -50,6 +50,7 @@ class ServerConnection : public QObject {
     // Mic transmit level, 0..1. Non-zero when the mic is open AND capturing
     // audio above the silence floor; zero when muted, disconnected, or idle.
     Q_PROPERTY(float micLevel READ micLevel NOTIFY micLevelChanged)
+    Q_PROPERTY(bool micSilent READ micSilent NOTIFY micSilentChanged)
     Q_PROPERTY(QString typingDisplay READ typingDisplay NOTIFY typingDisplayChanged)
     Q_PROPERTY(int myPowerLevel READ myPowerLevel NOTIFY myPowerLevelChanged)
     Q_PROPERTY(QJsonArray serverRoles READ serverRoles NOTIFY serverRolesChanged)
@@ -86,8 +87,14 @@ public:
     bool voiceMuted() const { return m_voiceMuted; }
     bool voiceDeafened() const { return m_voiceDeafened; }
     bool inVoiceChannel() const { return !m_activeVoiceRoomId.isEmpty(); }
-    QJsonArray voiceMembers() const { return m_voiceMembers; }
+    // Returns the voice-member list with each member augmented by a
+    // "peerState" key ("connected"/"connecting"/"failed"/etc.) so the
+    // VoicePanel can show per-peer indicators.
+    QJsonArray voiceMembers() const;
     float micLevel() const { return m_micLevel; }
+    // True when AudioEngine has been capturing silence for a sustained
+    // period — signals a device/permission problem the user should see.
+    bool micSilent() const { return m_micSilent; }
     QString typingDisplay() const { return m_typingDisplay; }
     int myPowerLevel() const { return m_myPowerLevel; }
     QJsonArray serverRoles() const { return m_serverRoles; }
@@ -109,6 +116,9 @@ public:
     Q_INVOKABLE void disconnectFromServer();
     Q_INVOKABLE void setActiveRoom(const QString& roomId);
     Q_INVOKABLE void sendMessage(const QString& body);
+    // Edit a previously-sent message in the currently-active room. Server
+    // rejects if the caller isn't the original sender.
+    Q_INVOKABLE void editMessage(const QString& eventId, const QString& newBody);
     Q_INVOKABLE void sendMediaMessage(const QString& fileUrl);
     Q_INVOKABLE void createRoom(const QString& name, const QString& topic);
     Q_INVOKABLE void joinRoom(const QString& roomIdOrAlias);
@@ -119,6 +129,9 @@ public:
     Q_INVOKABLE void resetUnreadForRoom(const QString& roomId);
 
     Q_INVOKABLE void loginWithOidc(const QString& providerUrl);
+    // Returns the identity-provider base URL (e.g. "https://id.bsfchat.com")
+    // for the "Manage Account" link. Empty if OIDC was never used.
+    Q_INVOKABLE QString identityProviderUrl() const;
 
     Q_INVOKABLE void joinVoiceChannel(const QString& roomId);
     Q_INVOKABLE void leaveVoiceChannel();
@@ -197,6 +210,7 @@ signals:
     void voiceDeafenedChanged();
     void voiceMembersChanged();
     void micLevelChanged();
+    void micSilentChanged();
     void avatarUrlChanged();
     void typingDisplayChanged();
     void profileFetched(const QString& userId, const QString& displayName, const QString& avatarUrl);
@@ -232,6 +246,9 @@ private:
 
     // Per-room member cache: roomId -> list of member events
     QMap<QString, QVector<bsfchat::RoomEvent>> m_roomMembers;
+    // Global userId → display name, populated from all m.room.member events
+    // across every room. MessageModel reads from this pointer.
+    QMap<QString, QString> m_userDisplayNames;
     void loadMembersForRoom(const QString& roomId);
 
     // Identity (OIDC)
@@ -246,6 +263,8 @@ private:
     // Voice state
     QString m_activeVoiceRoomId;
     float m_micLevel = 0.0f;
+    bool m_micSilent = false;
+    int m_zeroLevelFrames = 0; // consecutive frames with near-zero level
     bool m_voiceMuted = false;
     bool m_voiceDeafened = false;
     QJsonArray m_voiceMembers;

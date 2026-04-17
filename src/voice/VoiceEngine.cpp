@@ -129,9 +129,24 @@ void VoiceEngine::addPeer(const QString& userId, bool isOfferer) {
     connect(peer, &PeerConnectionManager::disconnected,
             this, [this, userId]() { emit peerDisconnected(userId); });
 
+    connect(peer, &PeerConnectionManager::peerStateChanged,
+            this, [this, userId](PeerConnectionManager::PeerState s) {
+        static const char* names[] = {"new","connecting","connected","disconnected","failed"};
+        emit peerStateChanged(userId, QString::fromLatin1(names[int(s)]));
+    });
+
     if (isOfferer) {
         peer->createOffer();
     }
+}
+
+QMap<QString, QString> VoiceEngine::peerStates() const {
+    QMap<QString, QString> out;
+    static const char* names[] = {"new","connecting","connected","disconnected","failed"};
+    for (auto it = m_peers.begin(); it != m_peers.end(); ++it) {
+        out[it.key()] = QString::fromLatin1(names[int(it.value()->peerState())]);
+    }
+    return out;
 }
 
 void VoiceEngine::removePeer(const QString& userId) {

@@ -37,9 +37,15 @@ public:
 
     float micLevel() const { return m_micLevel; }
 
+    // Per-peer connection state keyed by user-id. "connected", "connecting",
+    // "failed", "new", "disconnected". VoicePanel reads this to show colored
+    // indicators per member.
+    QMap<QString, QString> peerStates() const;
+
 signals:
     void peerConnected(const QString& userId);
     void peerDisconnected(const QString& userId);
+    void peerStateChanged(const QString& userId, const QString& state);
     void error(const QString& message);
     void micLevelChanged(float level);
 

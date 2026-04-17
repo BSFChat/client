@@ -35,6 +35,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 {
     m_client->setHomeserver(serverUrl);
     m_messageModel->setHomeserver(serverUrl);
+    m_messageModel->setDisplayNameCache(&m_userDisplayNames);
 
     // Connect sync signals
     connect(m_syncLoop, &SyncLoop::syncCompleted, this, &ServerConnection::processSyncResponse);
@@ -130,11 +131,36 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 #ifdef BSFCHAT_VOICE_ENABLED
         if (!m_activeVoiceRoomId.isEmpty() && !m_voiceEngine) {
             m_voiceEngine = new VoiceEngine(m_client, this);
+
+            // Mic level → transmit indicator + silence detection.
+            m_zeroLevelFrames = 0;
+            m_micSilent = false;
             connect(m_voiceEngine, &VoiceEngine::micLevelChanged, this, [this](float level) {
-                if (qAbs(level - m_micLevel) < 0.005f) return; // suppress sub-0.5% jitter
+                if (qAbs(level - m_micLevel) < 0.005f) return;
                 m_micLevel = level;
                 emit micLevelChanged();
+                // Sustained silence = ~3 seconds of near-zero signal (150 frames × 20ms).
+                if (level < 0.005f) {
+                    if (++m_zeroLevelFrames >= 150 && !m_micSilent) {
+                        m_micSilent = true;
+                        emit micSilentChanged();
+                        qWarning("[voice] Mic appears silent — device may not be "
+                                 "capturing or permission not granted");
+                    }
+                } else {
+                    m_zeroLevelFrames = 0;
+                    if (m_micSilent) {
+                        m_micSilent = false;
+                        emit micSilentChanged();
+                    }
+                }
             });
+
+            // When any peer's connection state changes, re-emit
+            // voiceMembersChanged so the UI refreshes the per-peer dot.
+            connect(m_voiceEngine, &VoiceEngine::peerStateChanged,
+                    this, [this]() { emit voiceMembersChanged(); });
+
             m_voiceEngine->start(m_activeVoiceRoomId, m_voiceMembers, config);
         }
 #endif
@@ -189,6 +215,14 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
                 m_avatarUrl = avatarUrl;
                 emit avatarUrlChanged();
             }
+        }
+        // Always push into the global display-name cache so MessageModel
+        // can resolve it. This covers the case where the server hasn't
+        // been updated to broadcastMemberUpdate yet — at minimum the
+        // user's own messages render with their chosen name immediately.
+        if (!displayName.isEmpty() && m_userDisplayNames.value(userId) != displayName) {
+            m_userDisplayNames[userId] = displayName;
+            m_messageModel->refreshDisplayNames();
         }
         emit profileFetched(userId, displayName, avatarUrl);
     });
@@ -278,6 +312,13 @@ void ServerConnection::registerUser(const QString& username, const QString& pass
         }, Qt::SingleShotConnection);
 
     m_client->registerUser(username, password);
+}
+
+QString ServerConnection::identityProviderUrl() const
+{
+    if (m_identityClient)
+        return m_identityClient->providerUrl();
+    return {};
 }
 
 void ServerConnection::loginWithOidc(const QString& providerUrl)
@@ -416,6 +457,12 @@ void ServerConnection::sendMessage(const QString& body)
     m_client->sendMessage(m_activeRoomId, body);
 }
 
+void ServerConnection::editMessage(const QString& eventId, const QString& newBody)
+{
+    if (m_activeRoomId.isEmpty() || eventId.isEmpty() || newBody.trimmed().isEmpty()) return;
+    m_client->editMessage(m_activeRoomId, eventId, newBody);
+}
+
 void ServerConnection::sendMediaMessage(const QString& fileUrl)
 {
     if (m_activeRoomId.isEmpty()) {
@@ -539,6 +586,30 @@ void ServerConnection::joinVoiceChannel(const QString& roomId)
         emit voiceMembersChanged();
     }
     m_client->joinVoice(roomId);
+}
+
+QJsonArray ServerConnection::voiceMembers() const
+{
+#ifdef BSFCHAT_VOICE_ENABLED
+    if (m_voiceEngine) {
+        auto states = m_voiceEngine->peerStates();
+        QJsonArray out;
+        for (const auto& v : m_voiceMembers) {
+            auto obj = v.toObject();
+            QString uid = obj.value("user_id").toString();
+            if (uid == m_userId) {
+                // Self — always "connected" since we don't have a peer to
+                // ourselves. Mark micSilent if applicable.
+                obj["peerState"] = QStringLiteral("connected");
+            } else {
+                obj["peerState"] = states.value(uid, QStringLiteral("new"));
+            }
+            out.append(obj);
+        }
+        return out;
+    }
+#endif
+    return m_voiceMembers;
 }
 
 void ServerConnection::leaveVoiceChannel()
@@ -784,8 +855,20 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 QString topic = QString::fromStdString(event.content.data.value("topic", ""));
                 m_roomListModel->updateRoomTopic(roomId, topic);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomMember)) {
-                // Always cache member events for all rooms
+                // Cache member events for all rooms + populate global
+                // display-name map that MessageModel reads from.
                 m_roomMembers[roomId].append(event);
+                if (event.state_key.has_value()) {
+                    QString uid = QString::fromStdString(*event.state_key);
+                    QString dn = QString::fromStdString(event.content.data.value("displayname", ""));
+                    if (!dn.isEmpty() && m_userDisplayNames.value(uid) != dn) {
+                        m_userDisplayNames[uid] = dn;
+                        // Push the new name into any messages already
+                        // rendered so the user sees "Demonke" immediately
+                        // instead of waiting for a room switch.
+                        m_messageModel->refreshDisplayNames();
+                    }
+                }
                 if (roomId == m_activeRoomId) {
                     m_memberListModel->processEvent(event);
                 }

@@ -112,7 +112,10 @@ Rectangle {
 
             model: serverManager.activeServer ? serverManager.activeServer.messageModel : null
 
-            // Track whether user is near the bottom
+            // Track whether the user is near the bottom so we know whether
+            // to auto-scroll on new messages. Imperative (not a binding) to
+            // avoid the transient-false glitch where contentHeight grows
+            // before contentY catches up during an append.
             property bool atBottom: true
             property bool initialLoad: true
 
@@ -123,25 +126,27 @@ Rectangle {
 
             onContentYChanged: {
                 if (!initialLoad) {
-                    atBottom = (contentY + height >= contentHeight - 50);
+                    atBottom = (contentY + height >= contentHeight - 200);
+                }
+            }
+
+            onContentHeightChanged: {
+                // Also recompute here so "contentHeight grew while I was
+                // at the end but contentY didn't move" still counts.
+                if (!initialLoad) {
+                    atBottom = (contentY + height >= contentHeight - 200);
+                }
+                if (initialLoad || atBottom) {
+                    Qt.callLater(positionViewAtEnd);
                 }
             }
 
             onCountChanged: {
                 if (initialLoad || atBottom) {
-                    // Scroll immediately
                     Qt.callLater(positionViewAtEnd);
-                    // And again after a delay (for images/media that load async)
                     if (initialLoad) {
                         scrollTimer.restart();
                     }
-                }
-            }
-
-            onContentHeightChanged: {
-                // Keep scrolling to bottom as content grows (images loading, etc.)
-                if (initialLoad || atBottom) {
-                    Qt.callLater(positionViewAtEnd);
                 }
             }
 
@@ -217,11 +222,15 @@ Rectangle {
                     mediaFileSize: model.mediaFileSize || 0
                     isOwnMessage: model.isOwnMessage
                     showSender: model.showSender
+                    edited: model.edited || false
 
                     onSenderClicked: (userId, displayName) => {
                         messageProfileCard.userId = userId;
                         messageProfileCard.profileDisplayName = displayName;
                         messageProfileCard.open();
+                    }
+                    onEditRequested: (targetId, currentBody) => {
+                        messageInput.beginEditing(targetId, currentBody);
                     }
                 }
             }
@@ -286,6 +295,7 @@ Rectangle {
 
         // Message input
         MessageInput {
+            id: messageInput
             Layout.fillWidth: true
             Layout.leftMargin: Theme.spacingLarge
             Layout.rightMargin: Theme.spacingLarge

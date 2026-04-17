@@ -552,6 +552,27 @@ Rectangle {
                     implicitWidth: 200
                 }
                 MenuItem {
+                    text: "Manage Account"
+                    contentItem: Text {
+                        text: parent.text
+                        font.pixelSize: Theme.fontSizeNormal
+                        color: Theme.textPrimary
+                    }
+                    background: Rectangle {
+                        color: parent.hovered ? Theme.bgLight : "transparent"
+                    }
+                    onTriggered: {
+                        // Open the identity portal in the default browser.
+                        // Uses the provider URL from the OIDC login if
+                        // available; falls back to id.bsfchat.com.
+                        var base = serverManager.activeServer
+                            ? serverManager.activeServer.identityProviderUrl()
+                            : "";
+                        if (!base) base = "https://id.bsfchat.com";
+                        Qt.openUrlExternally(base + "/profile.html");
+                    }
+                }
+                MenuItem {
                     text: "Edit Server Profile"
                     contentItem: Text {
                         text: parent.text
