@@ -18,16 +18,52 @@ Popup {
     property int section: 0
 
     background: Rectangle {
-        color: Theme.bgDark
-        radius: Theme.radiusNormal
-        border.color: Theme.bgLight
+        color: Theme.bg1
+        radius: Theme.r3
+        border.color: Theme.line
         border.width: 1
+
+        // Top-right close X — matches ServerSettings / ChannelSettings.
+        // Esc / click-outside still work the same way.
+        Rectangle {
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.topMargin: Theme.sp.s5
+            anchors.rightMargin: Theme.sp.s5
+            width: 28; height: 28
+            radius: Theme.r1
+            color: closeXMouse.containsMouse ? Theme.bg3 : "transparent"
+            z: 10
+            Icon {
+                anchors.centerIn: parent
+                name: "x"
+                size: 14
+                color: closeXMouse.containsMouse ? Theme.fg0 : Theme.fg2
+            }
+            MouseArea {
+                id: closeXMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: clientSettingsPopup.close()
+            }
+        }
     }
 
-    component SectionHeader: Text {
-        font.pixelSize: 18
-        font.bold: true
-        color: Theme.textPrimary
+    // SPEC §3.10 SectionHeader: title 24px fg0 + thin divider below.
+    component SectionHeader: ColumnLayout {
+        property string text: ""
+        Layout.fillWidth: true
+        spacing: Theme.sp.s3
+        Text {
+            text: parent.text
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.xxl
+            font.weight: Theme.fontWeight.semibold
+            font.letterSpacing: Theme.trackTight.xxl
+            color: Theme.fg0
+        }
+        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
     }
 
     // Row with title + description on the left and an arbitrary control on
@@ -37,23 +73,25 @@ Popup {
         property string description: ""
         default property alias rightControl: rightContainer.children
         Layout.fillWidth: true
-        spacing: Theme.spacingLarge
+        spacing: Theme.sp.s7
 
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 2
             Text {
                 text: title
-                font.pixelSize: Theme.fontSizeNormal
-                font.bold: true
-                color: Theme.textPrimary
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.md
+                font.weight: Theme.fontWeight.semibold
+                color: Theme.fg0
             }
             Text {
                 visible: description.length > 0
                 Layout.fillWidth: true
                 text: description
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.textMuted
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.fg2
                 wrapMode: Text.WordWrap
             }
         }
@@ -72,51 +110,59 @@ Popup {
         Rectangle {
             Layout.fillHeight: true
             Layout.preferredWidth: 180
-            color: Theme.bgDarkest
-            radius: Theme.radiusNormal
+            color: Theme.bg0
+            radius: Theme.r2
             Rectangle { // right-edge clip
                 anchors.right: parent.right
-                width: Theme.radiusNormal
+                width: Theme.r2
                 height: parent.height
-                color: Theme.bgDarkest
+                color: Theme.bg0
             }
 
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: Theme.spacingNormal
+                anchors.margins: Theme.sp.s3
                 spacing: 2
 
                 Text {
                     text: "CLIENT SETTINGS"
-                    font.pixelSize: Theme.fontSizeSmall
-                    font.bold: true
-                    color: Theme.textMuted
-                    Layout.topMargin: Theme.spacingNormal
-                    Layout.leftMargin: Theme.spacingNormal
-                    Layout.bottomMargin: Theme.spacingNormal
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xs
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackWidest.xs
+                    color: Theme.fg3
+                    Layout.topMargin: Theme.sp.s3
+                    Layout.leftMargin: Theme.sp.s3
+                    Layout.bottomMargin: Theme.sp.s3
                 }
 
                 Repeater {
-                    model: ["Audio", "Notifications"]
+                    model: ["Appearance", "Audio", "Notifications"]
                     delegate: Rectangle {
                         Layout.fillWidth: true
                         height: 36
-                        radius: Theme.radiusSmall
-                        color: clientSettingsPopup.section === index
-                            ? Theme.bgLight
-                            : (mouse.containsMouse ? Qt.darker(Theme.bgMedium, 1.05) : "transparent")
+                        radius: Theme.r1
+                        readonly property bool isActive:
+                            clientSettingsPopup.section === index
+                        color: isActive ? Theme.bg3
+                             : navItemMouse.containsMouse ? Theme.bg2
+                             : "transparent"
+                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.left: parent.left
-                            anchors.leftMargin: Theme.spacingNormal
+                            anchors.leftMargin: Theme.sp.s3
                             text: modelData
-                            color: clientSettingsPopup.section === index
-                                ? Theme.textPrimary : Theme.textSecondary
-                            font.pixelSize: Theme.fontSizeNormal
+                            color: parent.isActive ? Theme.fg0 : Theme.fg1
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.md
+                            font.weight: parent.isActive
+                                         ? Theme.fontWeight.semibold
+                                         : Theme.fontWeight.medium
                         }
                         MouseArea {
-                            id: mouse
+                            id: navItemMouse
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
@@ -125,29 +171,11 @@ Popup {
                     }
                 }
 
+                // Bottom-nav "Close" row removed — replaced by the top-right
+                // X on the dialog background (same convention as
+                // ServerSettings / ChannelSettings). Esc and click-outside
+                // still dismiss.
                 Item { Layout.fillHeight: true }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 36
-                    radius: Theme.radiusSmall
-                    color: closeMouse.containsMouse ? Theme.bgLight : "transparent"
-                    Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.left: parent.left
-                        anchors.leftMargin: Theme.spacingNormal
-                        text: "Close"
-                        color: Theme.textMuted
-                        font.pixelSize: Theme.fontSizeNormal
-                    }
-                    MouseArea {
-                        id: closeMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: clientSettingsPopup.close()
-                    }
-                }
             }
         }
 
@@ -157,19 +185,184 @@ Popup {
             Layout.fillHeight: true
             currentIndex: clientSettingsPopup.section
 
+            // ---- Appearance ----
+            Item {
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: Theme.sp.s7 * 2
+                    spacing: Theme.sp.s7
+
+                    SectionHeader { text: "Appearance" }
+
+                    // Theme toggle: two big buttons so the choice reads at
+                    // a glance rather than hiding behind a dropdown.
+                    SettingRow {
+                        title: "Theme"
+                        description: "Light mode for daylight desks, dark mode for everything else."
+                        RowLayout {
+                            spacing: Theme.sp.s1
+
+                            Repeater {
+                                model: [
+                                    { key: "dark",  label: "Dark"  },
+                                    { key: "light", label: "Light" }
+                                ]
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    implicitWidth: 96
+                                    implicitHeight: 36
+                                    radius: Theme.r2
+                                    readonly property bool selected: appSettings.theme === modelData.key
+                                    color: selected ? Theme.accent
+                                           : (themeMouse.containsMouse ? Theme.bg3 : Theme.bg2)
+                                    border.color: selected ? Theme.accent : Theme.line
+                                    border.width: 1
+                                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        color: parent.selected ? Theme.onAccent : Theme.fg1
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.md
+                                        font.weight: parent.selected
+                                                     ? Theme.fontWeight.semibold
+                                                     : Theme.fontWeight.medium
+                                    }
+                                    MouseArea {
+                                        id: themeMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: appSettings.theme = modelData.key
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Accent palette. Four Designer-kit hues drive the
+                    // palette in tokens.json — 180 (cyan), 260 (violet),
+                    // 320 (magenta), 30 (amber). Clicking a swatch writes
+                    // the hue int to Settings; Theme.qml binds live.
+                    SettingRow {
+                        title: "Accent color"
+                        description: "Highlights, focus rings, active channel stripes, mic meter."
+                        RowLayout {
+                            spacing: Theme.sp.s3
+                            Repeater {
+                                model: [
+                                    { hue: 180, label: "Cyan",    color: "#36d6c7" },
+                                    { hue: 260, label: "Violet",  color: "#a28bff" },
+                                    { hue: 320, label: "Magenta", color: "#ec6dd6" },
+                                    { hue:  30, label: "Amber",   color: "#ffa34a" }
+                                ]
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    implicitWidth: 32
+                                    implicitHeight: 32
+                                    radius: Theme.r3
+                                    color: modelData.color
+                                    readonly property bool selected:
+                                        appSettings.accentHue === modelData.hue
+                                    border.color: selected ? Theme.fg0 : Theme.line
+                                    border.width: selected ? 3 : 1
+                                    Behavior on border.width { NumberAnimation { duration: Theme.motion.fastMs } }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: appSettings.accentHue = modelData.hue
+                                    }
+                                    ToolTip.visible: hoverHandler.hovered
+                                    ToolTip.text: modelData.label
+                                    ToolTip.delay: 400
+                                    HoverHandler { id: hoverHandler }
+                                }
+                            }
+                        }
+                    }
+
+                    // Layout density — three preset "shapes" defined in
+                    // Theme.layout (standard / compact / focus). The
+                    // picker writes the string to appSettings; Theme's
+                    // `variant` is bound to it so widths switch live.
+                    SettingRow {
+                        title: "Layout density"
+                        description: "Standard = full desktop layout. Compact shrinks sidebars and participant tiles. Focus hides the member list + chat panel for a voice-first view."
+                        RowLayout {
+                            spacing: Theme.sp.s1
+
+                            Repeater {
+                                model: [
+                                    { key: "standard", label: "Standard" },
+                                    { key: "compact",  label: "Compact"  },
+                                    { key: "focus",    label: "Focus"    }
+                                ]
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    implicitWidth: 96
+                                    implicitHeight: 36
+                                    radius: Theme.r2
+                                    readonly property bool selected:
+                                        appSettings.layoutVariant === modelData.key
+                                    color: selected ? Theme.accent
+                                           : (variantMouse.containsMouse ? Theme.bg3 : Theme.bg2)
+                                    border.color: selected ? Theme.accent : Theme.line
+                                    border.width: 1
+                                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.md
+                                        font.weight: parent.selected
+                                                     ? Theme.fontWeight.semibold
+                                                     : Theme.fontWeight.medium
+                                        color: parent.selected ? Theme.onAccent : Theme.fg1
+                                    }
+                                    MouseArea {
+                                        id: variantMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: appSettings.layoutVariant = modelData.key
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        title: "Accessibility mode"
+                        description: "Draws thick, high-contrast borders between the server sidebar, channel list, chat, and member list so panel boundaries are unambiguous."
+                        ThemedSwitch {
+                            checked: appSettings.accessibilityMode
+                            onToggled: appSettings.accessibilityMode = checked
+                        }
+                    }
+
+                    InfoBanner {
+                        icon: "bolt"
+                        text: "Theme changes apply instantly across the entire app — no restart required."
+                    }
+
+                    Item { Layout.fillHeight: true }
+                }
+            }
+
             // ---- Audio ----
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.spacingLarge * 2
-                    spacing: Theme.spacingLarge
+                    anchors.margins: Theme.sp.s7 * 2
+                    spacing: Theme.sp.s7
 
                     SectionHeader { text: "Audio" }
 
                     SettingRow {
                         title: "Input device"
                         description: "Microphone used in voice channels."
-                        ComboBox {
+                        ThemedComboBox {
                             id: inputCombo
                             implicitWidth: 260
                             model: appSettings.audioInputDevices
@@ -195,7 +388,7 @@ Popup {
                     SettingRow {
                         title: "Input volume"
                         description: "Gain applied to your microphone before encoding."
-                        Slider {
+                        ThemedSlider {
                             id: inputVolSlider
                             implicitWidth: 260
                             from: 0; to: 100; stepSize: 1
@@ -207,7 +400,7 @@ Popup {
                     SettingRow {
                         title: "Output device"
                         description: "Speakers / headphones used for voice + notification sounds."
-                        ComboBox {
+                        ThemedComboBox {
                             id: outputCombo
                             implicitWidth: 260
                             model: appSettings.audioOutputDevices
@@ -233,7 +426,7 @@ Popup {
                     SettingRow {
                         title: "Output volume"
                         description: "Applied on top of your OS volume."
-                        Slider {
+                        ThemedSlider {
                             id: outputVolSlider
                             implicitWidth: 260
                             from: 0; to: 100; stepSize: 1
@@ -242,23 +435,10 @@ Popup {
                         }
                     }
 
-                    Rectangle {
-                        Layout.fillWidth: true
-                        color: Qt.rgba(1,1,1,0.04)
-                        radius: Theme.radiusSmall
-                        Layout.preferredHeight: heads.implicitHeight + Theme.spacingNormal * 2
-                        ColumnLayout {
-                            id: heads
-                            anchors.fill: parent
-                            anchors.margins: Theme.spacingNormal
-                            Text {
-                                text: "Device changes apply the next time you join a voice channel. Leave and rejoin to pick up a new selection mid-call. Volume sliders aren't applied yet."
-                                Layout.fillWidth: true
-                                color: Theme.textMuted
-                                font.pixelSize: Theme.fontSizeSmall
-                                wrapMode: Text.WordWrap
-                            }
-                        }
+                    InfoBanner {
+                        icon: "signal"
+                        tint: Theme.warn
+                        text: "Device changes apply the next time you join a voice channel — leave and rejoin to pick up a new selection mid-call. Volume sliders aren't applied yet."
                     }
 
                     Item { Layout.fillHeight: true }
@@ -269,15 +449,15 @@ Popup {
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.spacingLarge * 2
-                    spacing: Theme.spacingLarge
+                    anchors.margins: Theme.sp.s7 * 2
+                    spacing: Theme.sp.s7
 
                     SectionHeader { text: "Notifications" }
 
                     SettingRow {
                         title: "Enable notifications"
-                        description: "Not yet implemented — setting persists for when it is."
-                        Switch {
+                        description: "Show an OS notification when a new message arrives in a channel you're not currently viewing."
+                        ThemedSwitch {
                             checked: appSettings.notificationsEnabled
                             onToggled: appSettings.notificationsEnabled = checked
                         }
@@ -286,11 +466,17 @@ Popup {
                     SettingRow {
                         title: "Play a sound"
                         description: "Play the notification chime when a new message arrives."
-                        Switch {
+                        ThemedSwitch {
                             enabled: appSettings.notificationsEnabled
                             checked: appSettings.notificationSound
                             onToggled: appSettings.notificationSound = checked
                         }
+                    }
+
+                    InfoBanner {
+                        icon: "bolt"
+                        tint: Theme.warn
+                        text: "OS-level notification permissions may need to be granted separately in your system preferences."
                     }
 
                     Item { Layout.fillHeight: true }

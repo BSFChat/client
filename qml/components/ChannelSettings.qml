@@ -54,14 +54,17 @@ Popup {
     }
 
     background: Rectangle {
-        color: Theme.bgDark
-        radius: Theme.radiusNormal
-        border.color: Theme.bgLight
+        color: Theme.bg1
+        radius: Theme.r3
+        border.color: Theme.line
         border.width: 1
     }
 
     // ----- Reusable subcomponents -----
 
+    // Group header — widest-tracked small-caps fg3 label with a `line`
+    // divider filling the rest of the row. Matches the rest of the app's
+    // label vocabulary.
     component SectionHeader: Item {
         property alias text: label.text
         Layout.fillWidth: true
@@ -70,19 +73,19 @@ Popup {
             id: label
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            font.pixelSize: Theme.fontSizeSmall
-            font.bold: true
-            color: Theme.textMuted
-            font.letterSpacing: 0.5
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.xs
+            font.weight: Theme.fontWeight.semibold
+            font.letterSpacing: Theme.trackWidest.xs
+            color: Theme.fg3
         }
         Rectangle {
             anchors.left: label.right
-            anchors.leftMargin: Theme.spacingNormal
+            anchors.leftMargin: Theme.sp.s4
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             height: 1
-            color: Theme.bgLight
-            opacity: 0.5
+            color: Theme.line
         }
     }
 
@@ -94,23 +97,25 @@ Popup {
         property string description: ""
         default property alias rightControl: rightContainer.children
         Layout.fillWidth: true
-        spacing: Theme.spacingLarge
+        spacing: Theme.sp.s7
 
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 2
             Text {
                 text: title
-                font.pixelSize: Theme.fontSizeNormal
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.md
                 font.bold: true
-                color: Theme.textPrimary
+                color: Theme.fg0
             }
             Text {
                 visible: description.length > 0
                 Layout.fillWidth: true
                 text: description
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.textMuted
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.fg2
                 wrapMode: Text.WordWrap
             }
         }
@@ -122,40 +127,67 @@ Popup {
         }
     }
 
-    // 3-segment Allow / Neutral / Deny control. `state` is -1 deny, 0 neutral,
-    // 1 allow. Emits stateChangeRequested(newState).
-    component TriToggle: Row {
+    // 3-segment Allow / Neutral / Deny control (SPEC §3.10 Segment pattern).
+    // state = -1 deny, 0 neutral, 1 allow. Emits stateChangeRequested(newState).
+    //
+    // Visual: all three segments share a single rounded container with the
+    // selected segment raised onto a semantic-coloured pill. Colors come
+    // from Theme.online / Theme.fg3 / Theme.danger so they track the
+    // active theme (dark / light) and stay consistent with the rest of
+    // the app rather than hard-coded Discord green/red.
+    component TriToggle: Rectangle {
         id: tri
         property int state: 0
         signal stateChangeRequested(int newState)
 
-        spacing: 4
-        Repeater {
-            model: [
-                {label: "Allow",   value:  1, active: "#57f287"},
-                {label: "Neutral", value:  0, active: "#768390"},
-                {label: "Deny",    value: -1, active: "#ed4245"}
-            ]
-            delegate: Rectangle {
-                width: 72
-                height: 28
-                radius: 4
-                readonly property bool isSelected: tri.state === modelData.value
-                color: isSelected ? modelData.active : Theme.bgMedium
-                border.color: isSelected ? Qt.lighter(modelData.active, 1.2) : "transparent"
-                border.width: 1
+        implicitWidth: 228
+        implicitHeight: 30
+        radius: Theme.r2
+        color: Theme.bg0
+        border.color: Theme.line
+        border.width: 1
 
-                Text {
-                    anchors.centerIn: parent
-                    text: modelData.label
-                    color: parent.isSelected ? "white" : Theme.textMuted
-                    font.pixelSize: Theme.fontSizeSmall
-                    font.bold: parent.isSelected
-                }
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: tri.stateChangeRequested(modelData.value)
+        Row {
+            anchors.fill: parent
+            anchors.margins: 2
+            spacing: 2
+            Repeater {
+                model: [
+                    {label: "Allow",   value:  1, role: "online" },
+                    {label: "Neutral", value:  0, role: "neutral"},
+                    {label: "Deny",    value: -1, role: "danger" }
+                ]
+                delegate: Rectangle {
+                    width: (tri.width - 4 - 4) / 3   // container - margins - 2×2 gaps
+                    height: parent.height
+                    radius: Theme.r1
+                    readonly property bool isSelected: tri.state === modelData.value
+                    readonly property color roleColor:
+                        modelData.role === "online" ? Theme.online
+                      : modelData.role === "danger" ? Theme.danger
+                                                     : Theme.fg3
+                    color: isSelected ? roleColor
+                         : segHover.containsMouse ? Theme.bg3
+                         : "transparent"
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: modelData.label
+                        color: parent.isSelected ? Theme.onAccent : Theme.fg2
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        font.weight: parent.isSelected
+                                     ? Theme.fontWeight.semibold
+                                     : Theme.fontWeight.medium
+                    }
+                    MouseArea {
+                        id: segHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: tri.stateChangeRequested(modelData.value)
+                    }
                 }
             }
         }
@@ -174,23 +206,33 @@ Popup {
             color: "transparent"
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: Theme.spacingLarge
-                anchors.rightMargin: Theme.spacingLarge
+                anchors.leftMargin: Theme.sp.s7
+                anchors.rightMargin: Theme.sp.s7
                 Text {
                     Layout.fillWidth: true
                     text: channelSettings.roomName
                         ? ("Channel settings — #" + channelSettings.roomName)
                         : "Channel settings"
-                    font.pixelSize: 18
-                    font.bold: true
-                    color: Theme.textPrimary
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xl
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackTight.xl
+                    color: Theme.fg0
                     elide: Text.ElideRight
                 }
-                Text {
-                    text: "✕"
-                    font.pixelSize: 20
-                    color: closeXMouse.containsMouse ? Theme.textPrimary : Theme.textMuted
+                // Close X as a proper icon button rather than a unicode glyph.
+                Rectangle {
                     Layout.alignment: Qt.AlignVCenter
+                    Layout.preferredWidth: 28
+                    Layout.preferredHeight: 28
+                    radius: Theme.r1
+                    color: closeXMouse.containsMouse ? Theme.bg3 : "transparent"
+                    Icon {
+                        anchors.centerIn: parent
+                        name: "x"
+                        size: 16
+                        color: closeXMouse.containsMouse ? Theme.fg0 : Theme.fg2
+                    }
                     MouseArea {
                         id: closeXMouse
                         anchors.fill: parent
@@ -204,7 +246,7 @@ Popup {
                 anchors.bottom: parent.bottom
                 width: parent.width
                 height: 1
-                color: Theme.bgLight
+                color: Theme.line
             }
         }
 
@@ -216,10 +258,10 @@ Popup {
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
             ColumnLayout {
-                width: channelSettings.width - Theme.spacingLarge * 2
-                x: Theme.spacingLarge
-                y: Theme.spacingLarge
-                spacing: Theme.spacingLarge * 1.25
+                width: channelSettings.width - Theme.sp.s7 * 2
+                x: Theme.sp.s7
+                y: Theme.sp.s7
+                spacing: Theme.sp.s7 * 1.25
 
                 // ====== OVERVIEW ======
                 SectionHeader { text: "OVERVIEW" }
@@ -227,7 +269,7 @@ Popup {
                 SettingRow {
                     title: "Slowmode"
                     description: "Members must wait this long between messages. Users with Manage messages bypass."
-                    ComboBox {
+                    ThemedComboBox {
                         id: slowmodeCombo
                         implicitWidth: 160
                         model: [
@@ -276,7 +318,7 @@ Popup {
                     readonly property var _evOverride: channelSettings.overrideFor("role:everyone")
                     readonly property bool isPrivate: (_evOverride.deny & 0x1) !== 0
 
-                    Switch {
+                    ThemedSwitch {
                         id: privateSwitch
                         checked: privateRow.isPrivate
                         onToggled: {
@@ -296,20 +338,24 @@ Popup {
                 Text {
                     Layout.fillWidth: true
                     text: "Pick a role, then tune its permissions in this channel. Allow grants, Deny revokes, Neutral inherits from the role's server-wide permissions."
-                    font.pixelSize: Theme.fontSizeSmall
-                    color: Theme.textMuted
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.sm
+                    color: Theme.fg2
                     wrapMode: Text.WordWrap
                 }
 
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: Theme.spacingNormal
+                    spacing: Theme.sp.s3
                     Text {
-                        text: "Role"
-                        color: Theme.textSecondary
-                        font.pixelSize: Theme.fontSizeSmall
+                        text: "ROLE"
+                        color: Theme.fg3
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xs
+                        font.weight: Theme.fontWeight.semibold
+                        font.letterSpacing: Theme.trackWidest.xs
                     }
-                    ComboBox {
+                    ThemedComboBox {
                         id: roleCombo
                         Layout.fillWidth: true
                         model: serverManager.activeServer
@@ -328,9 +374,11 @@ Popup {
                         model: channelSettings.channelFlags
                         delegate: Rectangle {
                             Layout.fillWidth: true
-                            implicitHeight: permRow.implicitHeight + 16
-                            radius: Theme.radiusSmall
-                            color: Theme.bgMedium
+                            implicitHeight: permRow.implicitHeight + Theme.sp.s4 * 2
+                            radius: Theme.r2
+                            color: Theme.bg2
+                            border.color: Theme.line
+                            border.width: 1
 
                             readonly property var flagInfo: modelData
                             // Use activeServer + currentIndex + permissionsGeneration as deps
@@ -359,24 +407,26 @@ Popup {
                             RowLayout {
                                 id: permRow
                                 anchors.fill: parent
-                                anchors.leftMargin: Theme.spacingNormal
-                                anchors.rightMargin: Theme.spacingNormal
-                                spacing: Theme.spacingNormal
+                                anchors.leftMargin: Theme.sp.s5
+                                anchors.rightMargin: Theme.sp.s4
+                                spacing: Theme.sp.s4
 
                                 ColumnLayout {
                                     Layout.fillWidth: true
                                     spacing: 2
                                     Text {
                                         text: flagInfo.label
-                                        color: Theme.textPrimary
-                                        font.pixelSize: Theme.fontSizeNormal
+                                        color: Theme.fg0
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.md
                                     }
                                     Text {
                                         visible: flagInfo.hint.length > 0
                                         Layout.fillWidth: true
                                         text: flagInfo.hint
-                                        color: Theme.textMuted
-                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.fg2
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.sm
                                         wrapMode: Text.WordWrap
                                     }
                                 }
@@ -389,42 +439,55 @@ Popup {
                     }
                 }
 
-                Item { Layout.preferredHeight: Theme.spacingNormal }
+                Item { Layout.preferredHeight: Theme.sp.s3 }
             }
         }
 
-        // Footer
+        // Footer — changes save on toggle, so this is just a dismissal rail.
+        // Keep it quiet: top hairline + right-aligned accent "Done".
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 56
-            color: Theme.bgDarkest
+            Layout.preferredHeight: 64
+            color: Theme.bg0
             Rectangle {
                 anchors.top: parent.top
                 width: parent.width
                 height: 1
-                color: Theme.bgLight
+                color: Theme.line
             }
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: Theme.spacingLarge
-                anchors.rightMargin: Theme.spacingLarge
-                Item { Layout.fillWidth: true }
-                Button {
-                    text: "Close"
-                    contentItem: Text {
-                        text: parent.text
-                        color: "white"
-                        font.pixelSize: Theme.fontSizeNormal
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
+                anchors.leftMargin: Theme.sp.s7
+                anchors.rightMargin: Theme.sp.s7
+                Text {
+                    Layout.fillWidth: true
+                    text: "Changes save automatically."
+                    color: Theme.fg3
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.sm
+                }
+                Rectangle {
+                    id: doneBtn
+                    Layout.preferredWidth: 120
+                    Layout.preferredHeight: 36
+                    radius: Theme.r2
+                    color: doneBtnMouse.containsMouse ? Theme.accentDim : Theme.accent
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                    Text {
+                        anchors.centerIn: parent
+                        text: "Done"
+                        color: Theme.onAccent
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.semibold
                     }
-                    background: Rectangle {
-                        color: parent.hovered ? Theme.accentHover : Theme.accent
-                        radius: Theme.radiusSmall
-                        implicitHeight: Theme.buttonHeight
-                        implicitWidth: 100
+                    MouseArea {
+                        id: doneBtnMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: channelSettings.close()
                     }
-                    onClicked: channelSettings.close()
                 }
             }
         }

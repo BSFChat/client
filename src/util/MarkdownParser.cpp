@@ -11,6 +11,7 @@ QString MarkdownParser::toHtml(const QString& markdown)
     result = processItalic(result);
     result = processStrikethrough(result);
     result = processLinks(result);
+    result = processChannelMentions(result);
     result = processBlockQuotes(result);
     // Convert newlines to <br>
     result.replace('\n', "<br>");
@@ -69,6 +70,21 @@ QString MarkdownParser::processLinks(const QString& text)
     QString result = text;
     result.replace(re,
         "<a href=\"\\2\" style=\"color:#5865f2; text-decoration:none;\">\\1</a>");
+    return result;
+}
+
+QString MarkdownParser::processChannelMentions(const QString& text)
+{
+    // Match `#word` preceded by start-of-string, whitespace, or one of a few
+    // common delimiters. The negative lookahead on `(` avoids eating Markdown
+    // link anchors that already got rewritten (e.g. `<a href="bsfchat://...">`).
+    // Channel names allow letters, digits, hyphen, and underscore — matches
+    // the server-side room-name charset.
+    static QRegularExpression re(R"((^|[\s>("',.!?])#([a-zA-Z0-9][a-zA-Z0-9_-]{0,63}))");
+    QString result = text;
+    result.replace(re,
+        "\\1<a href=\"bsfchat://channel/\\2\" "
+        "style=\"color:#5865f2; text-decoration:none; font-weight:bold;\">#\\2</a>");
     return result;
 }
 

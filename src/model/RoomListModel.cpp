@@ -137,6 +137,20 @@ QString RoomListModel::roomDisplayName(const QString& roomId) const
     return m_rooms[idx].displayName.isEmpty() ? m_rooms[idx].roomId : m_rooms[idx].displayName;
 }
 
+QString RoomListModel::roomIdForName(const QString& name) const
+{
+    if (name.isEmpty()) return {};
+    const QString needle = name.trimmed();
+    for (const auto& r : m_rooms) {
+        // Only match text channels — voice channels wouldn't make sense
+        // as a #mention target. roomType is empty for regular text rooms.
+        if (r.isVoice) continue;
+        if (QString::compare(r.displayName, needle, Qt::CaseInsensitive) == 0)
+            return r.roomId;
+    }
+    return {};
+}
+
 QString RoomListModel::roomTopic(const QString& roomId) const
 {
     int idx = findRoom(roomId);

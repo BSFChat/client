@@ -4,6 +4,7 @@
 #include "core/Settings.h"
 
 class ServerManager;
+class NotificationManager;
 
 class App : public QObject {
     Q_OBJECT
@@ -14,8 +15,10 @@ public:
 
     ServerManager* serverManager() const { return m_serverManager; }
     Settings* settings() const { return m_settings; }
+    NotificationManager* notificationManager() const { return m_notificationManager; }
 
 private:
     Settings* m_settings;
     ServerManager* m_serverManager;
+    NotificationManager* m_notificationManager;
 };

@@ -1,7 +1,11 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QHash>
+#include <QPair>
 #include <QString>
+#include <QVariantList>
+#include <QVariantMap>
 #include <QVector>
 
 #include <bsfchat/MatrixTypes.h>
@@ -9,6 +13,14 @@
 class MessageModel : public QAbstractListModel {
     Q_OBJECT
     Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
+    // True when the server has more history beyond the oldest loaded
+    // message in this room. Bound by MessageView to show the "load more"
+    // affordance / trigger auto-paginate on scroll-to-top.
+    Q_PROPERTY(bool hasMoreHistory READ hasMoreHistory NOTIFY hasMoreHistoryChanged)
+    // True while a /messages back-pagination request is in flight.
+    // MessageView binds to this to show a spinner and suppress repeated
+    // triggers from rapid scroll-to-top events.
+    Q_PROPERTY(bool loadingHistory READ loadingHistory NOTIFY loadingHistoryChanged)
 
 public:
     enum Roles {
@@ -25,8 +37,25 @@ public:
         MediaUrlRole,       // Resolved HTTP URL for media messages
         MediaFileNameRole,  // Filename from media content
         MediaFileSizeRole,  // File size from media content info
-        EditedRole          // Whether this message has been edited at least once
+        EditedRole,         // Whether this message has been edited at least once
+        ReplyToEventIdRole, // Event ID of the message being replied to (empty if not a reply)
+        ReplyToSenderRole,  // Display name of the replied-to message's sender
+        ReplyPreviewRole,   // Short excerpt (<=80 chars) of the replied-to message body
+        ReactionsRole       // Aggregated reactions: list of {emoji, count, reacted, eventIds}
     };
+
+    // Convenience for QML — the reactions for a given row. Same shape as
+    // ReactionsRole.
+    Q_INVOKABLE QVariantMap reactionSummary(int index) const;
+
+    // If `userId` has reacted to `targetEventId` with `emoji`, return the
+    // reaction event id (needed for redaction). Empty string otherwise.
+    QString ownReactionEventId(const QString& targetEventId, const QString& emoji,
+                                 const QString& userId) const;
+
+    // Given a known event ID in this room, return its list index or -1.
+    // Used by the UI to scroll to a replied-to message.
+    Q_INVOKABLE int indexForEventId(const QString& eventId) const;
 
     explicit MessageModel(QObject* parent = nullptr);
 
@@ -46,12 +75,23 @@ public:
     void prependEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);
     void clear();
 
+    // Back-pagination state. ServerConnection writes these as sync+messages
+    // responses come in; MessageView reads them to drive the scroll-to-top
+    // trigger and the reply-jump paginate-until-found loop.
+    QString prevBatchToken() const { return m_prevBatchToken; }
+    void setPrevBatchToken(const QString& token);
+    bool hasMoreHistory() const { return !m_prevBatchToken.isEmpty(); }
+    bool loadingHistory() const { return m_loadingHistory; }
+    void setLoadingHistory(bool v);
+
     // Re-resolve every sender display name from the cache and emit
     // dataChanged so the UI updates when a user changes their profile.
     void refreshDisplayNames();
 
 signals:
     void countChanged();
+    void hasMoreHistoryChanged();
+    void loadingHistoryChanged();
 
 private:
     struct MessageEntry {
@@ -68,13 +108,52 @@ private:
         qint64 mediaFileSize = 0; // Size in bytes
         bool edited = false;    // True if ≥1 m.replace has been applied
         qint64 editedAt = 0;    // Timestamp of the latest edit
+        // Reply metadata — populated when content.m.relates_to.m.in_reply_to
+        // is present. replyToSender/replyPreview are best-effort snapshots
+        // resolved from the local timeline when this message was ingested;
+        // if the target arrives later, a future pass can backfill them.
+        QString replyToEventId;
+        QString replyToSender;
+        QString replyPreview;
+        // Reactions aggregated from m.reaction events targeting this entry.
+        // Keyed by emoji; value is the list of (userId, reactionEventId) pairs
+        // so we can (a) count unique reactors, (b) detect whether the current
+        // user has reacted, and (c) find the reaction event id to redact when
+        // toggling off.
+        QHash<QString, QVector<QPair<QString, QString>>> reactionsByEmoji;
+    };
+
+    // Reaction events that arrived before their target message. Keyed by
+    // target event id, flushed on the next appendEvent that lands the target.
+    struct PendingReaction {
+        QString emoji;
+        QString userId;
+        QString reactionEventId;
     };
 
     QVector<MessageEntry> m_messages;
+    QHash<QString, QVector<PendingReaction>> m_pendingReactions;
+    // Map reaction event id -> (target event id, emoji, userId) so when a
+    // redaction arrives we can find which message's aggregate to update.
+    struct ReactionRef { QString targetEventId; QString emoji; QString userId; };
+    QHash<QString, ReactionRef> m_reactionIndex;
+    QString m_ownUserId; // cached from the most recent append, used by redactions
     QString m_homeserver;
+    // Opaque token pointing at events older than the current oldest row.
+    // Empty => no more history (or never populated). The exact format is
+    // server-defined; we pass it back verbatim as the `from` param on
+    // /rooms/{id}/messages.
+    QString m_prevBatchToken;
+    bool m_loadingHistory = false;
     const QMap<QString, QString>* m_dnCache = nullptr;
 
     MessageEntry eventToEntry(const bsfchat::RoomEvent& event, const QString& ownUserId) const;
     QString resolveMediaUrl(const QString& mxcUri) const;
     QString resolveDisplayName(const QString& userId) const;
+    QVariantList buildReactionsList(const MessageEntry& entry) const;
+    // Apply a single reaction record to the target message. Returns the row
+    // index so the caller can emit dataChanged, or -1 if the target wasn't
+    // found (caller should stash as pending).
+    int applyReactionToTarget(const QString& targetEventId, const QString& emoji,
+                               const QString& userId, const QString& reactionEventId);
 };

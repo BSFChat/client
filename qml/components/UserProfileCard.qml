@@ -11,8 +11,8 @@ Popup {
     property string profileAvatarUrl: ""
     property string serverName: ""
 
-    width: 300
-    height: 250
+    width: 320
+    height: 290
     modal: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
@@ -29,9 +29,9 @@ Popup {
     }
 
     background: Rectangle {
-        color: Theme.bgDark
-        radius: Theme.radiusNormal
-        border.color: Theme.bgLight
+        color: Theme.bg1
+        radius: Theme.r3
+        border.color: Theme.line
         border.width: 1
     }
 
@@ -53,35 +53,39 @@ Popup {
 
     contentItem: ColumnLayout {
         anchors.fill: parent
-        anchors.margins: Theme.spacingLarge
-        spacing: Theme.spacingLarge
+        anchors.margins: Theme.sp.s7
+        spacing: Theme.sp.s7
 
-        // Banner area
+        // Banner — tinted accent strip (derived from the user's sender
+        // colour) with the avatar overlapping the bottom edge. Avatar is
+        // a rounded-square to match the ServerRail / MemberList / Settings
+        // treatment instead of a circle.
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 60
-            radius: Theme.radiusNormal
+            Layout.preferredHeight: 72
+            radius: Theme.r2
             color: Theme.senderColor(profileCard.userId)
 
-            // Avatar overlapping banner bottom
             Rectangle {
-                id: avatarCircle
-                width: 64
-                height: 64
-                radius: 32
-                color: Theme.bgDark
-                border.color: Theme.bgDark
+                id: avatarTile
+                width: 72
+                height: 72
+                radius: Theme.r3
+                color: Theme.bg1
+                border.color: Theme.bg1
                 border.width: 4
                 anchors.bottom: parent.bottom
-                anchors.bottomMargin: -32
+                anchors.bottomMargin: -36
                 anchors.left: parent.left
-                anchors.leftMargin: Theme.spacingLarge
+                anchors.leftMargin: Theme.sp.s7
+                clip: true
 
                 Rectangle {
                     anchors.fill: parent
                     anchors.margins: 4
-                    radius: width / 2
+                    radius: Theme.r2
                     color: Theme.senderColor(profileCard.userId)
+                    clip: true
 
                     Image {
                         anchors.fill: parent
@@ -98,45 +102,55 @@ Popup {
 
                     Text {
                         anchors.centerIn: parent
-                        text: profileCard.profileDisplayName.charAt(0).toUpperCase()
-                        font.pixelSize: 24
-                        font.bold: true
-                        color: "white"
+                        text: {
+                            var n = profileCard.profileDisplayName
+                                 || profileCard.userId || "?";
+                            var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                            return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
+                        }
+                        font.family: Theme.fontSans
+                        font.pixelSize: 28
+                        font.weight: Theme.fontWeight.semibold
+                        color: Theme.onAccent
                         visible: profileCard.profileAvatarUrl === ""
                     }
                 }
             }
         }
 
-        // Spacer for avatar overlap
+        // Spacer for avatar overlap (half of avatar height).
         Item {
-            Layout.preferredHeight: 20
+            Layout.preferredHeight: 36
         }
 
-        // Display name
+        // Display name — Geist semibold, tight tracking.
         Text {
             text: profileCard.profileDisplayName || profileCard.userId
-            font.pixelSize: 20
-            font.bold: true
-            color: Theme.textPrimary
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.xl
+            font.weight: Theme.fontWeight.semibold
+            font.letterSpacing: Theme.trackTight.xl
+            color: Theme.fg0
             Layout.fillWidth: true
             elide: Text.ElideRight
         }
 
-        // User ID
+        // User ID — mono, fg3 (quieter than display name).
         Text {
             text: profileCard.userId
-            font.pixelSize: Theme.fontSizeSmall
-            color: Theme.textMuted
+            font.family: Theme.fontMono
+            font.pixelSize: Theme.fontSize.sm
+            color: Theme.fg3
             Layout.fillWidth: true
             elide: Text.ElideRight
         }
 
-        // Server name
+        // Server host, in mono for consistency with the mxid.
         Text {
             text: serverManager.activeServer ? serverManager.activeServer.serverUrl : ""
-            font.pixelSize: Theme.fontSizeSmall
-            color: Theme.textMuted
+            font.family: Theme.fontMono
+            font.pixelSize: Theme.fontSize.xs
+            color: Theme.fg3
             Layout.fillWidth: true
             elide: Text.ElideRight
             visible: text !== ""
@@ -144,21 +158,27 @@ Popup {
 
         Item { Layout.fillHeight: true }
 
-        // Message button
+        // Message button — primary accent. DMs aren't wired yet, so the
+        // click currently just dismisses the card; when DMScreen lands,
+        // swap in the real open-DM flow.
         Button {
+            id: messageBtn
             Layout.fillWidth: true
-            Layout.preferredHeight: 36
+            Layout.preferredHeight: 40
             visible: serverManager.activeServer !== null && profileCard.userId !== serverManager.activeServer.userId
             contentItem: Text {
-                text: "Message"
-                font.pixelSize: Theme.fontSizeNormal
-                color: "white"
+                text: "Send message"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.md
+                font.weight: Theme.fontWeight.semibold
+                color: Theme.onAccent
                 horizontalAlignment: Text.AlignHCenter
                 verticalAlignment: Text.AlignVCenter
             }
             background: Rectangle {
-                color: parent.hovered ? Theme.accentHover : Theme.accent
-                radius: Theme.radiusSmall
+                color: messageBtn.hovered ? Theme.accentDim : Theme.accent
+                radius: Theme.r2
+                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
             }
             onClicked: {
                 // TODO: Open DM with user

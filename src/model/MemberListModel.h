@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QMap>
 #include <QString>
 #include <QVector>
 
@@ -28,6 +29,13 @@ public:
 
     QString displayNameForUser(const QString& userId) const;
 
+    // Global user display-name cache (owned by ServerConnection). Used as a
+    // fallback when the member event didn't carry a displayname (older
+    // rooms, or events written before the server's broadcast was added).
+    void setDisplayNameCache(const QMap<QString, QString>* cache) { m_dnCache = cache; }
+    // Re-resolve every member's display name from the cache and refresh.
+    void refreshDisplayNames();
+
 private:
     int findMember(const QString& userId) const;
 
@@ -39,4 +47,7 @@ private:
     };
 
     QVector<MemberEntry> m_members;
+    const QMap<QString, QString>* m_dnCache = nullptr;
+
+    QString resolveName(const QString& userId, const QString& localName) const;
 };

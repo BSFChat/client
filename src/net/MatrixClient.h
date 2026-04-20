@@ -41,12 +41,44 @@ public:
 
     // Messages
     void sendMessage(const QString& roomId, const QString& body);
+    // Rich message with explicit HTML formatting and @mention targeting.
+    // `formattedBody` is the `format: org.matrix.custom.html` payload
+    // (sender-generated — the composer adds <a> anchors for @Name and
+    // #channel tokens). `mentionedUserIds` populates `m.mentions.user_ids`
+    // so the server can elevate notifications for targeted users.
+    void sendRichMessage(const QString& roomId, const QString& body,
+                          const QString& formattedBody,
+                          const QStringList& mentionedUserIds);
     void sendRoomEvent(const QString& roomId, const QString& eventType, const QByteArray& content);
     void getRoomMessages(const QString& roomId, const QString& from, const QString& dir = "b", int limit = 50);
     // Edit a previously-sent m.room.message by the current user. Sends a
     // new m.room.message with m.relates_to {rel_type: m.replace,
     // event_id: targetEventId}; the server accepts it only if sender matches.
     void editMessage(const QString& roomId, const QString& targetEventId, const QString& newBody);
+    // Send a new m.room.message with m.relates_to.m.in_reply_to.event_id
+    // pointing at targetEventId. Server needs no special support — it's
+    // just content metadata.
+    void replyToMessage(const QString& roomId, const QString& body,
+                         const QString& targetEventId);
+    // Send an m.reaction event annotating targetEventId with `emoji`.
+    // Server treats it as a normal event and distributes it through /sync;
+    // the client aggregates state in MessageModel.
+    void sendReaction(const QString& roomId, const QString& targetEventId,
+                       const QString& emoji);
+    // Redact a previously-sent reaction (to unreact). Thin wrapper around
+    // redactEvent — exists so callers read naturally.
+    void redactReaction(const QString& roomId, const QString& reactionEventId);
+    // Send a new plain m.room.message into destRoomId, prefixed with a
+    // "Forwarded from #source by @sender" attribution. No Matrix relation.
+    // The source{ServerUrl,RoomId,EventId} trio lets us embed a
+    // bsfchat://message/... link in the header so recipients can click
+    // through to the original message & context.
+    void forwardMessage(const QString& destRoomId, const QString& body,
+                         const QString& sourceChannelName,
+                         const QString& sourceSenderName,
+                         const QString& sourceServerUrl = {},
+                         const QString& sourceRoomId = {},
+                         const QString& sourceEventId = {});
 
     // Media
     void uploadMedia(const QByteArray& data, const QString& contentType, const QString& filename);
@@ -73,6 +105,9 @@ public:
     void redactEvent(const QString& roomId, const QString& eventId, const QString& reason = {});
     void kickUser(const QString& roomId, const QString& userId, const QString& reason = {});
     void banUser(const QString& roomId, const QString& userId, const QString& reason = {});
+    // Reverses a ban on `userId` in `roomId`. The user goes back to "leave"
+    // state and can be re-invited / rejoin like anyone else.
+    void unbanUser(const QString& roomId, const QString& userId);
 
     // Voice
     void joinVoice(const QString& roomId);
@@ -134,6 +169,15 @@ signals:
     void turnConfigResult(const QJsonObject& config);
 
     void profileResult(const QString& userId, const QString& displayName, const QString& avatarUrl);
+
+    // Fired whenever PUT /rooms/{id}/state/{type}/{key} fails. The UI uses
+    // this to (a) surface a toast and (b) roll back any optimistic local
+    // updates it applied in anticipation of success. `stateKey` is the
+    // state_key of the attempted write; `status` is the HTTP status (0 if
+    // the network request itself failed); `error` is the human-readable
+    // message decoded from the response body (or Qt's network error).
+    void stateEventError(const QString& roomId, const QString& eventType,
+                         const QString& stateKey, int status, const QString& error);
 
     void categoryRoomCreated(const QString& roomId);
     void channelMoved();

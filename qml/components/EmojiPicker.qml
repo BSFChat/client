@@ -21,9 +21,9 @@ Popup {
     property string searchQuery: ""
 
     background: Rectangle {
-        color: Theme.bgDark
-        radius: Theme.radiusNormal
-        border.color: Theme.bgLight
+        color: Theme.bg1
+        radius: Theme.r3
+        border.color: Theme.line
         border.width: 1
 
         // Drop shadow effect via layered rectangle
@@ -31,7 +31,7 @@ Popup {
             anchors.fill: parent
             anchors.margins: -1
             z: -1
-            radius: Theme.radiusNormal + 1
+            radius: Theme.r3 + 1
             color: "#40000000"
         }
     }
@@ -43,21 +43,21 @@ Popup {
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 40
-            Layout.margins: Theme.spacingNormal
+            Layout.margins: Theme.sp.s3
             Layout.bottomMargin: 0
-            color: Theme.bgMedium
-            radius: Theme.radiusSmall
+            color: Theme.bg2
+            radius: Theme.r1
 
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: Theme.spacingNormal
-                anchors.rightMargin: Theme.spacingNormal
-                spacing: Theme.spacingSmall
+                anchors.leftMargin: Theme.sp.s3
+                anchors.rightMargin: Theme.sp.s3
+                spacing: Theme.sp.s1
 
-                Text {
-                    text: "\u{1F50D}"
-                    font.pixelSize: 14
-                    color: Theme.textMuted
+                Icon {
+                    name: "search"
+                    size: 14
+                    color: Theme.fg2
                     Layout.alignment: Qt.AlignVCenter
                 }
 
@@ -65,33 +65,43 @@ Popup {
                     id: searchField
                     Layout.fillWidth: true
                     Layout.alignment: Qt.AlignVCenter
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontSizeNormal
+                    color: Theme.fg0
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
                     clip: true
                     onTextChanged: emojiPicker.searchQuery = text
 
                     Text {
                         anchors.fill: parent
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "Search emoji..."
-                        color: Theme.textMuted
-                        font.pixelSize: Theme.fontSizeNormal
+                        text: "Search emoji…"
+                        color: Theme.fg3
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
                         visible: searchField.text.length === 0
                         verticalAlignment: Text.AlignVCenter
                     }
                 }
 
-                // Clear search button
-                Text {
-                    text: "\u2715"
-                    font.pixelSize: 12
-                    color: Theme.textMuted
-                    visible: searchField.text.length > 0
+                // Clear search button — ghost X that surfaces only when
+                // there's something to clear.
+                Rectangle {
+                    Layout.preferredWidth: 22
+                    Layout.preferredHeight: 22
                     Layout.alignment: Qt.AlignVCenter
-
+                    radius: Theme.r1
+                    color: clearSearchMouse.containsMouse ? Theme.bg3 : "transparent"
+                    visible: searchField.text.length > 0
+                    Icon {
+                        anchors.centerIn: parent
+                        name: "x"
+                        size: 10
+                        color: clearSearchMouse.containsMouse ? Theme.fg0 : Theme.fg2
+                    }
                     MouseArea {
+                        id: clearSearchMouse
                         anchors.fill: parent
-                        anchors.margins: -4
+                        hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             searchField.text = "";
@@ -106,9 +116,9 @@ Popup {
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 36
-            Layout.leftMargin: Theme.spacingNormal
-            Layout.rightMargin: Theme.spacingNormal
-            Layout.topMargin: Theme.spacingSmall
+            Layout.leftMargin: Theme.sp.s3
+            Layout.rightMargin: Theme.sp.s3
+            Layout.topMargin: Theme.sp.s1
             color: "transparent"
             visible: emojiPicker.searchQuery.length === 0
 
@@ -122,18 +132,39 @@ Popup {
                     Rectangle {
                         Layout.preferredWidth: 34
                         Layout.preferredHeight: 32
-                        radius: Theme.radiusSmall
-                        color: emojiPicker.currentCategory === modelData.id
-                               ? Theme.bgLight
+                        radius: Theme.r1
+                        readonly property bool isSelected:
+                            emojiPicker.currentCategory === modelData.id
+                        color: isSelected
+                               ? Theme.bg3
                                : categoryTabHover.containsMouse
-                                 ? Theme.bgMedium
+                                 ? Theme.bg2
                                  : "transparent"
                         visible: modelData.id !== "frequent" || emojiPicker.recentEmoji.length > 0
+                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                        // Selected-tab accent stripe along the bottom edge —
+                        // reads the selection without having to compare bg tints.
+                        Rectangle {
+                            anchors.bottom: parent.bottom
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            width: parent.isSelected ? 20 : 0
+                            height: 2
+                            radius: 1
+                            color: Theme.accent
+                            Behavior on width {
+                                NumberAnimation { duration: Theme.motion.fastMs
+                                                  easing.type: Easing.BezierSpline
+                                                  easing.bezierCurve: Theme.motion.bezier }
+                            }
+                        }
 
                         Text {
                             anchors.centerIn: parent
                             text: modelData.icon
                             font.pixelSize: 18
+                            opacity: parent.isSelected ? 1.0 : 0.65
+                            Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
                         }
 
                         MouseArea {
@@ -158,22 +189,22 @@ Popup {
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 1
-            Layout.leftMargin: Theme.spacingNormal
-            Layout.rightMargin: Theme.spacingNormal
-            Layout.topMargin: Theme.spacingSmall
-            color: Theme.bgLight
+            Layout.leftMargin: Theme.sp.s3
+            Layout.rightMargin: Theme.sp.s3
+            Layout.topMargin: Theme.sp.s1
+            color: Theme.line
         }
 
         // Emoji grid area
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.margins: Theme.spacingSmall
+            Layout.margins: Theme.sp.s1
 
             GridView {
                 id: emojiGrid
                 anchors.fill: parent
-                anchors.margins: Theme.spacingSmall
+                anchors.margins: Theme.sp.s1
                 cellWidth: 40
                 cellHeight: 40
                 clip: true
@@ -185,7 +216,7 @@ Popup {
                     contentItem: Rectangle {
                         implicitWidth: 4
                         radius: 2
-                        color: Theme.textMuted
+                        color: Theme.fg2
                         opacity: 0.5
                     }
                     background: Rectangle {
@@ -206,8 +237,8 @@ Popup {
                 delegate: Rectangle {
                     width: 38
                     height: 38
-                    radius: Theme.radiusSmall
-                    color: emojiCellHover.containsMouse ? Theme.bgLight : "transparent"
+                    radius: Theme.r1
+                    color: emojiCellHover.containsMouse ? Theme.bg3 : "transparent"
 
                     Text {
                         anchors.centerIn: parent
@@ -237,8 +268,8 @@ Popup {
                 Text {
                     anchors.centerIn: parent
                     text: "No emoji found"
-                    color: Theme.textMuted
-                    font.pixelSize: Theme.fontSizeNormal
+                    color: Theme.fg2
+                    font.pixelSize: Theme.fontSize.md
                     visible: emojiGrid.count === 0
                 }
             }

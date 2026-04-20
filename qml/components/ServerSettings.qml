@@ -13,6 +13,41 @@ Popup {
 
     property int selectedSection: 0
 
+    // Emitted when the user clicks a channel row in the Channels tab. The
+    // host component is expected to open its ChannelSettings instance for
+    // the given room (we don't have access to it from here — it's owned by
+    // ChannelList.qml alongside this popup).
+    signal channelSettingsRequested(string roomId, string roomName)
+
+    // Emitted when the user clicks the trash icon on a channel row. Host
+    // opens its delete-confirmation popup; we don't close the settings
+    // popup because the user is mid-task and may delete several in a row.
+    signal channelDeleteRequested(string roomId, string roomName)
+
+    // Emitted by the "+ Add channel" / "+ Add category" affordances. Host
+    // opens its create-prompt popup seeded with the right kind/parent.
+    //   kind: "category" | "text" | "voice"
+    //   categoryId: "" for top-level create or for kind=="category"
+    signal createChannelRequested(string kind, string categoryId)
+
+    // Per-tab header (24px title + divider rule). SPEC §3.10 section-header.
+    // Factored here so each tab body doesn't redeclare the five-property
+    // ColumnLayout → Text → Rectangle pattern.
+    component TabHeader: ColumnLayout {
+        property string title: ""
+        Layout.fillWidth: true
+        spacing: Theme.sp.s3
+        Text {
+            text: parent.title
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.xxl
+            font.weight: Theme.fontWeight.semibold
+            font.letterSpacing: Theme.trackTight.xxl
+            color: Theme.fg0
+        }
+        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
+    }
+
     // Permission bit definitions mirrored from protocol/include/bsfchat/Permissions.h.
     // Each entry has {key, label, flag} where flag is the bit value.
     readonly property var permissionFlags: [
@@ -33,11 +68,152 @@ Popup {
     property string editingRoleId: ""
     property string editingMemberId: ""
 
+    // Transient state for the kick/ban/unban confirm dialog. Populated by
+    // the row that initiated the action; consumed on confirm.
+    //   { kind: "kick" | "ban" | "unban", userId, displayName }
+    property var confirmMod: ({ kind: "", userId: "", displayName: "" })
+    property alias confirmModDialog: _confirmModDialog
+
+    // Inline error toast state. Populated by the stateWriteFailed handler
+    // on the active server; auto-clears after 5 seconds.
+    property string _toastMessage: ""
+    Timer {
+        id: _toastTimer
+        interval: 5000
+        onTriggered: serverSettingsPopup._toastMessage = ""
+    }
+    Connections {
+        target: serverManager.activeServer
+        function onStateWriteFailed(kind, status, error) {
+            var prefix;
+            switch (kind) {
+                case "role-assign":
+                    prefix = "Couldn't save role assignments";
+                    break;
+                case "server-name":
+                    prefix = "Couldn't update server name";
+                    break;
+                case "channel-override":
+                    prefix = "Couldn't save channel permissions";
+                    break;
+                case "channel-settings":
+                    prefix = "Couldn't update channel settings";
+                    break;
+                case "server-roles":
+                    prefix = "Couldn't save server roles";
+                    break;
+                default:
+                    prefix = "Save failed";
+            }
+            var suffix = status === 403
+                ? "you don't have permission."
+                : (error || ("HTTP " + status));
+            serverSettingsPopup._toastMessage = prefix + " — " + suffix;
+            _toastTimer.restart();
+        }
+    }
+
     background: Rectangle {
-        color: Theme.bgDark
-        radius: Theme.radiusNormal
-        border.color: Theme.bgLight
+        color: Theme.bg1
+        radius: Theme.r3
+        border.color: Theme.line
         border.width: 1
+
+        // Inline error toast — slides in from the top when the active
+        // server's stateWriteFailed signal fires, auto-dismisses after 5s.
+        // Anchored inside the popup's background so it floats above content
+        // at any tab.
+        Rectangle {
+            id: _errorToast
+            anchors.top: parent.top
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.topMargin: serverSettingsPopup._toastMessage !== ""
+                               ? Theme.sp.s5 : -_errorToast.height - Theme.sp.s5
+            width: Math.min(parent.width - Theme.sp.s7 * 2, 520)
+            height: _errorToastCol.implicitHeight + Theme.sp.s4 * 2
+            radius: Theme.r2
+            color: Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.14)
+            border.color: Theme.danger
+            border.width: 1
+            z: 20
+            visible: anchors.topMargin > -_errorToast.height
+            Behavior on anchors.topMargin {
+                NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+            }
+
+            RowLayout {
+                id: _errorToastCol
+                anchors.fill: parent
+                anchors.leftMargin: Theme.sp.s5
+                anchors.rightMargin: Theme.sp.s4
+                anchors.topMargin: Theme.sp.s4
+                anchors.bottomMargin: Theme.sp.s4
+                spacing: Theme.sp.s3
+                Icon {
+                    name: "x"
+                    size: 14
+                    color: Theme.danger
+                    Layout.alignment: Qt.AlignTop
+                    Layout.topMargin: 2
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: serverSettingsPopup._toastMessage
+                    color: Theme.fg0
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.sm
+                    wrapMode: Text.WordWrap
+                }
+                Rectangle {
+                    Layout.preferredWidth: 20
+                    Layout.preferredHeight: 20
+                    Layout.alignment: Qt.AlignTop
+                    radius: Theme.r1
+                    color: _toastDismissMouse.containsMouse
+                           ? Qt.rgba(0, 0, 0, 0.15) : "transparent"
+                    Text {
+                        anchors.centerIn: parent
+                        text: "×"
+                        color: Theme.fg1
+                        font.pixelSize: 14
+                    }
+                    MouseArea {
+                        id: _toastDismissMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: serverSettingsPopup._toastMessage = ""
+                    }
+                }
+            }
+        }
+
+        // Top-right close X — floats on top of whatever the content is,
+        // matches the ChannelSettings pattern. Esc / click-outside still
+        // work the same way.
+        Rectangle {
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.topMargin: Theme.sp.s5
+            anchors.rightMargin: Theme.sp.s5
+            width: 28; height: 28
+            radius: Theme.r1
+            color: closeXMouse.containsMouse ? Theme.bg3 : "transparent"
+            z: 10
+            Icon {
+                anchors.centerIn: parent
+                name: "x"
+                size: 14
+                color: closeXMouse.containsMouse ? Theme.fg0 : Theme.fg2
+            }
+            MouseArea {
+                id: closeXMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: serverSettingsPopup.close()
+            }
+        }
     }
 
     contentItem: RowLayout {
@@ -47,30 +223,32 @@ Popup {
         Rectangle {
             Layout.fillHeight: true
             Layout.preferredWidth: 200
-            color: Theme.bgDarkest
-            radius: Theme.radiusNormal
+            color: Theme.bg0
+            radius: Theme.r2
 
             // Clip right radius
             Rectangle {
                 anchors.right: parent.right
-                width: Theme.radiusNormal
+                width: Theme.r2
                 height: parent.height
-                color: Theme.bgDarkest
+                color: Theme.bg0
             }
 
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: Theme.spacingNormal
+                anchors.margins: Theme.sp.s3
                 spacing: 2
 
                 Text {
                     text: "SERVER SETTINGS"
-                    font.pixelSize: Theme.fontSizeSmall
-                    font.bold: true
-                    color: Theme.textMuted
-                    Layout.leftMargin: Theme.spacingNormal
-                    Layout.topMargin: Theme.spacingNormal
-                    Layout.bottomMargin: Theme.spacingNormal
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xs
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackWidest.xs
+                    color: Theme.fg3
+                    Layout.leftMargin: Theme.sp.s3
+                    Layout.topMargin: Theme.sp.s3
+                    Layout.bottomMargin: Theme.sp.s3
                 }
 
                 Repeater {
@@ -78,16 +256,24 @@ Popup {
                     delegate: Rectangle {
                         Layout.fillWidth: true
                         height: 36
-                        radius: Theme.radiusSmall
-                        color: selectedSection === index ? Theme.bgLight : navItemMouse.containsMouse ? Qt.darker(Theme.bgMedium, 0.9) : "transparent"
+                        radius: Theme.r1
+                        readonly property bool isActive: selectedSection === index
+                        color: isActive ? Theme.bg3
+                             : navItemMouse.containsMouse ? Theme.bg2
+                             : "transparent"
+                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.left: parent.left
-                            anchors.leftMargin: Theme.spacingNormal
+                            anchors.leftMargin: Theme.sp.s3
                             text: modelData
-                            color: selectedSection === index ? Theme.textPrimary : Theme.textSecondary
-                            font.pixelSize: Theme.fontSizeNormal
+                            color: parent.isActive ? Theme.fg0 : Theme.fg1
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.md
+                            font.weight: parent.isActive
+                                         ? Theme.fontWeight.semibold
+                                         : Theme.fontWeight.medium
                         }
 
                         MouseArea {
@@ -100,32 +286,9 @@ Popup {
                     }
                 }
 
+                // Close-nav row removed; the dialog is dismissed via the
+                // top-right X (see below) or Esc / click-outside.
                 Item { Layout.fillHeight: true }
-
-                // Close button at bottom
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 36
-                    radius: Theme.radiusSmall
-                    color: closeNavMouse.containsMouse ? Theme.bgLight : "transparent"
-
-                    Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.left: parent.left
-                        anchors.leftMargin: Theme.spacingNormal
-                        text: "Close"
-                        color: Theme.textMuted
-                        font.pixelSize: Theme.fontSizeNormal
-                    }
-
-                    MouseArea {
-                        id: closeNavMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: serverSettingsPopup.close()
-                    }
-                }
             }
         }
 
@@ -139,61 +302,87 @@ Popup {
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.spacingLarge * 2
-                    spacing: Theme.spacingLarge
+                    anchors.margins: Theme.sp.s7 * 2
+                    spacing: Theme.sp.s7
 
-                    Text {
-                        text: "Server Overview"
-                        font.pixelSize: 22
-                        font.bold: true
-                        color: Theme.textPrimary
-                    }
+                    TabHeader { title: "Server Overview" }
 
                     Text {
                         text: "SERVER NAME"
-                        font.pixelSize: Theme.fontSizeSmall
-                        font.bold: true
-                        color: Theme.textSecondary
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xs
+                        font.weight: Theme.fontWeight.semibold
+                        font.letterSpacing: Theme.trackWidest.xs
+                        color: Theme.fg3
                     }
 
                     TextField {
                         id: serverNameField
                         Layout.fillWidth: true
-                        Layout.maximumWidth: 400
+                        Layout.maximumWidth: 420
                         // Shown to all users across the server (channel-list
                         // header, tooltips, etc.). Only editable by users
                         // with MANAGE_SERVER; server enforces regardless.
                         text: serverManager.activeServer ? serverManager.activeServer.serverName : ""
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontSizeNormal
+                        color: Theme.fg0
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
                         background: Rectangle {
-                            color: Theme.bgDarkest
-                            radius: Theme.radiusSmall
-                            border.color: serverNameField.activeFocus ? Theme.accent : Theme.bgLight
+                            color: Theme.bg0
+                            radius: Theme.r2
+                            border.color: serverNameField.activeFocus ? Theme.accent : Theme.line
                             border.width: 1
                         }
-                        padding: Theme.spacingNormal
+                        leftPadding: Theme.sp.s4
+                        rightPadding: Theme.sp.s4
+                        topPadding: Theme.sp.s3
+                        bottomPadding: Theme.sp.s3
                     }
 
-                    Button {
-                        text: "Save"
-                        contentItem: Text {
-                            text: parent.text
-                            font.pixelSize: Theme.fontSizeNormal
-                            color: "white"
-                            horizontalAlignment: Text.AlignHCenter
-                        }
-                        background: Rectangle {
-                            color: parent.hovered ? Theme.accentHover : Theme.accent
-                            radius: Theme.radiusSmall
-                            implicitWidth: 100
-                            implicitHeight: Theme.buttonHeight
-                        }
-                        onClicked: {
-                            if (serverManager.activeServer) {
-                                serverManager.activeServer.updateServerName(serverNameField.text.trim());
+                    // Primary action row — "Save" as a proper primary
+                    // button, sized so it commands attention without
+                    // dominating. Disabled until the field value differs
+                    // from the currently persisted server name so the
+                    // button reads the current state at a glance.
+                    RowLayout {
+                        Layout.topMargin: Theme.sp.s3
+                        Layout.maximumWidth: 420
+
+                        Button {
+                            id: saveServerNameBtn
+                            enabled: serverManager.activeServer
+                                     && serverNameField.text.trim().length > 0
+                                     && serverNameField.text.trim() !== serverManager.activeServer.serverName
+                            contentItem: Text {
+                                text: "Save changes"
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.md
+                                font.weight: Theme.fontWeight.semibold
+                                color: saveServerNameBtn.enabled ? Theme.onAccent : Theme.fg3
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                color: !saveServerNameBtn.enabled
+                                       ? Theme.bg2
+                                       : (saveServerNameBtn.hovered ? Theme.accentDim : Theme.accent)
+                                radius: Theme.r2
+                                implicitWidth: 140
+                                implicitHeight: 36
+                                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                            }
+                            onClicked: {
+                                if (serverManager.activeServer) {
+                                    serverManager.activeServer.updateServerName(serverNameField.text.trim());
+                                }
                             }
                         }
+                    }
+
+                    InfoBanner {
+                        Layout.maximumWidth: 420
+                        icon: "shield"
+                        text: "Only members with the Manage Server permission can change the server name. Everyone else sees the field read-only."
                     }
 
                     Item { Layout.fillHeight: true }
@@ -204,21 +393,17 @@ Popup {
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.spacingLarge * 2
-                    spacing: Theme.spacingLarge
+                    anchors.margins: Theme.sp.s7 * 2
+                    spacing: Theme.sp.s7
 
-                    Text {
-                        text: "Roles"
-                        font.pixelSize: 22
-                        font.bold: true
-                        color: Theme.textPrimary
-                    }
+                    TabHeader { title: "Roles" }
 
                     Text {
                         Layout.fillWidth: true
                         text: "Roles grant permissions server-wide. Assign them to members in the Members tab; override per-channel in each channel's settings."
-                        font.pixelSize: Theme.fontSizeSmall
-                        color: Theme.textMuted
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        color: Theme.fg2
                         wrapMode: Text.WordWrap
                     }
 
@@ -227,6 +412,8 @@ Popup {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
+
+                        ScrollBar.vertical: ThemedScrollBar {}
                         model: serverManager.activeServer ? serverManager.activeServer.serverRoles : []
                         spacing: 4
 
@@ -239,30 +426,49 @@ Popup {
 
                             Rectangle {
                                 width: parent.width
-                                height: 44
-                                radius: Theme.radiusSmall
-                                color: roleRowMouse.containsMouse ? Theme.bgLight : Theme.bgMedium
+                                height: 48
+                                radius: Theme.r2
+                                color: roleRowMouse.containsMouse ? Theme.bg3 : Theme.bg2
+                                border.color: parent.isEditing ? Theme.accent : Theme.line
+                                border.width: 1
+                                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
 
                                 RowLayout {
                                     anchors.fill: parent
-                                    anchors.leftMargin: Theme.spacingNormal
-                                    anchors.rightMargin: Theme.spacingNormal
-                                    spacing: Theme.spacingNormal
+                                    anchors.leftMargin: Theme.sp.s5
+                                    anchors.rightMargin: Theme.sp.s3
+                                    spacing: Theme.sp.s4
 
+                                    // Role color chip — slightly larger so
+                                    // it reads as a real identifier.
                                     Rectangle {
-                                        width: 14; height: 14; radius: 7
+                                        width: 18; height: 18; radius: 9
                                         color: parent.parent.parent.role.color || Theme.accent
+                                        border.color: Theme.bg0
+                                        border.width: 1
                                     }
                                     Text {
                                         text: parent.parent.parent.role.name || ""
-                                        font.pixelSize: Theme.fontSizeNormal
-                                        color: Theme.textPrimary
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.md
+                                        font.weight: Theme.fontWeight.semibold
+                                        color: Theme.fg0
                                         Layout.fillWidth: true
+                                        elide: Text.ElideRight
                                     }
-                                    Text {
-                                        text: parent.parent.parent.isEditing ? "Close ▾" : "Edit ▸"
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        color: Theme.accent
+                                    // Expand / collapse chevron — rotates
+                                    // 90° rather than swapping glyphs.
+                                    Icon {
+                                        name: "chevron-right"
+                                        size: 14
+                                        color: Theme.fg2
+                                        rotation: parent.parent.parent.isEditing ? 90 : 0
+                                        Behavior on rotation {
+                                            NumberAnimation { duration: Theme.motion.fastMs
+                                                              easing.type: Easing.BezierSpline
+                                                              easing.bezierCurve: Theme.motion.bezier }
+                                        }
                                     }
                                 }
 
@@ -284,17 +490,23 @@ Popup {
                                 id: roleEditCard
                                 width: parent.width
                                 visible: parent.isEditing
-                                radius: Theme.radiusSmall
-                                color: Theme.bgDarkest
-                                border.color: Theme.bgLight
+                                radius: Theme.r2
+                                color: Theme.bg0
+                                border.color: Theme.line
                                 border.width: 1
-                                height: visible ? roleEditCol.implicitHeight + Theme.spacingLarge * 2 : 0
+                                height: visible ? roleEditCol.implicitHeight + Theme.sp.s7 * 2 : 0
 
                                 // Single source of truth for the form.
                                 // editRole binds to the delegate's role, so
                                 // scratch values reset whenever the user opens
-                                // a different role.
-                                readonly property var editRole: parent.parent.role
+                                // a different role. Falls back to an empty
+                                // object so the descendant bindings don't
+                                // explode into "Cannot read property X of
+                                // undefined" during the brief window between
+                                // the surrounding Column being recycled and
+                                // the new role reference landing (e.g. after
+                                // a role is deleted).
+                                readonly property var editRole: parent.parent.role || ({})
                                 property string scratchColor: editRole.color || "#5865f2"
                                 property int scratchPos: editRole.position !== undefined
                                     ? editRole.position : 0
@@ -320,50 +532,74 @@ Popup {
                                 ColumnLayout {
                                     id: roleEditCol
                                     anchors.fill: parent
-                                    anchors.margins: Theme.spacingLarge
-                                    spacing: Theme.spacingNormal
+                                    anchors.margins: Theme.sp.s7
+                                    spacing: Theme.sp.s3
 
                                     RowLayout {
                                         Layout.fillWidth: true
-                                        spacing: Theme.spacingNormal
+                                        spacing: Theme.sp.s3
 
                                         TextField {
                                             id: editRoleName
                                             Layout.fillWidth: true
                                             text: roleEditCard.editRole.name || ""
-                                            color: Theme.textPrimary
-                                            font.pixelSize: Theme.fontSizeNormal
+                                            color: Theme.fg0
+                                            font.family: Theme.fontSans
+                                            font.pixelSize: Theme.fontSize.md
                                             background: Rectangle {
-                                                color: Theme.bgMedium
-                                                radius: Theme.radiusSmall
+                                                color: Theme.bg1
+                                                radius: Theme.r2
+                                                border.color: editRoleName.activeFocus ? Theme.accent : Theme.line
+                                                border.width: 1
                                             }
-                                            padding: Theme.spacingNormal
+                                            leftPadding: Theme.sp.s4
+                                            rightPadding: Theme.sp.s4
+                                            topPadding: Theme.sp.s3
+                                            bottomPadding: Theme.sp.s3
                                         }
 
+                                        // SpinBox keeps Qt Controls chrome for its
+                                        // up/down buttons but we swap in a themed
+                                        // background and centre the value.
                                         SpinBox {
                                             id: editRolePosition
                                             from: 0; to: 1000
                                             value: roleEditCard.scratchPos
                                             onValueModified: roleEditCard.scratchPos = value
+                                            font.family: Theme.fontMono
+                                            font.pixelSize: Theme.fontSize.md
                                             background: Rectangle {
-                                                color: Theme.bgMedium
-                                                radius: Theme.radiusSmall
-                                                implicitWidth: 90
+                                                color: Theme.bg1
+                                                radius: Theme.r2
+                                                border.color: Theme.line
+                                                border.width: 1
+                                                implicitWidth: 100
+                                                implicitHeight: 36
                                             }
                                         }
                                     }
 
+                                    // Role color palette — the four Designer accents up
+                                    // front, then a wider gamut of classic chat role
+                                    // colors. Selected swatch gets an fg0 ring.
                                     Row {
-                                        spacing: Theme.spacingSmall
+                                        spacing: Theme.sp.s2
                                         Repeater {
-                                            model: ["#5865f2", "#57f287", "#fee75c", "#ed4245", "#f47067",
-                                                    "#e0823d", "#39c5cf", "#dcbdfb", "#768390", "#f69d50"]
+                                            model: [
+                                                "#36d6c7", "#a28bff", "#ec6dd6", "#ffa34a",
+                                                "#57f287", "#fee75c", "#ed4245", "#f47067",
+                                                "#39c5cf", "#dcbdfb", "#f69d50", "#768390"
+                                            ]
                                             delegate: Rectangle {
-                                                width: 20; height: 20; radius: 10
+                                                width: 22; height: 22; radius: 11
                                                 color: modelData
-                                                border.color: roleEditCard.scratchColor === modelData
-                                                    ? Theme.textPrimary : "transparent"
-                                                border.width: 2
+                                                readonly property bool selected:
+                                                    roleEditCard.scratchColor === modelData
+                                                border.color: selected ? Theme.fg0 : Theme.line
+                                                border.width: selected ? 3 : 1
+                                                Behavior on border.width {
+                                                    NumberAnimation { duration: Theme.motion.fastMs }
+                                                }
                                                 MouseArea {
                                                     anchors.fill: parent
                                                     cursorShape: Qt.PointingHandCursor
@@ -374,23 +610,26 @@ Popup {
                                     }
 
                                     Text {
-                                        text: "Permissions"
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        font.bold: true
-                                        color: Theme.textSecondary
+                                        Layout.topMargin: Theme.sp.s3
+                                        text: "PERMISSIONS"
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.xs
+                                        font.weight: Theme.fontWeight.semibold
+                                        font.letterSpacing: Theme.trackWidest.xs
+                                        color: Theme.fg3
                                     }
 
                                     Grid {
                                         Layout.fillWidth: true
                                         columns: 2
-                                        columnSpacing: Theme.spacingLarge
-                                        rowSpacing: Theme.spacingSmall
+                                        columnSpacing: Theme.sp.s7
+                                        rowSpacing: Theme.sp.s1
 
                                         Repeater {
                                             model: serverSettingsPopup.permissionFlags
                                             delegate: Row {
                                                 spacing: 6
-                                                CheckBox {
+                                                ThemedCheckBox {
                                                     id: cb
                                                     // Bind directly to the bitfield. The .scratchPerms
                                                     // access registers the dep so checkbox state stays
@@ -401,8 +640,9 @@ Popup {
                                                 }
                                                 Text {
                                                     text: modelData.label
-                                                    color: Theme.textPrimary
-                                                    font.pixelSize: Theme.fontSizeSmall
+                                                    color: Theme.fg0
+                                                    font.family: Theme.fontSans
+                                                    font.pixelSize: Theme.fontSize.sm
                                                     anchors.verticalCenter: cb.verticalCenter
                                                 }
                                             }
@@ -411,17 +651,27 @@ Popup {
 
                                     RowLayout {
                                         Layout.fillWidth: true
-                                        Layout.topMargin: Theme.spacingNormal
-                                        spacing: Theme.spacingNormal
+                                        Layout.topMargin: Theme.sp.s3
+                                        spacing: Theme.sp.s3
 
+                                        // Primary Save — accent pill.
                                         Button {
-                                            text: "Save"
-                                            contentItem: Text { text: parent.text; color: "white"; font.pixelSize: Theme.fontSizeNormal; horizontalAlignment: Text.AlignHCenter }
+                                            id: roleSaveBtn
+                                            contentItem: Text {
+                                                text: "Save role"
+                                                font.family: Theme.fontSans
+                                                font.pixelSize: Theme.fontSize.md
+                                                font.weight: Theme.fontWeight.semibold
+                                                color: Theme.onAccent
+                                                horizontalAlignment: Text.AlignHCenter
+                                                verticalAlignment: Text.AlignVCenter
+                                            }
                                             background: Rectangle {
-                                                color: parent.hovered ? Theme.accentHover : Theme.accent
-                                                radius: Theme.radiusSmall
-                                                implicitHeight: Theme.buttonHeight
-                                                implicitWidth: 100
+                                                color: roleSaveBtn.hovered ? Theme.accentDim : Theme.accent
+                                                radius: Theme.r2
+                                                implicitHeight: 36
+                                                implicitWidth: 120
+                                                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                             }
                                             onClicked: {
                                                 if (!serverManager.activeServer) return;
@@ -451,12 +701,30 @@ Popup {
                                             }
                                         }
 
+                                        // Ghost danger Delete — hollow with danger
+                                        // border, fills on hover.
                                         Button {
+                                            id: roleDeleteBtn
                                             visible: (roleEditCard.editRole.id || roleEditCard.editRole.name) !== "everyone"
                                                   && (roleEditCard.editRole.id || roleEditCard.editRole.name) !== "admin"
-                                            text: "Delete"
-                                            contentItem: Text { text: parent.text; color: "#ed4245"; font.pixelSize: Theme.fontSizeNormal; horizontalAlignment: Text.AlignHCenter }
-                                            background: Rectangle { color: "transparent"; radius: Theme.radiusSmall; border.color: "#ed4245"; border.width: 1; implicitHeight: Theme.buttonHeight; implicitWidth: 100 }
+                                            contentItem: Text {
+                                                text: "Delete role"
+                                                font.family: Theme.fontSans
+                                                font.pixelSize: Theme.fontSize.md
+                                                font.weight: Theme.fontWeight.semibold
+                                                color: roleDeleteBtn.hovered ? Theme.onAccent : Theme.danger
+                                                horizontalAlignment: Text.AlignHCenter
+                                                verticalAlignment: Text.AlignVCenter
+                                            }
+                                            background: Rectangle {
+                                                color: roleDeleteBtn.hovered ? Theme.danger : "transparent"
+                                                radius: Theme.r2
+                                                border.color: Theme.danger
+                                                border.width: 1
+                                                implicitHeight: 36
+                                                implicitWidth: 120
+                                                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                            }
                                             onClicked: {
                                                 if (!serverManager.activeServer) return;
                                                 var existing = serverManager.activeServer.serverRoles;
@@ -482,16 +750,36 @@ Popup {
                             anchors.centerIn: parent
                             visible: parent.count === 0
                             text: "No roles configured — defaults will seed on first boot."
-                            font.pixelSize: Theme.fontSizeNormal
-                            color: Theme.textMuted
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.md
+                            color: Theme.fg2
                         }
                     }
 
-                    // Add-role footer
+                    // Add-role footer — accent pill, r2/36h matching the
+                    // rest of the settings button vocabulary. Inline icon +
+                    // label instead of a unicode plus glyph.
                     Button {
-                        text: "+ Add Role"
-                        contentItem: Text { text: parent.text; color: "white"; font.pixelSize: Theme.fontSizeNormal; horizontalAlignment: Text.AlignHCenter }
-                        background: Rectangle { color: parent.hovered ? Theme.accentHover : Theme.accent; radius: Theme.radiusSmall; implicitHeight: Theme.buttonHeight; implicitWidth: 140 }
+                        id: addRoleBtn
+                        contentItem: RowLayout {
+                            spacing: Theme.sp.s2
+                            Icon { name: "plus"; size: 14; color: Theme.onAccent; Layout.alignment: Qt.AlignVCenter }
+                            Text {
+                                text: "Add role"
+                                color: Theme.onAccent
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.md
+                                font.weight: Theme.fontWeight.semibold
+                                Layout.alignment: Qt.AlignVCenter
+                            }
+                        }
+                        background: Rectangle {
+                            color: addRoleBtn.hovered ? Theme.accentDim : Theme.accent
+                            radius: Theme.r2
+                            implicitHeight: 36
+                            implicitWidth: 140
+                            Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                        }
                         onClicked: {
                             if (!serverManager.activeServer) return;
                             var existing = serverManager.activeServer.serverRoles || [];
@@ -505,7 +793,10 @@ Popup {
                             out.push({
                                 id: newId,
                                 name: "New Role",
-                                color: "#5865f2",
+                                // Default new-role swatch — Designer cyan.
+                                // (Was Discord blurple; swapped for
+                                // visual continuity with our accent.)
+                                color: "#36d6c7",
                                 position: maxPos + 1,
                                 permissions: "0x080f", // everyone defaults
                                 mentionable: false,
@@ -521,15 +812,10 @@ Popup {
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.spacingLarge * 2
-                    spacing: Theme.spacingLarge
+                    anchors.margins: Theme.sp.s7 * 2
+                    spacing: Theme.sp.s7
 
-                    Text {
-                        text: "Members"
-                        font.pixelSize: 22
-                        font.bold: true
-                        color: Theme.textPrimary
-                    }
+                    TabHeader { title: "Members" }
 
                     // Search field
                     TextField {
@@ -537,70 +823,258 @@ Popup {
                         Layout.fillWidth: true
                         Layout.maximumWidth: 400
                         placeholderText: "Search members..."
-                        placeholderTextColor: Theme.textMuted
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontSizeNormal
+                        placeholderTextColor: Theme.fg2
+                        color: Theme.fg0
+                        font.pixelSize: Theme.fontSize.md
                         background: Rectangle {
-                            color: Theme.bgDarkest
-                            radius: Theme.radiusSmall
-                            border.color: memberSearchField.activeFocus ? Theme.accent : Theme.bgLight
+                            color: Theme.bg0
+                            radius: Theme.r2
+                            border.color: memberSearchField.activeFocus ? Theme.accent : Theme.line
                             border.width: 1
                         }
-                        padding: Theme.spacingNormal
+                        padding: Theme.sp.s3
+                    }
+
+                    // Empty-state card when no members have synced yet.
+                    // Mirrors the Bans-tab placeholder so the two tabs read
+                    // as siblings.
+                    Item {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        visible: {
+                            if (!serverManager.activeServer) return true;
+                            return serverManager.activeServer.serverMembers.length === 0;
+                        }
+                        ColumnLayout {
+                            anchors.centerIn: parent
+                            width: 360
+                            spacing: Theme.sp.s4
+                            Rectangle {
+                                Layout.alignment: Qt.AlignHCenter
+                                Layout.preferredWidth: 56
+                                Layout.preferredHeight: 56
+                                radius: Theme.r3
+                                color: Theme.bg2
+                                border.color: Theme.line
+                                border.width: 1
+                                Icon {
+                                    anchors.centerIn: parent
+                                    name: "users"
+                                    size: 24
+                                    color: Theme.fg3
+                                }
+                            }
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: "No members synced yet"
+                                color: Theme.fg0
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.lg
+                                font.weight: Theme.fontWeight.semibold
+                            }
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignHCenter
+                                text: "Give it a moment — the member list populates from sync as each channel's state arrives."
+                                color: Theme.fg2
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                wrapMode: Text.WordWrap
+                            }
+                        }
                     }
 
                     ListView {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
-                        model: serverManager.activeServer ? serverManager.activeServer.memberListModel : null
+                        visible: serverManager.activeServer
+                                 && serverManager.activeServer.serverMembers.length > 0
+
+                        ScrollBar.vertical: ThemedScrollBar {}
+                        // Server-wide member union (not the active-room model
+                        // which only knows about the currently-selected
+                        // channel). See ServerConnection::serverMembers.
+                        model: serverManager.activeServer
+                               ? serverManager.activeServer.serverMembers : []
                         spacing: 2
 
                         delegate: Column {
+                            id: memberRow
                             width: ListView.view ? ListView.view.width : 400
                             visible: {
                                 var search = memberSearchField.text.toLowerCase();
                                 if (search.length === 0) return true;
-                                var dn = model.displayName ? model.displayName.toLowerCase() : "";
-                                var uid = model.userId ? model.userId.toLowerCase() : "";
+                                var dn = modelData.displayName ? modelData.displayName.toLowerCase() : "";
+                                var uid = modelData.userId ? modelData.userId.toLowerCase() : "";
                                 return dn.indexOf(search) >= 0 || uid.indexOf(search) >= 0;
                             }
-                            property string memberUserId: model.userId || ""
-                            property bool expanded: serverSettingsPopup.editingMemberId === memberUserId
+                            readonly property string memberUserId: modelData.userId || ""
+                            readonly property bool expanded: serverSettingsPopup.editingMemberId === memberUserId
+                            // Set of assigned role ids. Rebuilt when the row
+                            // expands; mutated by checkbox clicks; read by
+                            // the Save button. Explicit object ref so QML
+                            // tracks writes.
+                            property var assignedSet: ({})
+
+                            function rebuildAssignedSet() {
+                                var m = {};
+                                if (serverManager.activeServer && memberUserId) {
+                                    var list = serverManager.activeServer.memberRoles(memberUserId);
+                                    for (var i = 0; i < list.length; i++) m[list[i]] = true;
+                                }
+                                assignedSet = m;
+                            }
+                            onExpandedChanged: if (expanded) rebuildAssignedSet()
 
                             Rectangle {
                                 width: parent.width
-                                height: 48
-                                radius: Theme.radiusSmall
-                                color: memberItemMouse.containsMouse ? Theme.bgLight : Theme.bgMedium
+                                height: 52
+                                radius: Theme.r2
+                                color: memberItemMouse.containsMouse ? Theme.bg3 : Theme.bg2
+                                border.color: parent.expanded ? Theme.accent : Theme.line
+                                border.width: 1
+                                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
 
                                 RowLayout {
                                     anchors.fill: parent
-                                    anchors.leftMargin: Theme.spacingNormal
-                                    anchors.rightMargin: Theme.spacingNormal
-                                    spacing: Theme.spacingNormal
+                                    anchors.leftMargin: Theme.sp.s5
+                                    anchors.rightMargin: Theme.sp.s4
+                                    spacing: Theme.sp.s4
 
+                                    // Rounded-square avatar to match the
+                                    // ServerRail + MemberList treatment
+                                    // instead of the old circle.
                                     Rectangle {
-                                        width: 32; height: 32; radius: 16
-                                        color: Theme.accent
+                                        width: Theme.avatar.md
+                                        height: Theme.avatar.md
+                                        radius: Theme.r2
+                                        color: Theme.senderColor(modelData.userId || "")
                                         Text {
                                             anchors.centerIn: parent
-                                            text: model.displayName ? model.displayName.charAt(0).toUpperCase() : "?"
-                                            font.pixelSize: 14; font.bold: true; color: "white"
+                                            text: {
+                                                var n = modelData.displayName || modelData.userId || "?";
+                                                var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                                return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
+                                            }
+                                            font.family: Theme.fontSans
+                                            font.pixelSize: 13
+                                            font.weight: Theme.fontWeight.semibold
+                                            color: Theme.onAccent
                                         }
                                     }
 
-                                    Column {
+                                    ColumnLayout {
                                         Layout.fillWidth: true
-                                        Text { text: model.displayName || ""; font.pixelSize: Theme.fontSizeNormal; color: Theme.textPrimary }
-                                        Text { text: model.userId || ""; font.pixelSize: Theme.fontSizeSmall; color: Theme.textMuted }
+                                        spacing: 2
+                                        // mxid pinned above name+chips so the
+                                        // three-line stack reads: display
+                                        // name → id → assigned roles.
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: Theme.sp.s2
+                                            Text {
+                                                text: modelData.displayName || ""
+                                                font.family: Theme.fontSans
+                                                font.pixelSize: Theme.fontSize.md
+                                                font.weight: Theme.fontWeight.semibold
+                                                color: Theme.fg0
+                                                elide: Text.ElideRight
+                                            }
+                                            Text {
+                                                text: modelData.userId || ""
+                                                font.family: Theme.fontMono
+                                                font.pixelSize: Theme.fontSize.xs
+                                                color: Theme.fg3
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+
+                                        // Assigned-role chips. Binds to
+                                        // permissionsGeneration so the row
+                                        // updates immediately after save —
+                                        // no expand/collapse required.
+                                        Flow {
+                                            Layout.fillWidth: true
+                                            spacing: 4
+                                            readonly property int _gen:
+                                                serverManager.activeServer
+                                                    ? serverManager.activeServer.permissionsGeneration : 0
+                                            readonly property var assigned: {
+                                                _gen;
+                                                if (!serverManager.activeServer) return [];
+                                                return serverManager.activeServer.memberRoles(memberRow.memberUserId);
+                                            }
+                                            visible: assigned.length > 0
+                                            Repeater {
+                                                model: parent.assigned
+                                                delegate: Rectangle {
+                                                    // Resolve the role's
+                                                    // colour + display name
+                                                    // from serverRoles; fall
+                                                    // back to the raw id.
+                                                    readonly property var roleInfo: {
+                                                        if (!serverManager.activeServer) return null;
+                                                        var list = serverManager.activeServer.serverRoles;
+                                                        for (var i = 0; i < list.length; i++) {
+                                                            var rid = list[i].id || list[i].name;
+                                                            if (rid === modelData) return list[i];
+                                                        }
+                                                        return null;
+                                                    }
+                                                    readonly property color rcolor:
+                                                        roleInfo && roleInfo.color ? roleInfo.color : Theme.fg3
+                                                    readonly property string rname:
+                                                        roleInfo && roleInfo.name ? roleInfo.name : modelData
+                                                    visible: modelData !== "everyone"
+                                                    implicitWidth: chipRow.implicitWidth + 10
+                                                    implicitHeight: 18
+                                                    radius: 9
+                                                    color: Qt.rgba(rcolor.r, rcolor.g, rcolor.b, 0.14)
+                                                    border.color: Qt.rgba(rcolor.r, rcolor.g, rcolor.b, 0.38)
+                                                    border.width: 1
+                                                    RowLayout {
+                                                        id: chipRow
+                                                        anchors.centerIn: parent
+                                                        spacing: 4
+                                                        Rectangle {
+                                                            width: 6; height: 6; radius: 3
+                                                            color: parent.parent.rcolor
+                                                            Layout.alignment: Qt.AlignVCenter
+                                                        }
+                                                        Text {
+                                                            text: parent.parent.rname
+                                                            color: parent.parent.rcolor
+                                                            font.family: Theme.fontSans
+                                                            font.pixelSize: 10
+                                                            font.weight: Theme.fontWeight.semibold
+                                                            Layout.alignment: Qt.AlignVCenter
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Chevron to mirror the role row.
+                                    Icon {
+                                        name: "chevron-right"
+                                        size: 14
+                                        color: Theme.fg2
+                                        rotation: parent.parent.expanded ? 90 : 0
+                                        Behavior on rotation {
+                                            NumberAnimation { duration: Theme.motion.fastMs
+                                                              easing.type: Easing.BezierSpline
+                                                              easing.bezierCurve: Theme.motion.bezier }
+                                        }
                                     }
 
-                                    Text {
-                                        text: parent.parent.parent.expanded ? "Close ▾" : "Roles ▸"
-                                        color: Theme.accent
-                                        font.pixelSize: Theme.fontSizeSmall
-                                    }
+                                    // Chevron alone carries the expand/collapse
+                                    // affordance; no more duplicate "Roles ▸" /
+                                    // "Close ▾" text — it read as two different
+                                    // buttons instead of one gesture.
                                 }
 
                                 MouseArea {
@@ -610,76 +1084,244 @@ Popup {
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: {
                                         serverSettingsPopup.editingMemberId =
-                                            parent.parent.parent.expanded ? "" : parent.parent.parent.memberUserId;
+                                            memberRow.expanded ? "" : memberRow.memberUserId;
                                     }
                                 }
                             }
 
-                            // Role checkboxes
+                            // Role assignment card — mirrors the role-edit
+                            // card's treatment (r2 bg0 with line border) so the
+                            // two expansion patterns read consistently.
                             Rectangle {
+                                id: roleAssignCard
                                 width: parent.width
-                                visible: parent.expanded
-                                radius: Theme.radiusSmall
-                                color: Theme.bgDarkest
-                                border.color: Theme.bgLight; border.width: 1
-                                height: visible ? roleAssignCol.implicitHeight + Theme.spacingLarge * 2 : 0
+                                visible: memberRow.expanded
+                                radius: Theme.r2
+                                color: Theme.bg0
+                                border.color: Theme.line
+                                border.width: 1
+                                height: visible ? roleAssignCol.implicitHeight + Theme.sp.s7 * 2 : 0
 
                                 ColumnLayout {
                                     id: roleAssignCol
                                     anchors.fill: parent
-                                    anchors.margins: Theme.spacingLarge
-                                    spacing: Theme.spacingSmall
-
-                                    property var assigned: (serverManager.activeServer
-                                        ? serverManager.activeServer.memberRoles(parent.parent.memberUserId)
-                                        : [])
-                                    property var assignedMap: {
-                                        var m = {};
-                                        for (var i = 0; i < assigned.length; i++) m[assigned[i]] = true;
-                                        return m;
-                                    }
+                                    anchors.margins: Theme.sp.s7
+                                    spacing: Theme.sp.s3
 
                                     Text {
-                                        text: "Assigned roles"
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        font.bold: true
-                                        color: Theme.textSecondary
+                                        text: "ASSIGNED ROLES"
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.xs
+                                        font.weight: Theme.fontWeight.semibold
+                                        font.letterSpacing: Theme.trackWidest.xs
+                                        color: Theme.fg3
                                     }
 
                                     Repeater {
                                         model: serverManager.activeServer ? serverManager.activeServer.serverRoles : []
-                                        delegate: Row {
-                                            spacing: 6
-                                            visible: (modelData.id || modelData.name) !== "everyone"
-                                            CheckBox {
-                                                id: rolecb
-                                                checked: roleAssignCol.assignedMap[modelData.id || modelData.name] || false
-                                                onClicked: {
-                                                    var m = roleAssignCol.assignedMap;
-                                                    var rid = modelData.id || modelData.name;
-                                                    if (checked) m[rid] = true; else delete m[rid];
-                                                    roleAssignCol.assignedMap = m;
+                                        delegate: Rectangle {
+                                            // Each role is a bg1-tinted row with
+                                            // checkbox + color dot + name. Hover
+                                            // flips the row bg so the click
+                                            // affordance reads even when the
+                                            // checkbox is a small target.
+                                            readonly property string roleId: modelData.id || modelData.name
+                                            visible: roleId !== "everyone"
+                                            Layout.fillWidth: true
+                                            implicitHeight: 32
+                                            radius: Theme.r1
+                                            color: assignHover.containsMouse ? Theme.bg2 : "transparent"
+                                            Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                anchors.leftMargin: Theme.sp.s3
+                                                anchors.rightMargin: Theme.sp.s3
+                                                spacing: Theme.sp.s3
+
+                                                ThemedCheckBox {
+                                                    id: rolecb
+                                                    checked: memberRow.assignedSet[parent.parent.roleId] === true
+                                                    onToggled: {
+                                                        var m = {};
+                                                        for (var k in memberRow.assignedSet) m[k] = memberRow.assignedSet[k];
+                                                        if (checked) m[parent.parent.roleId] = true;
+                                                        else delete m[parent.parent.roleId];
+                                                        memberRow.assignedSet = m;
+                                                    }
+                                                }
+                                                Rectangle {
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    width: 12; height: 12; radius: 6
+                                                    color: modelData.color || Theme.accent
+                                                    border.color: Theme.bg0
+                                                    border.width: 1
+                                                }
+                                                Text {
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    Layout.fillWidth: true
+                                                    text: modelData.name || ""
+                                                    color: Theme.fg0
+                                                    font.family: Theme.fontSans
+                                                    font.pixelSize: Theme.fontSize.md
+                                                    font.weight: Theme.fontWeight.medium
+                                                    elide: Text.ElideRight
                                                 }
                                             }
-                                            Rectangle { width: 10; height: 10; radius: 5; color: modelData.color || Theme.accent; anchors.verticalCenter: rolecb.verticalCenter }
-                                            Text { text: modelData.name || ""; color: Theme.textPrimary; anchors.verticalCenter: rolecb.verticalCenter; font.pixelSize: Theme.fontSizeSmall }
+
+                                            MouseArea {
+                                                id: assignHover
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                // Click anywhere on the row
+                                                // toggles the role in/out of
+                                                // assignedSet. The checkbox's
+                                                // `checked: assignedSet[roleId]`
+                                                // binding then flips visually.
+                                                //
+                                                // We used to call rolecb.toggle()
+                                                // here, but Qt Controls only
+                                                // fires the CheckBox's
+                                                // `toggled` signal for real
+                                                // user clicks on the indicator
+                                                // — a programmatic toggle()
+                                                // flips state silently with no
+                                                // `toggled` emission. So
+                                                // clicks that landed on the
+                                                // row (not the 18px box)
+                                                // visually flipped but never
+                                                // reached onToggled, and the
+                                                // save path sent the unchanged
+                                                // role list.
+                                                onClicked: {
+                                                    var m = {};
+                                                    for (var k in memberRow.assignedSet) {
+                                                        m[k] = memberRow.assignedSet[k];
+                                                    }
+                                                    var rid = parent.roleId;
+                                                    if (m[rid]) delete m[rid];
+                                                    else m[rid] = true;
+                                                    memberRow.assignedSet = m;
+                                                }
+                                            }
                                         }
                                     }
 
-                                    Button {
-                                        Layout.topMargin: Theme.spacingNormal
-                                        text: "Save"
-                                        contentItem: Text { text: parent.text; color: "white"; font.pixelSize: Theme.fontSizeNormal; horizontalAlignment: Text.AlignHCenter }
-                                        background: Rectangle { color: parent.hovered ? Theme.accentHover : Theme.accent; radius: Theme.radiusSmall; implicitHeight: Theme.buttonHeight; implicitWidth: 100 }
-                                        onClicked: {
-                                            if (!serverManager.activeServer) return;
-                                            var ids = [];
-                                            for (var k in roleAssignCol.assignedMap) {
-                                                if (roleAssignCol.assignedMap[k]) ids.push(k);
+                                    // Action row — primary Save (accent pill)
+                                    // on the left; ghost-danger Kick + filled
+                                    // danger Ban pushed to the right so the
+                                    // destructive actions don't compete with
+                                    // the role-assignment save. Self is
+                                    // protected: the buttons disappear when
+                                    // editing your own account.
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Layout.topMargin: Theme.sp.s3
+                                        spacing: Theme.sp.s3
+
+                                        readonly property bool isSelf:
+                                            serverManager.activeServer
+                                            && memberRow.memberUserId
+                                               === serverManager.activeServer.userId
+
+                                        Button {
+                                            id: roleAssignSaveBtn
+                                            contentItem: Text {
+                                                text: "Save assignments"
+                                                font.family: Theme.fontSans
+                                                font.pixelSize: Theme.fontSize.md
+                                                font.weight: Theme.fontWeight.semibold
+                                                color: Theme.onAccent
+                                                horizontalAlignment: Text.AlignHCenter
+                                                verticalAlignment: Text.AlignVCenter
                                             }
-                                            serverManager.activeServer.setMemberRoles(
-                                                parent.parent.parent.memberUserId, ids);
-                                            serverSettingsPopup.editingMemberId = "";
+                                            background: Rectangle {
+                                                color: roleAssignSaveBtn.hovered ? Theme.accentDim : Theme.accent
+                                                radius: Theme.r2
+                                                implicitHeight: 36
+                                                implicitWidth: 160
+                                                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                            }
+                                            onClicked: {
+                                                if (!serverManager.activeServer) return;
+                                                var ids = [];
+                                                for (var k in memberRow.assignedSet) {
+                                                    if (memberRow.assignedSet[k]) ids.push(k);
+                                                }
+                                                serverManager.activeServer.setMemberRoles(
+                                                    memberRow.memberUserId, ids);
+                                                serverSettingsPopup.editingMemberId = "";
+                                            }
+                                        }
+
+                                        Item { Layout.fillWidth: true }
+
+                                        // Ghost-danger Kick — hollow with
+                                        // danger border, fills on hover.
+                                        // Hidden for the current user.
+                                        Button {
+                                            id: kickBtn
+                                            visible: !parent.isSelf
+                                            contentItem: Text {
+                                                text: "Kick"
+                                                font.family: Theme.fontSans
+                                                font.pixelSize: Theme.fontSize.md
+                                                font.weight: Theme.fontWeight.semibold
+                                                color: kickBtn.hovered ? Theme.onAccent : Theme.danger
+                                                horizontalAlignment: Text.AlignHCenter
+                                                verticalAlignment: Text.AlignVCenter
+                                            }
+                                            background: Rectangle {
+                                                color: kickBtn.hovered ? Theme.danger : "transparent"
+                                                radius: Theme.r2
+                                                border.color: Theme.danger
+                                                border.width: 1
+                                                implicitHeight: 36
+                                                implicitWidth: 80
+                                                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                            }
+                                            onClicked: {
+                                                serverSettingsPopup.confirmMod = {
+                                                    kind: "kick",
+                                                    userId: memberRow.memberUserId,
+                                                    displayName: modelData.displayName || memberRow.memberUserId
+                                                };
+                                                serverSettingsPopup.confirmModDialog.open();
+                                            }
+                                        }
+
+                                        // Filled danger Ban — primary
+                                        // destructive action, strongest read.
+                                        Button {
+                                            id: banBtn
+                                            visible: !parent.isSelf
+                                            contentItem: Text {
+                                                text: "Ban"
+                                                font.family: Theme.fontSans
+                                                font.pixelSize: Theme.fontSize.md
+                                                font.weight: Theme.fontWeight.semibold
+                                                color: Theme.onAccent
+                                                horizontalAlignment: Text.AlignHCenter
+                                                verticalAlignment: Text.AlignVCenter
+                                            }
+                                            background: Rectangle {
+                                                color: banBtn.hovered
+                                                       ? Qt.lighter(Theme.danger, 1.1)
+                                                       : Theme.danger
+                                                radius: Theme.r2
+                                                implicitHeight: 36
+                                                implicitWidth: 80
+                                                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                            }
+                                            onClicked: {
+                                                serverSettingsPopup.confirmMod = {
+                                                    kind: "ban",
+                                                    userId: memberRow.memberUserId,
+                                                    displayName: modelData.displayName || memberRow.memberUserId
+                                                };
+                                                serverSettingsPopup.confirmModDialog.open();
+                                            }
                                         }
                                     }
                                 }
@@ -693,87 +1335,252 @@ Popup {
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.spacingLarge * 2
-                    spacing: Theme.spacingLarge
+                    anchors.margins: Theme.sp.s7 * 2
+                    spacing: Theme.sp.s7
 
-                    Text {
-                        text: "Channels"
-                        font.pixelSize: 22
-                        font.bold: true
-                        color: Theme.textPrimary
+                    RowLayout {
+                        Layout.fillWidth: true
+                        TabHeader { title: "Channels"; Layout.fillWidth: true }
+
+                        // Top-right "+ Add category" — matches the accent-pill
+                        // vocabulary used on "Add role" in the Roles tab. The
+                        // create-prompt popup is owned by ChannelList, so we
+                        // emit a signal instead of opening it directly.
+                        Button {
+                            id: addCategoryBtn
+                            contentItem: RowLayout {
+                                spacing: Theme.sp.s2
+                                Icon { name: "plus"; size: 14; color: Theme.onAccent; Layout.alignment: Qt.AlignVCenter }
+                                Text {
+                                    text: "Add category"
+                                    color: Theme.onAccent
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: Theme.fontSize.md
+                                    font.weight: Theme.fontWeight.semibold
+                                    Layout.alignment: Qt.AlignVCenter
+                                }
+                            }
+                            background: Rectangle {
+                                color: addCategoryBtn.hovered ? Theme.accentDim : Theme.accent
+                                radius: Theme.r2
+                                implicitHeight: 36
+                                implicitWidth: 150
+                                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                            }
+                            onClicked: serverSettingsPopup.createChannelRequested("category", "")
+                        }
                     }
 
                     ListView {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
+
+                        ScrollBar.vertical: ThemedScrollBar {}
                         model: serverManager.activeServer ? serverManager.activeServer.categorizedRooms : []
-                        spacing: 4
+                        spacing: Theme.sp.s3
 
                         delegate: Column {
                             width: ListView.view ? ListView.view.width : 400
+                            readonly property string catId: modelData.categoryId || ""
 
-                            // Category header
+                            // Category header — widest-tracked small caps
+                            // matching the channel-list + settings labels.
+                            // Hover reveals "+ Add text / + Add voice"
+                            // affordances pushed to the right.
                             Rectangle {
+                                id: catHeader
                                 width: parent.width
-                                height: 36
-                                radius: Theme.radiusSmall
-                                color: Theme.bgMedium
-                                visible: modelData.categoryId !== ""
+                                height: 32
+                                color: "transparent"
+                                visible: parent.catId !== ""
 
                                 RowLayout {
                                     anchors.fill: parent
-                                    anchors.leftMargin: Theme.spacingNormal
-                                    anchors.rightMargin: Theme.spacingNormal
+                                    anchors.leftMargin: Theme.sp.s1
+                                    anchors.rightMargin: Theme.sp.s1
+                                    spacing: Theme.sp.s2
 
                                     Text {
-                                        text: modelData.categoryName || ""
-                                        font.pixelSize: Theme.fontSizeNormal
-                                        font.bold: true
-                                        color: Theme.textPrimary
+                                        text: (modelData.categoryName || "").toUpperCase()
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.xs
+                                        font.weight: Theme.fontWeight.semibold
+                                        font.letterSpacing: Theme.trackWidest.xs
+                                        color: Theme.fg3
                                         Layout.fillWidth: true
                                     }
 
                                     Text {
                                         text: modelData.channels ? modelData.channels.length + " channels" : "0 channels"
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        color: Theme.textMuted
+                                        font.family: Theme.fontMono
+                                        font.pixelSize: Theme.fontSize.xs
+                                        color: Theme.fg3
+                                        visible: !catHeaderHover.containsMouse
                                     }
+
+                                    // Inline create buttons — only show on
+                                    // category hover so the list stays quiet
+                                    // at rest. Each is an icon-only 24×24
+                                    // ghost button with an accent-on-hover tint.
+                                    component CatAddBtn: Rectangle {
+                                        id: _cab
+                                        property string iconName: ""
+                                        property string tooltipText: ""
+                                        property string createKind: ""
+                                        Layout.preferredWidth: 24
+                                        Layout.preferredHeight: 24
+                                        radius: Theme.r1
+                                        color: _cabMouse.containsMouse ? Theme.bg3 : "transparent"
+                                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                        Icon {
+                                            anchors.centerIn: parent
+                                            name: _cab.iconName
+                                            size: 12
+                                            color: _cabMouse.containsMouse ? Theme.accent : Theme.fg2
+                                        }
+                                        MouseArea {
+                                            id: _cabMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: serverSettingsPopup.createChannelRequested(
+                                                           _cab.createKind, catHeader.parent.catId)
+                                        }
+                                        ToolTip.visible: _cabMouse.containsMouse && tooltipText.length > 0
+                                        ToolTip.text: tooltipText
+                                        ToolTip.delay: 500
+                                    }
+
+                                    CatAddBtn {
+                                        iconName: "hash"
+                                        tooltipText: "Add text channel"
+                                        createKind: "text"
+                                        visible: catHeaderHover.containsMouse
+                                    }
+                                    CatAddBtn {
+                                        iconName: "volume"
+                                        tooltipText: "Add voice channel"
+                                        createKind: "voice"
+                                        visible: catHeaderHover.containsMouse
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: catHeaderHover
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    acceptedButtons: Qt.NoButton  // pass clicks through to the CatAddBtn children
                                 }
                             }
 
-                            // Channels in category
+                            // Channels in category.
                             Repeater {
                                 model: modelData.channels
 
                                 delegate: Rectangle {
                                     width: parent.width
-                                    height: 32
-                                    color: chSettingsMouse.containsMouse ? Theme.bgLight : "transparent"
+                                    height: 36
+                                    radius: Theme.r1
+                                    color: chSettingsMouse.containsMouse ? Theme.bg3 : "transparent"
+                                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                                    readonly property string rowRoomId: modelData.roomId || ""
+                                    readonly property string rowRoomName: modelData.displayName || ""
+                                    readonly property bool rowIsVoice: modelData.isVoice === true
 
                                     RowLayout {
                                         anchors.fill: parent
-                                        anchors.leftMargin: Theme.spacingLarge + Theme.spacingNormal
-                                        anchors.rightMargin: Theme.spacingNormal
-                                        spacing: Theme.spacingSmall
+                                        anchors.leftMargin: Theme.sp.s4
+                                        anchors.rightMargin: Theme.sp.s2
+                                        spacing: Theme.sp.s3
 
-                                        Text {
-                                            text: modelData.isVoice ? "\u25CF" : "#"
-                                            font.pixelSize: Theme.fontSizeNormal
-                                            color: Theme.textMuted
+                                        Icon {
+                                            name: parent.parent.rowIsVoice ? "volume" : "hash"
+                                            size: 14
+                                            color: chSettingsMouse.containsMouse ? Theme.accent : Theme.fg2
                                         }
 
                                         Text {
-                                            text: modelData.displayName || ""
-                                            font.pixelSize: Theme.fontSizeNormal
-                                            color: Theme.textSecondary
+                                            text: parent.parent.rowRoomName
+                                            font.family: Theme.fontSans
+                                            font.pixelSize: Theme.fontSize.md
+                                            color: Theme.fg1
                                             Layout.fillWidth: true
+                                            elide: Text.ElideRight
                                         }
 
                                         Text {
-                                            text: modelData.roomType || "text"
-                                            font.pixelSize: Theme.fontSizeSmall
-                                            color: Theme.textMuted
+                                            text: (modelData.roomType || (parent.parent.rowIsVoice ? "voice" : "text")).toUpperCase()
+                                            font.family: Theme.fontMono
+                                            font.pixelSize: Theme.fontSize.xs
+                                            font.letterSpacing: Theme.trackWide.xs
+                                            color: Theme.fg3
+                                        }
+
+                                        // Settings (text channels only) and
+                                        // Delete (all channels) on hover. Each
+                                        // has its own MouseArea so the chrome
+                                        // reliably routes clicks — bare Icon
+                                        // inside a parent MouseArea would
+                                        // eat everything.
+                                        Rectangle {
+                                            Layout.preferredWidth: 24
+                                            Layout.preferredHeight: 24
+                                            radius: Theme.r1
+                                            color: _settingsMouse.containsMouse ? Theme.bg2 : "transparent"
+                                            visible: chSettingsMouse.containsMouse
+                                                   && !parent.parent.rowIsVoice
+                                            Icon {
+                                                anchors.centerIn: parent
+                                                name: "settings"
+                                                size: 12
+                                                color: _settingsMouse.containsMouse ? Theme.fg0 : Theme.fg2
+                                            }
+                                            MouseArea {
+                                                id: _settingsMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    var rid = parent.parent.parent.rowRoomId;
+                                                    var rname = parent.parent.parent.rowRoomName;
+                                                    serverSettingsPopup.close();
+                                                    serverSettingsPopup.channelSettingsRequested(rid, rname);
+                                                }
+                                            }
+                                            ToolTip.visible: _settingsMouse.containsMouse
+                                            ToolTip.text: "Channel settings"
+                                            ToolTip.delay: 500
+                                        }
+                                        Rectangle {
+                                            Layout.preferredWidth: 24
+                                            Layout.preferredHeight: 24
+                                            radius: Theme.r1
+                                            color: _deleteMouse.containsMouse
+                                                   ? Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.16)
+                                                   : "transparent"
+                                            visible: chSettingsMouse.containsMouse
+                                            Icon {
+                                                anchors.centerIn: parent
+                                                name: "x"
+                                                size: 12
+                                                color: _deleteMouse.containsMouse ? Theme.danger : Theme.fg2
+                                            }
+                                            MouseArea {
+                                                id: _deleteMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    var rid = parent.parent.parent.rowRoomId;
+                                                    var rname = parent.parent.parent.rowRoomName;
+                                                    serverSettingsPopup.channelDeleteRequested(rid, rname);
+                                                }
+                                            }
+                                            ToolTip.visible: _deleteMouse.containsMouse
+                                            ToolTip.text: "Delete channel"
+                                            ToolTip.delay: 500
                                         }
                                     }
 
@@ -781,6 +1588,10 @@ Popup {
                                         id: chSettingsMouse
                                         anchors.fill: parent
                                         hoverEnabled: true
+                                        // Hover-only — clicks on the settings/
+                                        // delete buttons are handled by their
+                                        // own MouseAreas stacked above.
+                                        acceptedButtons: Qt.NoButton
                                     }
                                 }
                             }
@@ -790,51 +1601,410 @@ Popup {
             }
 
             // ---- Bans (index 4) ----
+            // Aggregates banned users across every room we've synced. The
+            // list is a snapshot — drop to empty-state when there's nothing
+            // to show rather than rendering a blank ListView.
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.spacingLarge * 2
-                    spacing: Theme.spacingLarge
+                    anchors.margins: Theme.sp.s7 * 2
+                    spacing: Theme.sp.s7
+
+                    TabHeader { title: "Bans" }
+
+                    readonly property var banList:
+                        serverManager.activeServer
+                            ? serverManager.activeServer.bannedMembers : []
 
                     Text {
-                        text: "Bans"
-                        font.pixelSize: 22
-                        font.bold: true
-                        color: Theme.textPrimary
-                    }
-
-                    Text {
-                        text: "Banned users will appear here."
-                        font.pixelSize: Theme.fontSizeNormal
-                        color: Theme.textMuted
                         Layout.fillWidth: true
+                        text: "Banned users can't see or join any channel on this server until they're unbanned."
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        color: Theme.fg2
+                        wrapMode: Text.WordWrap
                     }
 
-                    Item { Layout.fillHeight: true }
+                    // Empty-state card, shown when there are no bans.
+                    Item {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        visible: parent.banList.length === 0
+
+                        ColumnLayout {
+                            anchors.centerIn: parent
+                            width: 360
+                            spacing: Theme.sp.s4
+
+                            Rectangle {
+                                Layout.alignment: Qt.AlignHCenter
+                                Layout.preferredWidth: 56
+                                Layout.preferredHeight: 56
+                                radius: Theme.r3
+                                color: Theme.bg2
+                                border.color: Theme.line
+                                border.width: 1
+                                Icon {
+                                    anchors.centerIn: parent
+                                    name: "shield"
+                                    size: 24
+                                    color: Theme.fg3
+                                }
+                            }
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: "No one is banned"
+                                color: Theme.fg0
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.lg
+                                font.weight: Theme.fontWeight.semibold
+                            }
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignHCenter
+                                text: "Ban a member from the Members tab and they'll show up here."
+                                color: Theme.fg2
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                wrapMode: Text.WordWrap
+                            }
+                        }
+                    }
+
+                    // Populated list — each row shows avatar + name + mxid +
+                    // room count + reason, with a ghost Unban button on the
+                    // right. Same visual vocabulary as the Members rows so
+                    // the two tabs read as siblings.
+                    ListView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        visible: parent.banList.length > 0
+                        ScrollBar.vertical: ThemedScrollBar {}
+                        model: parent.banList
+                        spacing: 4
+
+                        delegate: Rectangle {
+                            width: ListView.view ? ListView.view.width : 400
+                            height: 60
+                            radius: Theme.r2
+                            color: Theme.bg2
+                            border.color: Theme.line
+                            border.width: 1
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: Theme.sp.s5
+                                anchors.rightMargin: Theme.sp.s4
+                                spacing: Theme.sp.s4
+
+                                Rectangle {
+                                    width: Theme.avatar.md
+                                    height: Theme.avatar.md
+                                    radius: Theme.r2
+                                    color: Theme.senderColor(modelData.userId || "")
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: {
+                                            var n = modelData.displayName || modelData.userId || "?";
+                                            var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                            return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
+                                        }
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: 13
+                                        font.weight: Theme.fontWeight.semibold
+                                        color: Theme.onAccent
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 0
+
+                                    Text {
+                                        text: modelData.displayName || modelData.userId || ""
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.md
+                                        font.weight: Theme.fontWeight.semibold
+                                        color: Theme.fg0
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: Theme.sp.s2
+
+                                        Text {
+                                            text: modelData.userId || ""
+                                            font.family: Theme.fontMono
+                                            font.pixelSize: Theme.fontSize.xs
+                                            color: Theme.fg3
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
+                                        // Reason, if any — quieter, italic.
+                                        Text {
+                                            visible: (modelData.reason || "") !== ""
+                                            text: "· " + (modelData.reason || "")
+                                            font.family: Theme.fontSans
+                                            font.pixelSize: Theme.fontSize.xs
+                                            font.italic: true
+                                            color: Theme.fg3
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+                                }
+
+                                // Ghost Unban.
+                                Button {
+                                    id: unbanBtn
+                                    contentItem: Text {
+                                        text: "Unban"
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.md
+                                        font.weight: Theme.fontWeight.semibold
+                                        color: unbanBtn.hovered ? Theme.fg0 : Theme.fg1
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    background: Rectangle {
+                                        color: unbanBtn.hovered ? Theme.bg3 : "transparent"
+                                        radius: Theme.r2
+                                        border.color: Theme.line
+                                        border.width: 1
+                                        implicitHeight: 32
+                                        implicitWidth: 88
+                                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                    }
+                                    onClicked: {
+                                        serverSettingsPopup.confirmMod = {
+                                            kind: "unban",
+                                            userId: modelData.userId,
+                                            displayName: modelData.displayName || modelData.userId
+                                        };
+                                        serverSettingsPopup.confirmModDialog.open();
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    // Close button (top-right X)
-    Text {
-        anchors.top: parent.top
-        anchors.right: parent.right
-        anchors.topMargin: Theme.spacingNormal
-        anchors.rightMargin: Theme.spacingNormal
-        text: "\u2715"
-        font.pixelSize: Theme.fontSizeLarge
-        color: closeXMouse.containsMouse ? Theme.textPrimary : Theme.textMuted
-        z: 10
-
-        MouseArea {
-            id: closeXMouse
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: serverSettingsPopup.close()
-        }
-    }
+    // (Legacy top-right close-X removed; the new one lives in `background`
+    // so it floats above content regardless of the current pane.)
 
     onOpened: selectedSection = 0
+
+    // Shared confirm dialog for kick / ban / unban. Reuses the delete-channel
+    // popup vocabulary — bg1 + r3 + line, danger-tinted icon tile for
+    // destructive actions, ghost Cancel + filled primary action.
+    Popup {
+        id: _confirmModDialog
+        parent: Overlay.overlay
+        anchors.centerIn: Overlay.overlay
+        width: 420
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        padding: Theme.sp.s7
+
+        readonly property bool isDestructive:
+            serverSettingsPopup.confirmMod.kind === "kick"
+            || serverSettingsPopup.confirmMod.kind === "ban"
+        readonly property string titleText: {
+            var who = serverSettingsPopup.confirmMod.displayName || "this member";
+            switch (serverSettingsPopup.confirmMod.kind) {
+                case "kick":  return "Kick " + who + "?";
+                case "ban":   return "Ban " + who + "?";
+                case "unban": return "Unban " + who + "?";
+                default:      return "";
+            }
+        }
+        readonly property string descText: {
+            switch (serverSettingsPopup.confirmMod.kind) {
+                case "kick":
+                    return "They're removed from every channel on this server but can be invited back or rejoin if the server allows.";
+                case "ban":
+                    return "They're removed from every channel and prevented from rejoining until you unban them. Their messages stay — you can delete those separately.";
+                case "unban":
+                    return "They can be re-invited or rejoin this server (subject to channel permissions) once the ban is lifted.";
+                default:
+                    return "";
+            }
+        }
+
+        background: Rectangle {
+            color: Theme.bg1
+            radius: Theme.r3
+            border.color: Theme.line
+            border.width: 1
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Theme.sp.s4
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.sp.s3
+                Rectangle {
+                    Layout.preferredWidth: 32
+                    Layout.preferredHeight: 32
+                    radius: Theme.r2
+                    color: _confirmModDialog.isDestructive
+                        ? Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.15)
+                        : Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.15)
+                    Icon {
+                        anchors.centerIn: parent
+                        name: _confirmModDialog.isDestructive ? "x" : "check"
+                        size: 16
+                        color: _confirmModDialog.isDestructive ? Theme.danger : Theme.accent
+                    }
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: _confirmModDialog.titleText
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xl
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackTight.xl
+                    color: Theme.fg0
+                    wrapMode: Text.WordWrap
+                }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: _confirmModDialog.descText
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.fg2
+                wrapMode: Text.WordWrap
+            }
+
+            // Optional reason input — only for kick/ban, since unban doesn't
+            // carry a reason in our model. Matrix attaches the reason to the
+            // ban event so it shows up in the banned-members reason column.
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: Theme.sp.s1
+                visible: _confirmModDialog.isDestructive
+                Text {
+                    text: "REASON (OPTIONAL)"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xs
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackWidest.xs
+                    color: Theme.fg3
+                }
+                TextField {
+                    id: reasonField
+                    Layout.fillWidth: true
+                    placeholderText: "Spam, harassment, off-topic, …"
+                    placeholderTextColor: Theme.fg3
+                    color: Theme.fg0
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    background: Rectangle {
+                        color: Theme.bg0
+                        radius: Theme.r2
+                        border.color: reasonField.activeFocus ? Theme.accent : Theme.line
+                        border.width: 1
+                    }
+                    leftPadding: Theme.sp.s4
+                    rightPadding: Theme.sp.s4
+                    topPadding: Theme.sp.s3
+                    bottomPadding: Theme.sp.s3
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.sp.s3
+                spacing: Theme.sp.s3
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    id: cancelModBtn
+                    contentItem: Text {
+                        text: "Cancel"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.medium
+                        color: Theme.fg1
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: cancelModBtn.hovered ? Theme.bg3 : "transparent"
+                        border.color: Theme.line
+                        border.width: 1
+                        radius: Theme.r2
+                        implicitWidth: 100
+                        implicitHeight: 36
+                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                    }
+                    onClicked: _confirmModDialog.close()
+                }
+
+                Button {
+                    id: confirmModBtn
+                    contentItem: Text {
+                        text: {
+                            switch (serverSettingsPopup.confirmMod.kind) {
+                                case "kick":  return "Kick member";
+                                case "ban":   return "Ban member";
+                                case "unban": return "Unban member";
+                                default:      return "Confirm";
+                            }
+                        }
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.semibold
+                        color: Theme.onAccent
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        readonly property color base: _confirmModDialog.isDestructive
+                            ? Theme.danger : Theme.accent
+                        color: confirmModBtn.hovered
+                               ? (_confirmModDialog.isDestructive
+                                   ? Qt.lighter(Theme.danger, 1.1)
+                                   : Theme.accentDim)
+                               : base
+                        radius: Theme.r2
+                        implicitWidth: 160
+                        implicitHeight: 36
+                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                    }
+                    onClicked: {
+                        if (!serverManager.activeServer) {
+                            _confirmModDialog.close();
+                            return;
+                        }
+                        var m = serverSettingsPopup.confirmMod;
+                        var reason = reasonField.text.trim();
+                        switch (m.kind) {
+                            case "kick":
+                                serverManager.activeServer.kickFromServer(m.userId, reason);
+                                break;
+                            case "ban":
+                                serverManager.activeServer.banFromServer(m.userId, reason);
+                                break;
+                            case "unban":
+                                serverManager.activeServer.unbanFromServer(m.userId);
+                                break;
+                        }
+                        serverSettingsPopup.editingMemberId = "";
+                        _confirmModDialog.close();
+                    }
+                }
+            }
+        }
+
+        onClosed: reasonField.text = ""
+    }
 }

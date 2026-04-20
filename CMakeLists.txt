@@ -13,7 +13,7 @@ option(BSFCHAT_ENABLE_VOICE "Enable voice chat (requires libdatachannel + opus)"
 include(cmake/Dependencies.cmake)
 
 # Find Qt6
-find_package(Qt6 REQUIRED COMPONENTS Core Network Qml Quick QuickControls2 QuickDialogs2 Sql Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Core Network Qml Quick QuickControls2 QuickDialogs2 Sql Multimedia Widgets)
 qt_standard_project_setup()
 qt_policy(SET QTP0001 NEW)
 qt_policy(SET QTP0004 OLD)
@@ -21,8 +21,11 @@ qt_policy(SET QTP0004 OLD)
 qt_add_executable(bsfchat-app
     src/main.cpp
     src/core/App.cpp
+    src/core/NotificationManager.cpp
     src/core/Settings.cpp
+    src/core/UrlHandler.cpp
     src/identity/IdentityClient.cpp
+    src/identity/IdentityApiClient.cpp
     src/net/MatrixClient.cpp
     src/net/SyncLoop.cpp
     src/net/ServerConnection.cpp
@@ -52,8 +55,8 @@ set_target_properties(bsfchat-app PROPERTIES
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_BUNDLE_NAME "BSFChat"
     MACOSX_BUNDLE_GUI_IDENTIFIER "com.bsfchat.app"
-    MACOSX_BUNDLE_BUNDLE_VERSION "0.0.18"
-    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.0.18"
+    MACOSX_BUNDLE_BUNDLE_VERSION "0.0.19"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.0.19"
     MACOSX_BUNDLE_INFO_STRING "BSFChat"
     WIN32_EXECUTABLE TRUE
 )
@@ -75,6 +78,23 @@ if(APPLE)
         COMMAND /usr/bin/plutil -replace NSCameraUsageDescription
                 -string "BSFChat does not use the camera."
                 "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
+        # Register `bsfchat://` as a URL scheme the app handles. Launch
+        # Services reads CFBundleURLTypes on install and routes activation
+        # to our QFileOpenEvent filter (see src/core/UrlHandler.cpp).
+        # PlistBuddy is happier with CMake VERBATIM than `plutil -json`,
+        # which gets its argument mangled by the quoting pass. Each Delete
+        # tolerates absence (|| true) so this is idempotent across builds.
+        COMMAND /bin/sh -c "/usr/libexec/PlistBuddy -c 'Delete :CFBundleURLTypes' \"$0\" || true" "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
+        COMMAND /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes array"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
+        COMMAND /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0 dict"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
+        COMMAND /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLName string com.bsfchat.url"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
+        COMMAND /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
+        COMMAND /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string bsfchat"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
         VERBATIM
     )
 endif()
@@ -94,7 +114,16 @@ qt_add_qml_module(bsfchat-app
         qml/components/MessageBubble.qml
         qml/components/MessageInput.qml
         qml/components/EmojiPicker.qml
-        qml/components/VoicePanel.qml
+        qml/components/VoiceDock.qml
+        qml/components/VoiceRoom.qml
+        qml/components/ParticipantTile.qml
+        qml/components/Icon.qml
+        qml/components/ThemedSwitch.qml
+        qml/components/ThemedScrollBar.qml
+        qml/components/ThemedComboBox.qml
+        qml/components/ThemedCheckBox.qml
+        qml/components/ThemedSlider.qml
+        qml/components/InfoBanner.qml
         qml/components/MemberList.qml
         qml/components/LoginDialog.qml
         qml/components/UserProfileCard.qml
@@ -102,16 +131,61 @@ qt_add_qml_module(bsfchat-app
         qml/components/ServerSettings.qml
         qml/components/ChannelSettings.qml
         qml/components/ClientSettings.qml
+        qml/components/ForwardDialog.qml
         qml/theme/Theme.qml
     RESOURCES
         qml/data/EmojiData.js
+        qml/fonts/Geist-Variable.ttf
+        qml/fonts/GeistMono-Variable.ttf
+        qml/fonts/OFL.txt
+        qml/icons/mic.svg
+        qml/icons/mic-off.svg
+        qml/icons/headphones.svg
+        qml/icons/headphones-off.svg
+        qml/icons/screen-share.svg
+        qml/icons/video.svg
+        qml/icons/phone-off.svg
+        qml/icons/settings.svg
+        qml/icons/hash.svg
+        qml/icons/at.svg
+        qml/icons/plus.svg
+        qml/icons/x.svg
+        qml/icons/chevron-down.svg
+        qml/icons/chevron-right.svg
+        qml/icons/send.svg
+        qml/icons/smile.svg
+        qml/icons/paperclip.svg
+        qml/icons/search.svg
+        qml/icons/bolt.svg
+        qml/icons/shield.svg
+        qml/icons/users.svg
+        qml/icons/pin.svg
+        qml/icons/signal.svg
+        qml/icons/lock.svg
+        qml/icons/reply.svg
+        qml/icons/forward.svg
+        qml/icons/edit.svg
+        qml/icons/link.svg
+        qml/icons/smile-plus.svg
+        qml/icons/more-horizontal.svg
+        qml/icons/check.svg
+        qml/icons/annotate.svg
+        qml/icons/crosshair.svg
+        qml/icons/expand.svg
+        qml/icons/eye.svg
+        qml/icons/gamepad.svg
+        qml/icons/gift.svg
+        qml/icons/inbox.svg
+        qml/icons/minus.svg
+        qml/icons/screen.svg
+        qml/icons/volume.svg
 )
 
 target_include_directories(bsfchat-app PRIVATE src)
 
 target_link_libraries(bsfchat-app PRIVATE
     bsfchat_protocol
-    Qt6::Core Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::QuickDialogs2 Qt6::Sql Qt6::Multimedia
+    Qt6::Core Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::QuickDialogs2 Qt6::Sql Qt6::Multimedia Qt6::Widgets
 )
 
 if(BSFCHAT_ENABLE_VOICE)

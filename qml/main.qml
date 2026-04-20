@@ -15,7 +15,24 @@ ApplicationWindow {
             return "BSFChat - #" + serverManager.activeServer.activeRoomName;
         return "BSFChat";
     }
-    color: Theme.bgMedium
+    // bg0 is the window bg per the Designer kit — sidebars lift to bg1,
+    // popups to bg1/bg2. Using bg2 here made the "window" brighter than
+    // the sidebars, inverting the hierarchy and robbing the accent tints
+    // of contrast.
+    color: Theme.bg0
+
+    // Load Geist + Geist Mono from qrc. Variable-weight TTFs; Qt picks the
+    // closest axis value off each Text item's `font.weight`. Without these
+    // loaded, every `font.family: Theme.fontSans` would fall back to the
+    // platform sans (SF Pro on macOS, Segoe UI on Win, whatever on Linux).
+    FontLoader {
+        id: geist
+        source: "qrc:/qt/qml/BSFChat/qml/fonts/Geist-Variable.ttf"
+    }
+    FontLoader {
+        id: geistMono
+        source: "qrc:/qt/qml/BSFChat/qml/fonts/GeistMono-Variable.ttf"
+    }
 
     property bool showMemberList: true
 
@@ -23,51 +40,80 @@ ApplicationWindow {
         anchors.fill: parent
         spacing: 0
 
-        // Server sidebar
+        // Server rail (SPEC §3.1) — width driven from Theme.layout so the
+        // 'compact' variant can narrow it to 60.
         ServerSidebar {
             Layout.fillHeight: true
-            Layout.preferredWidth: 72
+            Layout.preferredWidth: Theme.layout.serverRailW
         }
 
         // Channel separator
         Rectangle {
             Layout.fillHeight: true
-            Layout.preferredWidth: 1
-            color: Theme.bgDarkest
+            Layout.preferredWidth: Theme.panelBorderWidth
+            color: Theme.panelBorder
         }
 
-        // Channel list
+        // Channel sidebar (SPEC §3.2) — width from Theme.layout, switches
+        // with 'compact' / 'focus' variants.
         ChannelList {
             Layout.fillHeight: true
-            Layout.preferredWidth: 240
+            Layout.preferredWidth: Theme.layout.channelSidebarW
         }
 
         // Channel separator
         Rectangle {
             Layout.fillHeight: true
-            Layout.preferredWidth: 1
-            color: Theme.bgDarkest
+            Layout.preferredWidth: Theme.panelBorderWidth
+            color: Theme.panelBorder
         }
 
-        // Message view (main area)
-        MessageView {
+        // Main column (SPEC §1): main content stacks above the sticky
+        // VoiceDock. Main content flips between VoiceRoom (when connected
+        // to a voice channel) and MessageView (text channel reading). The
+        // `activeServer.inVoiceChannel` toggle is what SPEC §1 means by
+        // "main content can be VoiceRoom / ScreenShare / …".
+        ColumnLayout {
             Layout.fillHeight: true
             Layout.fillWidth: true
+            spacing: 0
+
+            // View swap: MessageView vs. VoiceRoom. The voice CONNECTION
+            // (inVoiceChannel) is orthogonal to the displayed VIEW
+            // (viewingVoiceRoom) — you can be in voice and reading a text
+            // channel. Clicking a text channel drops viewingVoiceRoom;
+            // clicking the voice channel, VoiceDock, or VoiceStatusCard
+            // raises it again.
+            StackLayout {
+                Layout.fillHeight: true
+                Layout.fillWidth: true
+                currentIndex: (serverManager.activeServer
+                               && serverManager.activeServer.viewingVoiceRoom) ? 1 : 0
+
+                MessageView { }
+                VoiceRoom  { }
+            }
+
+            VoiceDock {
+                Layout.fillWidth: true
+            }
         }
 
         // Member list separator
         Rectangle {
             Layout.fillHeight: true
-            Layout.preferredWidth: 1
-            color: Theme.bgDarkest
+            Layout.preferredWidth: Theme.panelBorderWidth
+            color: Theme.panelBorder
             visible: root.showMemberList && serverManager.activeServer !== null
+                     && Theme.layout.memberListW > 0
         }
 
         // Member list
         MemberList {
             Layout.fillHeight: true
-            Layout.preferredWidth: 240
+            Layout.preferredWidth: Theme.layout.memberListW
             visible: root.showMemberList && serverManager.activeServer !== null
+                     && Theme.layout.memberListW > 0
         }
     }
 

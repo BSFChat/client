@@ -3,8 +3,12 @@
 #include "net/MatrixClient.h"
 #include "model/ServerListModel.h"
 #include "core/Settings.h"
+#include "identity/IdentityClient.h"
+#include "identity/IdentityApiClient.h"
 
+#include <QClipboard>
 #include <QDesktopServices>
+#include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QUrl>
@@ -264,7 +268,16 @@ void ServerManager::onLoginSuccess(ServerConnection* conn)
     entry.accessToken = conn->accessToken();
     entry.deviceId = conn->deviceId();
     entry.displayName = conn->displayName();
+    entry.identityProviderUrl = m_identityUrl;
     m_settings->addServer(entry);
+
+    // If we have a live identity session, push this server to the user's
+    // membership list so next launch auto-restores it. Fire and forget — if
+    // the token has expired or the identity service is unreachable, it's
+    // not worth failing the whole login over.
+    if (m_identityApi && !m_identityAccessToken.isEmpty()) {
+        m_identityApi->registerServer(conn->serverUrl(), serverDisplayName);
+    }
 }
 
 void ServerManager::onLoginFailed(ServerConnection* conn, const QString& error)
@@ -276,4 +289,142 @@ void ServerManager::onLoginFailed(ServerConnection* conn, const QString& error)
     if (index >= 0) {
         removeServer(index);
     }
+}
+
+void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
+{
+    // Normalise the identity URL. Empty means "default to the hosted
+    // BSFChat identity service".
+    QString normalized = identityUrl.trimmed();
+    if (normalized.isEmpty()) {
+        normalized = QStringLiteral("https://id.bsfchat.com");
+    }
+    while (normalized.endsWith('/'))
+        normalized.chop(1);
+    m_identityUrl = normalized;
+
+    // Reuse the existing OIDC PKCE browser flow. The identity service's
+    // /authorize, /token etc. are the same endpoints IdentityClient already
+    // talks to, so we can point it at the identity URL itself — the access
+    // token we get back is just a session ID in the identity's session
+    // table, which its /api/servers handlers accept as Bearer auth.
+    if (!m_identityClient) {
+        m_identityClient = new IdentityClient(this);
+    } else {
+        // Disconnect any stale signal connections from a previous attempt.
+        m_identityClient->disconnect(this);
+    }
+
+    connect(m_identityClient, &IdentityClient::loginCompleted, this,
+        [this](const QString& /*idToken*/, const QString& accessToken,
+               const QString& refreshToken) {
+            m_identityAccessToken = accessToken;
+
+            // (Re)build the API client bound to this fresh token.
+            if (m_identityApi) {
+                m_identityApi->deleteLater();
+                m_identityApi = nullptr;
+            }
+            m_identityApi = new IdentityApiClient(m_identityUrl, accessToken, this);
+
+            connect(m_identityApi, &IdentityApiClient::serversFetched, this,
+                [this](const QJsonArray& servers) {
+                    QStringList addedUrls;
+                    for (const auto& v : servers) {
+                        QJsonObject obj = v.toObject();
+                        QString serverUrl = obj.value("server_url").toString();
+                        if (serverUrl.isEmpty()) continue;
+
+                        // Skip servers we're already connected to — the user
+                        // might re-run the sync while connections exist.
+                        bool already = false;
+                        for (auto* existing : m_connections) {
+                            if (existing->serverUrl() == serverUrl) {
+                                already = true;
+                                break;
+                            }
+                        }
+                        if (already) continue;
+
+                        addedUrls.append(serverUrl);
+                        addServerWithOidc(serverUrl);
+                    }
+                    emit identityLoginComplete(addedUrls);
+                });
+
+            connect(m_identityApi, &IdentityApiClient::fetchFailed, this,
+                [this](const QString& error) {
+                    emit identityLoginFailed(error);
+                });
+
+            m_identityApi->fetchServers();
+
+            // Persist the refresh token so a future launch can silently
+            // renew the identity session if we add it to that flow. We
+            // store it against a placeholder entry keyed by identityUrl —
+            // since ServerEntry already has identityRefreshToken/
+            // identityProviderUrl fields, but those are per-server. For
+            // now we just keep it in memory; MVP behaviour per the spec.
+            Q_UNUSED(refreshToken);
+        });
+
+    connect(m_identityClient, &IdentityClient::loginFailed, this,
+        [this](const QString& error) {
+            emit identityLoginFailed(error);
+        });
+
+    m_identityClient->startLogin(m_identityUrl);
+}
+
+void ServerManager::copyToClipboard(const QString& text)
+{
+    if (auto* cb = QGuiApplication::clipboard())
+        cb->setText(text);
+}
+
+bool ServerManager::openMessageLink(const QString& link)
+{
+    // Expected: bsfchat://message/<percent-encoded server URL>/<roomId>/<eventId>
+    const QString prefix = QStringLiteral("bsfchat://message/");
+    if (!link.startsWith(prefix)) return false;
+    const QString rest = link.mid(prefix.size());
+    // Split on '/' from the right so the server URL (which itself may
+    // contain encoded slashes) stays intact as the first segment.
+    const int lastSlash = rest.lastIndexOf('/');
+    if (lastSlash <= 0) return false;
+    const int midSlash = rest.lastIndexOf('/', lastSlash - 1);
+    if (midSlash <= 0) return false;
+    const QString serverUrlEnc = rest.left(midSlash);
+    const QString roomId = QUrl::fromPercentEncoding(
+        rest.mid(midSlash + 1, lastSlash - midSlash - 1).toUtf8());
+    const QString eventId = QUrl::fromPercentEncoding(
+        rest.mid(lastSlash + 1).toUtf8());
+    const QString serverUrl = QUrl::fromPercentEncoding(serverUrlEnc.toUtf8());
+
+    // Find the matching connection by URL.
+    int foundIdx = -1;
+    for (int i = 0; i < m_connections.size(); ++i) {
+        if (m_connections[i]->serverUrl() == serverUrl) {
+            foundIdx = i;
+            break;
+        }
+    }
+    if (foundIdx < 0) return false;
+
+    if (foundIdx != m_activeServerIndex)
+        setActiveServer(foundIdx);
+    // Delegate navigation to the connection (which owns the MessageModel).
+    auto* conn = m_connections[foundIdx];
+    if (conn) {
+        // Deferred so MessageView can receive the scroll signal after any
+        // room-switch signals have propagated.
+        QMetaObject::invokeMethod(conn, [conn, roomId, eventId]() {
+            if (conn->activeRoomId() != roomId)
+                conn->setActiveRoom(roomId);
+            QMetaObject::invokeMethod(conn, [conn, eventId]() {
+                emit conn->scrollToEventRequested(eventId);
+            }, Qt::QueuedConnection);
+        }, Qt::QueuedConnection);
+    }
+    return true;
 }

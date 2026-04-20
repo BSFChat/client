@@ -12,13 +12,13 @@ Popup {
     // contentItem is a ColumnLayout that reports its implicitHeight — add
     // padding + a comfortable margin.
     height: Math.min(
-        contentCol.implicitHeight + Theme.spacingLarge * 2 + padding * 2,
+        contentCol.implicitHeight + Theme.sp.s7 * 2 + padding * 2,
         parent ? parent.height * 0.9 : 600
     )
     anchors.centerIn: Overlay.overlay
     modal: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-    padding: Theme.spacingLarge
+    padding: Theme.sp.s7
 
     enter: Transition {
         NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 150; easing.type: Easing.OutCubic }
@@ -30,9 +30,9 @@ Popup {
     }
 
     background: Rectangle {
-        color: Theme.bgDark
-        radius: Theme.radiusNormal
-        border.color: Theme.bgLight
+        color: Theme.bg1
+        radius: Theme.r3
+        border.color: Theme.line
         border.width: 1
     }
 
@@ -44,28 +44,37 @@ Popup {
 
     contentItem: ColumnLayout {
         id: contentCol
-        spacing: Theme.spacingLarge
+        spacing: Theme.sp.s7
 
-        // Title
-        Text {
-            text: "User Settings"
-            font.pixelSize: 18
-            font.bold: true
-            color: Theme.textPrimary
+        // Title — SPEC §3.10 section-header convention (24px semibold +
+        // a 1px divider rule below).
+        ColumnLayout {
             Layout.fillWidth: true
+            spacing: Theme.sp.s3
+            Text {
+                text: "User Settings"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xxl
+                font.weight: Theme.fontWeight.semibold
+                font.letterSpacing: Theme.trackTight.xxl
+                color: Theme.fg0
+            }
+            Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
         }
 
-        // Avatar section
+        // Avatar section — 64×64 rounded-square (matches ServerRail /
+        // MemberList treatment instead of a circle), with a camera-icon
+        // hover overlay rather than a "Change" text label.
         RowLayout {
             Layout.fillWidth: true
-            spacing: Theme.spacingLarge
+            spacing: Theme.sp.s7
 
-            // Avatar circle (clickable)
             Rectangle {
                 width: 64
                 height: 64
-                radius: 32
+                radius: Theme.r3
                 color: Theme.senderColor(serverManager.activeServer ? serverManager.activeServer.userId : "")
+                clip: true
 
                 Image {
                     anchors.fill: parent
@@ -82,32 +91,35 @@ Popup {
 
                 Text {
                     anchors.centerIn: parent
-                    text: serverManager.activeServer ? serverManager.activeServer.userId.charAt(1).toUpperCase() : "?"
-                    font.pixelSize: 24
-                    font.bold: true
-                    color: "white"
+                    text: {
+                        if (!serverManager.activeServer) return "?";
+                        var n = serverManager.activeServer.displayName
+                             || serverManager.activeServer.userId;
+                        var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                        return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
+                    }
+                    font.family: Theme.fontSans
+                    font.pixelSize: 26
+                    font.weight: Theme.fontWeight.semibold
+                    color: Theme.onAccent
                     visible: !serverManager.activeServer || serverManager.activeServer.avatarUrl === ""
                 }
 
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: avatarFileDialog.open()
-                }
-
-                // Hover overlay
+                // Hover overlay — black scrim + small edit icon instead
+                // of the old "Change" text label. Icon reads at any
+                // avatar content, text would collide with tall initials.
                 Rectangle {
                     anchors.fill: parent
-                    radius: 32
-                    color: Qt.rgba(0, 0, 0, 0.4)
-                    visible: avatarMouse.containsMouse
+                    radius: parent.radius
+                    color: Qt.rgba(0, 0, 0, 0.55)
+                    opacity: avatarMouse.containsMouse ? 1.0 : 0.0
+                    Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
 
-                    Text {
+                    Icon {
                         anchors.centerIn: parent
-                        text: "Change"
-                        font.pixelSize: Theme.fontSizeSmall
-                        font.bold: true
-                        color: "white"
+                        name: "edit"
+                        size: 20
+                        color: Theme.fg0
                     }
 
                     MouseArea {
@@ -120,14 +132,24 @@ Popup {
                 }
             }
 
-            Column {
+            ColumnLayout {
                 Layout.fillWidth: true
-                spacing: Theme.spacingSmall
+                spacing: 2
 
                 Text {
-                    text: "Click avatar to change"
-                    font.pixelSize: Theme.fontSizeSmall
-                    color: Theme.textMuted
+                    text: "Profile picture"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    font.weight: Theme.fontWeight.semibold
+                    color: Theme.fg0
+                }
+                Text {
+                    text: "Hover the avatar to change. PNG, JPG, GIF up to 10 MB."
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.sm
+                    color: Theme.fg2
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
                 }
             }
         }
@@ -135,50 +157,65 @@ Popup {
         // Display name field
         Column {
             Layout.fillWidth: true
-            spacing: Theme.spacingSmall
+            spacing: Theme.sp.s1
 
             Text {
                 text: "DISPLAY NAME"
-                font.pixelSize: Theme.fontSizeSmall
-                font.bold: true
-                color: Theme.textSecondary
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                font.weight: Theme.fontWeight.semibold
+                font.letterSpacing: Theme.trackWidest.xs
+                color: Theme.fg3
             }
 
             RowLayout {
                 width: parent.width
-                spacing: Theme.spacingNormal
+                spacing: Theme.sp.s3
 
                 TextField {
                     id: displayNameField
                     Layout.fillWidth: true
                     placeholderText: "Enter display name"
-                    placeholderTextColor: Theme.textMuted
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontSizeNormal
+                    placeholderTextColor: Theme.fg3
+                    color: Theme.fg0
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
                     background: Rectangle {
-                        color: Theme.bgDarkest
-                        radius: Theme.radiusSmall
-                        border.color: displayNameField.activeFocus ? Theme.accent : Theme.bgLight
+                        color: Theme.bg0
+                        radius: Theme.r2
+                        border.color: displayNameField.activeFocus ? Theme.accent : Theme.line
                         border.width: 1
                     }
-                    padding: Theme.spacingNormal
+                    leftPadding: Theme.sp.s4
+                    rightPadding: Theme.sp.s4
+                    topPadding: Theme.sp.s3
+                    bottomPadding: Theme.sp.s3
 
                     Keys.onReturnPressed: saveDisplayName()
                 }
 
                 Button {
-                    Layout.preferredWidth: 60
-                    Layout.preferredHeight: 36
+                    id: displayNameSaveBtn
+                    enabled: serverManager.activeServer
+                             && displayNameField.text.trim().length > 0
+                             && displayNameField.text.trim() !== serverManager.activeServer.displayName
                     contentItem: Text {
                         text: "Save"
-                        font.pixelSize: Theme.fontSizeNormal
-                        color: "white"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.semibold
+                        color: displayNameSaveBtn.enabled ? Theme.onAccent : Theme.fg3
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle {
-                        color: parent.hovered ? Theme.accentHover : Theme.accent
-                        radius: Theme.radiusSmall
+                        color: !displayNameSaveBtn.enabled
+                               ? Theme.bg2
+                               : (displayNameSaveBtn.hovered ? Theme.accentDim : Theme.accent)
+                        radius: Theme.r2
+                        implicitWidth: 80
+                        implicitHeight: 36
+                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                     }
                     onClicked: saveDisplayName()
                 }
@@ -188,19 +225,23 @@ Popup {
         // User ID (read-only)
         Column {
             Layout.fillWidth: true
-            spacing: Theme.spacingSmall
+            spacing: Theme.sp.s1
 
             Text {
                 text: "USER ID"
-                font.pixelSize: Theme.fontSizeSmall
-                font.bold: true
-                color: Theme.textSecondary
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                font.weight: Theme.fontWeight.semibold
+                font.letterSpacing: Theme.trackWidest.xs
+                color: Theme.fg3
             }
 
+            // mxid reads as code — mono + fg3 matches UserProfileCard.
             Text {
                 text: serverManager.activeServer ? serverManager.activeServer.userId : ""
-                font.pixelSize: Theme.fontSizeNormal
-                color: Theme.textMuted
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.fg3
                 elide: Text.ElideRight
                 width: parent.width
             }
@@ -208,22 +249,27 @@ Popup {
 
         Item { Layout.fillHeight: true }
 
-        // Log Out button
+        // Log Out — ghost danger pattern (matches role-delete button in
+        // ServerSettings). Transparent on rest, fills danger on hover.
         Button {
+            id: logoutBtn
             Layout.fillWidth: true
-            Layout.preferredHeight: 36
+            Layout.preferredHeight: 40
             contentItem: Text {
-                text: "Log Out"
-                font.pixelSize: Theme.fontSizeNormal
-                color: Theme.danger
+                text: "Log out"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.md
+                font.weight: Theme.fontWeight.semibold
+                color: logoutBtn.hovered ? Theme.onAccent : Theme.danger
                 horizontalAlignment: Text.AlignHCenter
                 verticalAlignment: Text.AlignVCenter
             }
             background: Rectangle {
-                color: parent.hovered ? Qt.rgba(237/255, 66/255, 69/255, 0.1) : "transparent"
-                radius: Theme.radiusSmall
+                color: logoutBtn.hovered ? Theme.danger : "transparent"
+                radius: Theme.r2
                 border.color: Theme.danger
                 border.width: 1
+                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
             }
             onClicked: {
                 if (serverManager.activeServer) {

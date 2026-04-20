@@ -9,6 +9,24 @@ class Settings : public QObject {
     Q_OBJECT
     Q_PROPERTY(int fontSize READ fontSize WRITE setFontSize NOTIFY fontSizeChanged)
     Q_PROPERTY(QString theme READ theme WRITE setTheme NOTIFY themeChanged)
+    // Accent color as a "#rrggbb" string. Used for highlights, active
+    // channel chips, focused controls, and (in accessibility mode) panel
+    // borders. Theme.qml consumes this via the AppSettings QML singleton.
+    Q_PROPERTY(QString accent READ accent WRITE setAccent NOTIFY accentChanged)
+    // Hue int driving the Designer-kit accent palette — one of 180 (cyan),
+    // 260 (violet), 320 (magenta), 30 (amber). Theme.qml binds to this
+    // directly; the legacy `accent` hex is kept for accessibility-border
+    // tinting but the swatches write the hue.
+    Q_PROPERTY(int accentHue READ accentHue WRITE setAccentHue NOTIFY accentHueChanged)
+    // Accessibility mode draws strong, high-contrast borders between the
+    // server sidebar / channel list / message view / member list so panel
+    // boundaries are obvious to low-vision users.
+    Q_PROPERTY(bool accessibilityMode READ accessibilityMode WRITE setAccessibilityMode NOTIFY accessibilityModeChanged)
+    // Layout density — one of "standard" / "compact" / "focus". Matches the
+    // three branches in Theme.layout (see qml/theme/Theme.qml). Compact
+    // narrows sidebars & shrinks participant tiles; focus hides chat +
+    // member list. Stored as a string so Theme.variant can bind directly.
+    Q_PROPERTY(QString layoutVariant READ layoutVariant WRITE setLayoutVariant NOTIFY layoutVariantChanged)
     // Audio: preferred input/output device description strings (human-readable
     // names from QMediaDevices). Empty == system default. Volume is 0..100.
     Q_PROPERTY(QString audioInputDevice READ audioInputDevice WRITE setAudioInputDevice NOTIFY audioInputDeviceChanged)
@@ -55,6 +73,18 @@ public:
     QString theme() const;
     void setTheme(const QString& theme);
 
+    QString accent() const;
+    void setAccent(const QString& accent);
+
+    int accentHue() const;
+    void setAccentHue(int hue);
+
+    bool accessibilityMode() const;
+    void setAccessibilityMode(bool v);
+
+    QString layoutVariant() const;
+    void setLayoutVariant(const QString& variant);
+
     QString audioInputDevice() const;
     void setAudioInputDevice(const QString& desc);
     QString audioOutputDevice() const;
@@ -78,6 +108,10 @@ public:
 signals:
     void fontSizeChanged();
     void themeChanged();
+    void accentChanged();
+    void accentHueChanged();
+    void accessibilityModeChanged();
+    void layoutVariantChanged();
     void audioInputDeviceChanged();
     void audioOutputDeviceChanged();
     void inputVolumeChanged();

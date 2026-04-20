@@ -3,8 +3,13 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import BSFChat
 
+// Member list (SPEC §3 — "memberListW 220"). Quiet bg1 surface, widely-
+// tracked "MEMBERS" label in fg3, 32×32 avatars with rounded-square shape
+// to echo the ServerRail, display name in fg1. Will later grow presence
+// dots on avatars when the m.presence feature lands.
 Rectangle {
-    color: Theme.bgDark
+    color: Theme.bg1
+    implicitWidth: Theme.layout.memberListW
 
     ColumnLayout {
         anchors.fill: parent
@@ -17,19 +22,21 @@ Rectangle {
 
             Text {
                 anchors.fill: parent
-                anchors.leftMargin: Theme.spacingLarge
+                anchors.leftMargin: Theme.sp.s7
                 verticalAlignment: Text.AlignVCenter
                 text: "MEMBERS"
-                font.pixelSize: Theme.fontSizeSmall
-                font.bold: true
-                color: Theme.textMuted
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                font.weight: Theme.fontWeight.semibold
+                font.letterSpacing: Theme.trackWidest.xs
+                color: Theme.fg3
             }
 
             Rectangle {
                 anchors.bottom: parent.bottom
                 width: parent.width
                 height: 1
-                color: Theme.bgDarkest
+                color: Theme.line
             }
         }
 
@@ -38,53 +45,73 @@ Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
+            spacing: 2
+            ScrollBar.vertical: ThemedScrollBar {}
             model: serverManager.activeServer ? serverManager.activeServer.memberListModel : null
 
-            delegate: Rectangle {
+            delegate: Item {
                 width: ListView.view.width
-                height: 42
-                color: memberMouse.containsMouse ? Theme.bgLight : "transparent"
+                height: 40
 
-                RowLayout {
+                Rectangle {
                     anchors.fill: parent
-                    anchors.leftMargin: Theme.spacingLarge
-                    anchors.rightMargin: Theme.spacingLarge
-                    spacing: Theme.spacingNormal
+                    anchors.leftMargin: Theme.sp.s2
+                    anchors.rightMargin: Theme.sp.s2
+                    radius: Theme.r1
+                    color: memberMouse.containsMouse ? Theme.bg3 : "transparent"
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
-                    // Avatar
-                    Rectangle {
-                        width: 32
-                        height: 32
-                        radius: 16
-                        color: Theme.senderColor(model.userId)
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.sp.s4
+                        anchors.rightMargin: Theme.sp.s4
+                        spacing: Theme.sp.s4
+
+                        // Avatar — rounded-square so it rhymes with the
+                        // ServerRail tiles rather than Discord's round pill.
+                        Rectangle {
+                            width: Theme.avatar.md
+                            height: Theme.avatar.md
+                            radius: Theme.r2
+                            color: Theme.senderColor(model.userId)
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: {
+                                    var n = model.displayName || "?";
+                                    var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                    return (stripped.length > 0
+                                            ? stripped.charAt(0)
+                                            : "?").toUpperCase();
+                                }
+                                font.family: Theme.fontSans
+                                font.pixelSize: 13
+                                font.weight: Theme.fontWeight.semibold
+                                color: Theme.onAccent
+                            }
+                        }
 
                         Text {
-                            anchors.centerIn: parent
-                            text: model.displayName.charAt(0).toUpperCase()
-                            font.pixelSize: 14
-                            font.bold: true
-                            color: "white"
+                            text: model.displayName
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.base
+                            font.weight: Theme.fontWeight.medium
+                            color: memberMouse.containsMouse ? Theme.fg0 : Theme.fg1
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
                         }
                     }
 
-                    Text {
-                        text: model.displayName
-                        font.pixelSize: Theme.fontSizeNormal
-                        color: Theme.textSecondary
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
-                    }
-                }
-
-                MouseArea {
-                    id: memberMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        memberProfileCard.userId = model.userId;
-                        memberProfileCard.profileDisplayName = model.displayName;
-                        memberProfileCard.open();
+                    MouseArea {
+                        id: memberMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            memberProfileCard.userId = model.userId;
+                            memberProfileCard.profileDisplayName = model.displayName;
+                            memberProfileCard.open();
+                        }
                     }
                 }
             }

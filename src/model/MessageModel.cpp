@@ -49,6 +49,10 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
     case MediaFileNameRole: return msg.mediaFileName;
     case MediaFileSizeRole: return msg.mediaFileSize;
     case EditedRole: return msg.edited;
+    case ReplyToEventIdRole: return msg.replyToEventId;
+    case ReplyToSenderRole: return msg.replyToSender;
+    case ReplyPreviewRole: return msg.replyPreview;
+    case ReactionsRole: return buildReactionsList(msg);
     default: return {};
     }
 }
@@ -69,8 +73,88 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {MediaUrlRole, "mediaUrl"},
         {MediaFileNameRole, "mediaFileName"},
         {MediaFileSizeRole, "mediaFileSize"},
-        {EditedRole, "edited"}
+        {EditedRole, "edited"},
+        {ReplyToEventIdRole, "replyToEventId"},
+        {ReplyToSenderRole, "replyToSender"},
+        {ReplyPreviewRole, "replyPreview"},
+        {ReactionsRole, "reactions"}
     };
+}
+
+QVariantList MessageModel::buildReactionsList(const MessageEntry& entry) const
+{
+    // Build a stable list: sorted by emoji so the UI doesn't reshuffle chips
+    // on every sync. (QHash doesn't guarantee iteration order.)
+    QVariantList out;
+    QStringList keys = entry.reactionsByEmoji.keys();
+    std::sort(keys.begin(), keys.end());
+    for (const auto& emoji : keys) {
+        const auto& list = entry.reactionsByEmoji[emoji];
+        if (list.isEmpty()) continue;
+        QVariantMap m;
+        m[QStringLiteral("emoji")] = emoji;
+        m[QStringLiteral("count")] = list.size();
+        bool reacted = false;
+        QStringList eventIds;
+        for (const auto& p : list) {
+            eventIds.append(p.second);
+            if (!m_ownUserId.isEmpty() && p.first == m_ownUserId) reacted = true;
+        }
+        m[QStringLiteral("reacted")] = reacted;
+        m[QStringLiteral("eventIds")] = eventIds;
+        out.append(m);
+    }
+    return out;
+}
+
+QVariantMap MessageModel::reactionSummary(int idx) const
+{
+    QVariantMap out;
+    if (idx < 0 || idx >= m_messages.size()) return out;
+    out[QStringLiteral("reactions")] = buildReactionsList(m_messages[idx]);
+    return out;
+}
+
+QString MessageModel::ownReactionEventId(const QString& targetEventId, const QString& emoji,
+                                          const QString& userId) const
+{
+    for (const auto& msg : m_messages) {
+        if (msg.eventId != targetEventId) continue;
+        auto it = msg.reactionsByEmoji.find(emoji);
+        if (it == msg.reactionsByEmoji.end()) return {};
+        for (const auto& p : it.value()) {
+            if (p.first == userId) return p.second;
+        }
+        return {};
+    }
+    return {};
+}
+
+int MessageModel::applyReactionToTarget(const QString& targetEventId, const QString& emoji,
+                                         const QString& userId, const QString& reactionEventId)
+{
+    for (int i = 0; i < m_messages.size(); ++i) {
+        if (m_messages[i].eventId != targetEventId) continue;
+        auto& bucket = m_messages[i].reactionsByEmoji[emoji];
+        // Dedupe by reaction event id — sync may replay.
+        for (const auto& p : bucket) {
+            if (p.second == reactionEventId) return i;
+        }
+        bucket.append(qMakePair(userId, reactionEventId));
+        m_reactionIndex.insert(reactionEventId,
+                               ReactionRef{targetEventId, emoji, userId});
+        return i;
+    }
+    return -1;
+}
+
+int MessageModel::indexForEventId(const QString& eventId) const
+{
+    if (eventId.isEmpty()) return -1;
+    for (int i = m_messages.size() - 1; i >= 0; --i) {
+        if (m_messages[i].eventId == eventId) return i;
+    }
+    return -1;
 }
 
 QString MessageModel::resolveMediaUrl(const QString& mxcUri) const
@@ -93,6 +177,31 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
     entry.msgtype = QString::fromStdString(event.content.data.value("msgtype", ""));
     entry.body = QString::fromStdString(event.content.data.value("body", ""));
     entry.formattedBody = QString::fromStdString(event.content.data.value("formatted_body", ""));
+
+    // Parse m.in_reply_to — pointer to the message this one replies to.
+    // We don't mind m.replace (that's handled above); only genuine replies
+    // carry an m.in_reply_to key.
+    if (event.content.data.contains("m.relates_to")
+        && event.content.data["m.relates_to"].is_object()) {
+        const auto& rel = event.content.data["m.relates_to"];
+        if (rel.contains("m.in_reply_to") && rel["m.in_reply_to"].is_object()) {
+            entry.replyToEventId = QString::fromStdString(
+                rel["m.in_reply_to"].value("event_id", ""));
+        }
+    }
+
+    if (!entry.replyToEventId.isEmpty()) {
+        // Resolve the target from the already-ingested timeline, walking
+        // backward on the assumption the reply target is usually recent.
+        for (int i = m_messages.size() - 1; i >= 0; --i) {
+            if (m_messages[i].eventId != entry.replyToEventId) continue;
+            entry.replyToSender = m_messages[i].senderDisplayName;
+            QString preview = m_messages[i].body;
+            if (preview.size() > 80) preview = preview.left(80) + "…";
+            entry.replyPreview = preview;
+            break;
+        }
+    }
 
     // Extract media fields for image/file messages
     if (entry.msgtype == "m.image" || entry.msgtype == "m.file" ||
@@ -117,6 +226,69 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
 
 void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& ownUserId)
 {
+    // Cache the caller's identity so buildReactionsList() can mark chips the
+    // current user has reacted to.
+    m_ownUserId = ownUserId;
+
+    // --- m.reaction (m.annotation) -------------------------------------
+    // A reaction is a sibling event; it doesn't live in the message list,
+    // but we fold its state into the target message's reactions map.
+    if (event.type == "m.reaction") {
+        const auto& data = event.content.data;
+        if (!data.contains("m.relates_to") || !data["m.relates_to"].is_object())
+            return;
+        const auto& rel = data["m.relates_to"];
+        if (rel.value("rel_type", "") != "m.annotation") return;
+        QString targetId = QString::fromStdString(rel.value("event_id", ""));
+        QString key = QString::fromStdString(rel.value("key", ""));
+        if (targetId.isEmpty() || key.isEmpty()) return;
+        QString reactionEventId = QString::fromStdString(event.event_id);
+        QString sender = QString::fromStdString(event.sender);
+        // Dedupe globally — if we've indexed this reaction id already, skip.
+        if (m_reactionIndex.contains(reactionEventId)) return;
+        int row = applyReactionToTarget(targetId, key, sender, reactionEventId);
+        if (row >= 0) {
+            auto idx = index(row);
+            emit dataChanged(idx, idx, {ReactionsRole});
+        } else {
+            // Target not loaded yet — stash for drainage on append.
+            m_pendingReactions[targetId].append(
+                PendingReaction{key, sender, reactionEventId});
+        }
+        return;
+    }
+
+    // --- m.room.redaction ----------------------------------------------
+    // Currently only the server plumbs redactions for reactions; message
+    // redactions are handled elsewhere. We only care about reactions being
+    // redacted: find the reaction in our index and remove it from its target.
+    if (event.type == std::string(bsfchat::event_type::kRoomRedaction)) {
+        const auto& data = event.content.data;
+        QString target = QString::fromStdString(data.value("redacts", ""));
+        if (target.isEmpty()) return;
+        auto it = m_reactionIndex.find(target);
+        if (it == m_reactionIndex.end()) return;
+        ReactionRef ref = it.value();
+        m_reactionIndex.erase(it);
+        for (int i = 0; i < m_messages.size(); ++i) {
+            if (m_messages[i].eventId != ref.targetEventId) continue;
+            auto bIt = m_messages[i].reactionsByEmoji.find(ref.emoji);
+            if (bIt == m_messages[i].reactionsByEmoji.end()) return;
+            auto& bucket = bIt.value();
+            for (int j = 0; j < bucket.size(); ++j) {
+                if (bucket[j].second == target) {
+                    bucket.removeAt(j);
+                    break;
+                }
+            }
+            if (bucket.isEmpty()) m_messages[i].reactionsByEmoji.erase(bIt);
+            auto idx = index(i);
+            emit dataChanged(idx, idx, {ReactionsRole});
+            return;
+        }
+        return;
+    }
+
     // Only add message events
     if (event.type != std::string(bsfchat::event_type::kRoomMessage))
         return;
@@ -181,6 +353,22 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
     m_messages.append(eventToEntry(event, ownUserId));
     endInsertRows();
     emit countChanged();
+
+    // Drain any reactions we received before this message landed.
+    auto pIt = m_pendingReactions.find(eventId);
+    if (pIt != m_pendingReactions.end()) {
+        int row = m_messages.size() - 1;
+        for (const auto& pr : pIt.value()) {
+            if (m_reactionIndex.contains(pr.reactionEventId)) continue;
+            auto& bucket = m_messages[row].reactionsByEmoji[pr.emoji];
+            bucket.append(qMakePair(pr.userId, pr.reactionEventId));
+            m_reactionIndex.insert(pr.reactionEventId,
+                                   ReactionRef{eventId, pr.emoji, pr.userId});
+        }
+        m_pendingReactions.erase(pIt);
+        auto idx = index(row);
+        emit dataChanged(idx, idx, {ReactionsRole});
+    }
 }
 
 void MessageModel::appendEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId)
@@ -192,6 +380,7 @@ void MessageModel::appendEvents(const QVector<bsfchat::RoomEvent>& events, const
 
 void MessageModel::prependEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId)
 {
+    m_ownUserId = ownUserId;
     QVector<MessageEntry> newEntries;
     for (const auto& event : events) {
         if (event.type != std::string(bsfchat::event_type::kRoomMessage))
@@ -216,11 +405,34 @@ void MessageModel::prependEvents(const QVector<bsfchat::RoomEvent>& events, cons
     emit countChanged();
 }
 
+void MessageModel::setPrevBatchToken(const QString& token)
+{
+    if (m_prevBatchToken == token) return;
+    const bool hadMore = hasMoreHistory();
+    m_prevBatchToken = token;
+    if (hadMore != hasMoreHistory()) emit hasMoreHistoryChanged();
+}
+
+void MessageModel::setLoadingHistory(bool v)
+{
+    if (m_loadingHistory == v) return;
+    m_loadingHistory = v;
+    emit loadingHistoryChanged();
+}
+
 void MessageModel::clear()
 {
     beginResetModel();
     m_messages.clear();
+    m_pendingReactions.clear();
+    m_reactionIndex.clear();
     endResetModel();
+    // A room switch invalidates the pagination state too — otherwise a
+    // stale token from the previous room would drive the next scroll-up.
+    const bool hadMore = hasMoreHistory();
+    m_prevBatchToken.clear();
+    if (hadMore) emit hasMoreHistoryChanged();
+    if (m_loadingHistory) { m_loadingHistory = false; emit loadingHistoryChanged(); }
     emit countChanged();
 }
 

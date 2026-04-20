@@ -125,6 +125,65 @@ void Settings::setTheme(const QString& theme)
     }
 }
 
+QString Settings::accent() const
+{
+    return m_settings.value("accent", "#5865f2").toString();
+}
+
+void Settings::setAccent(const QString& accent)
+{
+    if (this->accent() != accent) {
+        m_settings.setValue("accent", accent);
+        emit accentChanged();
+    }
+}
+
+int Settings::accentHue() const
+{
+    return m_settings.value("accentHue", 180).toInt();
+}
+
+void Settings::setAccentHue(int hue)
+{
+    // Designer palette supports only these four hues; anything else would
+    // fall through to the 180 default in Theme.qml and look unthemed.
+    if (hue != 180 && hue != 260 && hue != 320 && hue != 30) hue = 180;
+    if (accentHue() == hue) return;
+    m_settings.setValue("accentHue", hue);
+    emit accentHueChanged();
+}
+
+bool Settings::accessibilityMode() const
+{
+    return m_settings.value("accessibilityMode", false).toBool();
+}
+
+void Settings::setAccessibilityMode(bool v)
+{
+    if (accessibilityMode() != v) {
+        m_settings.setValue("accessibilityMode", v);
+        emit accessibilityModeChanged();
+    }
+}
+
+QString Settings::layoutVariant() const
+{
+    return m_settings.value("layoutVariant", "standard").toString();
+}
+
+void Settings::setLayoutVariant(const QString& variant)
+{
+    // Only three valid values — anything else gets coerced to standard so
+    // a typo in saved state can't put Theme.variant into an unknown mode
+    // (Theme's layout switcher falls through to _layoutStandard anyway,
+    // but coercing here keeps the persisted value clean).
+    QString v = variant;
+    if (v != "standard" && v != "compact" && v != "focus") v = "standard";
+    if (layoutVariant() == v) return;
+    m_settings.setValue("layoutVariant", v);
+    emit layoutVariantChanged();
+}
+
 QString Settings::audioInputDevice() const {
     return m_settings.value("audio/inputDevice").toString();
 }

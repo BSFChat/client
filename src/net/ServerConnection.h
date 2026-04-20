@@ -8,6 +8,7 @@
 #include <QString>
 #include <QTimer>
 #include <QVector>
+#include <functional>
 
 #include <bsfchat/MatrixTypes.h>
 
@@ -46,6 +47,12 @@ class ServerConnection : public QObject {
     Q_PROPERTY(bool voiceMuted READ voiceMuted NOTIFY voiceMutedChanged)
     Q_PROPERTY(bool voiceDeafened READ voiceDeafened NOTIFY voiceDeafenedChanged)
     Q_PROPERTY(bool inVoiceChannel READ inVoiceChannel NOTIFY activeVoiceRoomIdChanged)
+    // Which view the main area should display. Independent of whether
+    // the user is connected to a voice call — you can be in voice AND
+    // reading a text channel. Flips true when the voice channel row is
+    // clicked (or the VoiceDock / VoiceStatusCard is tapped), false
+    // whenever a text channel becomes active or voice is left.
+    Q_PROPERTY(bool viewingVoiceRoom READ viewingVoiceRoom NOTIFY viewingVoiceRoomChanged)
     Q_PROPERTY(QJsonArray voiceMembers READ voiceMembers NOTIFY voiceMembersChanged)
     // Mic transmit level, 0..1. Non-zero when the mic is open AND capturing
     // audio above the silence floor; zero when muted, disconnected, or idle.
@@ -60,6 +67,17 @@ class ServerConnection : public QObject {
     // QML bindings should reference this so they re-evaluate whenever the
     // effective permission set could have changed.
     Q_PROPERTY(int permissionsGeneration READ permissionsGeneration NOTIFY permissionsChanged)
+    // Aggregated list of banned users across every room the sync has
+    // surfaced. One entry per user: { userId, displayName, rooms[], reason }.
+    // The value comes from m_roomMembers (client-side cache), so it only
+    // covers rooms we've seen — good enough for the Bans tab UI, not a
+    // source of truth.
+    Q_PROPERTY(QVariantList bannedMembers READ bannedMembers NOTIFY bannedMembersChanged)
+    // Union of every "join"-state member across every room we've synced.
+    // Distinct from memberListModel (which tracks the currently-active
+    // room only). ServerSettings > Members binds to this so the tab shows
+    // the full roster regardless of which channel happens to be active.
+    Q_PROPERTY(QVariantList serverMembers READ serverMembers NOTIFY serverMembersChanged)
 
 public:
     explicit ServerConnection(const QString& serverUrl, QObject* parent = nullptr);
@@ -116,9 +134,45 @@ public:
     Q_INVOKABLE void disconnectFromServer();
     Q_INVOKABLE void setActiveRoom(const QString& roomId);
     Q_INVOKABLE void sendMessage(const QString& body);
+    // Rich variant used when the composer has tracked @mention or #channel
+    // tokens. `formattedBody` is the sender-generated HTML (with <a>
+    // anchors for mentions/channels); `mentionedUserIds` goes into
+    // m.mentions.user_ids so the server can elevate notifications.
+    Q_INVOKABLE void sendRichMessage(const QString& body,
+                                      const QString& formattedBody,
+                                      const QStringList& mentionedUserIds);
     // Edit a previously-sent message in the currently-active room. Server
     // rejects if the caller isn't the original sender.
     Q_INVOKABLE void editMessage(const QString& eventId, const QString& newBody);
+    // Send `body` into the currently-active room as a reply pointing at
+    // `targetEventId`. The UI composer calls this when the reply banner is
+    // active; no server-side support is needed beyond arbitrary content.
+    Q_INVOKABLE void replyToMessage(const QString& targetEventId, const QString& body);
+    // Forward the message identified by sourceEventId (in the active room)
+    // into destRoomId on this server. Builds the attribution prefix from
+    // the message model + RoomListModel.
+    Q_INVOKABLE void forwardMessage(const QString& sourceEventId, const QString& destRoomId);
+
+    // Back-pagination. Issues GET /rooms/{id}/messages?from=<prev_batch>&dir=b.
+    // No-op if we've already reached the start of the room or a request is
+    // already in flight. MessageView binds hasMoreHistory/loadingHistory on
+    // MessageModel to drive the scroll-to-top trigger.
+    Q_INVOKABLE void loadOlderMessages(int limit = 50);
+
+    // Emoji reactions (Matrix m.reaction / m.annotation). If the current
+    // user already has a reaction with `emoji` on `targetEventId`, redact it
+    // (un-react); otherwise send a new reaction.
+    Q_INVOKABLE void toggleReaction(const QString& targetEventId, const QString& emoji);
+
+    // Look up a text channel by its display name (case-insensitive) and
+    // make it active. No-op if there's no match. Used by the
+    // #channel-mention click handler.
+    Q_INVOKABLE void activateRoomByName(const QString& name);
+
+    // Build a self-contained link to a message: bsfchat://message/<server>/<room>/<event>.
+    // Safe to call with any event id in the active room — we percent-encode
+    // all segments. Returns "" if no active room.
+    Q_INVOKABLE QString messageLink(const QString& eventId) const;
     Q_INVOKABLE void sendMediaMessage(const QString& fileUrl);
     Q_INVOKABLE void createRoom(const QString& name, const QString& topic);
     Q_INVOKABLE void joinRoom(const QString& roomIdOrAlias);
@@ -135,6 +189,14 @@ public:
 
     Q_INVOKABLE void joinVoiceChannel(const QString& roomId);
     Q_INVOKABLE void leaveVoiceChannel();
+    // Swap the main content to the VoiceRoom view without touching the
+    // voice connection itself. Called when the user clicks an already-
+    // joined voice channel, the VoiceDock, or the VoiceStatusCard. No-op
+    // if the user isn't in voice.
+    Q_INVOKABLE void showVoiceRoom();
+    // Swap back to the text view. setActiveRoom() calls this implicitly
+    // so clicking any text channel also flips the view.
+    Q_INVOKABLE void showTextView();
     Q_INVOKABLE void toggleMute();
     Q_INVOKABLE void toggleDeafen();
     Q_INVOKABLE void createVoiceChannel(const QString& name);
@@ -179,6 +241,25 @@ public:
                                  const QString& reason = {});
     Q_INVOKABLE void banMember(const QString& roomId, const QString& userId,
                                 const QString& reason = {});
+    Q_INVOKABLE void unbanMember(const QString& roomId, const QString& userId);
+
+    // Server-scope moderation — iterate every room the bot knows about and
+    // apply the matching Matrix per-room action. "Server-wide ban" maps to
+    // banning the user from each room; next sync updates the caches.
+    Q_INVOKABLE void kickFromServer(const QString& userId, const QString& reason = {});
+    Q_INVOKABLE void banFromServer(const QString& userId, const QString& reason = {});
+    Q_INVOKABLE void unbanFromServer(const QString& userId);
+
+    // Getter for the Q_PROPERTY declared above. Rebuilds from m_roomMembers
+    // each call (cheap at our expected member counts). Entries:
+    //   { userId, displayName, rooms: [roomId...], reason }
+    QVariantList bannedMembers() const;
+    // Server-wide members union. Entries:
+    //   { userId, displayName, avatarUrl, rooms: [roomId...] }
+    // Only users whose LATEST membership per room is "join" are included;
+    // a user who's "join" in one room and "leave" in another still counts
+    // as long as at least one room shows them as joined.
+    QVariantList serverMembers() const;
 
     Q_INVOKABLE void updateDisplayName(const QString& name);
     // Update the server-wide name (bsfchat.server.info). Requires MANAGE_SERVER.
@@ -206,6 +287,7 @@ signals:
     void mediaSendCompleted();
     void mediaSendFailed(const QString& error);
     void activeVoiceRoomIdChanged();
+    void viewingVoiceRoomChanged();
     void voiceMutedChanged();
     void voiceDeafenedChanged();
     void voiceMembersChanged();
@@ -218,6 +300,33 @@ signals:
     void serverRolesChanged();
     void permissionsChanged();
     void categorizedRoomsChanged();
+    void bannedMembersChanged();
+    void serverMembersChanged();
+    // Fired when a state-event write (role assignment, channel override,
+    // channel settings, server name) was rejected by the server. The QML
+    // layer shows a toast and the optimistic local update is rolled back
+    // before this signal fires. `kind` is a short tag ("role-assign",
+    // "server-name", …) so the UI can tailor the message.
+    void stateWriteFailed(const QString& kind, int status, const QString& error);
+    // Emitted when something outside MessageView (e.g. a message-link click
+    // from another server, or a cross-room jump) has asked the chat pane to
+    // scroll to a specific event. MessageView listens and calls
+    // positionViewAtIndex on the matching row, if loaded.
+    void scrollToEventRequested(const QString& eventId);
+    // Fired after a /messages response is absorbed into the MessageModel.
+    // MessageView listens to drive the "paginate-until-found" loop for
+    // reply-jumps whose target wasn't in the initial timeline.
+    void olderMessagesLoaded();
+    // Emitted once per inbound m.room.message timeline event that is
+    // attributable to a different user and isn't an edit or reaction.
+    // NotificationManager consumes this to raise OS notifications — the
+    // signal fires regardless of whether the message is in the active room
+    // so cross-server/cross-room notifications are possible.
+    void messageReceived(const QString& roomId,
+                         const QString& senderDisplayName,
+                         const QString& body,
+                         const QString& eventId,
+                         bool mentionsMe);
 
 private:
     void startSync();
@@ -243,6 +352,10 @@ private:
     int m_connectionStatus = 0; // 0=disconnected, 1=connected, 2=reconnecting
     QString m_syncErrorMessage;
     bool m_hasUnread = false;
+    bool m_viewingVoiceRoom = false;
+
+public:
+    bool viewingVoiceRoom() const { return m_viewingVoiceRoom; }
 
     // Per-room member cache: roomId -> list of member events
     QMap<QString, QVector<bsfchat::RoomEvent>> m_roomMembers;
@@ -301,12 +414,32 @@ private:
     QMap<QString, QVector<Override>> m_channelOverrides; // roomId -> list
     QMap<QString, int> m_channelSlowmode;              // roomId -> seconds
 
-    // Helper: parse a JSON state event into typed caches.
-    void applyServerRolesEvent(const QJsonObject& content);
-    void applyMemberRolesEvent(const QString& userId, const QJsonObject& content);
+    // Optimistic-update undo stash, keyed by "<eventType>|<stateKey>". When
+    // a state-event write fails, we pop the matching closure and run it to
+    // restore the prior cache value; then re-emit permissionsChanged so the
+    // QML re-binds to the rolled-back state.
+    QMap<QString, std::function<void()>> m_pendingStateUndo;
+
+    // Helper: parse a JSON state event into typed caches. Each applier
+    // takes the event's `originMs` (== origin_server_ts) so it can reject
+    // stale replays — otherwise a sync that returns member.roles events
+    // from multiple rooms can land in arbitrary order and the "newer" event
+    // loses to the "older" one depending on iteration.
+    void applyServerRolesEvent(const QJsonObject& content, qint64 originMs);
+    void applyMemberRolesEvent(const QString& userId, const QJsonObject& content,
+                               qint64 originMs);
     void applyChannelPermissionsEvent(const QString& roomId, const QString& stateKey,
-                                       const QJsonObject& content);
-    void applyChannelSettingsEvent(const QString& roomId, const QJsonObject& content);
+                                       const QJsonObject& content, qint64 originMs);
+    void applyChannelSettingsEvent(const QString& roomId, const QJsonObject& content,
+                                   qint64 originMs);
+
+    // Last-applied timestamps so the state appliers can enforce latest-wins
+    // semantics when the same logical state key shows up with multiple
+    // events in one sync response.
+    qint64 m_serverRolesTs = 0;
+    QMap<QString, qint64> m_memberRolesTs;                     // userId -> ms
+    QMap<QPair<QString, QString>, qint64> m_channelOverrideTs; // (roomId, key)
+    QMap<QString, qint64> m_channelSettingsTs;                 // roomId -> ms
 
     // Track first sync in this session — only prune hidden rooms once, since
     // subsequent (incremental) syncs only include rooms with new activity.

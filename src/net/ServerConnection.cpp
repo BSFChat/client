@@ -36,6 +36,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     m_client->setHomeserver(serverUrl);
     m_messageModel->setHomeserver(serverUrl);
     m_messageModel->setDisplayNameCache(&m_userDisplayNames);
+    m_memberListModel->setDisplayNameCache(&m_userDisplayNames);
 
     // Connect sync signals
     connect(m_syncLoop, &SyncLoop::syncCompleted, this, &ServerConnection::processSyncResponse);
@@ -46,6 +47,30 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         m_syncErrorMessage = error;
         emit connectionStatusChanged();
         emit syncErrorMessageChanged();
+    });
+
+    // Surface state-event write failures. Each write path that optimistically
+    // updates local caches stashes an undo closure in m_pendingStateUndo;
+    // this handler pops and runs the matching one, then tells QML.
+    connect(m_client, &MatrixClient::stateEventError, this,
+            [this](const QString& roomId, const QString& eventType,
+                   const QString& stateKey, int status, const QString& error) {
+        Q_UNUSED(roomId);
+        QString key = eventType + QStringLiteral("|") + stateKey;
+        if (auto it = m_pendingStateUndo.find(key); it != m_pendingStateUndo.end()) {
+            auto undo = std::move(it.value());
+            m_pendingStateUndo.erase(it);
+            if (undo) undo();
+        }
+        // Short tag for the toast — lets QML switch on it to tailor wording.
+        QString kind;
+        if (eventType == QStringLiteral("bsfchat.member.roles")) kind = "role-assign";
+        else if (eventType == QStringLiteral("bsfchat.server.info")) kind = "server-name";
+        else if (eventType == QStringLiteral("bsfchat.channel.permissions")) kind = "channel-override";
+        else if (eventType == QStringLiteral("bsfchat.channel.settings")) kind = "channel-settings";
+        else if (eventType == QStringLiteral("bsfchat.server.roles")) kind = "server-roles";
+        else kind = eventType;
+        emit stateWriteFailed(kind, status, error);
     });
 
     // Connect room members response
@@ -75,13 +100,40 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         }
     });
 
-    // Connect message history results
+    // Connect message history results. Two modes:
+    //   resp.start empty → initial room load (from==""); append + seed the
+    //     prev_batch token so scroll-up can walk further back from here.
+    //   resp.start non-empty → back-pagination; prepend the older batch and
+    //     advance the token. resp.end being nullopt means we've hit the
+    //     start of the room's history, so hasMoreHistory flips off.
     connect(m_client, &MatrixClient::messagesResult, this, [this](const bsfchat::MessagesResponse& resp) {
         auto events = resp.chunk;
+        // Server returns dir=b newest-first; reverse to chronological so
+        // both append and prepend get oldest→newest.
         std::reverse(events.begin(), events.end());
-        for (const auto& event : events) {
-            m_messageModel->appendEvent(event, m_userId);
+        const bool isBackPaginate = resp.start.has_value() && !resp.start->empty();
+        if (isBackPaginate) {
+            QVector<bsfchat::RoomEvent> vec;
+            vec.reserve(static_cast<int>(events.size()));
+            for (auto& e : events) vec.push_back(e);
+            m_messageModel->prependEvents(vec, m_userId);
+        } else {
+            for (const auto& event : events) {
+                m_messageModel->appendEvent(event, m_userId);
+            }
         }
+        // Always update the pagination token. On back-paginate the token
+        // advances; on initial load the sync may or may not have already
+        // set one — in either case the server's answer here is authoritative.
+        if (resp.end.has_value()) {
+            m_messageModel->setPrevBatchToken(QString::fromStdString(*resp.end));
+        } else {
+            m_messageModel->setPrevBatchToken(QString());
+        }
+        m_messageModel->setLoadingHistory(false);
+        // Fire a signal so MessageView / jumpToEvent loops can react to the
+        // completion of the load (for paginate-until-found).
+        emit olderMessagesLoaded();
     });
 
     // Typing timers
@@ -217,12 +269,15 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             }
         }
         // Always push into the global display-name cache so MessageModel
-        // can resolve it. This covers the case where the server hasn't
-        // been updated to broadcastMemberUpdate yet — at minimum the
-        // user's own messages render with their chosen name immediately.
+        // and MemberListModel can resolve it. This covers the case where
+        // the server hasn't been updated to broadcastMemberUpdate yet —
+        // at minimum the user's own messages render with their chosen
+        // name immediately.
         if (!displayName.isEmpty() && m_userDisplayNames.value(userId) != displayName) {
             m_userDisplayNames[userId] = displayName;
             m_messageModel->refreshDisplayNames();
+            m_memberListModel->refreshDisplayNames();
+            emit voiceMembersChanged();
         }
         emit profileFetched(userId, displayName, avatarUrl);
     });
@@ -403,6 +458,14 @@ void ServerConnection::loadMembersForRoom(const QString& roomId)
 
 void ServerConnection::setActiveRoom(const QString& roomId)
 {
+    // Always flip back to the text view when a text channel is selected,
+    // even if the room id didn't change — otherwise clicking the current
+    // text channel while the VoiceRoom is showing wouldn't return you to
+    // text reading.
+    if (m_viewingVoiceRoom) {
+        m_viewingVoiceRoom = false;
+        emit viewingVoiceRoomChanged();
+    }
     if (m_activeRoomId == roomId) return;
 
     m_activeRoomId = roomId;
@@ -457,10 +520,100 @@ void ServerConnection::sendMessage(const QString& body)
     m_client->sendMessage(m_activeRoomId, body);
 }
 
+void ServerConnection::sendRichMessage(const QString& body,
+                                        const QString& formattedBody,
+                                        const QStringList& mentionedUserIds)
+{
+    if (m_activeRoomId.isEmpty() || body.trimmed().isEmpty()) return;
+    m_typingTimer->stop();
+    m_typingStopTimer->stop();
+    m_client->setTyping(m_activeRoomId, m_userId, false);
+    m_client->sendRichMessage(m_activeRoomId, body, formattedBody, mentionedUserIds);
+}
+
 void ServerConnection::editMessage(const QString& eventId, const QString& newBody)
 {
     if (m_activeRoomId.isEmpty() || eventId.isEmpty() || newBody.trimmed().isEmpty()) return;
     m_client->editMessage(m_activeRoomId, eventId, newBody);
+}
+
+void ServerConnection::replyToMessage(const QString& targetEventId, const QString& body)
+{
+    if (m_activeRoomId.isEmpty() || targetEventId.isEmpty()
+        || body.trimmed().isEmpty()) return;
+
+    // Stop typing indicator like sendMessage() does.
+    m_typingTimer->stop();
+    m_typingStopTimer->stop();
+    m_client->setTyping(m_activeRoomId, m_userId, false);
+
+    m_client->replyToMessage(m_activeRoomId, body, targetEventId);
+}
+
+void ServerConnection::forwardMessage(const QString& sourceEventId, const QString& destRoomId)
+{
+    if (sourceEventId.isEmpty() || destRoomId.isEmpty()) return;
+
+    // Resolve the source message from the active room's MessageModel.
+    // If the caller is forwarding a message from another server, we'd
+    // need to hop through ServerManager; MVP is current-server only, so
+    // we assume the source is in m_messageModel.
+    int idx = m_messageModel->indexForEventId(sourceEventId);
+    if (idx < 0) return;
+
+    QModelIndex mi = m_messageModel->index(idx);
+    QString body = m_messageModel->data(mi, MessageModel::BodyRole).toString();
+    QString sender = m_messageModel->data(mi, MessageModel::SenderDisplayNameRole).toString();
+    QString sourceChannelName = m_roomListModel->roomDisplayName(m_activeRoomId);
+
+    // Pass the source location so MatrixClient can embed a clickable link
+    // back to the original event in the forwarded header.
+    m_client->forwardMessage(destRoomId, body, sourceChannelName, sender,
+                             m_serverUrl, m_activeRoomId, sourceEventId);
+}
+
+void ServerConnection::toggleReaction(const QString& targetEventId, const QString& emoji)
+{
+    if (m_activeRoomId.isEmpty() || targetEventId.isEmpty() || emoji.isEmpty()) return;
+    // If we already have a reaction of this emoji, redact it; otherwise add.
+    QString existing = m_messageModel->ownReactionEventId(targetEventId, emoji, m_userId);
+    if (!existing.isEmpty()) {
+        m_client->redactReaction(m_activeRoomId, existing);
+    } else {
+        m_client->sendReaction(m_activeRoomId, targetEventId, emoji);
+    }
+}
+
+void ServerConnection::loadOlderMessages(int limit)
+{
+    if (m_activeRoomId.isEmpty()) return;
+    const QString token = m_messageModel->prevBatchToken();
+    if (token.isEmpty()) return;                 // already at start of history
+    if (m_messageModel->loadingHistory()) return; // de-dupe rapid triggers
+    m_messageModel->setLoadingHistory(true);
+    m_client->getRoomMessages(m_activeRoomId, token, QStringLiteral("b"), limit);
+}
+
+void ServerConnection::activateRoomByName(const QString& name)
+{
+    if (!m_roomListModel) return;
+    const QString roomId = m_roomListModel->roomIdForName(name);
+    if (roomId.isEmpty()) return;
+    setActiveRoom(roomId);
+}
+
+QString ServerConnection::messageLink(const QString& eventId) const
+{
+    if (eventId.isEmpty() || m_activeRoomId.isEmpty()) return {};
+    // Percent-encode each segment individually. QUrl::toPercentEncoding by
+    // default leaves '/' alone, which would collide with our path separator;
+    // pass it as an "exclude" byte to force encoding.
+    const QByteArray enc = QUrl::toPercentEncoding(m_serverUrl, "", "/");
+    const QByteArray roomEnc = QUrl::toPercentEncoding(m_activeRoomId);
+    const QByteArray eventEnc = QUrl::toPercentEncoding(eventId);
+    return QStringLiteral("bsfchat://message/%1/%2/%3")
+        .arg(QString::fromUtf8(enc), QString::fromUtf8(roomEnc),
+             QString::fromUtf8(eventEnc));
 }
 
 void ServerConnection::sendMediaMessage(const QString& fileUrl)
@@ -576,7 +729,7 @@ void ServerConnection::resetUnreadForRoom(const QString& roomId)
 
 void ServerConnection::joinVoiceChannel(const QString& roomId)
 {
-    // If already in a voice channel, leave it first
+    // If already in a voice channel, leave it first.
     if (!m_activeVoiceRoomId.isEmpty() && m_activeVoiceRoomId != roomId) {
         m_client->leaveVoice(m_activeVoiceRoomId);
         m_activeVoiceRoomId.clear();
@@ -586,10 +739,57 @@ void ServerConnection::joinVoiceChannel(const QString& roomId)
         emit voiceMembersChanged();
     }
     m_client->joinVoice(roomId);
+    // Clicking a voice channel always flips the main area to the
+    // VoiceRoom view — even if the join request is still in flight.
+    if (!m_viewingVoiceRoom) {
+        m_viewingVoiceRoom = true;
+        emit viewingVoiceRoomChanged();
+    }
+}
+
+void ServerConnection::showVoiceRoom()
+{
+    // No-op if the user isn't actually in a voice call — there's nothing
+    // to render. Caller should gate this on inVoiceChannel too, but
+    // guarding here makes the method safe from any context.
+    if (m_activeVoiceRoomId.isEmpty()) return;
+    if (m_viewingVoiceRoom) return;
+    m_viewingVoiceRoom = true;
+    emit viewingVoiceRoomChanged();
+}
+
+void ServerConnection::showTextView()
+{
+    if (!m_viewingVoiceRoom) return;
+    m_viewingVoiceRoom = false;
+    emit viewingVoiceRoomChanged();
 }
 
 QJsonArray ServerConnection::voiceMembers() const
 {
+    // Resolve @localpart:host → displayname for rendering. Falls back to
+    // localpart if we don't have a cached name yet.
+    auto displayFor = [this](const QString& uid) -> QString {
+        auto it = m_userDisplayNames.find(uid);
+        if (it != m_userDisplayNames.end() && !it->isEmpty()) return *it;
+        if (uid.startsWith('@')) {
+            int colon = uid.indexOf(':');
+            if (colon > 1) return uid.mid(1, colon - 1);
+        }
+        return uid;
+    };
+
+    auto augment = [&](const QJsonArray& src) {
+        QJsonArray out;
+        for (const auto& v : src) {
+            auto obj = v.toObject();
+            QString uid = obj.value("user_id").toString();
+            obj["displayName"] = displayFor(uid);
+            out.append(obj);
+        }
+        return out;
+    };
+
 #ifdef BSFCHAT_VOICE_ENABLED
     if (m_voiceEngine) {
         auto states = m_voiceEngine->peerStates();
@@ -597,9 +797,8 @@ QJsonArray ServerConnection::voiceMembers() const
         for (const auto& v : m_voiceMembers) {
             auto obj = v.toObject();
             QString uid = obj.value("user_id").toString();
+            obj["displayName"] = displayFor(uid);
             if (uid == m_userId) {
-                // Self — always "connected" since we don't have a peer to
-                // ourselves. Mark micSilent if applicable.
                 obj["peerState"] = QStringLiteral("connected");
             } else {
                 obj["peerState"] = states.value(uid, QStringLiteral("new"));
@@ -609,12 +808,18 @@ QJsonArray ServerConnection::voiceMembers() const
         return out;
     }
 #endif
-    return m_voiceMembers;
+    return augment(m_voiceMembers);
 }
 
 void ServerConnection::leaveVoiceChannel()
 {
     if (m_activeVoiceRoomId.isEmpty()) return;
+    // Once the user leaves voice the VoiceRoom view has nothing to
+    // show — flip back to text so they land on the active channel.
+    if (m_viewingVoiceRoom) {
+        m_viewingVoiceRoom = false;
+        emit viewingVoiceRoomChanged();
+    }
 #ifdef BSFCHAT_VOICE_ENABLED
     if (m_voiceEngine) {
         m_voiceEngine->stop();
@@ -863,10 +1068,13 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     QString dn = QString::fromStdString(event.content.data.value("displayname", ""));
                     if (!dn.isEmpty() && m_userDisplayNames.value(uid) != dn) {
                         m_userDisplayNames[uid] = dn;
-                        // Push the new name into any messages already
-                        // rendered so the user sees "Demonke" immediately
-                        // instead of waiting for a room switch.
+                        // Push the new name into any views that have
+                        // cached it: the message timeline, the member
+                        // list, and (via voiceMembersChanged) the voice
+                        // panel.
                         m_messageModel->refreshDisplayNames();
+                        m_memberListModel->refreshDisplayNames();
+                        emit voiceMembersChanged();
                     }
                 }
                 if (roomId == m_activeRoomId) {
@@ -895,21 +1103,25 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 }
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerRoles)) {
                 QByteArray data = QByteArray::fromStdString(event.content.data.dump());
-                applyServerRolesEvent(QJsonDocument::fromJson(data).object());
+                applyServerRolesEvent(QJsonDocument::fromJson(data).object(),
+                                      static_cast<qint64>(event.origin_server_ts));
             } else if (type == QString::fromUtf8(bsfchat::event_type::kMemberRoles)) {
                 if (event.state_key.has_value()) {
                     QString targetUser = QString::fromStdString(*event.state_key);
                     QByteArray data = QByteArray::fromStdString(event.content.data.dump());
-                    applyMemberRolesEvent(targetUser, QJsonDocument::fromJson(data).object());
+                    applyMemberRolesEvent(targetUser, QJsonDocument::fromJson(data).object(),
+                                          static_cast<qint64>(event.origin_server_ts));
                 }
             } else if (type == QString::fromUtf8(bsfchat::event_type::kChannelSettings)) {
                 QByteArray data = QByteArray::fromStdString(event.content.data.dump());
-                applyChannelSettingsEvent(roomId, QJsonDocument::fromJson(data).object());
+                applyChannelSettingsEvent(roomId, QJsonDocument::fromJson(data).object(),
+                                          static_cast<qint64>(event.origin_server_ts));
             } else if (type == QString::fromUtf8(bsfchat::event_type::kChannelPermissions)) {
                 if (event.state_key.has_value()) {
                     QString key = QString::fromStdString(*event.state_key);
                     QByteArray data = QByteArray::fromStdString(event.content.data.dump());
-                    applyChannelPermissionsEvent(roomId, key, QJsonDocument::fromJson(data).object());
+                    applyChannelPermissionsEvent(roomId, key, QJsonDocument::fromJson(data).object(),
+                                                 static_cast<qint64>(event.origin_server_ts));
                 }
             } else if (type == QStringLiteral("m.room.power_levels")) {
                 // Legacy: ignored for enforcement but kept for UI compat.
@@ -960,21 +1172,25 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 }
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerRoles)) {
                 QByteArray data = QByteArray::fromStdString(event.content.data.dump());
-                applyServerRolesEvent(QJsonDocument::fromJson(data).object());
+                applyServerRolesEvent(QJsonDocument::fromJson(data).object(),
+                                      static_cast<qint64>(event.origin_server_ts));
             } else if (type == QString::fromUtf8(bsfchat::event_type::kMemberRoles)) {
                 if (event.state_key.has_value()) {
                     QString targetUser = QString::fromStdString(*event.state_key);
                     QByteArray data = QByteArray::fromStdString(event.content.data.dump());
-                    applyMemberRolesEvent(targetUser, QJsonDocument::fromJson(data).object());
+                    applyMemberRolesEvent(targetUser, QJsonDocument::fromJson(data).object(),
+                                          static_cast<qint64>(event.origin_server_ts));
                 }
             } else if (type == QString::fromUtf8(bsfchat::event_type::kChannelSettings)) {
                 QByteArray data = QByteArray::fromStdString(event.content.data.dump());
-                applyChannelSettingsEvent(roomId, QJsonDocument::fromJson(data).object());
+                applyChannelSettingsEvent(roomId, QJsonDocument::fromJson(data).object(),
+                                          static_cast<qint64>(event.origin_server_ts));
             } else if (type == QString::fromUtf8(bsfchat::event_type::kChannelPermissions)) {
                 if (event.state_key.has_value()) {
                     QString key = QString::fromStdString(*event.state_key);
                     QByteArray data = QByteArray::fromStdString(event.content.data.dump());
-                    applyChannelPermissionsEvent(roomId, key, QJsonDocument::fromJson(data).object());
+                    applyChannelPermissionsEvent(roomId, key, QJsonDocument::fromJson(data).object(),
+                                                 static_cast<qint64>(event.origin_server_ts));
                 }
             } else if (type == QStringLiteral("m.room.power_levels")) {
                 // Legacy: ignored for enforcement.
@@ -988,6 +1204,56 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 QString sender = QString::fromStdString(event.sender);
                 if (roomId == m_activeRoomId && sender != m_userId) {
                     activeRoomHadNewMessage = true;
+                }
+
+                // Fire messageReceived for notification-worthy inbound
+                // messages: not from us, not an edit (m.replace), not a
+                // reaction (kReaction is a different type entirely, so it
+                // never reaches this branch — but we still guard the
+                // replace case which *does* come through as m.room.message).
+                bool isEdit = false;
+                if (event.content.data.contains("m.relates_to")
+                    && event.content.data["m.relates_to"].is_object()) {
+                    const auto& rel = event.content.data["m.relates_to"];
+                    if (rel.value("rel_type", "") == "m.replace") {
+                        isEdit = true;
+                    }
+                }
+                if (sender != m_userId && !isEdit) {
+                    // Prefer the cached global display name so the
+                    // notification matches what the user sees in chat;
+                    // fall back to the localpart of the mxid.
+                    QString displayName = m_userDisplayNames.value(sender);
+                    if (displayName.isEmpty()) {
+                        displayName = sender;
+                        if (displayName.startsWith('@')) {
+                            int colon = displayName.indexOf(':');
+                            if (colon > 0) displayName = displayName.mid(1, colon - 1);
+                        }
+                    }
+                    QString eventId = QString::fromStdString(event.event_id);
+                    // Check m.mentions.user_ids for an explicit @-mention
+                    // targeting the current user. NotificationManager uses
+                    // this to bypass the "skip if focused" rule — if you
+                    // were mentioned, you want to know even if the window
+                    // is in the foreground.
+                    bool mentionsMe = false;
+                    if (event.content.data.contains("m.mentions")
+                        && event.content.data["m.mentions"].is_object()) {
+                        const auto& m = event.content.data["m.mentions"];
+                        if (m.contains("user_ids") && m["user_ids"].is_array()) {
+                            for (const auto& u : m["user_ids"]) {
+                                if (u.is_string()
+                                    && QString::fromStdString(u.get<std::string>())
+                                       == m_userId) {
+                                    mentionsMe = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    emit messageReceived(roomId, displayName, body, eventId,
+                                         mentionsMe);
                 }
             }
 
@@ -1126,6 +1392,12 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
     // Rebuild categorized rooms after sync processing
     rebuildCategorizedRooms();
 
+    // Let any Bans-tab binding re-evaluate. This fires once per sync
+    // regardless of whether membership actually changed — cheap enough
+    // since QML only calls bannedMembers() when that tab is visible.
+    emit bannedMembersChanged();
+    emit serverMembersChanged();
+
     // Recalculate global hasUnread flag from the authoritative per-room counts.
     bool hadUnread = m_hasUnread;
     m_hasUnread = m_roomListModel->totalUnreadCount() > 0;
@@ -1172,8 +1444,13 @@ quint64 parseFlagsValue(const QJsonValue& v) {
 }
 } // namespace
 
-void ServerConnection::applyServerRolesEvent(const QJsonObject& content)
+void ServerConnection::applyServerRolesEvent(const QJsonObject& content, qint64 originMs)
 {
+    // Stale-event guard — see header comment. A sync reply can return
+    // multiple server.roles events across rooms; only the newest (by
+    // origin_server_ts, which the server assigns monotonically) wins.
+    if (originMs > 0 && originMs < m_serverRolesTs) return;
+
     auto rolesArr = content.value("roles").toArray();
 
     // Parse into a temporary vector first so we can decide whether to adopt
@@ -1219,29 +1496,48 @@ void ServerConnection::applyServerRolesEvent(const QJsonObject& content)
 
     m_roles = std::move(parsed);
     m_serverRoles = rolesArr;
+    if (originMs > 0) m_serverRolesTs = originMs;
     emit serverRolesChanged();
     ++m_permissionsGeneration;
     emit permissionsChanged();
 }
 
-void ServerConnection::applyMemberRolesEvent(const QString& userId, const QJsonObject& content)
+void ServerConnection::applyMemberRolesEvent(const QString& userId, const QJsonObject& content,
+                                              qint64 originMs)
 {
     QStringList ids;
     auto arr = content.value("role_ids").toArray();
     for (const auto& v : arr) ids.append(v.toString());
+
+    // Latest-wins guard. Without this, a sync that returns member.roles
+    // events for `userId` from multiple rooms (e.g. historical assignments
+    // in different channels) landed in whatever order the outer loop
+    // iterated rooms — which meant a fresh "admin" write could be silently
+    // clobbered by a stale "@everyone-only" event from another room.
+    if (originMs > 0 && originMs < m_memberRolesTs.value(userId, 0)) return;
+
     m_memberRoles[userId] = ids;
+    if (originMs > 0) m_memberRolesTs[userId] = originMs;
+
+    // A successful round-trip invalidates any pending optimistic undo for
+    // this user — the server has accepted the write and this is its echo.
+    m_pendingStateUndo.remove(QStringLiteral("bsfchat.member.roles|") + userId);
     emit serverRolesChanged();
     ++m_permissionsGeneration;
     emit permissionsChanged();
 }
 
 void ServerConnection::applyChannelPermissionsEvent(const QString& roomId, const QString& stateKey,
-                                                    const QJsonObject& content)
+                                                    const QJsonObject& content, qint64 originMs)
 {
+    auto key = qMakePair(roomId, stateKey);
+    if (originMs > 0 && originMs < m_channelOverrideTs.value(key, 0)) return;
+
     Override ov;
     ov.targetKey = stateKey;
     ov.allow = parseFlagsValue(content.value("allow"));
     ov.deny = parseFlagsValue(content.value("deny"));
+    if (originMs > 0) m_channelOverrideTs[key] = originMs;
 
     auto& list = m_channelOverrides[roomId];
     // Replace any existing entry with the same target key.
@@ -1261,9 +1557,12 @@ void ServerConnection::applyChannelPermissionsEvent(const QString& roomId, const
     emit permissionsChanged();
 }
 
-void ServerConnection::applyChannelSettingsEvent(const QString& roomId, const QJsonObject& content)
+void ServerConnection::applyChannelSettingsEvent(const QString& roomId, const QJsonObject& content,
+                                                  qint64 originMs)
 {
+    if (originMs > 0 && originMs < m_channelSettingsTs.value(roomId, 0)) return;
     m_channelSlowmode[roomId] = content.value("slowmode_seconds").toInt(0);
+    if (originMs > 0) m_channelSettingsTs[roomId] = originMs;
     emit serverRolesChanged();
     ++m_permissionsGeneration;
     emit permissionsChanged();
@@ -1347,7 +1646,11 @@ int ServerConnection::channelSlowmode(const QString& roomId) const {
 }
 
 void ServerConnection::setMemberRoles(const QString& userId, const QStringList& roleIds) {
-    // Write to the first visible room — the server reads member.roles globally.
+    // Write to the first room we have sync'd state for. The server's
+    // member.roles lookup is keyed on state_key (= userId) and reads the
+    // latest-by-stream-position across every room, so the destination room
+    // only needs to be one we're a member of with MANAGE_ROLES — it doesn't
+    // have to "own" the user.
     QString targetRoom;
     for (int i = 0; i < m_roomListModel->rowCount(); ++i) {
         targetRoom = m_roomListModel->data(m_roomListModel->index(i),
@@ -1355,6 +1658,27 @@ void ServerConnection::setMemberRoles(const QString& userId, const QStringList& 
         if (!targetRoom.isEmpty()) break;
     }
     if (targetRoom.isEmpty()) return;
+
+    // Optimistic update — the UI should reflect the change immediately so
+    // the role checkboxes and "assigned roles" chips don't look like they
+    // silently failed while we wait for the sync round-trip. If the server
+    // rejects the write, the stateEventError handler pops m_pendingStateUndo
+    // and restores the prior value.
+    const QString undoKey = QStringLiteral("bsfchat.member.roles|") + userId;
+    QStringList previous = m_memberRoles.value(userId);
+    m_memberRoles[userId] = roleIds;
+    ++m_permissionsGeneration;
+    emit permissionsChanged();
+    emit serverRolesChanged();
+
+    m_pendingStateUndo[undoKey] = [this, userId, previous]() {
+        if (previous.isEmpty()) m_memberRoles.remove(userId);
+        else m_memberRoles[userId] = previous;
+        ++m_permissionsGeneration;
+        emit permissionsChanged();
+        emit serverRolesChanged();
+    };
+
     m_client->setMemberRoles(targetRoom, userId, roleIds);
 }
 
@@ -1399,4 +1723,187 @@ void ServerConnection::kickMember(const QString& roomId, const QString& userId,
 void ServerConnection::banMember(const QString& roomId, const QString& userId,
                                   const QString& reason) {
     m_client->banUser(roomId, userId, reason);
+}
+
+void ServerConnection::unbanMember(const QString& roomId, const QString& userId) {
+    m_client->unbanUser(roomId, userId);
+}
+
+// "Server-wide" moderation helpers. Matrix has no native server-ban
+// primitive, so we apply the action to every room the sync has surfaced.
+// Rooms the client hasn't synced yet fall through the cracks — acceptable
+// for v1 since the server also enforces each request, but flagged.
+
+void ServerConnection::kickFromServer(const QString& userId, const QString& reason) {
+    for (auto it = m_roomMembers.constBegin(); it != m_roomMembers.constEnd(); ++it) {
+        const QString& roomId = it.key();
+        // Only try rooms where the user's latest membership is "join" —
+        // kicking a non-member is a no-op server-side but spams noise.
+        QString latest;
+        for (const auto& ev : it.value()) {
+            if (ev.state_key.has_value()
+                && QString::fromStdString(*ev.state_key) == userId) {
+                latest = QString::fromStdString(
+                    ev.content.data.value("membership", ""));
+            }
+        }
+        if (latest == QStringLiteral("join")
+            || latest == QStringLiteral("invite")) {
+            m_client->kickUser(roomId, userId, reason);
+        }
+    }
+}
+
+void ServerConnection::banFromServer(const QString& userId, const QString& reason) {
+    // Ban applies regardless of current membership — even leaving users
+    // should be banned so they can't rejoin. The server will ignore redundant
+    // bans, and we intentionally skip rooms where the user is already banned
+    // to avoid the event spam.
+    for (auto it = m_roomMembers.constBegin(); it != m_roomMembers.constEnd(); ++it) {
+        const QString& roomId = it.key();
+        QString latest;
+        for (const auto& ev : it.value()) {
+            if (ev.state_key.has_value()
+                && QString::fromStdString(*ev.state_key) == userId) {
+                latest = QString::fromStdString(
+                    ev.content.data.value("membership", ""));
+            }
+        }
+        if (latest != QStringLiteral("ban")) {
+            m_client->banUser(roomId, userId, reason);
+        }
+    }
+}
+
+void ServerConnection::unbanFromServer(const QString& userId) {
+    for (auto it = m_roomMembers.constBegin(); it != m_roomMembers.constEnd(); ++it) {
+        const QString& roomId = it.key();
+        QString latest;
+        for (const auto& ev : it.value()) {
+            if (ev.state_key.has_value()
+                && QString::fromStdString(*ev.state_key) == userId) {
+                latest = QString::fromStdString(
+                    ev.content.data.value("membership", ""));
+            }
+        }
+        if (latest == QStringLiteral("ban")) {
+            m_client->unbanUser(roomId, userId);
+        }
+    }
+}
+
+QVariantList ServerConnection::serverMembers() const {
+    // Walk m_roomMembers, keeping only the latest event per (room, user),
+    // then union users whose latest state in any room is "join". We pull
+    // display name + avatar from the cached global map when available —
+    // the ban-event pattern (where displayname is blank) doesn't apply
+    // here but using the canonical cache keeps names consistent with
+    // MessageView / MemberList.
+    struct Agg {
+        QString displayName;
+        QString avatarUrl;
+        QStringList rooms;
+    };
+    QMap<QString, Agg> byUser;
+
+    for (auto it = m_roomMembers.constBegin(); it != m_roomMembers.constEnd(); ++it) {
+        const QString& roomId = it.key();
+        QMap<QString, bsfchat::RoomEvent> latestByUser;
+        for (const auto& ev : it.value()) {
+            if (ev.state_key.has_value()) {
+                latestByUser[QString::fromStdString(*ev.state_key)] = ev;
+            }
+        }
+        for (auto uit = latestByUser.constBegin(); uit != latestByUser.constEnd(); ++uit) {
+            const bsfchat::RoomEvent& ev = uit.value();
+            QString membership = QString::fromStdString(
+                ev.content.data.value("membership", ""));
+            if (membership != QStringLiteral("join")) continue;
+
+            const QString& uid = uit.key();
+            Agg& a = byUser[uid];
+            a.rooms.append(roomId);
+            QString dn = m_userDisplayNames.value(uid);
+            if (dn.isEmpty()) {
+                dn = QString::fromStdString(
+                    ev.content.data.value("displayname", ""));
+            }
+            if (!dn.isEmpty()) a.displayName = dn;
+            if (a.avatarUrl.isEmpty()) {
+                a.avatarUrl = QString::fromStdString(
+                    ev.content.data.value("avatar_url", ""));
+            }
+        }
+    }
+
+    QVariantList out;
+    for (auto it = byUser.constBegin(); it != byUser.constEnd(); ++it) {
+        QVariantMap row;
+        row.insert(QStringLiteral("userId"), it.key());
+        row.insert(QStringLiteral("displayName"),
+                   it.value().displayName.isEmpty() ? it.key() : it.value().displayName);
+        row.insert(QStringLiteral("avatarUrl"), it.value().avatarUrl);
+        row.insert(QStringLiteral("rooms"), it.value().rooms);
+        out.append(row);
+    }
+    return out;
+}
+
+QVariantList ServerConnection::bannedMembers() const {
+    // Walk the per-room member cache, keeping the latest membership event
+    // per (roomId, userId). Collect entries whose latest state is "ban" and
+    // dedupe into a per-user aggregate with the list of rooms + a reason
+    // (first non-empty one we encounter, since Matrix stores reasons per
+    // ban event and we don't try to prefer one).
+    struct Agg {
+        QString displayName;
+        QStringList rooms;
+        QString reason;
+    };
+    QMap<QString, Agg> byUser;
+
+    for (auto it = m_roomMembers.constBegin(); it != m_roomMembers.constEnd(); ++it) {
+        const QString& roomId = it.key();
+        // latest event per user in this room
+        QMap<QString, bsfchat::RoomEvent> latestByUser;
+        for (const auto& ev : it.value()) {
+            if (ev.state_key.has_value()) {
+                latestByUser[QString::fromStdString(*ev.state_key)] = ev;
+            }
+        }
+        for (auto uit = latestByUser.constBegin(); uit != latestByUser.constEnd(); ++uit) {
+            const bsfchat::RoomEvent& ev = uit.value();
+            QString membership = QString::fromStdString(
+                ev.content.data.value("membership", ""));
+            if (membership != QStringLiteral("ban")) continue;
+
+            const QString& uid = uit.key();
+            Agg& a = byUser[uid];
+            a.rooms.append(roomId);
+            // Prefer a cached displayname (from prior join) over the one on
+            // the ban event, which is often blank.
+            QString dn = m_userDisplayNames.value(uid);
+            if (dn.isEmpty()) {
+                dn = QString::fromStdString(
+                    ev.content.data.value("displayname", ""));
+            }
+            if (!dn.isEmpty()) a.displayName = dn;
+            if (a.reason.isEmpty()) {
+                a.reason = QString::fromStdString(
+                    ev.content.data.value("reason", ""));
+            }
+        }
+    }
+
+    QVariantList out;
+    for (auto it = byUser.constBegin(); it != byUser.constEnd(); ++it) {
+        QVariantMap row;
+        row.insert(QStringLiteral("userId"), it.key());
+        row.insert(QStringLiteral("displayName"),
+                   it.value().displayName.isEmpty() ? it.key() : it.value().displayName);
+        row.insert(QStringLiteral("rooms"), it.value().rooms);
+        row.insert(QStringLiteral("reason"), it.value().reason);
+        out.append(row);
+    }
+    return out;
 }

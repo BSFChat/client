@@ -21,11 +21,33 @@ QVariant MemberListModel::data(const QModelIndex& index, int role) const
     const auto& member = m_members[index.row()];
     switch (role) {
     case UserIdRole: return member.userId;
-    case DisplayNameRole: return member.displayName.isEmpty() ? member.userId : member.displayName;
+    case DisplayNameRole: return resolveName(member.userId, member.displayName);
     case AvatarUrlRole: return member.avatarUrl;
     case MembershipRole: return member.membership;
     default: return {};
     }
+}
+
+QString MemberListModel::resolveName(const QString& userId, const QString& localName) const
+{
+    if (!localName.isEmpty()) return localName;
+    if (m_dnCache) {
+        auto it = m_dnCache->find(userId);
+        if (it != m_dnCache->end() && !it->isEmpty()) return *it;
+    }
+    // Strip @localpart:host → localpart as final fallback.
+    if (userId.startsWith('@')) {
+        int colon = userId.indexOf(':');
+        if (colon > 1) return userId.mid(1, colon - 1);
+    }
+    return userId;
+}
+
+void MemberListModel::refreshDisplayNames()
+{
+    if (m_members.isEmpty()) return;
+    // Tell views to re-read DisplayNameRole for every row.
+    emit dataChanged(index(0), index(m_members.size() - 1), {DisplayNameRole});
 }
 
 QHash<int, QByteArray> MemberListModel::roleNames() const
@@ -86,8 +108,8 @@ void MemberListModel::processEvent(const bsfchat::RoomEvent& event)
 QString MemberListModel::displayNameForUser(const QString& userId) const
 {
     int idx = findMember(userId);
-    if (idx >= 0 && !m_members[idx].displayName.isEmpty()) {
-        return m_members[idx].displayName;
+    if (idx >= 0) {
+        return resolveName(userId, m_members[idx].displayName);
     }
     return {};
 }
