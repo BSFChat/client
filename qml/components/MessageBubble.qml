@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import BSFChat
 
 Item {
@@ -57,15 +58,268 @@ Item {
     // Clicking a `bsfchat://user/<userId>` link — inline @mention anchor.
     // MessageView opens the profile card for that user.
     signal userLinkClicked(string userId, string displayName)
+    // Left-click on an inline image asks MessageView to open the
+    // in-app ImageViewer (zoomable / pannable lightbox). Middle-click
+    // bypasses this and opens in the OS browser instead.
+    signal imageOpenRequested(string url, string filename, real size)
+    // Right-click context-menu action: redact (delete) the message.
+    // Allowed for the sender or anyone with MANAGE_MESSAGES.
+    signal deleteRequested(string eventId)
+
+    // URLs to unfurl — extracted once per body change. Capped at 2 so
+    // a spam-linked message doesn't explode into preview cards.
+    readonly property var _previewUrls: {
+        // Only unfurl plain-text messages. Attachments (image/file/
+        // video) already carry their own preview chrome; a URL buried
+        // in an image caption isn't worth fetching.
+        if (bubble.msgtype !== "m.text") return [];
+        if (!bubble.body) return [];
+        // Match http(s) URLs anywhere in the body. Stops at whitespace
+        // or closing punctuation commonly seen at the end of a prose
+        // sentence (`.`, `)`, `]`, `!`, `?`, `,`, `"`, `'`).
+        var re = /\bhttps?:\/\/[^\s<>"'()\[\]]+[^\s<>"'()\[\].,!?]/gi;
+        var matches = bubble.body.match(re);
+        if (!matches) return [];
+        // Dedupe + cap.
+        var seen = {};
+        var out = [];
+        for (var i = 0; i < matches.length && out.length < 2; i++) {
+            var u = matches[i];
+            if (seen[u]) continue;
+            seen[u] = true;
+            out.push(u);
+        }
+        return out;
+    }
 
     implicitHeight: contentLayout.implicitHeight + (showSender ? Theme.sp.s7 : 2)
+
+    // HoverHandler tracks hover across the whole bubble regardless of
+    // child event consumption — the MouseArea below goes false the moment
+    // the cursor lands on the TextEdit (which grabs mouse events for
+    // selectByMouse). Using `bubbleHovered` as the single source of truth
+    // for hover-sensitive UI keeps the action bar stable.
+    HoverHandler {
+        id: bubbleHoverHandler
+    }
+    readonly property bool bubbleHovered: bubbleHoverHandler.hovered
+
+    // Right-click anywhere on the bubble pops the context menu. Using a
+    // TapHandler instead of a MouseArea so it cooperates with the
+    // TextEdit body's selectByMouse — children still handle their own
+    // left-drag text selection, and we only grab the right button here.
+    TapHandler {
+        acceptedButtons: Qt.RightButton
+        // popup() with no args uses the OS cursor position, which is
+        // what we want for a right-click context menu. popup(pos)
+        // expects coords in the Menu's parent item's frame, and mixing
+        // that with scene-root coords from a TapHandler eventPoint put
+        // the menu half a screen away from the actual click.
+        onTapped: contextMenu.popup()
+    }
+
+    // True when we can show the "Delete" menu item. Either we sent the
+    // message, or we have MANAGE_MESSAGES in the active room.
+    readonly property bool canDelete: isOwnMessage
+        || (serverManager.activeServer
+            && serverManager.activeServer.canManageMessages(
+                   serverManager.activeServer.activeRoomId))
+
+    // Right-click context menu. Declared at the bubble root so the
+    // position passed to popup() is in application coords and works
+    // regardless of where in the bubble the user clicked.
+    Menu {
+        id: contextMenu
+
+        background: Rectangle {
+            color: Theme.bg1
+            radius: Theme.r2
+            border.color: Theme.line
+            border.width: 1
+            implicitWidth: 200
+        }
+
+        component CtxItem: MenuItem {
+            id: ci
+            // Collapse vertical footprint when hidden. Qt Controls Menu
+            // doesn't always skip invisible MenuItems in its layout, so
+            // an `Edit` item on someone else's message would leave a
+            // blank 34px slot in the popup. Gating implicitHeight on
+            // visibility is the canonical way to fold it cleanly.
+            implicitHeight: visible ? 34 : 0
+            height: implicitHeight
+            property string iconName: ""
+            property color labelColor: Theme.fg0
+            property string shortcut: ""
+            contentItem: RowLayout {
+                spacing: Theme.sp.s3
+                Icon {
+                    name: ci.iconName
+                    size: 14
+                    color: !ci.enabled ? Theme.fg3
+                         : ci.hovered ? ci.labelColor : Theme.fg2
+                    Layout.leftMargin: Theme.sp.s3
+                }
+                Text {
+                    text: ci.text
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    color: !ci.enabled ? Theme.fg3 : ci.labelColor
+                    Layout.fillWidth: true
+                    verticalAlignment: Text.AlignVCenter
+                }
+                Text {
+                    text: ci.shortcut
+                    visible: ci.shortcut.length > 0
+                    font.family: Theme.fontMono
+                    font.pixelSize: Theme.fontSize.xs
+                    color: Theme.fg3
+                    Layout.rightMargin: Theme.sp.s3
+                }
+            }
+            background: Rectangle {
+                color: ci.hovered && ci.enabled ? Theme.bg2 : "transparent"
+                radius: Theme.r1
+                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+            }
+        }
+
+        CtxItem {
+            text: "Reply"
+            iconName: "reply"
+            onTriggered: bubble.replyRequested(bubble.eventId, bubble.body,
+                                               bubble.senderDisplayName)
+        }
+        CtxItem {
+            text: "Forward"
+            iconName: "forward"
+            onTriggered: bubble.forwardRequested(bubble.eventId, bubble.body,
+                                                 bubble.senderDisplayName)
+        }
+        CtxItem {
+            text: "Edit"
+            iconName: "edit"
+            visible: bubble.isOwnMessage
+            onTriggered: bubble.editRequested(bubble.eventId, bubble.body)
+        }
+
+        MenuSeparator {
+            contentItem: Rectangle {
+                implicitWidth: 160
+                implicitHeight: 1
+                color: Theme.line
+            }
+        }
+
+        CtxItem {
+            text: "Copy text"
+            iconName: "copy"
+            onTriggered: {
+                if (serverManager) serverManager.copyToClipboard(bubble.body);
+            }
+        }
+        CtxItem {
+            text: "Copy message link"
+            iconName: "link"
+            onTriggered: bubble.copyLinkRequested(bubble.eventId)
+        }
+
+        CtxItem {
+            text: {
+                var s = serverManager.activeServer;
+                if (s && s.isEventPinned(s.activeRoomId, bubble.eventId))
+                    return "Unpin message";
+                return "Pin message";
+            }
+            iconName: "pin"
+            enabled: {
+                var s = serverManager.activeServer;
+                if (!s) return false;
+                if (s.permissionsGeneration < 0) return false;
+                return s.canManageChannel(s.activeRoomId);
+            }
+            onTriggered: {
+                var s = serverManager.activeServer;
+                if (s) s.togglePinnedEvent(s.activeRoomId, bubble.eventId);
+            }
+        }
+
+        MenuSeparator {
+            visible: bubble.canDelete
+            contentItem: Rectangle {
+                implicitWidth: 160
+                implicitHeight: 1
+                color: Theme.line
+            }
+        }
+
+        CtxItem {
+            text: "Delete message"
+            iconName: "x"
+            labelColor: Theme.danger
+            visible: bubble.canDelete
+            onTriggered: bubble.deleteRequested(bubble.eventId)
+        }
+    }
+
+    // User-scope context menu — popped by right-click on the sender
+    // avatar or sender name. Distinct from the message-scope menu
+    // (which is fired by right-click on the bubble body) so "reply"/
+    // "delete" actions don't appear when the user meant to reach out
+    // to the person. Mirrors the MemberList right-click vocabulary.
+    Menu {
+        id: userContextMenu
+        readonly property bool isSelfUser: serverManager.activeServer
+            && bubble.sender === serverManager.activeServer.userId
+        readonly property bool canManageRoles: serverManager.activeServer
+            && serverManager.activeServer.canManageRoles(
+                   serverManager.activeServer.activeRoomId)
+
+        background: Rectangle {
+            color: Theme.bg1
+            radius: Theme.r2
+            border.color: Theme.line
+            border.width: 1
+            implicitWidth: 220
+        }
+
+        CtxItem {
+            text: "View profile"
+            iconName: "at"
+            onTriggered: bubble.senderClicked(bubble.sender,
+                                              bubble.senderDisplayName)
+        }
+        CtxItem {
+            text: "Copy user ID"
+            iconName: "copy"
+            onTriggered: {
+                if (serverManager) serverManager.copyToClipboard(bubble.sender);
+            }
+        }
+
+        MenuSeparator {
+            visible: userContextMenu.canManageRoles
+            contentItem: Rectangle {
+                implicitWidth: 180
+                implicitHeight: 1
+                color: Theme.line
+            }
+        }
+        CtxItem {
+            text: "Manage roles…"
+            iconName: "shield"
+            visible: userContextMenu.canManageRoles
+            onTriggered: Window.window.openRoleAssignment(
+                bubble.sender, bubble.senderDisplayName)
+        }
+    }
 
     Rectangle {
         id: hoverBg
         anchors.fill: parent
         anchors.leftMargin: -Theme.sp.s3
         anchors.rightMargin: -Theme.sp.s3
-        color: bubbleHover.containsMouse ? Qt.rgba(0, 0, 0, 0.06) : "transparent"
+        color: bubble.bubbleHovered ? Qt.rgba(0, 0, 0, 0.06) : "transparent"
         radius: Theme.r1
     }
 
@@ -83,13 +337,6 @@ Item {
         Behavior on opacity { NumberAnimation { duration: 300 } }
     }
 
-    MouseArea {
-        id: bubbleHover
-        anchors.fill: parent
-        hoverEnabled: true
-        acceptedButtons: Qt.NoButton
-    }
-
     // Hover action bar — visible on mouse-over. Contains reply/forward for
     // any text message and edit for own messages. Three compact icon
     // buttons sit in a row; each highlights its glyph on hover.
@@ -100,11 +347,12 @@ Item {
         anchors.topMargin: 0
         anchors.rightMargin: Theme.sp.s1
         spacing: 0
-        // Visibility must stay true while the cursor is on any child
-        // button — otherwise moving from the bubble onto a button toggles
-        // bubbleHover.containsMouse off (child MouseAreas consume hover)
-        // and the bar flickers. OR the per-button hover states in.
-        visible: bubble.msgtype === "m.text" && (bubbleHover.containsMouse
+        // `bubbleHovered` (HoverHandler) stays true across the whole
+        // bubble — including while the cursor is on the selectable
+        // TextEdit, which would swallow hover from a plain MouseArea.
+        // The per-button MouseAreas OR'd in keep the bar visible while
+        // the cursor has travelled off the bubble onto a button itself.
+        visible: bubble.msgtype === "m.text" && (bubble.bubbleHovered
                  || replyMouse.containsMouse
                  || forwardMouse.containsMouse
                  || copyLinkMouse.containsMouse
@@ -260,17 +508,51 @@ Item {
             visible: showSender
 
             Rectangle {
+                id: senderAvatar
                 width: 40
                 height: 40
                 radius: 20
                 color: Theme.senderColor(bubble.sender)
+                scale: senderAvatarMouse.containsMouse ? 1.06 : 1.0
+                Behavior on scale {
+                    NumberAnimation { duration: Theme.motion.fastMs
+                                      easing.type: Easing.BezierSpline
+                                      easing.bezierCurve: Theme.motion.bezier }
+                }
 
                 Text {
                     anchors.centerIn: parent
-                    text: bubble.senderDisplayName.charAt(0).toUpperCase()
+                    // Strip leading non-alphanumerics (@, _, etc.) before
+                    // picking the initial — otherwise "@josh" renders as
+                    // "@" and the swatch looks like a typo.
+                    text: {
+                        var n = bubble.senderDisplayName || "?";
+                        var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                        return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
+                    }
+                    font.family: Theme.fontSans
                     font.pixelSize: 16
-                    font.bold: true
+                    font.weight: Theme.fontWeight.semibold
                     color: Theme.onAccent
+                }
+
+                // Avatar click target. Left-click opens the profile card
+                // (same as clicking the sender name next to it). Right-
+                // click opens the user context menu. Matches MemberList.
+                MouseArea {
+                    id: senderAvatarMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: (m) => {
+                        if (m.button === Qt.RightButton) {
+                            userContextMenu.popup();
+                        } else {
+                            bubble.senderClicked(bubble.sender,
+                                                 bubble.senderDisplayName);
+                        }
+                    }
                 }
             }
         }
@@ -290,7 +572,7 @@ Item {
                 }
                 font.pixelSize: 10
                 color: Theme.fg2
-                visible: bubbleHover.containsMouse
+                visible: bubble.bubbleHovered
             }
         }
 
@@ -312,16 +594,29 @@ Item {
                     font.letterSpacing: Theme.trackTight.md
                     color: Theme.senderColor(bubble.sender)
 
+                    // Same left/right routing as the avatar, so the name
+                    // and the avatar feel like one user-target. The
+                    // outer right-click TapHandler on the bubble root
+                    // wins anywhere else and shows the message menu —
+                    // this MouseArea steals right-clicks only over the
+                    // sender name's actual glyph bounds.
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            bubble.senderClicked(bubble.sender, bubble.senderDisplayName);
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onClicked: (m) => {
+                            if (m.button === Qt.RightButton) {
+                                userContextMenu.popup();
+                            } else {
+                                bubble.senderClicked(bubble.sender,
+                                                     bubble.senderDisplayName);
+                            }
                         }
                     }
                 }
 
                 Text {
+                    id: senderTimestamp
                     text: {
                         var date = new Date(bubble.timestamp);
                         var today = new Date();
@@ -339,6 +634,20 @@ Item {
                     font.family: Theme.fontMono
                     font.pixelSize: 11
                     color: Theme.fg3
+
+                    // Hover tooltip with the full absolute date + time
+                    // (with seconds). "Today at 14:41" is great for
+                    // scanning; a hover tooltip gives users the exact
+                    // moment when they need it — referencing a specific
+                    // message, cross-checking logs, etc.
+                    HoverHandler { id: timestampHover }
+                    ToolTip.visible: timestampHover.hovered
+                    ToolTip.delay: 500
+                    ToolTip.text: {
+                        var d = new Date(bubble.timestamp);
+                        return d.toLocaleString(Qt.locale(),
+                            "dddd, MMMM d, yyyy 'at' h:mm:ss AP");
+                    }
                 }
             }
 
@@ -402,6 +711,23 @@ Item {
                 }
             }
 
+            // Inline video for m.video messages. Uses QtMultimedia
+            // (already linked). Paused by default — Discord-style;
+            // click the big play overlay to start. Transport bar
+            // appears once playing, fades out while the cursor isn't
+            // on the card so a muted video-in-background doesn't
+            // clutter the message row.
+            Loader {
+                Layout.fillWidth: true
+                Layout.preferredHeight: item ? item.implicitHeight : 0
+                active: bubble.msgtype === "m.video" && bubble.mediaUrl !== ""
+                sourceComponent: VideoPlayerCard {
+                    source: bubble.mediaUrl
+                    fileName: bubble.mediaFileName
+                    fileSize: bubble.mediaFileSize
+                }
+            }
+
             // Inline image for m.image messages
             Loader {
                 Layout.fillWidth: true
@@ -435,21 +761,35 @@ Item {
                                 cache: true
                             }
 
-                            // Loading placeholder
+                            // Loading placeholder — subtle bg2 on the
+                            // card, "Loading…" copy, accent progress bar
+                            // along the bottom edge tracking real bytes
+                            // (mediaImage.progress is 0..1).
                             Rectangle {
                                 anchors.fill: parent
-                                color: Theme.bg3
+                                color: Theme.bg2
                                 radius: Theme.r2
                                 visible: mediaImage.status === Image.Loading
 
-                                Text {
+                                ColumnLayout {
                                     anchors.centerIn: parent
-                                    text: "Loading image..."
-                                    font.pixelSize: Theme.fontSize.sm
-                                    color: Theme.fg2
+                                    spacing: Theme.sp.s2
+                                    Icon {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        name: "paperclip"
+                                        size: 20
+                                        color: Theme.fg3
+                                        opacity: 0.6
+                                    }
+                                    Text {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        text: "Loading…"
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.sm
+                                        color: Theme.fg2
+                                    }
                                 }
 
-                                // Simple loading bar
                                 Rectangle {
                                     anchors.bottom: parent.bottom
                                     anchors.left: parent.left
@@ -457,28 +797,66 @@ Item {
                                     width: parent.width * mediaImage.progress
                                     color: Theme.accent
                                     radius: 1
+                                    Behavior on width {
+                                        NumberAnimation { duration: 120 }
+                                    }
                                 }
                             }
 
-                            // Error state
+                            // Error state — danger icon + explanatory copy
+                            // + retry-in-browser hint. Matches the
+                            // empty-state vocabulary used in the Bans /
+                            // Members tabs for consistency.
                             Rectangle {
                                 anchors.fill: parent
-                                color: Theme.bg3
+                                color: Theme.bg2
                                 radius: Theme.r2
                                 visible: mediaImage.status === Image.Error
 
-                                Text {
+                                ColumnLayout {
                                     anchors.centerIn: parent
-                                    text: "Failed to load image"
-                                    font.pixelSize: Theme.fontSize.sm
-                                    color: Theme.danger
+                                    spacing: Theme.sp.s2
+                                    Icon {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        name: "eye"
+                                        size: 22
+                                        color: Theme.danger
+                                    }
+                                    Text {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        text: "Couldn't load image"
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.sm
+                                        font.weight: Theme.fontWeight.semibold
+                                        color: Theme.fg0
+                                    }
+                                    Text {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        text: "Middle-click to try in your browser"
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.xs
+                                        color: Theme.fg3
+                                    }
                                 }
                             }
 
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: Qt.openUrlExternally(bubble.mediaUrl)
+                                acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+                                onClicked: (mouse) => {
+                                    // Left-click opens the in-app viewer
+                                    // (zoom + pan). Middle-click is the
+                                    // escape hatch to the OS browser.
+                                    if (mouse.button === Qt.MiddleButton) {
+                                        Qt.openUrlExternally(bubble.mediaUrl);
+                                    } else {
+                                        bubble.imageOpenRequested(
+                                            bubble.mediaUrl,
+                                            bubble.mediaFileName,
+                                            bubble.mediaFileSize);
+                                    }
+                                }
                             }
                         }
 
@@ -513,64 +891,78 @@ Item {
                 active: bubble.msgtype === "m.file" && bubble.mediaUrl !== ""
                 sourceComponent: Component {
                     Rectangle {
+                        id: fileCard
                         implicitHeight: fileRow.implicitHeight + Theme.sp.s7
                         implicitWidth: fileRow.implicitWidth + Theme.sp.s7 * 2
-                        width: Math.min(350, implicitWidth)
-                        color: Theme.bg3
+                        width: Math.min(360, implicitWidth)
+                        // Subtle container — bg2 card with a line border,
+                        // lifts to bg3 on hover. Keeps the file affordance
+                        // distinct from the message body without competing
+                        // with the rest of the chat for attention.
+                        color: fileCardMouse.containsMouse ? Theme.bg3 : Theme.bg2
                         radius: Theme.r2
+                        border.color: fileCardMouse.containsMouse ? Theme.fg3 : Theme.line
+                        border.width: 1
+                        Behavior on color       { ColorAnimation { duration: Theme.motion.fastMs } }
+                        Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
 
                         RowLayout {
                             id: fileRow
                             anchors.fill: parent
-                            anchors.margins: Theme.sp.s3
-                            spacing: Theme.sp.s3
+                            anchors.margins: Theme.sp.s4
+                            spacing: Theme.sp.s4
 
-                            // File icon
+                            // Icon tile — subtle accent-tinted swatch with
+                            // a paperclip glyph, lifts to fully-accent on
+                            // card hover to cue "click to open".
                             Rectangle {
-                                Layout.preferredWidth: 36
-                                Layout.preferredHeight: 36
-                                radius: Theme.r1
-                                color: Theme.accent
-
-                                Text {
+                                Layout.preferredWidth: 40
+                                Layout.preferredHeight: 40
+                                radius: Theme.r2
+                                color: fileCardMouse.containsMouse
+                                    ? Theme.accent
+                                    : Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                              Theme.accent.b, 0.16)
+                                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                Icon {
                                     anchors.centerIn: parent
-                                    text: "\u2B07"
-                                    font.pixelSize: 18
-                                    color: Theme.onAccent
+                                    name: "paperclip"
+                                    size: 18
+                                    color: fileCardMouse.containsMouse
+                                        ? Theme.onAccent : Theme.accent
                                 }
                             }
 
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 spacing: 2
-
                                 Text {
                                     text: bubble.mediaFileName
+                                    font.family: Theme.fontSans
                                     font.pixelSize: Theme.fontSize.md
-                                    color: Theme.accent
+                                    font.weight: Theme.fontWeight.semibold
+                                    color: Theme.fg0
                                     elide: Text.ElideMiddle
                                     Layout.fillWidth: true
-
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: Qt.openUrlExternally(bubble.mediaUrl)
-                                    }
                                 }
-
                                 Text {
-                                    text: bubble.mediaFileSize > 0 ? formatFileSize(bubble.mediaFileSize) : "File"
+                                    text: bubble.mediaFileSize > 0
+                                        ? formatFileSize(bubble.mediaFileSize)
+                                          + " · click to open"
+                                        : "File · click to open"
+                                    font.family: Theme.fontSans
                                     font.pixelSize: Theme.fontSize.sm
-                                    color: Theme.fg2
+                                    color: Theme.fg3
                                 }
                             }
                         }
 
                         MouseArea {
+                            id: fileCardMouse
                             anchors.fill: parent
+                            hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: Qt.openUrlExternally(bubble.mediaUrl)
-                            z: -1
                         }
                     }
                 }
@@ -584,7 +976,11 @@ Item {
             // Discord uses.
             TextEdit {
                 Layout.fillWidth: true
-                visible: bubble.msgtype === "m.text" || (bubble.msgtype !== "m.image" && bubble.msgtype !== "m.file")
+                visible: bubble.msgtype === "m.text"
+                      || (bubble.msgtype !== "m.image"
+                          && bubble.msgtype !== "m.video"
+                          && bubble.msgtype !== "m.audio"
+                          && bubble.msgtype !== "m.file")
                 text: {
                     var base = bubble.formattedBody !== "" ? bubble.formattedBody : bubble.body;
                     if (!bubble.edited) return base;
@@ -635,6 +1031,18 @@ Item {
                 }
             }
 
+            // Link previews — OpenGraph-style unfurl cards for any
+            // URLs in the body. Cap at 2 so a message full of links
+            // doesn't produce a wall of previews. Each LinkPreview
+            // self-hides if the target page has no usable metadata.
+            Repeater {
+                model: bubble._previewUrls
+                delegate: LinkPreview {
+                    Layout.topMargin: 4
+                    url: modelData
+                }
+            }
+
             // Reaction chips: one per unique emoji + a trailing "+" chip that
             // The first reaction is added exclusively from the hover bar's
             // smiley button; this row only appears once at least one
@@ -649,19 +1057,32 @@ Item {
                 Repeater {
                     model: bubble.reactions
                     delegate: Rectangle {
+                        id: chip
                         property var entry: modelData
+                        property bool reacted: entry && entry.reacted === true
                         height: 22
                         width: chipRow.implicitWidth + 14
                         // r5 per SPEC — pill-ish rounded tag.
                         radius: Theme.r5
-                        color: entry && entry.reacted
-                               ? Qt.rgba(Theme.accent.r, Theme.accent.g,
-                                         Theme.accent.b, 0.22)
-                               : Theme.bg3
+                        // Three-state fill: reacted (accent-tinted), hover
+                        // (slightly brighter neutral), rest (bg3).
+                        color: {
+                            if (chip.reacted) {
+                                return chipMouse.containsMouse
+                                    ? Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                              Theme.accent.b, 0.32)
+                                    : Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                              Theme.accent.b, 0.22);
+                            }
+                            return chipMouse.containsMouse ? Theme.bg4 : Theme.bg3;
+                        }
                         border.width: 1
-                        border.color: entry && entry.reacted
-                                      ? Theme.accent
-                                      : Theme.line
+                        border.color: chip.reacted ? Theme.accent
+                                                   : chipMouse.containsMouse
+                                                     ? Theme.fg3
+                                                     : Theme.line
+                        Behavior on color       { ColorAnimation { duration: Theme.motion.fastMs } }
+                        Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
 
                         Row {
                             id: chipRow
@@ -677,17 +1098,16 @@ Item {
                                 text: entry ? entry.count : 0
                                 font.family: Theme.fontMono
                                 font.pixelSize: 11
-                                font.weight: entry && entry.reacted
+                                font.weight: chip.reacted
                                              ? Theme.fontWeight.semibold
                                              : Theme.fontWeight.medium
-                                color: entry && entry.reacted
-                                       ? Theme.accent
-                                       : Theme.fg2
+                                color: chip.reacted ? Theme.fg0 : Theme.fg2
                                 anchors.verticalCenter: parent.verticalCenter
                             }
                         }
 
                         MouseArea {
+                            id: chipMouse
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
@@ -695,6 +1115,39 @@ Item {
                                 if (!entry) return;
                                 bubble.reactionToggled(bubble.eventId, entry.emoji);
                             }
+                        }
+
+                        // Tooltip lists who reacted. Resolves each userId
+                        // through the shared sender display-name map so
+                        // the strings match what people see everywhere
+                        // else. Our own reaction surfaces as "you" for
+                        // extra self-recognition.
+                        ToolTip.visible: chipMouse.containsMouse
+                                        && chip.width > 0
+                        ToolTip.delay: 500
+                        ToolTip.text: {
+                            if (!entry) return "";
+                            var ids = entry.userIds || [];
+                            if (ids.length === 0) return entry.emoji;
+                            var names = [];
+                            var ownId = serverManager.activeServer
+                                        ? serverManager.activeServer.userId : "";
+                            for (var i = 0; i < Math.min(ids.length, 6); ++i) {
+                                if (ids[i] === ownId) {
+                                    names.push("you");
+                                } else if (serverManager.activeServer
+                                           && serverManager.activeServer.memberListModel) {
+                                    var n = serverManager.activeServer
+                                        .memberListModel.displayNameForUser(ids[i]);
+                                    names.push(n && n.length > 0 ? n : ids[i]);
+                                } else {
+                                    names.push(ids[i]);
+                                }
+                            }
+                            var more = ids.length - names.length;
+                            var list = names.join(", ");
+                            if (more > 0) list += " and " + more + " more";
+                            return list + " reacted with " + entry.emoji;
                         }
                     }
                 }

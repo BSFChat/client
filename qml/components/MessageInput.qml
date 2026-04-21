@@ -531,14 +531,29 @@ Rectangle {
         }
 
         // Send button — accent-filled once the composer has something to
-        // send. SPEC §3.6 calls for it to show only when input is non-empty.
+        // send. SPEC §3.6 calls for it to show only when input is
+        // non-empty. We fade+scale the button in instead of toggling a
+        // visibility flag so the right side of the composer doesn't
+        // pop-reflow on every key press.
         Rectangle {
+            id: sendBtn
             Layout.preferredWidth: 28
             Layout.preferredHeight: 28
             Layout.alignment: Qt.AlignVCenter
             radius: Theme.r1
-            color: inputArea.text.trim().length > 0 ? Theme.accent : "transparent"
-            visible: inputArea.text.trim().length > 0 && !inputRoot.uploading
+            readonly property bool armed: inputArea.text.trim().length > 0
+                                          && !inputRoot.uploading
+            color: sendMouse.containsMouse && armed
+                ? Theme.accentDim : Theme.accent
+            Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+            opacity: armed ? 1.0 : 0.0
+            scale:   armed ? 1.0 : 0.8
+            Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
+            Behavior on scale {
+                NumberAnimation { duration: Theme.motion.fastMs
+                                  easing.type: Easing.BezierSpline
+                                  easing.bezierCurve: Theme.motion.bezier }
+            }
 
             Icon {
                 anchors.centerIn: parent
@@ -548,8 +563,11 @@ Rectangle {
             }
 
             MouseArea {
+                id: sendMouse
                 anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
+                hoverEnabled: true
+                cursorShape: sendBtn.armed ? Qt.PointingHandCursor : Qt.ArrowCursor
+                enabled: sendBtn.armed
                 onClicked: sendCurrentMessage()
             }
         }

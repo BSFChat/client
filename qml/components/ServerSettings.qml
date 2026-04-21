@@ -68,6 +68,42 @@ Popup {
     property string editingRoleId: ""
     property string editingMemberId: ""
 
+    // Swap the role at `index` with its neighbour in the given
+    // direction (-1 = up, +1 = down). We swap BOTH array order and
+    // position fields: the UI renders in array order (the ListView
+    // iterates as the server serialises), and the server's permission
+    // engine sorts by position — so if we only swapped positions the
+    // UI would look unchanged until the next reload. Keeping both in
+    // sync means the rebuilt view matches what we just asked for.
+    function moveRole(index, direction) {
+        if (!serverManager.activeServer) return;
+        var roles = serverManager.activeServer.serverRoles;
+        if (!roles || roles.length === 0) return;
+        var other = index + direction;
+        if (other < 0 || other >= roles.length) return;
+
+        // Deep copy so we don't mutate the live Q_PROPERTY payload.
+        var out = [];
+        for (var i = 0; i < roles.length; i++) {
+            var r = {};
+            for (var k in roles[i]) r[k] = roles[i][k];
+            out.push(r);
+        }
+        // Swap positions first so that sorting by position downstream
+        // still lines up with our array order.
+        var p1 = out[index].position;
+        var p2 = out[other].position;
+        if (p1 === p2) p2 = p1 + direction;
+        out[index].position = p2;
+        out[other].position = p1;
+        // Then swap the array slots so the ListView reflects the
+        // change immediately (sync echo will confirm the same shape).
+        var tmp = out[index];
+        out[index] = out[other];
+        out[other] = tmp;
+        serverManager.activeServer.updateServerRoles(out);
+    }
+
     // Transient state for the kick/ban/unban confirm dialog. Populated by
     // the row that initiated the action; consumed on confirm.
     //   { kind: "kick" | "ban" | "unban", userId, displayName }
@@ -418,18 +454,26 @@ Popup {
                         spacing: 4
 
                         delegate: Column {
+                            id: roleDelegate
                             width: ListView.view ? ListView.view.width : 400
                             spacing: 2
 
                             property var role: modelData
+                            property int roleIndex: index
                             property bool isEditing: serverSettingsPopup.editingRoleId === (role.id || role.name)
+                            readonly property bool canMoveUp:
+                                roleIndex > 0
+                            readonly property bool canMoveDown: {
+                                if (!serverManager.activeServer) return false;
+                                return roleIndex < serverManager.activeServer.serverRoles.length - 1;
+                            }
 
                             Rectangle {
                                 width: parent.width
                                 height: 48
                                 radius: Theme.r2
                                 color: roleRowMouse.containsMouse ? Theme.bg3 : Theme.bg2
-                                border.color: parent.isEditing ? Theme.accent : Theme.line
+                                border.color: roleDelegate.isEditing ? Theme.accent : Theme.line
                                 border.width: 1
                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                 Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
@@ -444,12 +488,12 @@ Popup {
                                     // it reads as a real identifier.
                                     Rectangle {
                                         width: 18; height: 18; radius: 9
-                                        color: parent.parent.parent.role.color || Theme.accent
+                                        color: roleDelegate.role.color || Theme.accent
                                         border.color: Theme.bg0
                                         border.width: 1
                                     }
                                     Text {
-                                        text: parent.parent.parent.role.name || ""
+                                        text: roleDelegate.role.name || ""
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.md
                                         font.weight: Theme.fontWeight.semibold
@@ -457,13 +501,69 @@ Popup {
                                         Layout.fillWidth: true
                                         elide: Text.ElideRight
                                     }
+
+                                    // Reorder chevrons — reveal-on-hover so
+                                    // the resting list stays quiet. Click
+                                    // swaps the role with its neighbour's
+                                    // position and writes the new ordering
+                                    // back. Disabled at the ends of the
+                                    // list so `position`s stay unique.
+                                    component ReorderBtn: Rectangle {
+                                        id: rbtn
+                                        property string iconName: ""
+                                        property bool disabled: false
+                                        signal clicked()
+                                        Layout.preferredWidth: 22
+                                        Layout.preferredHeight: 22
+                                        radius: Theme.r1
+                                        color: rbtnMouse.containsMouse && !disabled
+                                            ? Theme.bg2 : "transparent"
+                                        opacity: disabled
+                                            ? 0.25
+                                            : (roleRowMouse.containsMouse
+                                               || rbtnMouse.containsMouse ? 1.0 : 0.0)
+                                        Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
+                                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                        Icon {
+                                            anchors.centerIn: parent
+                                            name: rbtn.iconName
+                                            size: 12
+                                            color: rbtnMouse.containsMouse && !rbtn.disabled
+                                                ? Theme.fg0 : Theme.fg2
+                                        }
+                                        MouseArea {
+                                            id: rbtnMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            enabled: !rbtn.disabled
+                                            cursorShape: rbtn.disabled
+                                                ? Qt.ArrowCursor : Qt.PointingHandCursor
+                                            onClicked: rbtn.clicked()
+                                        }
+                                    }
+
+                                    ReorderBtn {
+                                        iconName: "chevron-right"
+                                        rotation: -90          // point up
+                                        disabled: !roleDelegate.canMoveUp
+                                        onClicked: serverSettingsPopup.moveRole(
+                                            roleDelegate.roleIndex, -1)
+                                    }
+                                    ReorderBtn {
+                                        iconName: "chevron-right"
+                                        rotation: 90           // point down
+                                        disabled: !roleDelegate.canMoveDown
+                                        onClicked: serverSettingsPopup.moveRole(
+                                            roleDelegate.roleIndex, 1)
+                                    }
+
                                     // Expand / collapse chevron — rotates
                                     // 90° rather than swapping glyphs.
                                     Icon {
                                         name: "chevron-right"
                                         size: 14
                                         color: Theme.fg2
-                                        rotation: parent.parent.parent.isEditing ? 90 : 0
+                                        rotation: roleDelegate.isEditing ? 90 : 0
                                         Behavior on rotation {
                                             NumberAnimation { duration: Theme.motion.fastMs
                                                               easing.type: Easing.BezierSpline
@@ -477,10 +577,21 @@ Popup {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
+                                    // Sit BEHIND the chevron buttons in
+                                    // z-order so their MouseAreas get
+                                    // clicks first and don't propagate
+                                    // back to the row's expand/collapse
+                                    // handler. In QML later-declared
+                                    // items stack on top; we declared
+                                    // the RowLayout first, so without
+                                    // a negative z this MouseArea
+                                    // overlays the chevrons and steals
+                                    // their clicks.
+                                    z: -1
                                     onClicked: {
-                                        var rid = parent.parent.parent.role.id || parent.parent.parent.role.name;
+                                        var rid = roleDelegate.role.id || roleDelegate.role.name;
                                         serverSettingsPopup.editingRoleId =
-                                            parent.parent.parent.isEditing ? "" : rid;
+                                            roleDelegate.isEditing ? "" : rid;
                                     }
                                 }
                             }
@@ -506,7 +617,18 @@ Popup {
                                 // the surrounding Column being recycled and
                                 // the new role reference landing (e.g. after
                                 // a role is deleted).
-                                readonly property var editRole: parent.parent.role || ({})
+                                // Directly reference the enclosing delegate's
+                                // role. The old `parent.parent.role` walked
+                                // up past the Column into the ListView's
+                                // contentItem (which has no `role` property)
+                                // so editRole was always `({})` — harmless-
+                                // looking because the descendant bindings
+                                // all short-circuit to defaults, but it
+                                // meant the Save button's `editRoleName`
+                                // (which depends on `editRole.name`) had
+                                // nothing to fall back to and saves looked
+                                // like they silently cleared the name.
+                                readonly property var editRole: roleDelegate.role || ({})
                                 property string scratchColor: editRole.color || "#5865f2"
                                 property int scratchPos: editRole.position !== undefined
                                     ? editRole.position : 0

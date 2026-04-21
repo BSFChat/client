@@ -37,6 +37,18 @@ class Settings : public QObject {
     // persists so the UI keeps the user's choice across restarts.)
     Q_PROPERTY(bool notificationsEnabled READ notificationsEnabled WRITE setNotificationsEnabled NOTIFY notificationsEnabledChanged)
     Q_PROPERTY(bool notificationSound READ notificationSound WRITE setNotificationSound NOTIFY notificationSoundChanged)
+    // Whether the right-hand member list is expanded. Also toggleable via
+    // the chat-header users button and the Ctrl+M shortcut.
+    Q_PROPERTY(bool showMemberList READ showMemberList WRITE setShowMemberList NOTIFY showMemberListChanged)
+    // Persisted window geometry. Negative values == "use default" (first
+    // run, or the saved position was off-screen / on a detached monitor).
+    // We save each field independently so a partial restore still works if
+    // QSettings was hand-edited.
+    Q_PROPERTY(int windowX READ windowX WRITE setWindowX NOTIFY windowXChanged)
+    Q_PROPERTY(int windowY READ windowY WRITE setWindowY NOTIFY windowYChanged)
+    Q_PROPERTY(int windowWidth READ windowWidth WRITE setWindowWidth NOTIFY windowWidthChanged)
+    Q_PROPERTY(int windowHeight READ windowHeight WRITE setWindowHeight NOTIFY windowHeightChanged)
+    Q_PROPERTY(int windowVisibility READ windowVisibility WRITE setWindowVisibility NOTIFY windowVisibilityChanged)
     // List of {description, id} maps for audio devices; populated live from
     // QMediaDevices. The id isn't persistent across reboots on every OS, so
     // selection is stored by description and resolved on startup.
@@ -98,12 +110,40 @@ public:
     bool notificationSound() const;
     void setNotificationSound(bool v);
 
+    bool showMemberList() const;
+    void setShowMemberList(bool v);
+
+    int windowX() const;
+    void setWindowX(int v);
+    int windowY() const;
+    void setWindowY(int v);
+    int windowWidth() const;
+    void setWindowWidth(int v);
+    int windowHeight() const;
+    void setWindowHeight(int v);
+    int windowVisibility() const;
+    void setWindowVisibility(int v);
+
     QVariantList audioInputDevices() const;
     QVariantList audioOutputDevices() const;
 
     // Category collapse state
     QStringList collapsedCategories() const;
     void setCollapsedCategories(const QStringList& categories);
+
+    // Per-room "last read" timestamp (ms since epoch) for the unread-
+    // messages divider. Returns 0 if never seen (caller treats as "no
+    // boundary — don't show a divider"). Stored under unread/<roomId>.
+    Q_INVOKABLE qint64 lastReadTs(const QString& roomId) const;
+    Q_INVOKABLE void setLastReadTs(const QString& roomId, qint64 tsMs);
+
+    // Muted rooms — the channel list dims them and suppresses their
+    // unread dot. Stored as a QStringList under mutedRooms.
+    Q_INVOKABLE bool isRoomMuted(const QString& roomId) const;
+    Q_INVOKABLE void setRoomMuted(const QString& roomId, bool muted);
+signals:
+    void mutedRoomsChanged();
+public:
 
 signals:
     void fontSizeChanged();
@@ -118,6 +158,12 @@ signals:
     void outputVolumeChanged();
     void notificationsEnabledChanged();
     void notificationSoundChanged();
+    void showMemberListChanged();
+    void windowXChanged();
+    void windowYChanged();
+    void windowWidthChanged();
+    void windowHeightChanged();
+    void windowVisibilityChanged();
 
 private:
     mutable QSettings m_settings;

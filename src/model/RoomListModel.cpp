@@ -304,6 +304,7 @@ QVariantList RoomListModel::getCategoriesWithChannels() const
         ch[QStringLiteral("voiceMemberCount")] = room.voiceMemberCount;
         ch[QStringLiteral("topic")] = room.topic;
         ch[QStringLiteral("sortOrder")] = room.sortOrder;
+        ch[QStringLiteral("lastMessageTime")] = room.lastMessageTime;
         return ch;
     };
 

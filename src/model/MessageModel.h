@@ -57,6 +57,18 @@ public:
     // Used by the UI to scroll to a replied-to message.
     Q_INVOKABLE int indexForEventId(const QString& eventId) const;
 
+    // Unread-divider helpers. `firstEventIdAfterTs` returns the oldest
+    // loaded event whose ts is strictly greater than `tsMs` (empty if
+    // none). `newestTimestampMs` returns the newest loaded event's ts
+    // or 0 if empty.
+    Q_INVOKABLE QString firstEventIdAfterTs(qint64 tsMs) const;
+    Q_INVOKABLE qint64 newestTimestampMs() const;
+
+    // Case-insensitive substring search over loaded message bodies +
+    // sender display names. Returns up to `limit` matches, newest
+    // first, each a map with {eventId, sender, body, timestamp}.
+    Q_INVOKABLE QVariantList searchMessages(const QString& query, int limit = 50) const;
+
     explicit MessageModel(QObject* parent = nullptr);
 
     void setHomeserver(const QString& homeserver) { m_homeserver = homeserver; }

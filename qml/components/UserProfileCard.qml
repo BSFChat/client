@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import BSFChat
 
 Popup {
@@ -158,31 +159,71 @@ Popup {
 
         Item { Layout.fillHeight: true }
 
-        // Message button — primary accent. DMs aren't wired yet, so the
-        // click currently just dismisses the card; when DMScreen lands,
-        // swap in the real open-DM flow.
-        Button {
-            id: messageBtn
+        // Action row — Send message (accent, placeholder until DMs) +
+        // Manage roles (ghost, gated on MANAGE_ROLES). Both suppressed
+        // when the card is showing your own profile, since you can't
+        // DM yourself and shouldn't edit your own roles from here.
+        RowLayout {
             Layout.fillWidth: true
-            Layout.preferredHeight: 40
-            visible: serverManager.activeServer !== null && profileCard.userId !== serverManager.activeServer.userId
-            contentItem: Text {
-                text: "Send message"
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontSize.md
-                font.weight: Theme.fontWeight.semibold
-                color: Theme.onAccent
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
+            spacing: Theme.sp.s3
+            visible: serverManager.activeServer !== null
+                && profileCard.userId !== serverManager.activeServer.userId
+
+            readonly property bool canManageRoles: serverManager.activeServer
+                && serverManager.activeServer.canManageRoles(
+                       serverManager.activeServer.activeRoomId)
+
+            Button {
+                id: messageBtn
+                Layout.fillWidth: true
+                Layout.preferredHeight: 40
+                contentItem: Text {
+                    text: "Send message"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    font.weight: Theme.fontWeight.semibold
+                    color: Theme.onAccent
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    color: messageBtn.hovered ? Theme.accentDim : Theme.accent
+                    radius: Theme.r2
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                }
+                onClicked: {
+                    // TODO: Open DM with user
+                    profileCard.close();
+                }
             }
-            background: Rectangle {
-                color: messageBtn.hovered ? Theme.accentDim : Theme.accent
-                radius: Theme.r2
-                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
-            }
-            onClicked: {
-                // TODO: Open DM with user
-                profileCard.close();
+
+            Button {
+                id: manageRolesBtn
+                visible: parent.canManageRoles
+                Layout.preferredWidth: 44
+                Layout.preferredHeight: 40
+                contentItem: Icon {
+                    anchors.centerIn: parent
+                    name: "shield"
+                    size: 16
+                    color: manageRolesBtn.hovered ? Theme.fg0 : Theme.fg1
+                }
+                background: Rectangle {
+                    color: manageRolesBtn.hovered ? Theme.bg3 : Theme.bg2
+                    border.color: Theme.line
+                    border.width: 1
+                    radius: Theme.r2
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                }
+                onClicked: {
+                    var uid = profileCard.userId;
+                    var dn = profileCard.profileDisplayName;
+                    profileCard.close();
+                    Window.window.openRoleAssignment(uid, dn);
+                }
+                ToolTip.visible: manageRolesBtn.hovered
+                ToolTip.text: "Manage roles"
+                ToolTip.delay: 500
             }
         }
     }

@@ -112,16 +112,21 @@ Rectangle {
 
                 Rectangle {
                     width: Theme.avatar.md; height: Theme.avatar.md
-                    radius: Theme.avatar.md / 2
-                    color: Theme.accent
+                    // Rounded-square to match every other avatar in the
+                    // app (ServerRail / MemberList / UserSettings / profile
+                    // card). We were still on the circular legacy here.
+                    radius: Theme.r2
+                    color: Theme.senderColor(serverManager.activeServer
+                        ? (serverManager.activeServer.userId || "") : "")
                     Text {
                         anchors.centerIn: parent
                         text: {
                             if (!serverManager.activeServer) return "?";
                             var n = serverManager.activeServer.displayName
                                  || serverManager.activeServer.userId;
-                            var i = n.charAt(0) === '@' ? 1 : 0;
-                            return (i < n.length ? n.charAt(i) : "?").toUpperCase();
+                            var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
+                            return (stripped.length > 0
+                                    ? stripped.charAt(0) : "?").toUpperCase();
                         }
                         font.family: Theme.fontSans
                         font.pixelSize: 14

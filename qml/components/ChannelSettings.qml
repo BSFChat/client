@@ -266,6 +266,180 @@ Popup {
                 // ====== OVERVIEW ======
                 SectionHeader { text: "OVERVIEW" }
 
+                // Channel name. Rebuilds on each open from the
+                // RoomListModel; the save handler writes m.room.name
+                // and the sync echo flows back into the sidebar.
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.sp.s1
+                    Text {
+                        text: "CHANNEL NAME"
+                        color: Theme.fg3
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xs
+                        font.weight: Theme.fontWeight.semibold
+                        font.letterSpacing: Theme.trackWidest.xs
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.sp.s3
+
+                        TextField {
+                            id: nameField
+                            Layout.fillWidth: true
+                            Layout.maximumWidth: 420
+                            color: Theme.fg0
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.md
+                            background: Rectangle {
+                                color: Theme.bg0
+                                radius: Theme.r2
+                                border.color: nameField.activeFocus ? Theme.accent : Theme.line
+                                border.width: 1
+                            }
+                            leftPadding: Theme.sp.s4
+                            rightPadding: Theme.sp.s4
+                            topPadding: Theme.sp.s3
+                            bottomPadding: Theme.sp.s3
+
+                            // Original value — seeded when the popup
+                            // opens, refreshed when the server's sync
+                            // echo bumps `roomName`. Used to disable the
+                            // Save button when nothing's changed and to
+                            // revert on Esc.
+                            property string _original: ""
+                            function _resync() {
+                                _original = channelSettings.roomName;
+                                text = _original;
+                            }
+
+                            Keys.onEscapePressed: _resync()
+                            Keys.onReturnPressed: saveNameBtn.clicked()
+                        }
+                        Button {
+                            id: saveNameBtn
+                            enabled: nameField.text.trim().length > 0
+                                  && nameField.text !== nameField._original
+                            contentItem: Text {
+                                text: "Save"
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.md
+                                font.weight: Theme.fontWeight.semibold
+                                color: saveNameBtn.enabled ? Theme.onAccent : Theme.fg3
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                color: !saveNameBtn.enabled ? Theme.bg2
+                                     : (saveNameBtn.hovered ? Theme.accentDim : Theme.accent)
+                                radius: Theme.r2
+                                implicitWidth: 80
+                                implicitHeight: 36
+                                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                            }
+                            onClicked: {
+                                if (!serverManager.activeServer) return;
+                                serverManager.activeServer.setRoomName(
+                                    channelSettings.roomId, nameField.text.trim());
+                                nameField._original = nameField.text;
+                            }
+                        }
+                    }
+                }
+
+                // Channel topic (Matrix m.room.topic). Plain single-line
+                // for now — Matrix topics are descriptive text, not
+                // formatted, so a TextField is sufficient.
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.sp.s1
+                    Text {
+                        text: "TOPIC"
+                        color: Theme.fg3
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xs
+                        font.weight: Theme.fontWeight.semibold
+                        font.letterSpacing: Theme.trackWidest.xs
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.sp.s3
+
+                        TextField {
+                            id: topicField
+                            Layout.fillWidth: true
+                            placeholderText: "Describe what this channel is for"
+                            placeholderTextColor: Theme.fg3
+                            color: Theme.fg0
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.md
+                            background: Rectangle {
+                                color: Theme.bg0
+                                radius: Theme.r2
+                                border.color: topicField.activeFocus ? Theme.accent : Theme.line
+                                border.width: 1
+                            }
+                            leftPadding: Theme.sp.s4
+                            rightPadding: Theme.sp.s4
+                            topPadding: Theme.sp.s3
+                            bottomPadding: Theme.sp.s3
+
+                            property string _original: ""
+                            function _resync() {
+                                if (!serverManager.activeServer
+                                    || !serverManager.activeServer.roomListModel) {
+                                    _original = "";
+                                } else {
+                                    _original = serverManager.activeServer.roomListModel
+                                        .roomTopic(channelSettings.roomId);
+                                }
+                                text = _original;
+                            }
+
+                            Keys.onEscapePressed: _resync()
+                            Keys.onReturnPressed: saveTopicBtn.clicked()
+                        }
+                        Button {
+                            id: saveTopicBtn
+                            enabled: topicField.text !== topicField._original
+                            contentItem: Text {
+                                text: "Save"
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.md
+                                font.weight: Theme.fontWeight.semibold
+                                color: saveTopicBtn.enabled ? Theme.onAccent : Theme.fg3
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                color: !saveTopicBtn.enabled ? Theme.bg2
+                                     : (saveTopicBtn.hovered ? Theme.accentDim : Theme.accent)
+                                radius: Theme.r2
+                                implicitWidth: 80
+                                implicitHeight: 36
+                                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                            }
+                            onClicked: {
+                                if (!serverManager.activeServer) return;
+                                serverManager.activeServer.setRoomTopic(
+                                    channelSettings.roomId, topicField.text);
+                                topicField._original = topicField.text;
+                            }
+                        }
+                    }
+                }
+
+                // Re-sync the editable fields whenever the popup opens
+                // so the user sees the freshest server-side values
+                // (not stale text from a previous edit session).
+                Connections {
+                    target: channelSettings
+                    function onOpened() {
+                        nameField._resync();
+                        topicField._resync();
+                    }
+                }
+
                 SettingRow {
                     title: "Slowmode"
                     description: "Members must wait this long between messages. Users with Manage messages bypass."

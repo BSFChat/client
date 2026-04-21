@@ -138,13 +138,16 @@ Rectangle {
                 }
 
                 // Unread dot (bottom-right) — only when inactive and has
-                // unread. Active servers have all their rooms visible so the
-                // dot would be redundant.
+                // unread. Active servers have all their rooms visible so
+                // the dot would be redundant. Uses the danger palette
+                // because any server-level unread is "you have mentions
+                // or activity across the whole server" — worth a stronger
+                // cue than the neutral-grey channel-row unread.
                 Rectangle {
                     width: 10
                     height: 10
                     radius: 5
-                    color: Theme.fg0
+                    color: Theme.danger
                     border.width: 2
                     border.color: Theme.bg0
                     anchors.right: tile.right
@@ -190,12 +193,10 @@ Rectangle {
                                                       easing.type: Easing.BezierSpline
                                                       easing.bezierCurve: Theme.motion.bezier } }
 
-                Text {
+                Icon {
                     anchors.centerIn: parent
-                    text: "+"
-                    font.family: Theme.fontSans
-                    font.pixelSize: 22
-                    font.weight: Theme.fontWeight.regular
+                    name: "plus"
+                    size: 18
                     color: addArea.containsMouse ? Theme.accent : Theme.fg2
                 }
 

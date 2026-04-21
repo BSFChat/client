@@ -132,6 +132,13 @@ qt_add_qml_module(bsfchat-app
         qml/components/ChannelSettings.qml
         qml/components/ClientSettings.qml
         qml/components/ForwardDialog.qml
+        qml/components/ImageViewer.qml
+        qml/components/ShortcutsDialog.qml
+        qml/components/SearchPopup.qml
+        qml/components/RoleAssignPopup.qml
+        qml/components/ToastHost.qml
+        qml/components/VideoPlayerCard.qml
+        qml/components/LinkPreview.qml
         qml/theme/Theme.qml
     RESOURCES
         qml/data/EmojiData.js
@@ -166,6 +173,10 @@ qt_add_qml_module(bsfchat-app
         qml/icons/forward.svg
         qml/icons/edit.svg
         qml/icons/link.svg
+        qml/icons/copy.svg
+        qml/icons/play.svg
+        qml/icons/pause.svg
+        qml/icons/volume-off.svg
         qml/icons/smile-plus.svg
         qml/icons/more-horizontal.svg
         qml/icons/check.svg

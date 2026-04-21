@@ -210,19 +210,7 @@ Popup {
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
 
-                ScrollBar.vertical: ScrollBar {
-                    active: true
-                    policy: ScrollBar.AsNeeded
-                    contentItem: Rectangle {
-                        implicitWidth: 4
-                        radius: 2
-                        color: Theme.fg2
-                        opacity: 0.5
-                    }
-                    background: Rectangle {
-                        color: "transparent"
-                    }
-                }
+                ScrollBar.vertical: ThemedScrollBar {}
 
                 model: {
                     if (emojiPicker.searchQuery.length > 0) {

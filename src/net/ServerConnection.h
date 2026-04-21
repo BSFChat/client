@@ -59,6 +59,10 @@ class ServerConnection : public QObject {
     Q_PROPERTY(float micLevel READ micLevel NOTIFY micLevelChanged)
     Q_PROPERTY(bool micSilent READ micSilent NOTIFY micSilentChanged)
     Q_PROPERTY(QString typingDisplay READ typingDisplay NOTIFY typingDisplayChanged)
+    // Monotonic counter bumped whenever per-room typing state changes.
+    // QML bindings read this as a dependency then call
+    // `roomHasTyping(roomId)` to drive the sidebar typing indicators.
+    Q_PROPERTY(int typingGeneration READ typingGeneration NOTIFY roomTypingChanged)
     Q_PROPERTY(int myPowerLevel READ myPowerLevel NOTIFY myPowerLevelChanged)
     Q_PROPERTY(QJsonArray serverRoles READ serverRoles NOTIFY serverRolesChanged)
     Q_PROPERTY(QVariantList categorizedRooms READ categorizedRooms NOTIFY categorizedRoomsChanged)
@@ -114,6 +118,10 @@ public:
     // period — signals a device/permission problem the user should see.
     bool micSilent() const { return m_micSilent; }
     QString typingDisplay() const { return m_typingDisplay; }
+    int typingGeneration() const { return m_typingGeneration; }
+    Q_INVOKABLE bool roomHasTyping(const QString& roomId) const {
+        return !m_roomTyping.value(roomId).isEmpty();
+    }
     int myPowerLevel() const { return m_myPowerLevel; }
     QJsonArray serverRoles() const { return m_serverRoles; }
     QVariantList categorizedRooms() const { return m_categorizedRooms; }
@@ -235,6 +243,18 @@ public:
     Q_INVOKABLE void setChannelOverride(const QString& roomId, const QString& targetKey,
                                         quint64 allow, quint64 deny);
     Q_INVOKABLE void setChannelSlowmode(const QString& roomId, int seconds);
+    // Per-channel name + topic editors. Write m.room.name / m.room.topic
+    // state events; server gates on kManageChannels.
+    Q_INVOKABLE void setRoomName(const QString& roomId, const QString& name);
+    Q_INVOKABLE void setRoomTopic(const QString& roomId, const QString& topic);
+
+    // Pinned messages — Matrix m.room.pinned_events. togglePinnedEvent
+    // flips whether `eventId` appears in the room's pinned list. The
+    // UI uses pinnedEventIds() for display; populated live from sync.
+    Q_INVOKABLE QStringList pinnedEventIds(const QString& roomId) const;
+    Q_INVOKABLE bool isEventPinned(const QString& roomId, const QString& eventId) const;
+    Q_INVOKABLE void togglePinnedEvent(const QString& roomId, const QString& eventId);
+
     Q_INVOKABLE void redactEvent(const QString& roomId, const QString& eventId,
                                   const QString& reason = {});
     Q_INVOKABLE void kickMember(const QString& roomId, const QString& userId,
@@ -295,6 +315,8 @@ signals:
     void micSilentChanged();
     void avatarUrlChanged();
     void typingDisplayChanged();
+    void roomTypingChanged();
+    void roomPinnedEventsChanged(const QString& roomId);
     void profileFetched(const QString& userId, const QString& displayName, const QString& avatarUrl);
     void myPowerLevelChanged();
     void serverRolesChanged();
@@ -359,6 +381,7 @@ public:
 
     // Per-room member cache: roomId -> list of member events
     QMap<QString, QVector<bsfchat::RoomEvent>> m_roomMembers;
+    QMap<QString, QStringList> m_roomPinnedEvents;
     // Global userId → display name, populated from all m.room.member events
     // across every room. MessageModel reads from this pointer.
     QMap<QString, QString> m_userDisplayNames;
@@ -372,6 +395,12 @@ public:
     QString m_typingDisplay;
     QTimer* m_typingTimer = nullptr;
     QTimer* m_typingStopTimer = nullptr;
+    // Per-room typing state. Populated for every joined room's
+    // ephemeral typing event, not just the active one, so the sidebar
+    // can surface a quiet indicator on non-active channels where
+    // someone is typing. Set entries are user IDs minus self.
+    QMap<QString, QStringList> m_roomTyping;
+    int m_typingGeneration = 0;
 
     // Voice state
     QString m_activeVoiceRoomId;

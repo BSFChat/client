@@ -12,6 +12,31 @@ Rectangle {
     // Category collapse state
     property var collapsedCategories: ({})
 
+    // During a cross-category drag this is set to the categoryId the
+    // pointer is currently over (or "__none__" when outside any
+    // category / over the source). Category delegates watch this to
+    // show an accent outline — gives the user a clear "this is where
+    // I'm about to drop" affordance. Sentinel rather than "" because
+    // "" is the uncategorized bucket's real ID.
+    property string dropHoverCategoryId: "__none__"
+
+    // Nudges the channel-row bindings when mute or read-state
+    // changes. QSettings reads are not reactive, so we drive a
+    // counter that row bindings reference. Bumped on mute toggle,
+    // on room-switch (from MessageView via the same appSettings
+    // path), and periodically via the refresh timer.
+    property int muteGeneration: 0
+    property int unreadGeneration: 0
+
+    // Poll for external lastReadTs updates (e.g. MessageView
+    // persisting on room-switch). Cheap — only drives bindings.
+    Timer {
+        interval: 800
+        running: true
+        repeat: true
+        onTriggered: channelListRoot.unreadGeneration++
+    }
+
     function isCategoryCollapsed(catId) {
         return collapsedCategories[catId] === true;
     }
@@ -42,6 +67,79 @@ Rectangle {
     function openCreateMenu(x, y, categoryId) {
         createMenu.categoryId = categoryId || "";
         createMenu.popup(x, y);
+    }
+
+    // Drag-reorder commit. Given a sibling array and a (fromIdx,
+    // toIdx), rewrites every channel's sortOrder so the final
+    // ordering matches `siblings` with `fromIdx` spliced into
+    // `toIdx`. Stride of 10 leaves room for future single-step
+    // inserts without touching every sibling. Issuing all the
+    // setChannelOrder writes back-to-back is fine — the server
+    // timestamps them individually and the sync echo rebuilds the
+    // sidebar from the canonical positions.
+    function moveChannelTo(siblings, fromIdx, toIdx) {
+        if (!serverManager.activeServer || !siblings) return;
+        if (fromIdx === toIdx) return;
+        if (fromIdx < 0 || fromIdx >= siblings.length) return;
+        if (toIdx   < 0 || toIdx   >= siblings.length) return;
+        var arr = siblings.slice();
+        var moved = arr.splice(fromIdx, 1)[0];
+        arr.splice(toIdx, 0, moved);
+        for (var i = 0; i < arr.length; i++) {
+            var want = i * 10;
+            if (arr[i].sortOrder !== want) {
+                serverManager.activeServer.setChannelOrder(arr[i].roomId, want);
+            }
+        }
+    }
+
+    // Look up which category a scene-Y coordinate falls inside. Walks
+    // the outer Repeater's instantiated delegates; each exposes
+    // `categoryId` + `categoryChannels` as explicit properties so we
+    // don't have to peek into the model from here.
+    //
+    // Returns null if the Y isn't over any category (e.g. below the
+    // last row's bottom), so the caller can keep the drag on its
+    // source category.
+    function dropTargetAt(sceneY) {
+        var container = channelColumn;
+        if (!container) return null;
+        for (var i = 0; i < container.children.length; i++) {
+            var cat = container.children[i];
+            if (!cat || cat.categoryId === undefined) continue;
+            var topLeft = cat.mapToItem(null, 0, 0);
+            if (sceneY >= topLeft.y && sceneY <= topLeft.y + cat.height) {
+                return {
+                    categoryId: cat.categoryId,
+                    categoryChannels: cat.categoryChannels,
+                    top: topLeft.y,
+                    height: cat.height
+                };
+            }
+        }
+        return null;
+    }
+
+    // Cross-category drop. Moves `roomId` into `destCategoryId`, then
+    // writes a sortOrder that puts it at `destSlot` among the
+    // destination's existing channels. We don't rewrite all sort
+    // orders — inserting at `destSlot` gets a value between the
+    // neighbours, leaving siblings unchanged. Matches how Discord
+    // feels: one source channel moved, nothing else disturbed.
+    function moveChannelAcross(roomId, destCategoryId, destChannels, destSlot) {
+        if (!serverManager.activeServer) return;
+        var arr = destChannels || [];
+        // Clamp slot to [0, arr.length].
+        var slot = Math.max(0, Math.min(arr.length, destSlot));
+        var before = slot > 0 ? arr[slot - 1].sortOrder : null;
+        var after  = slot < arr.length ? arr[slot].sortOrder : null;
+        var newOrder;
+        if (before === null && after === null) newOrder = 0;
+        else if (before === null)              newOrder = after - 10;
+        else if (after  === null)              newOrder = before + 10;
+        else                                   newOrder = Math.floor((before + after) / 2);
+        serverManager.activeServer.moveChannelToCategory(roomId, destCategoryId);
+        serverManager.activeServer.setChannelOrder(roomId, newOrder);
     }
 
     // Root-level right-click handler: anywhere in the sidebar that isn't a
@@ -182,22 +280,58 @@ Rectangle {
                 Repeater {
                     model: serverManager.activeServer ? serverManager.activeServer.categorizedRooms : []
 
-                    delegate: Column {
+                    delegate: Item {
+                        id: categoryDelegate
                         width: channelColumn.width
+                        // Size to the inner content Column; Column's
+                        // implicitHeight tracks the stacked kids so we
+                        // re-flow when channels collapse/expand.
+                        implicitHeight: categoryContent.implicitHeight
+                        height: implicitHeight
 
-                        // Category header (skip for uncategorized)
+                        // Exposed to channelListRoot's drop-target
+                        // scanner so it can attribute a scene-Y to
+                        // the right category without hit-testing the
+                        // private delegate hierarchy.
+                        readonly property string categoryId: modelData.categoryId || ""
+                        readonly property var    categoryChannels: modelData.channels || []
+
+                        // Drop-target highlight: accent-tinted backdrop
+                        // + dashed-feel border when this category is the
+                        // active drop target. Sits behind the content
+                        // (z: -1) so channels remain fully interactive.
+                        Rectangle {
+                            anchors.fill: parent
+                            anchors.margins: 2
+                            z: -1
+                            radius: Theme.r2
+                            visible: channelListRoot.dropHoverCategoryId === categoryDelegate.categoryId
+                            color: Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                           Theme.accent.b, 0.12)
+                            border.color: Theme.accent
+                            border.width: 1
+                            Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
+                        }
+
+                        Column {
+                            id: categoryContent
+                            width: parent.width
+
+                        // Category header (skip for uncategorized).
                         Item {
+                            id: catHeader
                             width: parent.width
                             height: modelData.categoryId !== "" ? 32 : 0
                             visible: modelData.categoryId !== ""
 
                             // Backdrop click handler — left-click toggles
-                            // collapse/expand; right-click opens the create
-                            // menu scoped to this category so the new channel
-                            // lands inside it. Declared before RowLayout so
-                            // child MouseAreas (notably "+") still win on
-                            // their own hit tests.
+                            // collapse/expand; right-click opens the
+                            // create menu scoped to this category. Child
+                            // MouseAreas (the "+" add button) steal their
+                            // own clicks because they're declared later
+                            // and land on top.
                             MouseArea {
+                                id: catHeaderMouse
                                 anchors.fill: parent
                                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                                 cursorShape: Qt.PointingHandCursor
@@ -215,8 +349,8 @@ Rectangle {
 
                             RowLayout {
                                 anchors.fill: parent
-                                anchors.leftMargin: Theme.sp.s3
-                                anchors.rightMargin: Theme.sp.s3
+                                anchors.leftMargin: Theme.sp.s2
+                                anchors.rightMargin: Theme.sp.s2
 
                                 // Collapse chevron — rotates rather than
                                 // swapping glyphs so the transition is
@@ -225,13 +359,15 @@ Rectangle {
                                 Icon {
                                     name: "chevron-right"
                                     size: 12
-                                    color: Theme.fg3
+                                    color: catHeaderMouse.containsMouse
+                                        ? Theme.fg0 : Theme.fg3
                                     rotation: isCategoryCollapsed(modelData.categoryId) ? 0 : 90
                                     Behavior on rotation {
                                         NumberAnimation { duration: Theme.motion.fastMs
                                                           easing.type: Easing.BezierSpline
                                                           easing.bezierCurve: Theme.motion.bezier }
                                     }
+                                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                 }
 
                                 Text {
@@ -240,16 +376,36 @@ Rectangle {
                                     font.pixelSize: Theme.fontSize.xs
                                     font.weight: Theme.fontWeight.semibold
                                     font.letterSpacing: Theme.trackWidest.xs
-                                    color: Theme.fg3
+                                    color: catHeaderMouse.containsMouse
+                                        ? Theme.fg1 : Theme.fg3
                                     Layout.fillWidth: true
+                                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                 }
 
-                                // "+" to add channel in this category
-                                Text {
+                                // "+" to add channel in this category.
+                                // Reveal-on-hover so the resting header
+                                // stays quiet; covers the chevron+label
+                                // vocabulary used in ServerSettings.
+                                Rectangle {
                                     id: catPlus
-                                    text: "+"
-                                    font.pixelSize: Theme.fontSize.xl
-                                    color: catPlusMouse.containsMouse ? Theme.fg0 : Theme.fg2
+                                    Layout.preferredWidth: 22
+                                    Layout.preferredHeight: 22
+                                    Layout.alignment: Qt.AlignVCenter
+                                    radius: Theme.r1
+                                    color: catPlusMouse.containsMouse
+                                        ? Theme.bg3 : "transparent"
+                                    opacity: catHeaderMouse.containsMouse
+                                          || catPlusMouse.containsMouse ? 1.0 : 0.0
+                                    Behavior on color   { ColorAnimation { duration: Theme.motion.fastMs } }
+                                    Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
+
+                                    Icon {
+                                        anchors.centerIn: parent
+                                        name: "plus"
+                                        size: 12
+                                        color: catPlusMouse.containsMouse
+                                            ? Theme.accent : Theme.fg2
+                                    }
 
                                     MouseArea {
                                         id: catPlusMouse
@@ -261,13 +417,11 @@ Rectangle {
                                             channelListRoot.openCreateMenu(p.x, p.y, modelData.categoryId);
                                         }
                                     }
-                                }
-                            }
 
-                            MouseArea {
-                                anchors.fill: parent
-                                z: -1
-                                onClicked: toggleCategoryCollapsed(modelData.categoryId)
+                                    ToolTip.visible: catPlusMouse.containsMouse
+                                    ToolTip.text: "Add channel"
+                                    ToolTip.delay: 500
+                                }
                             }
                         }
 
@@ -277,11 +431,48 @@ Rectangle {
                             visible: !isCategoryCollapsed(modelData.categoryId)
 
                             Repeater {
+                                id: channelRepeater
                                 model: modelData.channels
 
                                 delegate: Item {
+                                    id: channelDelegate
                                     width: parent.width
                                     height: channelItemContent.implicitHeight + 4
+
+                                    readonly property int channelIndex: index
+                                    // Live mute + unread flags. Gated by
+                                    // muteGeneration / unreadGeneration so
+                                    // QSettings changes flow into bindings.
+                                    readonly property bool isMuted: {
+                                        channelListRoot.muteGeneration;
+                                        return appSettings.isRoomMuted(modelData.roomId);
+                                    }
+                                    readonly property bool hasUnread: {
+                                        channelListRoot.unreadGeneration;
+                                        channelListRoot.muteGeneration;
+                                        if (isMuted) return false;
+                                        if (modelData.isVoice) return false;
+                                        var lastMsg = modelData.lastMessageTime || 0;
+                                        if (lastMsg <= 0) return false;
+                                        var lastRead = appSettings.lastReadTs(modelData.roomId);
+                                        // lastRead == 0 means we've never recorded a
+                                        // read marker for this room yet. Treat that as
+                                        // "caught up" rather than "all messages new"
+                                        // — otherwise every channel in the tree lights
+                                        // up on first launch.
+                                        if (lastRead <= 0) return false;
+                                        return lastMsg > lastRead;
+                                    }
+                                    // Drag state — while `dragging` is
+                                    // true, the row lifts via bg + z
+                                    // and translates by `dragY` to
+                                    // follow the cursor. On release
+                                    // we snap `dragY` to 0 and write
+                                    // new sortOrders via the backend;
+                                    // the sync echo then rebuilds the
+                                    // final channel order.
+                                    property bool dragging: false
+                                    property real dragY: 0
 
                                     readonly property bool isActiveText:
                                         !modelData.isVoice && serverManager.activeServer
@@ -296,14 +487,39 @@ Rectangle {
                                         anchors.fill: parent
                                         anchors.leftMargin: Theme.sp.s2
                                         anchors.rightMargin: Theme.sp.s2
+                                        // Lift the row above its siblings while dragging
+                                        // so it floats over the rest of the list. Anchor
+                                        // offsets move the background with the drag.
+                                        anchors.topMargin: channelDelegate.dragging
+                                            ? channelDelegate.dragY : 0
+                                        anchors.bottomMargin: channelDelegate.dragging
+                                            ? -channelDelegate.dragY : 0
+                                        z: channelDelegate.dragging ? 100 : 0
+                                        opacity: channelDelegate.dragging ? 0.9
+                                               : (channelDelegate.isMuted ? 0.5 : 1.0)
                                         radius: Theme.r1
                                         color: {
+                                            if (channelDelegate.dragging) return Theme.bg3;
                                             if (parent.isActive) return Theme.bg3;
                                             if (channelItemMouse.containsMouse) return Theme.bg2;
                                             return "transparent";
                                         }
+                                        border.color: channelDelegate.dragging
+                                            ? Theme.accent : "transparent"
+                                        border.width: 1
 
                                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                        Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
+
+                                        // Invisible proxy for MouseArea.drag.target. We don't
+                                        // actually move this item (it's unanchored, stays at
+                                        // 0,0) — but handing MouseArea a drag target is what
+                                        // unlocks its built-in drag-threshold behaviour, which
+                                        // guarantees that a press-release under threshold falls
+                                        // straight through to `onClicked` without ever
+                                        // activating drag. The reorder logic reads mouseY
+                                        // itself instead of relying on target movement.
+                                        Item { id: dragProxy; width: 1; height: 1 }
 
                                         // Left accent stripe — on ANY active channel (text or voice),
                                         // per SPEC §3.2. Used to be voice-only.
@@ -356,21 +572,111 @@ Rectangle {
                                                     Layout.fillWidth: true
                                                 }
 
-                                                // Unread count badge (text channels only)
+                                                // Typing indicator — three pulsing accent
+                                                // dots on any channel (other than the
+                                                // active one, which already shows the
+                                                // full typing banner below the messages)
+                                                // where at least one non-self user is
+                                                // typing. Hidden otherwise. Binds to
+                                                // typingGeneration so sync updates
+                                                // re-evaluate the roomHasTyping check.
+                                                Row {
+                                                    readonly property int _typingGen:
+                                                        serverManager.activeServer
+                                                            ? serverManager.activeServer.typingGeneration : 0
+                                                    readonly property bool hasTyping: {
+                                                        _typingGen;
+                                                        var s = serverManager.activeServer;
+                                                        if (!s) return false;
+                                                        if (modelData.roomId === s.activeRoomId) return false;
+                                                        return s.roomHasTyping(modelData.roomId);
+                                                    }
+                                                    visible: hasTyping
+                                                    spacing: 2
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    Repeater {
+                                                        model: 3
+                                                        delegate: Rectangle {
+                                                            required property int index
+                                                            width: 3; height: 3; radius: 1.5
+                                                            color: Theme.accent
+                                                            opacity: 0.3
+                                                            SequentialAnimation on opacity {
+                                                                loops: Animation.Infinite
+                                                                running: parent.parent.visible
+                                                                PauseAnimation { duration: index * 140 }
+                                                                NumberAnimation { to: 1.0; duration: 280 }
+                                                                NumberAnimation { to: 0.3; duration: 280 }
+                                                                PauseAnimation { duration: (2 - index) * 140 }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                // Mute indicator — shown for muted channels
+                                                // so the dim styling doesn't look like a bug.
+                                                Icon {
+                                                    visible: channelDelegate.isMuted
+                                                    name: "volume-off"
+                                                    size: 12
+                                                    color: Theme.fg3
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                }
+
+                                                // Unread dot — 8px accent circle, shown when
+                                                // the room has messages newer than the stored
+                                                // lastReadTs. Hidden for muted channels.
                                                 Rectangle {
-                                                    visible: !modelData.isVoice && modelData.unreadCount > 0
-                                                    Layout.preferredWidth: Math.max(20, unreadBadgeText.implicitWidth + 8)
+                                                    visible: channelDelegate.hasUnread
+                                                    Layout.preferredWidth: 8
+                                                    Layout.preferredHeight: 8
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    radius: 4
+                                                    color: Theme.accent
+                                                }
+
+                                                // Voice participant count pill — subtle
+                                                // bg3 chip with a `users` icon + count.
+                                                // Only shown on voice channels with at
+                                                // least one member; live-updates via
+                                                // voiceMemberCount from the room model.
+                                                Rectangle {
+                                                    visible: modelData.isVoice && modelData.voiceMemberCount > 0
+                                                    Layout.preferredWidth: voiceCountRow.implicitWidth + 10
                                                     Layout.preferredHeight: 18
                                                     radius: 9
-                                                    color: Theme.danger
+                                                    color: modelData.roomId === (serverManager.activeServer
+                                                            ? serverManager.activeServer.activeVoiceRoomId : "")
+                                                        ? Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                                                  Theme.accent.b, 0.18)
+                                                        : Theme.bg3
+                                                    border.color: modelData.roomId === (serverManager.activeServer
+                                                            ? serverManager.activeServer.activeVoiceRoomId : "")
+                                                        ? Theme.accent : Theme.line
+                                                    border.width: 1
 
-                                                    Text {
-                                                        id: unreadBadgeText
+                                                    Row {
+                                                        id: voiceCountRow
                                                         anchors.centerIn: parent
-                                                        text: modelData.unreadCount > 99 ? "99+" : modelData.unreadCount
-                                                        font.pixelSize: 11
-                                                        font.bold: true
-                                                        color: Theme.onAccent
+                                                        spacing: 3
+                                                        Icon {
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            name: "users"
+                                                            size: 10
+                                                            color: modelData.roomId === (serverManager.activeServer
+                                                                    ? serverManager.activeServer.activeVoiceRoomId : "")
+                                                                ? Theme.accent : Theme.fg2
+                                                        }
+                                                        Text {
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            text: modelData.voiceMemberCount
+                                                            font.family: Theme.fontMono
+                                                            font.pixelSize: 11
+                                                            font.weight: Theme.fontWeight.semibold
+                                                            color: modelData.roomId === (serverManager.activeServer
+                                                                    ? serverManager.activeServer.activeVoiceRoomId : "")
+                                                                ? Theme.accent : Theme.fg2
+                                                        }
                                                     }
                                                 }
                                             }
@@ -394,43 +700,107 @@ Rectangle {
                                                         return serverManager.activeServer.voiceMembers;
                                                     }
                                                     delegate: Item {
+                                                        id: voiceMemberRow
                                                         required property var modelData
                                                         width: parent.width
                                                         height: 22
 
+                                                        readonly property bool isSelf:
+                                                            serverManager.activeServer
+                                                            && modelData.user_id === serverManager.activeServer.userId
+                                                        readonly property bool muted:
+                                                            modelData.muted === true
+                                                        readonly property bool deafened:
+                                                            modelData.deafened === true
+                                                        readonly property real micLevel:
+                                                            isSelf && serverManager.activeServer
+                                                            ? serverManager.activeServer.micLevel : 0
+                                                        readonly property bool speaking:
+                                                            isSelf && !muted && micLevel > 0.05
+
                                                         Row {
                                                             anchors.verticalCenter: parent.verticalCenter
+                                                            anchors.left: parent.left
+                                                            anchors.right: parent.right
                                                             spacing: Theme.sp.s3
 
-                                                            // 16×16 circular avatar.
-                                                            Rectangle {
-                                                                width: 16; height: 16
-                                                                radius: 8
-                                                                color: Theme.senderColor(
-                                                                    parent.parent.modelData.user_id || "")
-                                                                Text {
+                                                            // 16×16 avatar. Green ring pulses when
+                                                            // the local mic detects speech above
+                                                            // the silence floor — only for self,
+                                                            // since we don't get remote-speaking
+                                                            // signalling yet.
+                                                            Item {
+                                                                width: 18; height: 18
+                                                                Rectangle {
                                                                     anchors.centerIn: parent
-                                                                    text: {
-                                                                        var m = parent.parent.parent.modelData;
-                                                                        var n = (m.displayName || m.user_id || "?");
-                                                                        var s = n.replace(/^[^a-zA-Z0-9]+/, "");
-                                                                        return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
+                                                                    width: 16; height: 16
+                                                                    radius: 8
+                                                                    color: Theme.senderColor(
+                                                                        voiceMemberRow.modelData.user_id || "")
+                                                                    opacity: voiceMemberRow.muted
+                                                                          || voiceMemberRow.deafened ? 0.5 : 1.0
+                                                                    Text {
+                                                                        anchors.centerIn: parent
+                                                                        text: {
+                                                                            var m = voiceMemberRow.modelData;
+                                                                            var n = (m.displayName || m.user_id || "?");
+                                                                            var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                                                            return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
+                                                                        }
+                                                                        font.family: Theme.fontSans
+                                                                        font.pixelSize: 9
+                                                                        font.weight: Theme.fontWeight.semibold
+                                                                        color: Theme.onAccent
                                                                     }
-                                                                    font.family: Theme.fontSans
-                                                                    font.pixelSize: 9
-                                                                    font.weight: Theme.fontWeight.semibold
-                                                                    color: Theme.onAccent
+                                                                }
+                                                                Rectangle {
+                                                                    anchors.centerIn: parent
+                                                                    width: 18 + voiceMemberRow.micLevel * 6
+                                                                    height: width
+                                                                    radius: width / 2
+                                                                    color: "transparent"
+                                                                    border.color: Theme.online
+                                                                    border.width: 1.5
+                                                                    opacity: voiceMemberRow.speaking ? 0.8 : 0
+                                                                    visible: opacity > 0.01
+                                                                    Behavior on opacity { NumberAnimation { duration: 80 } }
+                                                                    Behavior on width { NumberAnimation { duration: 60 } }
                                                                 }
                                                             }
 
                                                             Text {
                                                                 anchors.verticalCenter: parent.verticalCenter
-                                                                text: parent.parent.modelData.displayName
-                                                                      || parent.parent.modelData.user_id
+                                                                text: voiceMemberRow.modelData.displayName
+                                                                      || voiceMemberRow.modelData.user_id
                                                                       || ""
                                                                 font.family: Theme.fontSans
                                                                 font.pixelSize: Theme.fontSize.sm
-                                                                color: Theme.fg1
+                                                                font.weight: voiceMemberRow.isSelf
+                                                                    ? Theme.fontWeight.semibold
+                                                                    : Theme.fontWeight.regular
+                                                                color: voiceMemberRow.muted
+                                                                    || voiceMemberRow.deafened
+                                                                    ? Theme.fg3 : Theme.fg1
+                                                                elide: Text.ElideRight
+                                                                width: voiceMemberRow.width - 18 - 24 - Theme.sp.s3 * 2
+                                                            }
+
+                                                            // Trailing status icon: deafened >
+                                                            // muted > speaking (none). Tiny 12px
+                                                            // glyph in danger red so the row stays
+                                                            // scannable.
+                                                            Item {
+                                                                anchors.verticalCenter: parent.verticalCenter
+                                                                width: 14; height: 14
+                                                                Icon {
+                                                                    anchors.centerIn: parent
+                                                                    visible: voiceMemberRow.deafened
+                                                                           || voiceMemberRow.muted
+                                                                    name: voiceMemberRow.deafened
+                                                                          ? "headphones-off" : "mic-off"
+                                                                    size: 11
+                                                                    color: Theme.danger
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -438,12 +808,71 @@ Rectangle {
                                             }
                                         }
 
+                                        // Unified click + drag handler. Uses MouseArea's
+                                        // built-in drag (with drag.target: dragProxy) so
+                                        // taps under the 6-pixel threshold fall straight
+                                        // through to onClicked for channel selection, and
+                                        // only a deliberate drag past threshold activates
+                                        // reorder mode — fixes the "clicks don't work"
+                                        // pathology from the old DragHandler approach.
                                         MouseArea {
                                             id: channelItemMouse
                                             anchors.fill: parent
                                             hoverEnabled: true
                                             cursorShape: Qt.PointingHandCursor
                                             acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                            drag.target: dragProxy
+                                            drag.axis: Drag.YAxis
+                                            drag.threshold: 6
+
+                                            // Scene-Y of the press point — invariant to the
+                                            // row's own lift via anchor.topMargin (which
+                                            // moves the MouseArea and would otherwise feed
+                                            // back into local mouse.y, causing oscillation).
+                                            property real _pressSceneY: 0
+
+                                            onPressed: (mouse) => {
+                                                _pressSceneY = mapToItem(null, mouse.x, mouse.y).y;
+                                            }
+
+                                            onPositionChanged: (mouse) => {
+                                                if (!drag.active) return;
+                                                channelDelegate.dragging = true;
+                                                var scene = mapToItem(null, mouse.x, mouse.y);
+                                                channelDelegate.dragY = scene.y - _pressSceneY;
+                                                var t = channelListRoot.dropTargetAt(scene.y);
+                                                channelListRoot.dropHoverCategoryId =
+                                                    (t && t.categoryId !== categoryDelegate.categoryId)
+                                                        ? t.categoryId : "__none__";
+                                            }
+
+                                            onReleased: (mouse) => {
+                                                if (!channelDelegate.dragging) return;
+                                                var scene = mapToItem(null, mouse.x, mouse.y);
+                                                var t = channelListRoot.dropTargetAt(scene.y);
+                                                var sourceCat = categoryDelegate.categoryId;
+                                                channelListRoot.dropHoverCategoryId = "__none__";
+                                                if (t && t.categoryId !== sourceCat) {
+                                                    var relY = scene.y - t.top;
+                                                    var slot = Math.round(relY / channelDelegate.height);
+                                                    channelListRoot.moveChannelAcross(
+                                                        modelData.roomId, t.categoryId,
+                                                        t.categoryChannels, slot);
+                                                } else {
+                                                    var slots = Math.round(
+                                                        channelDelegate.dragY / channelDelegate.height);
+                                                    var fromIdx = channelDelegate.channelIndex;
+                                                    var toIdx = Math.max(0, Math.min(
+                                                        channelRepeater.count - 1, fromIdx + slots));
+                                                    if (toIdx !== fromIdx) {
+                                                        channelListRoot.moveChannelTo(
+                                                            channelRepeater.model, fromIdx, toIdx);
+                                                    }
+                                                }
+                                                channelDelegate.dragY = 0;
+                                                channelDelegate.dragging = false;
+                                            }
+
                                             onClicked: (mouse) => {
                                                 if (mouse.button === Qt.RightButton) {
                                                     roomContextMenu.roomId = modelData.roomId;
@@ -453,10 +882,6 @@ Rectangle {
                                                 }
                                                 if (!serverManager.activeServer) return;
                                                 if (modelData.isVoice) {
-                                                    // If we're already in this voice channel,
-                                                    // just flip the view (no rejoin). Otherwise
-                                                    // joinVoiceChannel leaves+rejoins AND sets
-                                                    // the view to VoiceRoom.
                                                     if (serverManager.activeServer.activeVoiceRoomId === modelData.roomId) {
                                                         serverManager.activeServer.showVoiceRoom();
                                                     } else {
@@ -471,6 +896,7 @@ Rectangle {
                                 }
                             }
                         }
+                        } // categoryContent Column
                     }
                 }
             }
@@ -872,7 +1298,8 @@ Rectangle {
 
                 component ThemedUserItem: MenuItem {
                     id: ui
-                    implicitHeight: 34
+                    implicitHeight: visible ? 34 : 0
+            height: implicitHeight
                     property string iconName: ""
                     property color labelColor: Theme.fg0
                     contentItem: RowLayout {
@@ -923,17 +1350,101 @@ Rectangle {
                     iconName: "settings"
                     onTriggered: Window.window.openClientSettings()
                 }
+                ThemedUserItem {
+                    text: "Keyboard Shortcuts"
+                    iconName: "crosshair"
+                    onTriggered: Window.window.openShortcutsDialog()
+                }
             }
         }
     }
 
-    // Empty state
-    Text {
+    // Empty state — shown when the user hasn't selected a server (no
+    // servers added, or they're on the add-server flow). Mirrors the
+    // empty-state vocabulary we use elsewhere: accent-tinted icon tile,
+    // headline, subtext, then a primary action pulling the LoginDialog.
+    ColumnLayout {
         anchors.centerIn: parent
         visible: serverManager.activeServer === null
-        text: "Add a server to get started"
-        font.pixelSize: Theme.fontSize.md
-        color: Theme.fg2
+        width: Math.min(parent.width - Theme.sp.s7 * 2, 280)
+        spacing: Theme.sp.s4
+
+        Rectangle {
+            Layout.alignment: Qt.AlignHCenter
+            Layout.preferredWidth: 56
+            Layout.preferredHeight: 56
+            radius: Theme.r3
+            color: Theme.bg2
+            border.color: Theme.line
+            border.width: 1
+            Icon {
+                anchors.centerIn: parent
+                name: "hash"
+                size: 24
+                color: Theme.accent
+            }
+        }
+        Text {
+            Layout.alignment: Qt.AlignHCenter
+            text: {
+                var count = serverManager.servers ? serverManager.servers.rowCount() : 0;
+                return count === 0 ? "Welcome to BSFChat" : "No server selected";
+            }
+            color: Theme.fg0
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.lg
+            font.weight: Theme.fontWeight.semibold
+            font.letterSpacing: Theme.trackTight.lg
+        }
+        Text {
+            Layout.alignment: Qt.AlignHCenter
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
+            text: {
+                var count = serverManager.servers ? serverManager.servers.rowCount() : 0;
+                return count === 0
+                    ? "Add a server to start chatting. Sign in with a BSFChat ID to pull in all the servers you've joined."
+                    : "Pick a server from the sidebar to see its channels.";
+            }
+            color: Theme.fg2
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.sm
+            wrapMode: Text.WordWrap
+        }
+
+        // Primary action — accent pill opens the login / add-server
+        // dialog. Only shown in the true "no servers at all" state; once
+        // the user has servers, the "Pick a server" subtext directs them
+        // to the rail without another competing CTA.
+        Button {
+            id: addServerCta
+            Layout.alignment: Qt.AlignHCenter
+            Layout.topMargin: Theme.sp.s2
+            visible: serverManager.servers && serverManager.servers.rowCount() === 0
+            contentItem: RowLayout {
+                spacing: Theme.sp.s2
+                Icon {
+                    name: "plus"; size: 14; color: Theme.onAccent
+                    Layout.alignment: Qt.AlignVCenter
+                }
+                Text {
+                    text: "Add a server"
+                    color: Theme.onAccent
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    font.weight: Theme.fontWeight.semibold
+                    Layout.alignment: Qt.AlignVCenter
+                }
+            }
+            background: Rectangle {
+                color: addServerCta.hovered ? Theme.accentDim : Theme.accent
+                radius: Theme.r2
+                implicitHeight: 40
+                implicitWidth: 160
+                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+            }
+            onClicked: loginDialog.open()
+        }
     }
 
     // Room context menu — inline-styled items, danger action uses
@@ -953,7 +1464,8 @@ Rectangle {
 
         component ThemedRoomItem: MenuItem {
             id: ri
-            implicitHeight: 34
+            implicitHeight: visible ? 34 : 0
+            height: implicitHeight
             property string iconName: ""
             property color labelColor: Theme.fg0
             contentItem: RowLayout {
@@ -978,6 +1490,17 @@ Rectangle {
                 color: ri.hovered && ri.enabled ? Theme.bg2 : "transparent"
                 radius: Theme.r1
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+            }
+        }
+
+        ThemedRoomItem {
+            text: appSettings.isRoomMuted(roomContextMenu.roomId)
+                  ? "Unmute Channel" : "Mute Channel"
+            iconName: "volume-off"
+            onTriggered: {
+                var rid = roomContextMenu.roomId;
+                appSettings.setRoomMuted(rid, !appSettings.isRoomMuted(rid));
+                channelListRoot.muteGeneration++;
             }
         }
 
@@ -1162,7 +1685,8 @@ Rectangle {
 
         component ThemedCreateItem: MenuItem {
             id: ci
-            implicitHeight: 34
+            implicitHeight: visible ? 34 : 0
+            height: implicitHeight
             property string iconName: ""
             contentItem: RowLayout {
                 spacing: Theme.sp.s3

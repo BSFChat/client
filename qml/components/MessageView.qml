@@ -10,7 +10,113 @@ import BSFChat
 // real SPEC §3.6 ChatPanel lands as a 320w right-rail variant, it'll
 // switch to bg1 to read as the "panel" surface instead.
 Rectangle {
+    id: messageViewRoot
     color: Theme.bg0
+
+    // Drag-and-drop file uploads. Anchored over the whole MessageView
+    // so dropping anywhere in the chat pane — message list, composer,
+    // empty state — uploads the files into the current channel. Only
+    // accepts drops while the user has an active channel AND
+    // ATTACH_FILES permission (canAttach is a live binding).
+    DropArea {
+        id: fileDrop
+        anchors.fill: parent
+        z: 100
+        // A single drag-enter session can carry multiple files. We
+        // accept the drag if *any* URL looks like a local file; each
+        // URL is then re-checked on drop before uploading so we don't
+        // send empty selections.
+        keys: ["text/uri-list"]
+
+        property bool canUploadHere: {
+            var s = serverManager.activeServer;
+            if (!s || !s.activeRoomId) return false;
+            return s.canAttach(s.activeRoomId);
+        }
+
+        onEntered: (drag) => {
+            if (!canUploadHere || !drag.hasUrls) {
+                drag.accepted = false;
+                return;
+            }
+            drag.accepted = true;
+        }
+        onDropped: (drop) => {
+            if (!canUploadHere) { drop.accepted = false; return; }
+            var uploaded = 0;
+            for (var i = 0; i < drop.urls.length; ++i) {
+                var u = drop.urls[i];
+                if (!u) continue;
+                // Accept only local file:// URLs for now; Matrix media
+                // upload reads the bytes off disk. Remote URLs would
+                // need a separate fetch-and-reupload path.
+                var s = u.toString();
+                if (s.indexOf("file://") === 0) {
+                    serverManager.activeServer.sendMediaMessage(s);
+                    uploaded++;
+                }
+            }
+            if (uploaded > 0) messageInput.uploading = true;
+            drop.accepted = uploaded > 0;
+        }
+    }
+
+    // Drag overlay — fades in while a drag is hovering the DropArea.
+    // Accent-tinted scrim + centered card so there's an unmissable
+    // "drop here to upload" affordance regardless of what's underneath.
+    Rectangle {
+        anchors.fill: parent
+        z: 99
+        visible: opacity > 0.01
+        opacity: fileDrop.containsDrag && fileDrop.canUploadHere ? 1.0 : 0.0
+        Behavior on opacity {
+            NumberAnimation { duration: Theme.motion.fastMs
+                              easing.type: Easing.OutCubic }
+        }
+        color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.14)
+        border.color: Theme.accent
+        border.width: 2
+        radius: Theme.r2
+
+        ColumnLayout {
+            anchors.centerIn: parent
+            spacing: Theme.sp.s4
+
+            Rectangle {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.preferredWidth: 72
+                Layout.preferredHeight: 72
+                radius: Theme.r3
+                color: Theme.bg1
+                border.color: Theme.accent
+                border.width: 2
+                Icon {
+                    anchors.centerIn: parent
+                    name: "paperclip"
+                    size: 28
+                    color: Theme.accent
+                }
+            }
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text: "Drop to upload"
+                color: Theme.fg0
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.lg
+                font.weight: Theme.fontWeight.semibold
+                font.letterSpacing: Theme.trackTight.lg
+            }
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text: "Files dropped here are sent to #"
+                    + (serverManager.activeServer
+                        ? serverManager.activeServer.activeRoomName : "")
+                color: Theme.fg2
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+            }
+        }
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -78,16 +184,57 @@ Rectangle {
         }
 
         // Header bar (SPEC §3.6 top, 40-48h) — hash + channel name, inline
-        // topic, bottom divider.
+        // topic, right-aligned action cluster, bottom divider.
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 48
             color: Theme.bg0
 
+            // Icon-button primitive for the action cluster. 28×28 ghost
+            // tile, bg2 hover, optional toggled state that paints the
+            // glyph in the accent. Matches ChannelList.FooterButton.
+            component HeaderButton: Rectangle {
+                id: hbtn
+                property string icon: ""
+                property string tooltip: ""
+                property bool toggled: false
+                signal clicked()
+
+                Layout.preferredWidth: 28
+                Layout.preferredHeight: 28
+                Layout.alignment: Qt.AlignVCenter
+                radius: Theme.r1
+                color: toggled
+                    ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.16)
+                    : (hbtnMouse.containsMouse ? Theme.bg2 : "transparent")
+                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                Icon {
+                    anchors.centerIn: parent
+                    name: hbtn.icon
+                    size: 16
+                    color: hbtn.toggled ? Theme.accent
+                         : hbtnMouse.containsMouse ? Theme.fg0
+                         : Theme.fg2
+                }
+
+                MouseArea {
+                    id: hbtnMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: hbtn.clicked()
+                }
+
+                ToolTip.visible: hbtnMouse.containsMouse && hbtn.tooltip.length > 0
+                ToolTip.text: hbtn.tooltip
+                ToolTip.delay: 500
+            }
+
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: Theme.sp.s7
-                anchors.rightMargin: Theme.sp.s7
+                anchors.rightMargin: Theme.sp.s5
                 spacing: Theme.sp.s5
 
                 Icon {
@@ -126,6 +273,47 @@ Rectangle {
                 }
 
                 Item { Layout.fillWidth: true; visible: topicText.text === "" }
+
+                // Action cluster — thin vertical rule separates from title,
+                // then 28px ghost buttons. Hidden when there's no active
+                // channel so we don't advertise actions that can't fire.
+                Rectangle {
+                    Layout.preferredWidth: 1
+                    Layout.preferredHeight: 18
+                    Layout.alignment: Qt.AlignVCenter
+                    color: Theme.line
+                    visible: serverManager.activeServer !== null
+                           && serverManager.activeServer.activeRoomId !== ""
+                }
+
+                HeaderButton {
+                    id: pinnedBtn
+                    icon: "pin"
+                    tooltip: "Pinned messages"
+                    visible: serverManager.activeServer !== null
+                           && serverManager.activeServer.activeRoomId !== ""
+                    onClicked: pinnedPopover.openBelow(pinnedBtn)
+                }
+
+                HeaderButton {
+                    icon: "search"
+                    tooltip: "Search messages  (⌃K)"
+                    visible: serverManager.activeServer !== null
+                           && serverManager.activeServer.activeRoomId !== ""
+                    onClicked: Window.window.openSearch
+                        ? Window.window.openSearch()
+                        : null
+                }
+
+                HeaderButton {
+                    icon: "users"
+                    tooltip: Window.window.showMemberList
+                        ? "Hide member list  (⌃M)"
+                        : "Show member list  (⌃M)"
+                    toggled: Window.window.showMemberList
+                    visible: serverManager.activeServer !== null
+                    onClicked: Window.window.showMemberList = !Window.window.showMemberList
+                }
             }
 
             Rectangle {
@@ -157,6 +345,65 @@ Rectangle {
             ScrollBar.vertical: ThemedScrollBar {}
 
             model: serverManager.activeServer ? serverManager.activeServer.messageModel : null
+
+            // ── Unread-messages divider ───────────────────────────────
+            // When the user enters a room, we snapshot the stored
+            // "last read" timestamp into `unreadBoundaryMs`. The
+            // delegate draws a red "New" divider above the first
+            // message whose ts > boundary. The boundary is frozen for
+            // the visit so the divider doesn't jump while messages
+            // arrive. On leaving the room we write the newest loaded
+            // message's ts back into settings, marking it read.
+            property real unreadBoundaryMs: 0
+            property string unreadDividerEventId: ""
+            property string _currentRoomId: ""
+
+            function _recomputeUnreadDivider() {
+                var mm = model;
+                if (!mm || unreadBoundaryMs <= 0) {
+                    unreadDividerEventId = "";
+                    return;
+                }
+                unreadDividerEventId = mm.firstEventIdAfterTs(unreadBoundaryMs) || "";
+            }
+
+            function _persistLastReadForCurrent() {
+                if (!_currentRoomId) return;
+                var mm = model;
+                if (!mm) return;
+                var ts = mm.newestTimestampMs();
+                if (ts > 0) appSettings.setLastReadTs(_currentRoomId, ts);
+            }
+
+            // React to room changes: write the OUTGOING room's lastRead,
+            // then load the INCOMING room's boundary for divider placement.
+            Connections {
+                target: serverManager.activeServer
+                ignoreUnknownSignals: true
+                function onActiveRoomIdChanged() {
+                    // Persist newest-seen ts for the room we're leaving.
+                    messageListView._persistLastReadForCurrent();
+                    var s = serverManager.activeServer;
+                    var next = s ? s.activeRoomId : "";
+                    messageListView._currentRoomId = next;
+                    messageListView.unreadBoundaryMs = next
+                        ? appSettings.lastReadTs(next) : 0;
+                    // Defer recompute until the model has repopulated
+                    // for the new room. Trigger via onCountChanged below.
+                    messageListView.unreadDividerEventId = "";
+                }
+            }
+
+            // Initial-load: pick up whichever room is already active
+            // when the view is constructed, so the divider works on
+            // first app start (not just after a room switch).
+            Component.onCompleted: {
+                var s = serverManager.activeServer;
+                var rid = s ? s.activeRoomId : "";
+                _currentRoomId = rid;
+                unreadBoundaryMs = rid ? appSettings.lastReadTs(rid) : 0;
+                _recomputeUnreadDivider();
+            }
 
             // Whether the user is pinned to the bottom. Updated ONLY by
             // user-initiated scroll completion (onMovementEnded) so
@@ -211,7 +458,9 @@ Rectangle {
 
             onContentYChanged: {
                 if (contentHeight <= height) return;
-                if (!_isAtEnd()) {
+                if (_isAtEnd()) {
+                    atBottom = true;
+                } else {
                     if (initialLoad) {
                         initialLoad = false;
                         scrollTimer.stop();
@@ -285,10 +534,15 @@ Rectangle {
             // fired — or when an inline image loaded and
             // onContentHeightChanged triggered a forced end-scroll while
             // initialLoad was still true.
+            // Any user-driven movement cancels the 2-second initial-load
+            // grace window. The `atBottom` state is derived from position
+            // in onContentYChanged now (bidirectional), so we don't
+            // preemptively flip it false here — a short wheel tick that
+            // happens to land inside the end band shouldn't be punished
+            // by having atBottom first set false and then back true.
             onMovementStarted: {
                 initialLoad = false;
                 scrollTimer.stop();
-                atBottom = false;
             }
 
             onMovementEnded: {
@@ -328,13 +582,29 @@ Rectangle {
                     _scrollToEndSoon();
                     if (initialLoad) scrollTimer.restart();
                 }
+                _recomputeUnreadDivider();
+            }
+
+            // Jump to the end. We used to call the builtin
+            // `positionViewAtEnd()`, but during layout flap (async image
+            // loads, delegate recycling) it computed targets from stale
+            // item heights and parked contentY well past the actual end
+            // of content — which then latched atBottom=false because dist
+            // went negative. Doing the arithmetic ourselves against the
+            // live contentHeight/height is both simpler and stable.
+            function _jumpToEnd() {
+                if (contentHeight <= height) {
+                    contentY = originY;
+                } else {
+                    contentY = originY + contentHeight - height;
+                }
             }
 
             // Guarded callLater — re-checks the pin state at fire time so
             // a mid-frame user scroll can abort a pending auto-scroll.
             function _scrollToEndSoon() {
                 Qt.callLater(function() {
-                    if (initialLoad || atBottom) positionViewAtEnd();
+                    if (initialLoad || atBottom) _jumpToEnd();
                 });
             }
 
@@ -343,7 +613,7 @@ Rectangle {
                 interval: 2000
                 onTriggered: {
                     if (messageListView.initialLoad || messageListView.atBottom) {
-                        messageListView.positionViewAtEnd();
+                        messageListView._jumpToEnd();
                     }
                     messageListView.initialLoad = false;
                 }
@@ -364,10 +634,55 @@ Rectangle {
                 width: messageListView.width
                 spacing: 0
 
-                // Date separator
+                // "New messages" divider — accent-coloured hairline with
+                // a pill on the right, rendered above the first unread
+                // message in the loaded timeline. Computed once per
+                // channel-enter via `_recomputeUnreadDivider` and
+                // frozen there for the visit, so it doesn't jump as
+                // new messages arrive.
                 Item {
                     width: parent.width
-                    height: visible ? 40 : 0
+                    height: visible ? 18 : 0
+                    visible: messageListView.unreadDividerEventId !== ""
+                          && messageListView.unreadDividerEventId === model.eventId
+
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        height: 1
+                        color: Theme.danger
+                    }
+
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.right: parent.right
+                        anchors.rightMargin: Theme.sp.s2
+                        width: newPill.implicitWidth + Theme.sp.s3 * 2
+                        height: 14
+                        radius: Theme.r1
+                        color: Theme.danger
+
+                        Text {
+                            id: newPill
+                            anchors.centerIn: parent
+                            text: "NEW"
+                            font.family: Theme.fontSans
+                            font.pixelSize: 9
+                            font.weight: Theme.fontWeight.semibold
+                            font.letterSpacing: Theme.trackWidest.xs
+                            color: "white"
+                        }
+                    }
+                }
+
+                // Date separator — thin `line` rule spanning the full
+                // width, with a widest-tracked small-caps pill floating
+                // on top. Matches the section-header vocabulary used in
+                // ServerSettings / ChannelSettings.
+                Item {
+                    width: parent.width
+                    height: visible ? 44 : 0
                     visible: model.showDateSeparator
 
                     Rectangle {
@@ -375,23 +690,27 @@ Rectangle {
                         anchors.left: parent.left
                         anchors.right: parent.right
                         height: 1
-                        color: Theme.bg3
+                        color: Theme.line
                     }
 
                     Rectangle {
                         anchors.centerIn: parent
-                        width: dateSepText.implicitWidth + 24
+                        width: dateSepText.implicitWidth + Theme.sp.s5 * 2
                         height: 22
-                        color: Theme.bg2
+                        color: Theme.bg1
                         radius: Theme.r4
+                        border.color: Theme.line
+                        border.width: 1
 
                         Text {
                             id: dateSepText
                             anchors.centerIn: parent
-                            text: messageListView.formatDateSeparator(model.timestamp)
-                            font.pixelSize: Theme.fontSize.sm
-                            font.bold: true
-                            color: Theme.fg2
+                            text: messageListView.formatDateSeparator(model.timestamp).toUpperCase()
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.xs
+                            font.weight: Theme.fontWeight.semibold
+                            font.letterSpacing: Theme.trackWidest.xs
+                            color: Theme.fg3
                         }
                     }
                 }
@@ -467,6 +786,24 @@ Rectangle {
                         if (!serverManager.activeServer) return;
                         serverManager.activeServer.toggleReaction(targetId, emoji);
                     }
+                    // Inline image left-click — route to the shared
+                    // lightbox. Middle-click bypasses this entirely and
+                    // goes straight to the browser (handled in the bubble).
+                    onImageOpenRequested: (url, filename, size) => {
+                        imageViewer.openFor(url, filename, size);
+                    }
+                    // Context-menu delete → confirm, then redact. The
+                    // server enforces MANAGE_MESSAGES / sender-ownership
+                    // so a spoofed client at worst gets a 403, but the
+                    // confirmation step prevents honest right-click
+                    // slips on your own messages.
+                    onDeleteRequested: (targetId) => {
+                        deleteConfirm.eventId = targetId;
+                        deleteConfirm.preview =
+                            (model.body || "").substring(0, 140);
+                        deleteConfirm.senderName = model.senderDisplayName || "";
+                        deleteConfirm.open();
+                    }
                 }
             }
 
@@ -528,7 +865,7 @@ Rectangle {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
-                        messageListView.positionViewAtEnd();
+                        messageListView._jumpToEnd();
                         messageListView.atBottom = true;
                     }
                 }
@@ -697,5 +1034,377 @@ Rectangle {
     ForwardDialog {
         id: forwardDialog
         parent: Overlay.overlay
+    }
+
+    // Full-window image lightbox. Shared across every bubble in the
+    // channel so reopening a new image replaces the current one instead
+    // of stacking modals.
+    ImageViewer {
+        id: imageViewer
+    }
+
+    // Pinned-messages popover — anchored below the chat-header "pin"
+    // button. Shows the current room's pinned events (computed from
+    // ServerConnection's m.room.pinned_events cache). Clicking a row
+    // scrolls the timeline to that event via the same code path as
+    // reply-jump. Unpin button (admins/mods only) removes it live.
+    Popup {
+        id: pinnedPopover
+        parent: Overlay.overlay
+        width: 380
+        height: Math.min(420, contentColumn.implicitHeight + 24)
+        padding: 0
+        modal: false
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        function openBelow(anchor) {
+            var p = anchor.mapToItem(Overlay.overlay,
+                                      anchor.width, anchor.height + 4);
+            x = Math.max(8, p.x - width);
+            y = p.y;
+            open();
+        }
+
+        // Reactive list of pinned ids, rebuilt when the server signals a
+        // pinned-events state change. `_gen` gives the binding a real
+        // dependency the QML engine can observe.
+        property int _gen: 0
+        readonly property var pinnedIds: {
+            _gen;
+            var s = serverManager.activeServer;
+            if (!s || !s.activeRoomId) return [];
+            return s.pinnedEventIds(s.activeRoomId);
+        }
+        Connections {
+            target: serverManager.activeServer
+            ignoreUnknownSignals: true
+            function onRoomPinnedEventsChanged(roomId) { pinnedPopover._gen++; }
+        }
+
+        background: Rectangle {
+            color: Theme.bg1
+            radius: Theme.r2
+            border.color: Theme.line
+            border.width: 1
+        }
+
+        contentItem: ColumnLayout {
+            id: contentColumn
+            spacing: 0
+
+            // Header
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 40
+                color: Theme.bg2
+                radius: Theme.r2
+                Text {
+                    anchors.left: parent.left
+                    anchors.leftMargin: Theme.sp.s4
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "PINNED MESSAGES"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xs
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackWidest.xs
+                    color: Theme.fg3
+                }
+                Rectangle {
+                    anchors.bottom: parent.bottom
+                    width: parent.width; height: 1; color: Theme.line
+                }
+            }
+
+            // Body
+            ListView {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.min(320, count * 66 + 2)
+                visible: pinnedPopover.pinnedIds.length > 0
+                clip: true
+                model: pinnedPopover.pinnedIds
+                spacing: 0
+                boundsBehavior: Flickable.StopAtBounds
+
+                delegate: Rectangle {
+                    required property string modelData
+                    required property int index
+                    width: ListView.view.width
+                    height: 66
+                    color: pinRowHover.containsMouse ? Theme.bg2 : "transparent"
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                    // Look up the pinned event's preview fields from the
+                    // MessageModel. If it isn't loaded we still show the
+                    // eventId so admins know something is pinned.
+                    readonly property var eventRow: {
+                        var s = serverManager.activeServer;
+                        if (!s || !s.messageModel) return null;
+                        var idx = s.messageModel.indexForEventId(modelData);
+                        if (idx < 0) return null;
+                        // Pull the row via searchMessages substring "" isn't
+                        // supported; use reactionSummary-style accessor. We
+                        // don't have one, so fall back to a minimal shape.
+                        return { idx: idx };
+                    }
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: Theme.sp.s3
+                        spacing: 2
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Icon {
+                                name: "pin"
+                                size: 12
+                                color: Theme.accent
+                            }
+                            Text {
+                                text: eventRow ? "In loaded history" : "Not loaded yet"
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.xs
+                                color: Theme.fg3
+                                Layout.fillWidth: true
+                            }
+                            // Unpin button — reveal on hover.
+                            Icon {
+                                name: "x"
+                                size: 12
+                                color: unpinMouse.containsMouse
+                                    ? Theme.danger : Theme.fg3
+                                opacity: pinRowHover.containsMouse ? 1.0 : 0.0
+                                Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
+                                MouseArea {
+                                    id: unpinMouse
+                                    anchors.fill: parent
+                                    anchors.margins: -6
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        var s = serverManager.activeServer;
+                                        if (s) s.togglePinnedEvent(s.activeRoomId, modelData);
+                                    }
+                                }
+                            }
+                        }
+                        Text {
+                            text: modelData
+                            font.family: Theme.fontMono
+                            font.pixelSize: Theme.fontSize.xs
+                            color: Theme.fg2
+                            elide: Text.ElideMiddle
+                            Layout.fillWidth: true
+                        }
+                    }
+
+                    MouseArea {
+                        id: pinRowHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            messageListView.jumpToLoadedEvent(modelData);
+                            pinnedPopover.close();
+                        }
+                    }
+                }
+            }
+
+            // Empty state
+            Item {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 120
+                visible: pinnedPopover.pinnedIds.length === 0
+                ColumnLayout {
+                    anchors.centerIn: parent
+                    spacing: Theme.sp.s2
+                    Icon {
+                        name: "pin"
+                        size: 20
+                        color: Theme.fg3
+                        Layout.alignment: Qt.AlignHCenter
+                    }
+                    Text {
+                        text: "No pinned messages"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        color: Theme.fg2
+                        Layout.alignment: Qt.AlignHCenter
+                    }
+                    Text {
+                        text: "Right-click a message → Pin"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xs
+                        color: Theme.fg3
+                        Layout.alignment: Qt.AlignHCenter
+                    }
+                }
+            }
+        }
+    }
+
+    // Confirm popup for message deletion. Fields are populated by the
+    // MessageBubble's onDeleteRequested so the modal shows a preview of
+    // exactly what's about to be redacted — easy to bail on a misclick.
+    Popup {
+        id: deleteConfirm
+        parent: Overlay.overlay
+        anchors.centerIn: Overlay.overlay
+        width: 420
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        padding: Theme.sp.s7
+
+        property string eventId: ""
+        property string preview: ""
+        property string senderName: ""
+
+        background: Rectangle {
+            color: Theme.bg1
+            radius: Theme.r3
+            border.color: Theme.line
+            border.width: 1
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Theme.sp.s4
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.sp.s3
+                Rectangle {
+                    Layout.preferredWidth: 32
+                    Layout.preferredHeight: 32
+                    radius: Theme.r2
+                    color: Qt.rgba(Theme.danger.r, Theme.danger.g,
+                                   Theme.danger.b, 0.15)
+                    Icon {
+                        anchors.centerIn: parent
+                        name: "x"
+                        size: 16
+                        color: Theme.danger
+                    }
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: "Delete message?"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xl
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackTight.xl
+                    color: Theme.fg0
+                }
+            }
+
+            // Preview — shows what's about to disappear. Capped to 140
+            // chars at the emit site so the dialog doesn't balloon on a
+            // long message.
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: previewCol.implicitHeight + Theme.sp.s4 * 2
+                color: Theme.bg2
+                radius: Theme.r2
+                border.color: Theme.line
+                border.width: 1
+                visible: deleteConfirm.preview.length > 0
+                ColumnLayout {
+                    id: previewCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: Theme.sp.s4
+                    anchors.rightMargin: Theme.sp.s4
+                    spacing: 2
+                    Text {
+                        visible: deleteConfirm.senderName.length > 0
+                        text: deleteConfirm.senderName
+                        color: Theme.accent
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xs
+                        font.weight: Theme.fontWeight.semibold
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: deleteConfirm.preview
+                        color: Theme.fg1
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        wrapMode: Text.Wrap
+                        elide: Text.ElideRight
+                        maximumLineCount: 3
+                    }
+                }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: "This can't be undone. The message will be removed for everyone in the channel."
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.fg2
+                wrapMode: Text.WordWrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.sp.s3
+                spacing: Theme.sp.s3
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    id: cancelDeleteBtn
+                    contentItem: Text {
+                        text: "Cancel"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.medium
+                        color: Theme.fg1
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: cancelDeleteBtn.hovered ? Theme.bg3 : "transparent"
+                        border.color: Theme.line
+                        border.width: 1
+                        radius: Theme.r2
+                        implicitWidth: 100
+                        implicitHeight: 36
+                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                    }
+                    onClicked: deleteConfirm.close()
+                }
+                Button {
+                    id: confirmDeleteBtn
+                    contentItem: Text {
+                        text: "Delete"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.semibold
+                        color: Theme.onAccent
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: confirmDeleteBtn.hovered
+                            ? Qt.lighter(Theme.danger, 1.1) : Theme.danger
+                        radius: Theme.r2
+                        implicitWidth: 120
+                        implicitHeight: 36
+                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                    }
+                    onClicked: {
+                        if (!serverManager.activeServer
+                            || deleteConfirm.eventId === "") {
+                            deleteConfirm.close();
+                            return;
+                        }
+                        serverManager.activeServer.redactEvent(
+                            serverManager.activeServer.activeRoomId,
+                            deleteConfirm.eventId);
+                        deleteConfirm.close();
+                    }
+                }
+            }
+        }
     }
 }

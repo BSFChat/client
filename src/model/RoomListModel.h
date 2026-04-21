@@ -44,7 +44,7 @@ public:
     // Reverse lookup: find a text channel by exact case-insensitive name.
     // Used by the #channel-mention click handler. Returns "" if no match.
     Q_INVOKABLE QString roomIdForName(const QString& name) const;
-    QString roomTopic(const QString& roomId) const;
+    Q_INVOKABLE QString roomTopic(const QString& roomId) const;
     void updateVoiceState(const QString& roomId, bool isVoice);
     void updateVoiceMemberCount(const QString& roomId, int count);
     void removeRoom(const QString& roomId);

@@ -1059,6 +1059,17 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomTopic)) {
                 QString topic = QString::fromStdString(event.content.data.value("topic", ""));
                 m_roomListModel->updateRoomTopic(roomId, topic);
+            } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomPinnedEvents)) {
+                // Matrix canonical pinned list is a JSON array under "pinned".
+                QStringList ids;
+                if (event.content.data.contains("pinned")
+                    && event.content.data["pinned"].is_array()) {
+                    for (const auto& v : event.content.data["pinned"]) {
+                        if (v.is_string()) ids.append(QString::fromStdString(v.get<std::string>()));
+                    }
+                }
+                m_roomPinnedEvents[roomId] = ids;
+                emit roomPinnedEventsChanged(roomId);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomMember)) {
                 // Cache member events for all rooms + populate global
                 // display-name map that MessageModel reads from.
@@ -1307,72 +1318,64 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             m_roomListModel->setUnreadCount(roomId, serverUnread);
         }
 
-        // Process ephemeral events (typing indicators)
-        if (roomId == m_activeRoomId && joinedRoom.ephemeral.has_value()) {
+        // Process ephemeral typing events for EVERY joined room so the
+        // sidebar can show a typing indicator on non-active channels.
+        // Each typing event is an authoritative snapshot — empty
+        // user_ids means "everyone stopped." We only record and emit
+        // the set here; the display string for the active-room bar
+        // is rebuilt below from m_roomTyping[m_activeRoomId].
+        if (joinedRoom.ephemeral.has_value()) {
             for (const auto& event : joinedRoom.ephemeral->events) {
-                if (event.type == std::string(bsfchat::event_type::kTyping)) {
-                    QStringList typingUsers;
-                    if (event.content.data.contains("user_ids")) {
-                        for (const auto& uid : event.content.data["user_ids"]) {
-                            QString usrId = QString::fromStdString(uid.get<std::string>());
-                            // Filter out self
-                            if (usrId != m_userId) {
-                                // Try to get display name from member list
-                                QString dn = m_memberListModel->displayNameForUser(usrId);
-                                if (dn.isEmpty()) {
-                                    // Fallback: extract localpart from @user:server
-                                    dn = usrId;
-                                    if (dn.startsWith('@')) {
-                                        int colon = dn.indexOf(':');
-                                        if (colon > 0) {
-                                            dn = dn.mid(1, colon - 1);
-                                        }
-                                    }
-                                }
-                                typingUsers.append(dn);
-                            }
-                        }
+                if (event.type != std::string(bsfchat::event_type::kTyping)) continue;
+                QStringList users;
+                if (event.content.data.contains("user_ids")) {
+                    for (const auto& uid : event.content.data["user_ids"]) {
+                        QString usrId = QString::fromStdString(uid.get<std::string>());
+                        if (usrId != m_userId) users.append(usrId);
                     }
-
-                    // Build display string
-                    QString display;
-                    if (typingUsers.size() == 1) {
-                        display = typingUsers[0] + " is typing...";
-                    } else if (typingUsers.size() == 2) {
-                        display = typingUsers[0] + " and " + typingUsers[1] + " are typing...";
-                    } else if (typingUsers.size() > 2) {
-                        display = "Several people are typing...";
-                    }
-
-                    if (display != m_typingDisplay) {
-                        m_typingDisplay = display;
-                        m_typingUsers = typingUsers;
-                        emit typingDisplayChanged();
-                    }
+                }
+                auto existing = m_roomTyping.value(roomId);
+                if (existing != users) {
+                    if (users.isEmpty()) m_roomTyping.remove(roomId);
+                    else m_roomTyping[roomId] = users;
+                    ++m_typingGeneration;
+                    emit roomTypingChanged();
                 }
             }
         }
     }
 
-    // Clear typing display if active room had no ephemeral typing event
-    if (!m_activeRoomId.isEmpty() && !m_typingDisplay.isEmpty()) {
-        auto it = response.rooms.join.find(m_activeRoomId.toStdString());
-        if (it != response.rooms.join.end()) {
-            bool hadTyping = false;
-            if (it->second.ephemeral.has_value()) {
-                for (const auto& ev : it->second.ephemeral->events) {
-                    if (ev.type == std::string(bsfchat::event_type::kTyping)) {
-                        hadTyping = true;
-                        break;
-                    }
+    // Rebuild the active-room typing display string. We resolve user
+    // ids → display names lazily here (instead of in each per-room
+    // update above) because only the active room needs the rendered
+    // string; the sidebar just cares whether a set is non-empty.
+    QString display;
+    {
+        const QStringList& typingIds = m_roomTyping.value(m_activeRoomId);
+        QStringList names;
+        for (const auto& uid : typingIds) {
+            QString dn = m_memberListModel ? m_memberListModel->displayNameForUser(uid) : QString();
+            if (dn.isEmpty()) {
+                dn = uid;
+                if (dn.startsWith('@')) {
+                    int colon = dn.indexOf(':');
+                    if (colon > 0) dn = dn.mid(1, colon - 1);
                 }
             }
-            if (!hadTyping) {
-                m_typingDisplay.clear();
-                m_typingUsers.clear();
-                emit typingDisplayChanged();
-            }
+            names.append(dn);
         }
+        if (names.size() == 1) {
+            display = names[0] + " is typing...";
+        } else if (names.size() == 2) {
+            display = names[0] + " and " + names[1] + " are typing...";
+        } else if (names.size() > 2) {
+            display = "Several people are typing...";
+        }
+    }
+    if (display != m_typingDisplay) {
+        m_typingDisplay = display;
+        m_typingUsers = m_roomTyping.value(m_activeRoomId);
+        emit typingDisplayChanged();
     }
 
     // Update active room name/topic after processing
@@ -1710,9 +1713,56 @@ void ServerConnection::setChannelSlowmode(const QString& roomId, int seconds) {
     m_client->setChannelSlowmode(roomId, seconds);
 }
 
+void ServerConnection::setRoomName(const QString& roomId, const QString& name) {
+    QJsonObject body{{"name", name}};
+    QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    m_client->setRoomState(roomId,
+        QString::fromUtf8(bsfchat::event_type::kRoomName),
+        QString(), payload);
+}
+
+void ServerConnection::setRoomTopic(const QString& roomId, const QString& topic) {
+    QJsonObject body{{"topic", topic}};
+    QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    m_client->setRoomState(roomId,
+        QString::fromUtf8(bsfchat::event_type::kRoomTopic),
+        QString(), payload);
+}
+
 void ServerConnection::redactEvent(const QString& roomId, const QString& eventId,
                                     const QString& reason) {
     m_client->redactEvent(roomId, eventId, reason);
+}
+
+QStringList ServerConnection::pinnedEventIds(const QString& roomId) const
+{
+    return m_roomPinnedEvents.value(roomId);
+}
+
+bool ServerConnection::isEventPinned(const QString& roomId, const QString& eventId) const
+{
+    return m_roomPinnedEvents.value(roomId).contains(eventId);
+}
+
+void ServerConnection::togglePinnedEvent(const QString& roomId, const QString& eventId)
+{
+    if (roomId.isEmpty() || eventId.isEmpty()) return;
+    QStringList list = m_roomPinnedEvents.value(roomId);
+    if (list.contains(eventId)) list.removeAll(eventId);
+    else list.append(eventId);
+    // Optimistic: update the cache immediately so the UI reflects the
+    // change without waiting for the sync echo. Server state wins on
+    // the next m.room.pinned_events event.
+    m_roomPinnedEvents[roomId] = list;
+    emit roomPinnedEventsChanged(roomId);
+
+    QJsonArray arr;
+    for (const auto& id : list) arr.append(id);
+    QJsonObject body{{"pinned", arr}};
+    QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    m_client->setRoomState(roomId,
+        QString::fromUtf8(bsfchat::event_type::kRoomPinnedEvents),
+        QString(), payload);
 }
 
 void ServerConnection::kickMember(const QString& roomId, const QString& userId,

@@ -25,8 +25,17 @@ Rectangle {
     readonly property real   level: isSelf && serverManager.activeServer
                                     ? serverManager.activeServer.micLevel : 0
     readonly property bool   speaking: level > 0.04
-    readonly property bool   muted:    isSelf && serverManager.activeServer
-                                       ? serverManager.activeServer.voiceMuted : false
+    // Muted state. For ourselves, authoritative from the connection;
+    // for remote peers, we trust the per-member `muted` flag broadcast
+    // over the voice signalling channel.
+    readonly property bool   muted:    isSelf
+                                       ? (serverManager.activeServer
+                                          && serverManager.activeServer.voiceMuted)
+                                       : (member && member.muted === true)
+    readonly property bool   deafened: isSelf
+                                       ? (serverManager.activeServer
+                                          && serverManager.activeServer.voiceDeafened)
+                                       : (member && member.deafened === true)
 
     implicitWidth:  Theme.layout.participantTileW
     implicitHeight: Theme.layout.participantTileH
@@ -96,7 +105,10 @@ Rectangle {
                     color: Theme.onAccent
                 }
 
-                // Muted indicator — bottom-right corner of the avatar.
+                // Muted indicator — bottom-right of the avatar. Same 22px
+                // treatment whether it's self (authoritative) or remote
+                // (trusted via signalling). Deafened supersedes muted
+                // since a deafened user is implicitly muted too.
                 Rectangle {
                     anchors.right: parent.right
                     anchors.bottom: parent.bottom
@@ -107,13 +119,40 @@ Rectangle {
                     color: Theme.danger
                     border.color: Theme.bg2
                     border.width: 2
-                    visible: tile.muted
+                    visible: tile.muted || tile.deafened
                     Icon {
                         anchors.centerIn: parent
-                        name: "mic-off"
+                        name: tile.deafened ? "headphones-off" : "mic-off"
                         size: 12
                         color: Theme.onAccent
                     }
+                }
+
+                // Peer-connection dot — top-right of the avatar. Only
+                // visible while the connection is anything other than
+                // "connected" so the steady state stays clean. Colour
+                // mirrors the VoiceDock / old VoicePanel convention:
+                // green=online, yellow=handshaking, red=broken.
+                Rectangle {
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.rightMargin: -2
+                    anchors.topMargin: -2
+                    width: 14; height: 14
+                    radius: 7
+                    border.color: Theme.bg2
+                    border.width: 2
+                    color: {
+                        switch (tile.peerState) {
+                            case "connecting":   return Theme.warn;
+                            case "new":          return Theme.warn;
+                            case "failed":       return Theme.danger;
+                            case "disconnected": return Theme.danger;
+                            default:             return Theme.online;
+                        }
+                    }
+                    visible: !tile.isSelf && tile.peerState !== "connected"
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                 }
             }
         }

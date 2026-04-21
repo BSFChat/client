@@ -96,12 +96,15 @@ QVariantList MessageModel::buildReactionsList(const MessageEntry& entry) const
         m[QStringLiteral("count")] = list.size();
         bool reacted = false;
         QStringList eventIds;
+        QStringList userIds;
         for (const auto& p : list) {
             eventIds.append(p.second);
+            userIds.append(p.first);
             if (!m_ownUserId.isEmpty() && p.first == m_ownUserId) reacted = true;
         }
         m[QStringLiteral("reacted")] = reacted;
         m[QStringLiteral("eventIds")] = eventIds;
+        m[QStringLiteral("userIds")] = userIds;
         out.append(m);
     }
     return out;
@@ -155,6 +158,44 @@ int MessageModel::indexForEventId(const QString& eventId) const
         if (m_messages[i].eventId == eventId) return i;
     }
     return -1;
+}
+
+QString MessageModel::firstEventIdAfterTs(qint64 tsMs) const
+{
+    if (tsMs <= 0) return {};
+    // m_messages is ordered oldest → newest. Linear scan from front is
+    // fine for the 100-ish loaded events; early-returns on first hit.
+    for (int i = 0; i < m_messages.size(); ++i) {
+        if (m_messages[i].timestamp > tsMs) return m_messages[i].eventId;
+    }
+    return {};
+}
+
+qint64 MessageModel::newestTimestampMs() const
+{
+    if (m_messages.isEmpty()) return 0;
+    return m_messages.last().timestamp;
+}
+
+QVariantList MessageModel::searchMessages(const QString& query, int limit) const
+{
+    QVariantList out;
+    if (query.trimmed().isEmpty()) return out;
+    const QString needle = query.trimmed();
+    // Newest-first so the most recent matches top the list.
+    for (int i = m_messages.size() - 1; i >= 0 && out.size() < limit; --i) {
+        const auto& m = m_messages[i];
+        if (!m.body.contains(needle, Qt::CaseInsensitive)
+            && !m.senderDisplayName.contains(needle, Qt::CaseInsensitive)) continue;
+        QVariantMap row;
+        row[QStringLiteral("eventId")] = m.eventId;
+        row[QStringLiteral("sender")] = m.senderDisplayName.isEmpty()
+            ? m.sender : m.senderDisplayName;
+        row[QStringLiteral("body")] = m.body;
+        row[QStringLiteral("timestamp")] = m.timestamp;
+        out.append(row);
+    }
+    return out;
 }
 
 QString MessageModel::resolveMediaUrl(const QString& mxcUri) const

@@ -241,6 +241,64 @@ void Settings::setNotificationSound(bool v) {
     }
 }
 
+bool Settings::showMemberList() const {
+    return m_settings.value("ui/showMemberList", true).toBool();
+}
+void Settings::setShowMemberList(bool v) {
+    if (showMemberList() != v) {
+        m_settings.setValue("ui/showMemberList", v);
+        emit showMemberListChanged();
+    }
+}
+
+int Settings::windowX() const {
+    return m_settings.value("window/x", -1).toInt();
+}
+void Settings::setWindowX(int v) {
+    if (windowX() != v) {
+        m_settings.setValue("window/x", v);
+        emit windowXChanged();
+    }
+}
+int Settings::windowY() const {
+    return m_settings.value("window/y", -1).toInt();
+}
+void Settings::setWindowY(int v) {
+    if (windowY() != v) {
+        m_settings.setValue("window/y", v);
+        emit windowYChanged();
+    }
+}
+int Settings::windowWidth() const {
+    return m_settings.value("window/width", -1).toInt();
+}
+void Settings::setWindowWidth(int v) {
+    if (windowWidth() != v) {
+        m_settings.setValue("window/width", v);
+        emit windowWidthChanged();
+    }
+}
+int Settings::windowHeight() const {
+    return m_settings.value("window/height", -1).toInt();
+}
+void Settings::setWindowHeight(int v) {
+    if (windowHeight() != v) {
+        m_settings.setValue("window/height", v);
+        emit windowHeightChanged();
+    }
+}
+// Matches Qt's QWindow::Visibility enum: 2 = Windowed, 4 = Maximized,
+// 5 = FullScreen. Default -1 means "apply platform default".
+int Settings::windowVisibility() const {
+    return m_settings.value("window/visibility", -1).toInt();
+}
+void Settings::setWindowVisibility(int v) {
+    if (windowVisibility() != v) {
+        m_settings.setValue("window/visibility", v);
+        emit windowVisibilityChanged();
+    }
+}
+
 namespace {
 QVariantList devicesToList(const QList<QAudioDevice>& devices) {
     QVariantList out;
@@ -273,4 +331,35 @@ QStringList Settings::collapsedCategories() const
 void Settings::setCollapsedCategories(const QStringList& categories)
 {
     m_settings.setValue("collapsedCategories", categories);
+}
+
+qint64 Settings::lastReadTs(const QString& roomId) const
+{
+    if (roomId.isEmpty()) return 0;
+    return m_settings.value(QStringLiteral("unread/") + roomId, 0).toLongLong();
+}
+
+void Settings::setLastReadTs(const QString& roomId, qint64 tsMs)
+{
+    if (roomId.isEmpty()) return;
+    m_settings.setValue(QStringLiteral("unread/") + roomId, tsMs);
+}
+
+bool Settings::isRoomMuted(const QString& roomId) const
+{
+    if (roomId.isEmpty()) return false;
+    return m_settings.value(QStringLiteral("mutedRooms"))
+        .toStringList().contains(roomId);
+}
+
+void Settings::setRoomMuted(const QString& roomId, bool muted)
+{
+    if (roomId.isEmpty()) return;
+    auto list = m_settings.value(QStringLiteral("mutedRooms")).toStringList();
+    const bool has = list.contains(roomId);
+    if (muted && !has) list.append(roomId);
+    else if (!muted && has) list.removeAll(roomId);
+    else return;
+    m_settings.setValue(QStringLiteral("mutedRooms"), list);
+    emit mutedRoomsChanged();
 }

@@ -8,8 +8,15 @@ import BSFChat
 // any Flickable / ScrollView / ListView.
 ScrollBar {
     id: bar
-    policy: ScrollBar.AsNeeded
     minimumSize: 0.08
+
+    // ScrollBar.size is the scaled thumb size (0..1); it hits 1.0 when the
+    // content fully fits the viewport. `AsNeeded` is *meant* to hide the
+    // bar in that case but the track still rendered in some Qt builds —
+    // gating visibility on size < 1 makes "no scroll → no chrome" honest
+    // across platforms. Sub-pixel epsilon avoids a flicker when rounding
+    // lands the thumb at exactly 1.0.
+    policy: size < 0.999 ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
 
     contentItem: Rectangle {
         implicitWidth: bar.hovered || bar.pressed ? 8 : 4
