@@ -735,6 +735,11 @@ Rectangle {
                     replyToSender: model.replyToSender || ""
                     replyPreview: model.replyPreview || ""
                     reactions: model.reactions || []
+                    threadRootId: model.threadRootId || ""
+                    threadReplyCount: model.threadReplyCount || 0
+                    onThreadOpenRequested: (rootId) => {
+                        threadPanel.openFor(rootId);
+                    }
 
                     onSenderClicked: (userId, displayName) => {
                         messageProfileCard.userId = userId;
@@ -1134,17 +1139,13 @@ Rectangle {
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
                     // Look up the pinned event's preview fields from the
-                    // MessageModel. If it isn't loaded we still show the
-                    // eventId so admins know something is pinned.
-                    readonly property var eventRow: {
+                    // MessageModel. If it isn't loaded we still show a
+                    // stub so admins know something is pinned.
+                    readonly property var preview: {
                         var s = serverManager.activeServer;
                         if (!s || !s.messageModel) return null;
-                        var idx = s.messageModel.indexForEventId(modelData);
-                        if (idx < 0) return null;
-                        // Pull the row via searchMessages substring "" isn't
-                        // supported; use reactionSummary-style accessor. We
-                        // don't have one, so fall back to a minimal shape.
-                        return { idx: idx };
+                        var p = s.messageModel.eventPreview(modelData);
+                        return (p && p.sender !== undefined) ? p : null;
                     }
 
                     ColumnLayout {
@@ -1154,19 +1155,29 @@ Rectangle {
 
                         RowLayout {
                             Layout.fillWidth: true
-                            Icon {
-                                name: "pin"
-                                size: 12
-                                color: Theme.accent
+                            spacing: Theme.sp.s2
+
+                            Text {
+                                text: preview ? preview.sender : "Not loaded yet"
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                font.weight: Theme.fontWeight.semibold
+                                color: Theme.fg0
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
                             }
                             Text {
-                                text: eventRow ? "In loaded history" : "Not loaded yet"
+                                visible: preview !== null
+                                text: {
+                                    if (!preview) return "";
+                                    var d = new Date(preview.timestamp);
+                                    return d.toLocaleString(Qt.locale(), "MMM d, h:mm ap");
+                                }
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.xs
                                 color: Theme.fg3
-                                Layout.fillWidth: true
                             }
-                            // Unpin button — reveal on hover.
+                            // Unpin — reveal on hover.
                             Icon {
                                 name: "x"
                                 size: 12
@@ -1188,11 +1199,15 @@ Rectangle {
                             }
                         }
                         Text {
-                            text: modelData
-                            font.family: Theme.fontMono
-                            font.pixelSize: Theme.fontSize.xs
-                            color: Theme.fg2
-                            elide: Text.ElideMiddle
+                            text: preview && preview.body && preview.body.length > 0
+                                ? preview.body
+                                : "(scroll up — this pinned message hasn't loaded yet)"
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.sm
+                            color: preview ? Theme.fg1 : Theme.fg3
+                            font.italic: !preview
+                            elide: Text.ElideRight
+                            maximumLineCount: 1
                             Layout.fillWidth: true
                         }
                     }
@@ -1406,5 +1421,14 @@ Rectangle {
                 }
             }
         }
+    }
+
+    // Threading side-drawer. Overlays the right portion of the chat
+    // area; hidden until a thread is explicitly opened. Closes on
+    // backdrop click or the X in its header.
+    ThreadPanel {
+        id: threadPanel
+        anchors.fill: parent
+        z: 50
     }
 }

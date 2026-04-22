@@ -53,6 +53,8 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
     case ReplyToSenderRole: return msg.replyToSender;
     case ReplyPreviewRole: return msg.replyPreview;
     case ReactionsRole: return buildReactionsList(msg);
+    case ThreadRootIdRole: return msg.threadRootId;
+    case ThreadReplyCountRole: return threadReplyCount(msg.eventId);
     default: return {};
     }
 }
@@ -77,7 +79,9 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {ReplyToEventIdRole, "replyToEventId"},
         {ReplyToSenderRole, "replyToSender"},
         {ReplyPreviewRole, "replyPreview"},
-        {ReactionsRole, "reactions"}
+        {ReactionsRole, "reactions"},
+        {ThreadRootIdRole, "threadRootId"},
+        {ThreadReplyCountRole, "threadReplyCount"}
     };
 }
 
@@ -160,6 +164,48 @@ int MessageModel::indexForEventId(const QString& eventId) const
     return -1;
 }
 
+QVariantList MessageModel::threadReplies(const QString& rootEventId) const
+{
+    QVariantList out;
+    if (rootEventId.isEmpty()) return out;
+    for (const auto& m : m_messages) {
+        if (m.threadRootId != rootEventId) continue;
+        QVariantMap row;
+        row[QStringLiteral("eventId")] = m.eventId;
+        row[QStringLiteral("sender")] = m.sender;
+        row[QStringLiteral("senderDisplayName")] = m.senderDisplayName;
+        row[QStringLiteral("body")] = m.body;
+        row[QStringLiteral("timestamp")] = m.timestamp;
+        row[QStringLiteral("msgtype")] = m.msgtype;
+        row[QStringLiteral("isOwnMessage")] = m.isOwnMessage;
+        out.append(row);
+    }
+    return out;
+}
+
+int MessageModel::threadReplyCount(const QString& rootEventId) const
+{
+    if (rootEventId.isEmpty()) return 0;
+    int n = 0;
+    for (const auto& m : m_messages) {
+        if (m.threadRootId == rootEventId) ++n;
+    }
+    return n;
+}
+
+QVariantMap MessageModel::eventPreview(const QString& eventId) const
+{
+    QVariantMap out;
+    int idx = indexForEventId(eventId);
+    if (idx < 0) return out;
+    const auto& m = m_messages[idx];
+    out[QStringLiteral("sender")] = m.senderDisplayName.isEmpty()
+        ? m.sender : m.senderDisplayName;
+    out[QStringLiteral("body")] = m.body.left(160);
+    out[QStringLiteral("timestamp")] = m.timestamp;
+    return out;
+}
+
 QString MessageModel::firstEventIdAfterTs(qint64 tsMs) const
 {
     if (tsMs <= 0) return {};
@@ -228,6 +274,11 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
         if (rel.contains("m.in_reply_to") && rel["m.in_reply_to"].is_object()) {
             entry.replyToEventId = QString::fromStdString(
                 rel["m.in_reply_to"].value("event_id", ""));
+        }
+        // Thread relation — rel_type = "m.thread", event_id points at
+        // the thread root. Spec'd under Matrix threading (MSC3440).
+        if (rel.value("rel_type", "") == "m.thread") {
+            entry.threadRootId = QString::fromStdString(rel.value("event_id", ""));
         }
     }
 

@@ -137,7 +137,7 @@ Popup {
                 }
 
                 Repeater {
-                    model: ["Appearance", "Audio", "Notifications"]
+                    model: ["Appearance", "Audio", "Screen Share", "Notifications"]
                     delegate: Rectangle {
                         Layout.fillWidth: true
                         height: 36
@@ -439,6 +439,81 @@ Popup {
                         icon: "signal"
                         tint: Theme.warn
                         text: "Device changes apply the next time you join a voice channel — leave and rejoin to pick up a new selection mid-call. Volume sliders aren't applied yet."
+                    }
+
+                    Item { Layout.fillHeight: true }
+                }
+            }
+
+            // ---- Screen Share (index 2) ----
+            Item {
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: Theme.sp.s7 * 2
+                    spacing: Theme.sp.s7
+
+                    SectionHeader { text: "Screen Share" }
+
+                    SettingRow {
+                        title: "Stream quality"
+                        description: {
+                            var s = serverManager.activeServer;
+                            var serverMax = s ? s.maxScreenShareQuality : 3;
+                            var base = "Bandwidth-vs-fidelity tradeoff applied when "
+                                     + "you share a screen. Lower presets reduce fps, "
+                                     + "resolution, and JPEG quality.";
+                            var labels = ["Low", "Medium", "High", "Ultra"];
+                            if (serverMax < 3)
+                                return base + " This server caps the maximum at "
+                                     + labels[serverMax] + ".";
+                            return base;
+                        }
+                        ThemedComboBox {
+                            id: ssQualityCombo
+                            implicitWidth: 300
+                            textRole: "label"
+                            // Reactive to server-max changes so items disable
+                            // live when an admin tightens the policy.
+                            model: {
+                                var s = serverManager.activeServer;
+                                var max = s ? s.maxScreenShareQuality : 3;
+                                var entries = [];
+                                var labels = ["Low (2 fps · 960 px · Q40)",
+                                              "Medium (5 fps · 1280 px · Q60)",
+                                              "High (10 fps · 1600 px · Q75)",
+                                              "Ultra (15 fps · 1920 px · Q85)"];
+                                for (var i = 0; i <= 3; ++i) {
+                                    entries.push({
+                                        label: i > max
+                                            ? labels[i] + " — server max exceeded"
+                                            : labels[i],
+                                        value: i,
+                                        enabled: i <= max
+                                    });
+                                }
+                                return entries;
+                            }
+                            Component.onCompleted:
+                                currentIndex = appSettings.screenShareQuality
+                            onActivated: {
+                                var entry = model[currentIndex];
+                                if (!entry.enabled) {
+                                    var s = serverManager.activeServer;
+                                    var cap = s ? s.maxScreenShareQuality : 3;
+                                    currentIndex = cap;
+                                    appSettings.screenShareQuality = cap;
+                                } else {
+                                    appSettings.screenShareQuality = entry.value;
+                                }
+                            }
+                        }
+                    }
+
+                    InfoBanner {
+                        icon: "signal"
+                        text: "The chosen preset applies the next time you start a "
+                            + "share. Your current stream is unaffected until you "
+                            + "stop and restart it."
                     }
 
                     Item { Layout.fillHeight: true }

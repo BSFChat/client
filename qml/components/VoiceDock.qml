@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import BSFChat
 
 // VoiceDock (SPEC §3.5) — persistent 64h call-controls bar anchored below
@@ -200,8 +201,28 @@ Rectangle {
 
             DockButton {
                 icon: "screen-share"
-                tooltip: "Share screen (coming soon)"
-                enabled2: false
+                tooltip: screenShare.active
+                    ? "Stop sharing screen"
+                    : "Share screen or window…"
+                toggled: screenShare.active
+                onClicked: {
+                    if (screenShare.active) screenShare.stop();
+                    else screenShare.showPicker();
+                }
+                // Surface capture errors as a toast (silent QScreenCapture
+                // failures would otherwise just look like "the button did
+                // nothing"). No action buttons — we don't want a click to
+                // re-trigger any system-settings navigation.
+                Connections {
+                    target: screenShare
+                    function onLastErrorChanged() {
+                        var err = screenShare.lastError;
+                        if (err && err.length > 0
+                            && Window.window && Window.window.toastError) {
+                            Window.window.toastError(err);
+                        }
+                    }
+                }
             }
 
             DockButton {

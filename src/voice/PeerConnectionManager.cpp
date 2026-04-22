@@ -149,13 +149,36 @@ void PeerConnectionManager::setupDataChannel(std::shared_ptr<rtc::DataChannel> d
     });
 
     m_dc->onMessage([this](rtc::message_variant msg) {
-        if (std::holds_alternative<rtc::binary>(msg)) {
-            auto& data = std::get<rtc::binary>(msg);
-            QByteArray frame(reinterpret_cast<const char*>(data.data()),
-                           static_cast<int>(data.size()));
-            QMetaObject::invokeMethod(this, [this, frame]() {
+        if (!std::holds_alternative<rtc::binary>(msg)) return;
+        auto& data = std::get<rtc::binary>(msg);
+        if (data.empty()) return;
+        // Type-tag framing. First byte = frame kind. Older audio-only
+        // peers (pre-screen-share) sent untagged Opus; those look
+        // indistinguishable from tag=OPUS_FIRST_BYTE here, so we
+        // treat an unknown tag as an audio frame with no tag strip
+        // — preserves backwards compatibility with legacy peers.
+        uint8_t tag = static_cast<uint8_t>(data[0]);
+        QByteArray payload;
+        if (tag == 0x01) {
+            payload = QByteArray(reinterpret_cast<const char*>(data.data() + 1),
+                                 static_cast<int>(data.size() - 1));
+            QMetaObject::invokeMethod(this, [this, payload]() {
                 m_framesReceived++;
-                emit audioFrameReceived(frame);
+                emit audioFrameReceived(payload);
+            }, Qt::QueuedConnection);
+        } else if (tag == 0x02) {
+            payload = QByteArray(reinterpret_cast<const char*>(data.data() + 1),
+                                 static_cast<int>(data.size() - 1));
+            QMetaObject::invokeMethod(this, [this, payload]() {
+                emit screenFrameReceived(payload);
+            }, Qt::QueuedConnection);
+        } else {
+            // Legacy untagged audio — no tag strip.
+            payload = QByteArray(reinterpret_cast<const char*>(data.data()),
+                                 static_cast<int>(data.size()));
+            QMetaObject::invokeMethod(this, [this, payload]() {
+                m_framesReceived++;
+                emit audioFrameReceived(payload);
             }, Qt::QueuedConnection);
         }
     });
@@ -214,9 +237,24 @@ void PeerConnectionManager::flushPendingCandidates() {
 
 void PeerConnectionManager::sendAudioFrame(const QByteArray& frame) {
     if (m_dc && m_dc->isOpen()) {
+        // Prepend the 0x01 audio tag so peers can distinguish from
+        // screen-share frames on the shared data channel.
+        rtc::binary data;
+        data.reserve(frame.size() + 1);
+        data.push_back(std::byte{0x01});
         auto* raw = reinterpret_cast<const std::byte*>(frame.constData());
-        rtc::binary data(raw, raw + frame.size());
+        data.insert(data.end(), raw, raw + frame.size());
         m_dc->send(data);
         m_framesSent++;
     }
+}
+
+void PeerConnectionManager::sendScreenFrame(const QByteArray& jpegData) {
+    if (!m_dc || !m_dc->isOpen()) return;
+    rtc::binary data;
+    data.reserve(jpegData.size() + 1);
+    data.push_back(std::byte{0x02});
+    auto* raw = reinterpret_cast<const std::byte*>(jpegData.constData());
+    data.insert(data.end(), raw, raw + jpegData.size());
+    m_dc->send(data);
 }

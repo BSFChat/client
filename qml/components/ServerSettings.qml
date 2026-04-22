@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 import BSFChat
 
 Popup {
@@ -343,6 +344,113 @@ Popup {
 
                     TabHeader { title: "Server Overview" }
 
+                    // Server icon — 80×80 preview on the left, Upload /
+                    // Remove actions on the right. Icon is a resolved
+                    // http URL (mxc → media endpoint). Fallback is the
+                    // server's initial letter in an accent tile.
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: 420
+                        spacing: Theme.sp.s5
+
+                        Rectangle {
+                            Layout.preferredWidth: 80
+                            Layout.preferredHeight: 80
+                            radius: Theme.r3
+                            color: Theme.bg2
+                            border.color: Theme.line
+                            border.width: 1
+                            clip: true
+
+                            Text {
+                                anchors.centerIn: parent
+                                visible: serverIconPreview.status !== Image.Ready
+                                text: {
+                                    var n = serverManager.activeServer
+                                        ? serverManager.activeServer.serverName : "?";
+                                    var stripped = (n || "?").replace(/^[^a-zA-Z0-9]+/, "");
+                                    return (stripped.charAt(0) || "?").toUpperCase();
+                                }
+                                font.family: Theme.fontSans
+                                font.pixelSize: 32
+                                font.weight: Theme.fontWeight.semibold
+                                color: Theme.fg1
+                            }
+
+                            Image {
+                                id: serverIconPreview
+                                anchors.fill: parent
+                                anchors.margins: 1
+                                source: serverManager.activeServer
+                                    ? serverManager.activeServer.serverAvatarUrl : ""
+                                visible: status === Image.Ready
+                                fillMode: Image.PreserveAspectCrop
+                                smooth: true
+                                asynchronous: true
+                                cache: true
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.sp.s2
+
+                            Text {
+                                text: "SERVER ICON"
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.xs
+                                font.weight: Theme.fontWeight.semibold
+                                font.letterSpacing: Theme.trackWidest.xs
+                                color: Theme.fg3
+                            }
+
+                            Text {
+                                text: "Square image, at least 128×128. PNG, JPEG, GIF or WebP."
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                color: Theme.fg2
+                                wrapMode: Text.WordWrap
+                                Layout.fillWidth: true
+                            }
+
+                            RowLayout {
+                                spacing: Theme.sp.s3
+                                Layout.topMargin: Theme.sp.s2
+
+                                Button {
+                                    id: uploadIconBtn
+                                    text: "Upload icon…"
+                                    contentItem: Text {
+                                        text: uploadIconBtn.text
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.sm
+                                        font.weight: Theme.fontWeight.medium
+                                        color: Theme.fg0
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    background: Rectangle {
+                                        color: uploadIconBtn.hovered ? Theme.bg3 : Theme.bg2
+                                        border.color: Theme.line
+                                        border.width: 1
+                                        radius: Theme.r2
+                                        implicitWidth: 120
+                                        implicitHeight: 32
+                                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                    }
+                                    onClicked: serverIconFileDialog.open()
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: 420
+                        Layout.preferredHeight: 1
+                        color: Theme.lineSoft
+                    }
+
                     Text {
                         text: "SERVER NAME"
                         font.family: Theme.fontSans
@@ -419,6 +527,79 @@ Popup {
                         Layout.maximumWidth: 420
                         icon: "shield"
                         text: "Only members with the Manage Server permission can change the server name. Everyone else sees the field read-only."
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: 420
+                        Layout.topMargin: Theme.sp.s5
+                        Layout.preferredHeight: 1
+                        color: Theme.lineSoft
+                    }
+
+                    Text {
+                        text: "SCREEN-SHARE MAXIMUM QUALITY"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xs
+                        font.weight: Theme.fontWeight.semibold
+                        font.letterSpacing: Theme.trackWidest.xs
+                        color: Theme.fg3
+                    }
+
+                    Text {
+                        Layout.maximumWidth: 420
+                        text: "Cap the highest quality preset users may pick when "
+                            + "sharing their screen in voice channels. Lower caps "
+                            + "protect bandwidth on busy servers; Ultra is uncapped."
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        color: Theme.fg2
+                        wrapMode: Text.WordWrap
+                    }
+
+                    ThemedComboBox {
+                        id: serverMaxQualityCombo
+                        Layout.maximumWidth: 260
+                        textRole: "label"
+                        model: [
+                            { label: "Low (2 fps · 960 px · Q40)",   value: 0 },
+                            { label: "Medium (5 fps · 1280 px · Q60)", value: 1 },
+                            { label: "High (10 fps · 1600 px · Q75)",  value: 2 },
+                            { label: "Ultra (15 fps · 1920 px · Q85)", value: 3 }
+                        ]
+                        enabled: {
+                            var s = serverManager.activeServer;
+                            if (!s) return false;
+                            if (s.permissionsGeneration < 0) return false;
+                            // Reuse manage-channel on the active room as a
+                            // proxy for "server admin" until a proper
+                            // manage-server check lands.
+                            return s.canManageChannel(s.activeRoomId);
+                        }
+                        Component.onCompleted: {
+                            var s = serverManager.activeServer;
+                            currentIndex = s ? s.maxScreenShareQuality : 3;
+                        }
+                        onActivated: {
+                            if (!serverManager.activeServer) return;
+                            var v = model[currentIndex].value;
+                            serverManager.activeServer.setMaxScreenShareQuality(v);
+                        }
+                        // Reflect live updates (e.g. from another device).
+                        Connections {
+                            target: serverManager.activeServer
+                            ignoreUnknownSignals: true
+                            function onMaxScreenShareQualityChanged() {
+                                serverMaxQualityCombo.currentIndex =
+                                    serverManager.activeServer.maxScreenShareQuality;
+                            }
+                        }
+                    }
+
+                    InfoBanner {
+                        Layout.maximumWidth: 420
+                        icon: "shield"
+                        text: "Only members with the Manage Server permission can change this cap."
                     }
 
                     Item { Layout.fillHeight: true }
@@ -2128,5 +2309,16 @@ Popup {
         }
 
         onClosed: reasonField.text = ""
+    }
+
+    FileDialog {
+        id: serverIconFileDialog
+        title: "Choose Server Icon"
+        nameFilters: ["Image files (*.png *.jpg *.jpeg *.gif *.webp)"]
+        onAccepted: {
+            if (!serverManager.activeServer) return;
+            serverManager.activeServer.uploadServerAvatar(
+                selectedFile.toString());
+        }
     }
 }

@@ -19,6 +19,21 @@ Rectangle {
     readonly property int _gen: serverManager.activeServer
         ? serverManager.activeServer.permissionsGeneration : 0
 
+    // Presence dots re-evaluate on every `presenceChanged` tick (sender
+    // activity observed, self-status set). The underlying presenceFor()
+    // lookup is a plain QMap read; this property just drives the refresh.
+    property int _presenceGen: 0
+    Connections {
+        target: serverManager.activeServer
+        ignoreUnknownSignals: true
+        function onPresenceChanged() { memberListRoot._presenceGen++; }
+    }
+    // Also tick every minute so the 5-minute online window decays
+    // naturally — a user who went silent 4 minutes ago shouldn't still
+    // show green forever.
+    Timer { running: true; repeat: true; interval: 60 * 1000
+        onTriggered: memberListRoot._presenceGen++ }
+
     // Resolve a user's highest-position hoisted role (Discord-style: the
     // most senior role with `hoist` flag determines the name colour +
     // dot). Returns null if the user has no applicable role or the
@@ -131,25 +146,60 @@ Rectangle {
 
                         // Avatar — rounded-square so it rhymes with the
                         // ServerRail tiles rather than Discord's round pill.
-                        Rectangle {
+                        Item {
                             width: Theme.avatar.md
                             height: Theme.avatar.md
-                            radius: Theme.r2
-                            color: Theme.senderColor(model.userId)
 
-                            Text {
-                                anchors.centerIn: parent
-                                text: {
-                                    var n = model.displayName || "?";
-                                    var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
-                                    return (stripped.length > 0
-                                            ? stripped.charAt(0)
-                                            : "?").toUpperCase();
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: Theme.r2
+                                color: Theme.senderColor(model.userId)
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: {
+                                        var n = model.displayName || "?";
+                                        var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                        return (stripped.length > 0
+                                                ? stripped.charAt(0)
+                                                : "?").toUpperCase();
+                                    }
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: 13
+                                    font.weight: Theme.fontWeight.semibold
+                                    color: Theme.onAccent
                                 }
-                                font.family: Theme.fontSans
-                                font.pixelSize: 13
-                                font.weight: Theme.fontWeight.semibold
-                                color: Theme.onAccent
+                            }
+
+                            // Presence dot — online/idle/dnd/offline colour,
+                            // offline rendered as a hollow ring so it reads
+                            // as a meaningful absence rather than "no dot".
+                            // Bumps memberListRoot._presenceGen when sync
+                            // runs so QSettings-style lookups refresh.
+                            Rectangle {
+                                readonly property string _state: {
+                                    memberListRoot._presenceGen;
+                                    var s = serverManager.activeServer;
+                                    return s ? s.presenceFor(model.userId) : "offline";
+                                }
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                anchors.rightMargin: -2
+                                anchors.bottomMargin: -2
+                                width: 10
+                                height: 10
+                                radius: 5
+                                color: {
+                                    switch (_state) {
+                                    case "online": return Theme.online;
+                                    case "idle":   return Theme.warn;
+                                    case "dnd":    return Theme.danger;
+                                    default:       return Theme.bg1;
+                                    }
+                                }
+                                border.width: _state === "offline" ? 1.5 : 2
+                                border.color: _state === "offline" ? Theme.fg3 : Theme.bg1
+                                visible: true
                             }
                         }
 

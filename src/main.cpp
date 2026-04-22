@@ -11,6 +11,9 @@
 #include "core/Settings.h"
 #include "core/UrlHandler.h"
 #include "net/ServerManager.h"
+#include "net/ServerConnection.h"
+#include "voice/ScreenShareController.h"
+#include "voice/VoiceEngine.h"
 
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((used))
@@ -73,6 +76,17 @@ int main(int argc, char *argv[])
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("serverManager", application.serverManager());
     engine.rootContext()->setContextProperty("appSettings", application.settings());
+    // Screen-share controller — wraps QScreenCapture into a Q_INVOKABLE
+    // API. Local preview works end-to-end; remote streaming over the
+    // voice WebRTC link is a follow-up (needs a video track added to
+    // libdatachannel's PeerConnection with an H.264/VP8 encoder).
+    ScreenShareController screenShare;
+    QQmlEngine::setObjectOwnership(&screenShare, QQmlEngine::CppOwnership);
+    engine.rootContext()->setContextProperty("screenShare", &screenShare);
+    // The share controller looks up the active server's voice
+    // engine on each frame push via this pointer.
+    screenShare.setServerManager(application.serverManager());
+    screenShare.setSettings(application.settings());
     engine.load(QUrl(QStringLiteral("qrc:/qt/qml/BSFChat/qml/main.qml")));
 
     if (engine.rootObjects().isEmpty())

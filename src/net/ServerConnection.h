@@ -32,6 +32,9 @@ class ServerConnection : public QObject {
     // server-side via a bsfchat.server.info state event, gated on
     // MANAGE_SERVER. Falls back to the server's host if unset.
     Q_PROPERTY(QString serverName READ serverName NOTIFY serverNameChanged)
+    // Server icon — fully-resolved HTTP URL (empty if no icon is set).
+    // Stored on the same bsfchat.server.info state event as the name.
+    Q_PROPERTY(QString serverAvatarUrl READ serverAvatarUrl NOTIFY serverAvatarUrlChanged)
     Q_PROPERTY(QString userId READ userId NOTIFY userIdChanged)
     Q_PROPERTY(RoomListModel* roomListModel READ roomListModel CONSTANT)
     Q_PROPERTY(MessageModel* messageModel READ messageModel CONSTANT)
@@ -92,6 +95,7 @@ public:
     QString avatarUrl() const { return m_avatarUrl; }
     QString serverUrl() const { return m_serverUrl; }
     QString serverName() const;
+    QString serverAvatarUrl() const { return m_serverAvatarUrl; }
     QString userId() const { return m_userId; }
     QString accessToken() const { return m_accessToken; }
     QString deviceId() const { return m_deviceId; }
@@ -109,6 +113,21 @@ public:
     bool voiceMuted() const { return m_voiceMuted; }
     bool voiceDeafened() const { return m_voiceDeafened; }
     bool inVoiceChannel() const { return !m_activeVoiceRoomId.isEmpty(); }
+    // Accessor for the screen-share controller to bind to the
+    // currently-running voice engine. Null when no voice session.
+    VoiceEngine* voiceEngine() const { return m_voiceEngine; }
+
+    // Receive side for screen share: the latest JPEG frame from each
+    // remote peer, exposed as an encoded data URL the QML Image
+    // element can consume directly. Empty map when nobody is sharing.
+    Q_INVOKABLE QString peerScreenDataUrl(const QString& userId) const {
+        auto it = m_peerScreenData.constFind(userId);
+        if (it == m_peerScreenData.constEnd()) return {};
+        return *it;
+    }
+    Q_INVOKABLE QStringList peersCurrentlySharing() const {
+        return m_peerScreenData.keys();
+    }
     // Returns the voice-member list with each member augmented by a
     // "peerState" key ("connected"/"connecting"/"failed"/etc.) so the
     // VoicePanel can show per-peer indicators.
@@ -142,6 +161,9 @@ public:
     Q_INVOKABLE void disconnectFromServer();
     Q_INVOKABLE void setActiveRoom(const QString& roomId);
     Q_INVOKABLE void sendMessage(const QString& body);
+    // Send a threaded reply. The message carries m.relates_to with
+    // rel_type=m.thread and event_id=rootEventId. Uses the active room.
+    Q_INVOKABLE void sendThreadReply(const QString& rootEventId, const QString& body);
     // Rich variant used when the composer has tracked @mention or #channel
     // tokens. `formattedBody` is the sender-generated HTML (with <a>
     // anchors for mentions/channels); `mentionedUserIds` goes into
@@ -285,6 +307,42 @@ public:
     // Update the server-wide name (bsfchat.server.info). Requires MANAGE_SERVER.
     Q_INVOKABLE void updateServerName(const QString& name);
     Q_INVOKABLE void updateAvatarUrl(const QString& url);
+
+    // Upload a local image file as the server icon. Uploads to Matrix
+    // media then writes the mxc:// URI into bsfchat.server.info's
+    // `avatar` field (preserving the existing name).
+    Q_INVOKABLE void uploadServerAvatar(const QString& fileUrl);
+
+    // Presence — client-side activity heuristic until the server
+    // starts emitting m.presence. Any user whose last observed
+    // event timestamp falls inside the "active" window is reported
+    // as "online". `self` consults the local Settings preference
+    // ("online" / "idle" / "dnd" / "offline"). Returns one of the
+    // above four strings.
+    Q_INVOKABLE QString presenceFor(const QString& userId) const;
+    Q_INVOKABLE void setSelfPresence(const QString& state);
+    Q_INVOKABLE QString selfPresence() const { return m_selfPresence; }
+
+    // Direct messages — 1:1 rooms with another user on this server.
+    // createDirectMessage creates+invites then marks the room as DM
+    // locally (persisted per-server in the settings file) so the
+    // channel list can segregate them under "Direct Messages". Matrix
+    // also ships an `m.direct` account_data event; we accept either
+    // signal but for MVP we only write the local store.
+    Q_INVOKABLE void createDirectMessage(const QString& targetUserId);
+    Q_INVOKABLE bool isDirectRoom(const QString& roomId) const;
+    Q_INVOKABLE QString directRoomPeer(const QString& roomId) const;
+    // List of all DM rooms in this server, newest-activity first.
+    // Each entry: { roomId, peerId, peerDisplayName, lastMessageTime }.
+    Q_INVOKABLE QVariantList directRooms() const;
+
+    // Server-wide screen-share max quality preset (0..3). Written by
+    // admins via a bsfchat.server.screenshare state event; read by
+    // every client on sync. Clients clamp their own quality pref
+    // downward to this value. Default 3 (Ultra ⇒ no limit) when the
+    // server has never set a policy.
+    Q_INVOKABLE int maxScreenShareQuality() const { return m_maxScreenShareQuality; }
+    Q_INVOKABLE void setMaxScreenShareQuality(int level);
     Q_INVOKABLE void uploadAvatar(const QString& fileUrl);
     Q_INVOKABLE void fetchProfile(const QString& userId);
     Q_INVOKABLE QString resolveMediaUrl(const QString& mxcUri) const;
@@ -292,6 +350,16 @@ public:
 signals:
     void displayNameChanged();
     void serverNameChanged();
+    void serverAvatarUrlChanged();
+    // Bumped whenever presence-relevant state changes (activity
+    // observed, self-status set). Views use it as a cheap reactive
+    // hook since presenceFor() is a lookup on a regular QMap.
+    void presenceChanged();
+    void directRoomsChanged();
+    // Emitted whenever a remote peer's screen-share frame has been
+    // updated. QML rebinds peerScreenDataUrl(userId) off this.
+    void peerScreenFrameChanged(const QString& userId);
+    void maxScreenShareQualityChanged();
     void userIdChanged();
     void activeRoomIdChanged();
     void activeRoomNameChanged();
@@ -366,6 +434,8 @@ private:
     QString m_deviceId;
     QString m_displayName;
     QString m_serverName; // set by bsfchat.server.info state event
+    QString m_serverAvatarMxc;  // raw mxc:// uri
+    QString m_serverAvatarUrl;  // resolved http URL for QML
     QString m_avatarUrl;
     QString m_activeRoomId;
     QString m_activeRoomName;
@@ -382,6 +452,13 @@ public:
     // Per-room member cache: roomId -> list of member events
     QMap<QString, QVector<bsfchat::RoomEvent>> m_roomMembers;
     QMap<QString, QStringList> m_roomPinnedEvents;
+    QMap<QString, qint64> m_userLastActivityMs; // for activity-based presence
+    QString m_selfPresence = QStringLiteral("online");
+    // DM store: roomId -> peer user id. Persisted via Settings under
+    // "dm/<serverUrl>/<roomId>". Loaded once on setup.
+    QMap<QString, QString> m_directRoomPeers;
+    QMap<QString, QString> m_peerScreenData; // userId -> data URL
+    int m_maxScreenShareQuality = 3; // 3 = no limit by default
     // Global userId → display name, populated from all m.room.member events
     // across every room. MessageModel reads from this pointer.
     QMap<QString, QString> m_userDisplayNames;

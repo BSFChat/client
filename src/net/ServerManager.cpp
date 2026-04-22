@@ -225,6 +225,16 @@ void ServerManager::wireConnection(ServerConnection* conn)
         m_serverListModel->updateServer(idx, conn->serverName(), conn->serverUrl());
     };
     connect(conn, &ServerConnection::serverNameChanged, this, pushName);
+
+    // Same pattern for the server icon — push the resolved HTTP URL
+    // into the list model's IconUrlRole whenever it changes.
+    auto pushIcon = [this, conn]() {
+        int idx = m_connections.indexOf(conn);
+        if (idx < 0) return;
+        m_serverListModel->setIconUrl(idx, conn->serverAvatarUrl());
+    };
+    connect(conn, &ServerConnection::serverAvatarUrlChanged, this, pushIcon);
+    pushIcon();
 }
 
 void ServerManager::loginWithIdentity(const QString& identityUrl) {

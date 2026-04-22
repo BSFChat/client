@@ -122,6 +122,11 @@ void VoiceEngine::addPeer(const QString& userId, bool isOfferer) {
         connect(m_audioEngine, &AudioEngine::audioFrameReady,
                 peer, &PeerConnectionManager::sendAudioFrame);
     }
+    // Route screen-share frames up to the UI.
+    connect(peer, &PeerConnectionManager::screenFrameReceived,
+            this, [this, userId](const QByteArray& jpeg) {
+                emit peerScreenFrameReceived(userId, jpeg);
+            });
 
     connect(peer, &PeerConnectionManager::connected,
             this, [this, userId]() { emit peerConnected(userId); });
@@ -186,6 +191,10 @@ void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId,
         connect(m_audioEngine, &AudioEngine::audioFrameReady,
                 peer, &PeerConnectionManager::sendAudioFrame);
     }
+    connect(peer, &PeerConnectionManager::screenFrameReceived,
+            this, [this, sender](const QByteArray& jpeg) {
+                emit peerScreenFrameReceived(sender, jpeg);
+            });
 
     connect(peer, &PeerConnectionManager::connected,
             this, [this, sender]() { emit peerConnected(sender); });
@@ -324,4 +333,16 @@ QString VoiceEngine::generateCallId() const {
     return QString("call-%1-%2")
         .arg(QDateTime::currentMSecsSinceEpoch())
         .arg(QRandomGenerator::global()->generate(), 8, 16, QChar('0'));
+}
+
+void VoiceEngine::broadcastScreenFrame(const QByteArray& jpegData) {
+    if (!m_running) return;
+    static int s_bc = 0;
+    if (++s_bc % 25 == 1) {
+        qInfo("[voice] broadcastScreenFrame: %d peers, %d bytes",
+              int(m_peers.size()), int(jpegData.size()));
+    }
+    for (auto* peer : m_peers) {
+        if (peer) peer->sendScreenFrame(jpegData);
+    }
 }

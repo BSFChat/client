@@ -33,6 +33,12 @@ public:
 
     // Rooms
     void createRoom(const QString& name, const QString& topic, const QString& visibility = "private");
+
+    // Create a direct-message room with a single other user:
+    // trusted_private_chat preset, no name/topic, is_direct=true,
+    // invitee on creation. Mirrors the Matrix spec DM convention.
+    void createDirectMessageRoom(const QString& targetUserId);
+
     void joinRoom(const QString& roomIdOrAlias);
     void leaveRoom(const QString& roomId);
     void deleteRoom(const QString& roomId);
@@ -60,6 +66,12 @@ public:
     // just content metadata.
     void replyToMessage(const QString& roomId, const QString& body,
                          const QString& targetEventId);
+    // Send an m.thread relation — identical payload to a reply, but
+    // with rel_type="m.thread" and event_id pointing at the thread
+    // root. Clients that don't understand threads see it as a
+    // standalone message (acceptable fallback).
+    void sendThreadReply(const QString& roomId, const QString& body,
+                          const QString& threadRootId);
     // Send an m.reaction event annotating targetEventId with `emoji`.
     // Server treats it as a normal event and distributes it through /sync;
     // the client aggregates state in MessageModel.

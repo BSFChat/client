@@ -25,6 +25,13 @@ public:
     void applyAnswer(const std::string& sdp);
     void addRemoteCandidate(const std::string& candidate, const std::string& mid);
     void sendAudioFrame(const QByteArray& frame);
+    // Send a JPEG-encoded screen-share frame to this peer over the
+    // same SCTP data channel. Wire format: [tag][payload] where
+    // tag=0x01 for audio, tag=0x02 for screen JPEG. All clients that
+    // support screen share must speak this framing; audio-only
+    // peers see the 0x02 frames as garbage and drop them. We keep
+    // tag=0x01 on audio too so the wire format is symmetric.
+    void sendScreenFrame(const QByteArray& jpegData);
 
     // Connection quality
     enum class PeerState { New, Connecting, Connected, Disconnected, Failed };
@@ -42,6 +49,7 @@ signals:
     void disconnected();
     void peerStateChanged(PeerState state);
     void audioFrameReceived(const QByteArray& frame);
+    void screenFrameReceived(const QByteArray& jpegData);
 
 private:
     void setupCallbacks();

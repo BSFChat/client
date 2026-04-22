@@ -66,3 +66,11 @@ void ServerListModel::setUnreadCount(int index, int count)
     m_servers[index].unreadCount = count;
     emit dataChanged(this->index(index), this->index(index), {UnreadCountRole});
 }
+
+void ServerListModel::setIconUrl(int index, const QString& iconUrl)
+{
+    if (index < 0 || index >= m_servers.size()) return;
+    if (m_servers[index].iconUrl == iconUrl) return;
+    m_servers[index].iconUrl = iconUrl;
+    emit dataChanged(this->index(index), this->index(index), {IconUrlRole});
+}

@@ -238,6 +238,37 @@ void MatrixClient::createRoom(const QString& name, const QString& topic, const Q
     });
 }
 
+void MatrixClient::createDirectMessageRoom(const QString& targetUserId)
+{
+    bsfchat::CreateRoomRequest req;
+    req.visibility = "private";
+    req.preset = "trusted_private_chat";
+    req.is_direct = true;
+    req.invite.push_back(targetUserId.toStdString());
+
+    json j;
+    bsfchat::to_json(j, req);
+    QByteArray body = QByteArray::fromStdString(j.dump());
+
+    auto* reply = makeRequest("POST", QString::fromUtf8(bsfchat::api_path::kCreateRoom), body);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        auto data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit createRoomError(QString::fromUtf8(data));
+            return;
+        }
+        try {
+            auto j = json::parse(data.toStdString());
+            bsfchat::CreateRoomResponse resp;
+            bsfchat::from_json(j, resp);
+            emit createRoomSuccess(QString::fromStdString(resp.room_id));
+        } catch (const std::exception& e) {
+            emit createRoomError(QString::fromStdString(e.what()));
+        }
+    });
+}
+
 void MatrixClient::joinRoom(const QString& roomIdOrAlias)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kJoinByAlias)
@@ -460,6 +491,42 @@ void MatrixClient::replyToMessage(const QString& roomId, const QString& body,
     content["body"] = body.toStdString();
     content["m.relates_to"] = {
         {"m.in_reply_to", {{"event_id", targetEventId.toStdString()}}},
+    };
+
+    QByteArray reqBody = QByteArray::fromStdString(content.dump());
+    auto* reply = makeRequest("PUT", path, reqBody);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        auto data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit sendMessageError(QString::fromUtf8(data));
+            return;
+        }
+        try {
+            auto j = json::parse(data.toStdString());
+            emit messageSent(QString::fromStdString(j.value("event_id", "")));
+        } catch (const std::exception& e) {
+            emit sendMessageError(QString::fromStdString(e.what()));
+        }
+    });
+}
+
+void MatrixClient::sendThreadReply(const QString& roomId, const QString& body,
+                                    const QString& threadRootId)
+{
+    static int txnCounter = 0;
+    QString txnId = QString("t%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
+
+    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
+                   + QUrl::toPercentEncoding(roomId)
+                   + "/send/m.room.message/" + txnId;
+
+    json content;
+    content["msgtype"] = "m.text";
+    content["body"] = body.toStdString();
+    content["m.relates_to"] = {
+        {"rel_type", "m.thread"},
+        {"event_id", threadRootId.toStdString()}
     };
 
     QByteArray reqBody = QByteArray::fromStdString(content.dump());

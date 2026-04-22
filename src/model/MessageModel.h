@@ -41,8 +41,17 @@ public:
         ReplyToEventIdRole, // Event ID of the message being replied to (empty if not a reply)
         ReplyToSenderRole,  // Display name of the replied-to message's sender
         ReplyPreviewRole,   // Short excerpt (<=80 chars) of the replied-to message body
-        ReactionsRole       // Aggregated reactions: list of {emoji, count, reacted, eventIds}
+        ReactionsRole,      // Aggregated reactions: list of {emoji, count, reacted, eventIds}
+        ThreadRootIdRole,   // If non-empty, this message is part of that thread
+        ThreadReplyCountRole // Count of m.thread replies anchored on this message
     };
+
+    // Thread helpers. `threadReplies` returns the messages whose
+    // threadRootId == rootEventId, oldest-first, as {eventId, sender,
+    // body, timestamp, msgtype}. `threadReplyCount` is a count-only
+    // variant for badges.
+    Q_INVOKABLE QVariantList threadReplies(const QString& rootEventId) const;
+    Q_INVOKABLE int threadReplyCount(const QString& rootEventId) const;
 
     // Convenience for QML — the reactions for a given row. Same shape as
     // ReactionsRole.
@@ -56,6 +65,11 @@ public:
     // Given a known event ID in this room, return its list index or -1.
     // Used by the UI to scroll to a replied-to message.
     Q_INVOKABLE int indexForEventId(const QString& eventId) const;
+
+    // Preview map for a loaded event — {sender, body, timestamp}. Used
+    // by the pinned-messages popover. Empty map if the event isn't
+    // loaded. `body` is trimmed to ~160 chars for display.
+    Q_INVOKABLE QVariantMap eventPreview(const QString& eventId) const;
 
     // Unread-divider helpers. `firstEventIdAfterTs` returns the oldest
     // loaded event whose ts is strictly greater than `tsMs` (empty if
@@ -127,6 +141,11 @@ private:
         QString replyToEventId;
         QString replyToSender;
         QString replyPreview;
+        // Threading — if this message is part of an m.thread relation,
+        // `threadRootId` points to the thread's top-level event. The
+        // root message's own `threadRootId` stays empty; we compute
+        // its reply count by scanning children.
+        QString threadRootId;
         // Reactions aggregated from m.reaction events targeting this entry.
         // Keyed by emoji; value is the list of (userId, reactionEventId) pairs
         // so we can (a) count unique reactors, (b) detect whether the current
@@ -160,7 +179,13 @@ private:
     const QMap<QString, QString>* m_dnCache = nullptr;
 
     MessageEntry eventToEntry(const bsfchat::RoomEvent& event, const QString& ownUserId) const;
+public:
+    // Resolves an mxc:// URI to an authenticated HTTP URL against the
+    // homeserver. Exposed (was private) because ServerConnection needs
+    // it for resolving server-icon avatars in m.room.pinned_events and
+    // bsfchat.server.info state.
     QString resolveMediaUrl(const QString& mxcUri) const;
+private:
     QString resolveDisplayName(const QString& userId) const;
     QVariantList buildReactionsList(const MessageEntry& entry) const;
     // Apply a single reaction record to the target message. Returns the row

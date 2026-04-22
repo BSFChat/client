@@ -46,15 +46,31 @@ if(BSFCHAT_ENABLE_VOICE)
         src/voice/AudioMixer.cpp
         src/voice/SoundGenerator.cpp
         src/voice/NotificationSounds.cpp
+        src/voice/ScreenShareController.cpp
+        $<$<PLATFORM_ID:Darwin>:src/voice/MacScreenCapturer.mm>
     )
     target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_VOICE_ENABLED)
 endif()
 
-# Ensure macOS .app bundle is created
+# Ensure macOS .app bundle is created.
+#
+# Bundle ID is overridable — the default `com.bsfchat.app.dev` keeps
+# local Debug builds out of Launch Services' way when a release
+# BSFChat.app is also installed (otherwise `open` picks the installed
+# one and the dev build is unreachable from the Dock / ⌘Q → reopen
+# flow). CI + release builds pass -DBSFCHAT_BUNDLE_ID=com.bsfchat.app
+# to restore the canonical identity.
+if(NOT DEFINED BSFCHAT_BUNDLE_ID)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+        set(BSFCHAT_BUNDLE_ID "com.bsfchat.app")
+    else()
+        set(BSFCHAT_BUNDLE_ID "com.bsfchat.app.dev")
+    endif()
+endif()
 set_target_properties(bsfchat-app PROPERTIES
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_BUNDLE_NAME "BSFChat"
-    MACOSX_BUNDLE_GUI_IDENTIFIER "com.bsfchat.app"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "${BSFCHAT_BUNDLE_ID}"
     MACOSX_BUNDLE_BUNDLE_VERSION "0.0.19"
     MACOSX_BUNDLE_SHORT_VERSION_STRING "0.0.19"
     MACOSX_BUNDLE_INFO_STRING "BSFChat"
@@ -77,6 +93,12 @@ if(APPLE)
                 "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
         COMMAND /usr/bin/plutil -replace NSCameraUsageDescription
                 -string "BSFChat does not use the camera."
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
+        # Screen Recording permission is gated by TCC without a
+        # dedicated string — add it so macOS prompts on first capture
+        # attempt instead of silently refusing.
+        COMMAND /usr/bin/plutil -replace NSScreenCaptureUsageDescription
+                -string "BSFChat needs screen-recording access so you can share your screen in voice channels."
                 "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
         # Register `bsfchat://` as a URL scheme the app handles. Launch
         # Services reads CFBundleURLTypes on install and routes activation
@@ -135,6 +157,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/ImageViewer.qml
         qml/components/ShortcutsDialog.qml
         qml/components/SearchPopup.qml
+        qml/components/ThreadPanel.qml
         qml/components/RoleAssignPopup.qml
         qml/components/ToastHost.qml
         qml/components/VideoPlayerCard.qml
@@ -201,6 +224,16 @@ target_link_libraries(bsfchat-app PRIVATE
 
 if(BSFCHAT_ENABLE_VOICE)
     target_link_libraries(bsfchat-app PRIVATE datachannel-static opus)
+endif()
+
+# CoreGraphics gives us CGRequestScreenCaptureAccess to trigger the
+# macOS TCC prompt for Screen Recording — Qt's QScreenCapture won't
+# ask on its own.
+if(APPLE)
+    target_link_libraries(bsfchat-app PRIVATE
+        "-framework CoreGraphics"
+        "-framework ScreenCaptureKit"
+        "-framework Foundation")
 endif()
 
 if(GAMECHAT_CLIENT_BUILD_TESTS)

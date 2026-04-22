@@ -11,6 +11,10 @@
 #endif
 
 #include <QFile>
+#include <QSettings>
+#include <QUrl>
+#include <QDateTime>
+#include <algorithm>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -35,6 +39,18 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 {
     m_client->setHomeserver(serverUrl);
     m_messageModel->setHomeserver(serverUrl);
+
+    // Hydrate the DM map from QSettings so the "Direct Messages"
+    // section survives restart. Empty if first-run. Group is scoped
+    // by homeserver host so two servers don't clobber each other.
+    {
+        QSettings s;
+        s.beginGroup(QStringLiteral("dm/") + QUrl(serverUrl).host());
+        for (const auto& rid : s.childKeys()) {
+            m_directRoomPeers[rid] = s.value(rid).toString();
+        }
+        s.endGroup();
+    }
     m_messageModel->setDisplayNameCache(&m_userDisplayNames);
     m_memberListModel->setDisplayNameCache(&m_userDisplayNames);
 
@@ -183,6 +199,17 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 #ifdef BSFCHAT_VOICE_ENABLED
         if (!m_activeVoiceRoomId.isEmpty() && !m_voiceEngine) {
             m_voiceEngine = new VoiceEngine(m_client, this);
+
+            // Fan incoming screen frames up to QML via a base64
+            // data URL. Recomputed each frame (~5 fps) so cost is
+            // negligible and the binding stays trivial.
+            connect(m_voiceEngine, &VoiceEngine::peerScreenFrameReceived,
+                this, [this](const QString& userId, const QByteArray& jpeg) {
+                    QString url = QStringLiteral("data:image/jpeg;base64,")
+                        + QString::fromLatin1(jpeg.toBase64());
+                    m_peerScreenData[userId] = url;
+                    emit peerScreenFrameChanged(userId);
+                });
 
             // Mic level → transmit indicator + silence detection.
             m_zeroLevelFrames = 0;
@@ -520,6 +547,16 @@ void ServerConnection::sendMessage(const QString& body)
     m_client->sendMessage(m_activeRoomId, body);
 }
 
+void ServerConnection::sendThreadReply(const QString& rootEventId, const QString& body)
+{
+    if (m_activeRoomId.isEmpty() || rootEventId.isEmpty()
+        || body.trimmed().isEmpty()) return;
+    m_typingTimer->stop();
+    m_typingStopTimer->stop();
+    m_client->setTyping(m_activeRoomId, m_userId, false);
+    m_client->sendThreadReply(m_activeRoomId, body, rootEventId);
+}
+
 void ServerConnection::sendRichMessage(const QString& body,
                                         const QString& formattedBody,
                                         const QStringList& mentionedUserIds)
@@ -826,6 +863,12 @@ void ServerConnection::leaveVoiceChannel()
         delete m_voiceEngine;
         m_voiceEngine = nullptr;
     }
+    // Forget cached screen frames from the call we just left.
+    if (!m_peerScreenData.isEmpty()) {
+        auto keys = m_peerScreenData.keys();
+        m_peerScreenData.clear();
+        for (const auto& uid : keys) emit peerScreenFrameChanged(uid);
+    }
 #endif
     // Ensure UI drops the transmit indicator immediately, bypassing the
     // jitter threshold in the micLevelChanged forwarder.
@@ -958,7 +1001,29 @@ void ServerConnection::updateServerRoles(const QJsonArray& rolesJson)
 
 void ServerConnection::rebuildCategorizedRooms()
 {
-    m_categorizedRooms = m_roomListModel->getCategoriesWithChannels();
+    // Pull the full category tree, then strip out any rooms we've
+    // flagged as DMs — those live in their own "Direct Messages"
+    // channel-list section and shouldn't double-appear as channels.
+    auto groups = m_roomListModel->getCategoriesWithChannels();
+    if (!m_directRoomPeers.isEmpty()) {
+        QVariantList filtered;
+        for (const auto& g : groups) {
+            QVariantMap cat = g.toMap();
+            QVariantList ch = cat.value("channels").toList();
+            QVariantList kept;
+            for (const auto& c : ch) {
+                auto rid = c.toMap().value("roomId").toString();
+                if (!m_directRoomPeers.contains(rid)) kept.append(c);
+            }
+            cat["channels"] = kept;
+            // Drop empty categories that existed only because of the DMs
+            // we just removed. Uncategorized (empty id) stays either way.
+            if (!kept.isEmpty() || cat.value("categoryId").toString().isEmpty())
+                filtered.append(cat);
+        }
+        groups = filtered;
+    }
+    m_categorizedRooms = groups;
     emit categorizedRoomsChanged();
 }
 
@@ -991,9 +1056,65 @@ void ServerConnection::updateServerName(const QString& name)
     if (targetRoom.isEmpty()) return;
 
     QJsonObject content{{"name", name}};
+    // Preserve the existing avatar so a name update doesn't wipe the icon.
+    if (!m_serverAvatarMxc.isEmpty()) content["avatar"] = m_serverAvatarMxc;
     QByteArray body = QJsonDocument(content).toJson(QJsonDocument::Compact);
     m_client->setRoomState(targetRoom,
         QString::fromUtf8(bsfchat::event_type::kServerInfo), QString(), body);
+}
+
+void ServerConnection::setMaxScreenShareQuality(int level)
+{
+    level = std::clamp(level, 0, 3);
+    QString targetRoom = m_activeRoomId;
+    if (targetRoom.isEmpty() && m_roomListModel->rowCount() > 0) {
+        targetRoom = m_roomListModel->data(
+            m_roomListModel->index(0), RoomListModel::RoomIdRole).toString();
+    }
+    if (targetRoom.isEmpty()) return;
+    // Optimistic update — sync echo will confirm.
+    if (level != m_maxScreenShareQuality) {
+        m_maxScreenShareQuality = level;
+        emit maxScreenShareQualityChanged();
+    }
+    QJsonObject content{{"max_quality", level}};
+    QByteArray body = QJsonDocument(content).toJson(QJsonDocument::Compact);
+    m_client->setRoomState(targetRoom,
+        QString::fromUtf8(bsfchat::event_type::kServerScreenShare),
+        QString(), body);
+}
+
+void ServerConnection::uploadServerAvatar(const QString& fileUrl)
+{
+    QUrl url(fileUrl);
+    QString filePath = url.isLocalFile() ? url.toLocalFile() : fileUrl;
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) return;
+    QByteArray fileData = file.readAll();
+    file.close();
+
+    QMimeDatabase mimeDb;
+    QString mimeType = mimeDb.mimeTypeForFile(filePath).name();
+    QFileInfo fileInfo(filePath);
+
+    QObject::connect(m_client, &MatrixClient::mediaUploaded, this,
+        [this](const QString& contentUri) {
+            // Write the new avatar, preserving the current name. Pick the
+            // same target-room heuristic as updateServerName — the server
+            // reads server-info globally by latest stream position.
+            QString targetRoom = m_activeRoomId;
+            if (targetRoom.isEmpty() && m_roomListModel->rowCount() > 0) {
+                targetRoom = m_roomListModel->data(
+                    m_roomListModel->index(0), RoomListModel::RoomIdRole).toString();
+            }
+            if (targetRoom.isEmpty()) return;
+            QJsonObject content{{"name", m_serverName}, {"avatar", contentUri}};
+            QByteArray body = QJsonDocument(content).toJson(QJsonDocument::Compact);
+            m_client->setRoomState(targetRoom,
+                QString::fromUtf8(bsfchat::event_type::kServerInfo), QString(), body);
+        }, Qt::SingleShotConnection);
+
+    m_client->uploadMedia(fileData, mimeType, fileInfo.fileName());
 }
 
 void ServerConnection::updateAvatarUrl(const QString& url)
@@ -1059,6 +1180,13 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomTopic)) {
                 QString topic = QString::fromStdString(event.content.data.value("topic", ""));
                 m_roomListModel->updateRoomTopic(roomId, topic);
+            } else if (type == QString::fromUtf8(bsfchat::event_type::kServerScreenShare)) {
+                int q = event.content.data.value("max_quality", 3);
+                q = std::clamp(q, 0, 3);
+                if (q != m_maxScreenShareQuality) {
+                    m_maxScreenShareQuality = q;
+                    emit maxScreenShareQualityChanged();
+                }
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomPinnedEvents)) {
                 // Matrix canonical pinned list is a JSON array under "pinned".
                 QStringList ids;
@@ -1111,6 +1239,13 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 if (name != m_serverName) {
                     m_serverName = name;
                     emit serverNameChanged();
+                }
+                QString mxc = QString::fromStdString(event.content.data.value("avatar", ""));
+                if (mxc != m_serverAvatarMxc) {
+                    m_serverAvatarMxc = mxc;
+                    m_serverAvatarUrl = mxc.isEmpty() ? QString()
+                        : m_messageModel->resolveMediaUrl(mxc);
+                    emit serverAvatarUrlChanged();
                 }
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerRoles)) {
                 QByteArray data = QByteArray::fromStdString(event.content.data.dump());
@@ -1181,6 +1316,13 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     m_serverName = name;
                     emit serverNameChanged();
                 }
+                QString mxc = QString::fromStdString(event.content.data.value("avatar", ""));
+                if (mxc != m_serverAvatarMxc) {
+                    m_serverAvatarMxc = mxc;
+                    m_serverAvatarUrl = mxc.isEmpty() ? QString()
+                        : m_messageModel->resolveMediaUrl(mxc);
+                    emit serverAvatarUrlChanged();
+                }
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerRoles)) {
                 QByteArray data = QByteArray::fromStdString(event.content.data.dump());
                 applyServerRolesEvent(QJsonDocument::fromJson(data).object(),
@@ -1213,6 +1355,14 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 m_roomListModel->updateLastMessage(roomId, body, event.origin_server_ts);
 
                 QString sender = QString::fromStdString(event.sender);
+                // Presence heuristic: any message means the sender was
+                // online at origin_server_ts. Later lookups compare
+                // against now() vs the window.
+                if (!sender.isEmpty()) {
+                    m_userLastActivityMs[sender] =
+                        static_cast<qint64>(event.origin_server_ts);
+                    emit presenceChanged();
+                }
                 if (roomId == m_activeRoomId && sender != m_userId) {
                     activeRoomHadNewMessage = true;
                 }
@@ -1737,6 +1887,111 @@ void ServerConnection::redactEvent(const QString& roomId, const QString& eventId
 QStringList ServerConnection::pinnedEventIds(const QString& roomId) const
 {
     return m_roomPinnedEvents.value(roomId);
+}
+
+// ── Presence ─────────────────────────────────────────────────────
+// Pure client-side heuristic: a user is "online" if we've observed
+// a message from them in the last 5 minutes. No server m.presence
+// plumbing yet, so power users / lurkers who read but never post
+// will look offline — acceptable tradeoff for "works today without
+// server support".
+static constexpr qint64 kPresenceOnlineWindowMs = 5 * 60 * 1000;
+
+QString ServerConnection::presenceFor(const QString& userId) const
+{
+    if (userId == m_userId) return m_selfPresence;
+    auto it = m_userLastActivityMs.constFind(userId);
+    if (it == m_userLastActivityMs.constEnd()) return QStringLiteral("offline");
+    qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - *it <= kPresenceOnlineWindowMs) return QStringLiteral("online");
+    return QStringLiteral("offline");
+}
+
+void ServerConnection::setSelfPresence(const QString& state)
+{
+    if (state == m_selfPresence) return;
+    m_selfPresence = state;
+    emit presenceChanged();
+}
+
+// ── Direct messages ──────────────────────────────────────────────
+// Tracked client-side in a QSettings group so every device reload
+// picks up its own DM list without needing m.direct account_data
+// round-trips. Server-wide m.direct sync can layer on later.
+static QString dmSettingsGroup(const QString& serverUrl) {
+    return QStringLiteral("dm/") + QUrl(serverUrl).host();
+}
+
+void ServerConnection::createDirectMessage(const QString& targetUserId)
+{
+    if (targetUserId.isEmpty()) return;
+    if (targetUserId == m_userId) return;
+
+    // Stash the peer now; the createRoomSuccess callback only has the
+    // new room id, not the target. SingleShotConnection so successive
+    // DM creations don't stomp each other.
+    QString peer = targetUserId;
+    QObject::connect(m_client, &MatrixClient::createRoomSuccess, this,
+        [this, peer](const QString& roomId) {
+            m_directRoomPeers[roomId] = peer;
+            // Persist.
+            QSettings s;
+            s.beginGroup(QStringLiteral("dm/") + QUrl(m_serverUrl).host());
+            s.setValue(roomId, peer);
+            s.endGroup();
+            // Pull the new DM out of the regular category tree.
+            rebuildCategorizedRooms();
+            emit directRoomsChanged();
+            // Jump to the new DM room so the user lands straight in it.
+            setActiveRoom(roomId);
+        }, Qt::SingleShotConnection);
+
+    m_client->createDirectMessageRoom(targetUserId);
+}
+
+bool ServerConnection::isDirectRoom(const QString& roomId) const
+{
+    return m_directRoomPeers.contains(roomId);
+}
+
+QString ServerConnection::directRoomPeer(const QString& roomId) const
+{
+    return m_directRoomPeers.value(roomId);
+}
+
+QVariantList ServerConnection::directRooms() const
+{
+    QVariantList out;
+    for (auto it = m_directRoomPeers.constBegin(); it != m_directRoomPeers.constEnd(); ++it) {
+        QVariantMap m;
+        m[QStringLiteral("roomId")] = it.key();
+        m[QStringLiteral("peerId")] = it.value();
+        m[QStringLiteral("peerDisplayName")] =
+            m_userDisplayNames.value(it.value(), it.value());
+        // Pull last message time out of RoomListModel for sort.
+        qint64 lastMs = 0;
+        if (m_roomListModel) {
+            int idx = -1;
+            for (int i = 0; i < m_roomListModel->rowCount(); ++i) {
+                auto rid = m_roomListModel->data(
+                    m_roomListModel->index(i), RoomListModel::RoomIdRole).toString();
+                if (rid == it.key()) { idx = i; break; }
+            }
+            if (idx >= 0) {
+                lastMs = m_roomListModel->data(
+                    m_roomListModel->index(idx),
+                    RoomListModel::LastMessageTimeRole).toLongLong();
+            }
+        }
+        m[QStringLiteral("lastMessageTime")] = lastMs;
+        out.append(m);
+    }
+    // Sort newest-activity first.
+    std::sort(out.begin(), out.end(), [](const QVariant& a, const QVariant& b) {
+        return a.toMap().value("lastMessageTime").toLongLong()
+             > b.toMap().value("lastMessageTime").toLongLong();
+    });
+    return out;
 }
 
 bool ServerConnection::isEventPinned(const QString& roomId, const QString& eventId) const

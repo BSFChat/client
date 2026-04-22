@@ -119,11 +119,12 @@ Rectangle {
                                                           easing.bezierCurve: Theme.motion.bezier } }
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
-                    // Two-letter abbreviation if we can derive one, else
-                    // the first character. Strips leading non-alphanumerics
-                    // so @-prefixed names still produce a sensible glyph.
+                    // Initial letter — shown when there's no icon
+                    // uploaded, or the icon is still loading.
                     Text {
                         anchors.centerIn: parent
+                        visible: serverIcon.status !== Image.Ready
+                              || !model.iconUrl
                         text: {
                             var name = (model.displayName || "?");
                             var stripped = name.replace(/^[^a-zA-Z0-9]+/, "");
@@ -134,6 +135,23 @@ Rectangle {
                         font.pixelSize: 18
                         font.weight: Theme.fontWeight.semibold
                         color: row.isActive ? Theme.onAccent : Theme.fg0
+                    }
+
+                    // Uploaded server icon. The containing Rectangle is
+                    // rounded, so small margins hide any sharp image
+                    // corners inside the radius; if the image fails
+                    // the initial letter above fades back in via its
+                    // `visible` binding.
+                    Image {
+                        id: serverIcon
+                        anchors.fill: parent
+                        anchors.margins: 1
+                        source: model.iconUrl || ""
+                        visible: status === Image.Ready
+                        fillMode: Image.PreserveAspectCrop
+                        smooth: true
+                        asynchronous: true
+                        cache: true
                     }
                 }
 

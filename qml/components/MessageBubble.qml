@@ -65,6 +65,14 @@ Item {
     // Right-click context-menu action: redact (delete) the message.
     // Allowed for the sender or anyone with MANAGE_MESSAGES.
     signal deleteRequested(string eventId)
+    // User chose "Reply in Thread" — MessageView opens the ThreadPanel
+    // anchored on this event. If the message is already part of a
+    // thread (threadRootId set), we open the thread, not a new one.
+    signal threadOpenRequested(string rootEventId)
+
+    // Threading fields — mirrored from the model.
+    property string threadRootId: ""
+    property int threadReplyCount: 0
 
     // URLs to unfurl — extracted once per body change. Capped at 2 so
     // a spam-linked message doesn't explode into preview cards.
@@ -195,6 +203,21 @@ Item {
             iconName: "forward"
             onTriggered: bubble.forwardRequested(bubble.eventId, bubble.body,
                                                  bubble.senderDisplayName)
+        }
+        CtxItem {
+            // If this message IS a thread reply, "Open Thread" jumps
+            // to its root; otherwise "Reply in Thread" starts a new
+            // thread with this message as the root.
+            text: bubble.threadRootId !== ""
+                  ? "Open Thread"
+                  : (bubble.threadReplyCount > 0 ? "Open Thread"
+                                                 : "Reply in Thread")
+            iconName: "forward"
+            onTriggered: {
+                var target = bubble.threadRootId !== ""
+                    ? bubble.threadRootId : bubble.eventId;
+                bubble.threadOpenRequested(target);
+            }
         }
         CtxItem {
             text: "Edit"

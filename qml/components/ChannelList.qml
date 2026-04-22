@@ -219,6 +219,162 @@ Rectangle {
             }
         }
 
+        // Direct Messages section — rendered above the channel list.
+        // Uses ServerConnection.directRooms() which returns one entry
+        // per 1:1 room the current user has ever created/persisted on
+        // this server. Empty ⇒ whole section collapses to zero height.
+        Item {
+            id: dmSection
+            Layout.fillWidth: true
+            Layout.preferredHeight: dmSectionColumn.implicitHeight
+            visible: serverManager.activeServer !== null
+                  && dmRepeater.count > 0
+
+            readonly property int _dmGen: {
+                if (!serverManager.activeServer) return 0;
+                // Tick on every DM mutation so the Repeater rebuilds.
+                serverManager.activeServer.directRoomsChanged;
+                return 0;
+            }
+
+            ColumnLayout {
+                id: dmSectionColumn
+                anchors.left: parent.left
+                anchors.right: parent.right
+                spacing: 0
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 40
+                    Layout.leftMargin: Theme.sp.s7
+                    Layout.rightMargin: Theme.sp.s3
+
+                    Text {
+                        text: "DIRECT MESSAGES"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xs
+                        font.weight: Theme.fontWeight.semibold
+                        font.letterSpacing: Theme.trackWidest.xs
+                        color: Theme.fg3
+                        Layout.fillWidth: true
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    Text {
+                        id: dmPlus
+                        text: "+"
+                        font.pixelSize: Theme.fontSize.xl
+                        color: dmPlusMouse.containsMouse ? Theme.fg0 : Theme.fg2
+                        Layout.alignment: Qt.AlignVCenter
+                        MouseArea {
+                            id: dmPlusMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: newDmPrompt.open()
+                        }
+                    }
+                }
+
+                Repeater {
+                    id: dmRepeater
+                    model: serverManager.activeServer
+                        ? serverManager.activeServer.directRooms() : []
+
+                    delegate: Item {
+                        width: channelListRoot.width
+                        height: 36
+
+                        readonly property bool _active: serverManager.activeServer
+                            && modelData.roomId === serverManager.activeServer.activeRoomId
+
+                        Rectangle {
+                            anchors.fill: parent
+                            anchors.leftMargin: Theme.sp.s2
+                            anchors.rightMargin: Theme.sp.s2
+                            radius: Theme.r1
+                            color: _active ? Theme.bg3
+                                 : (dmRowMouse.containsMouse ? Theme.bg2 : "transparent")
+                            Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: Theme.sp.s3
+                                anchors.rightMargin: Theme.sp.s3
+                                spacing: Theme.sp.s3
+
+                                Item {
+                                    Layout.preferredWidth: 22
+                                    Layout.preferredHeight: 22
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        radius: Theme.r2
+                                        color: Theme.senderColor(modelData.peerId)
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: {
+                                                var n = (modelData.peerDisplayName || modelData.peerId || "?");
+                                                var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                                return (stripped.charAt(0) || "?").toUpperCase();
+                                            }
+                                            font.family: Theme.fontSans
+                                            font.pixelSize: 11
+                                            font.weight: Theme.fontWeight.semibold
+                                            color: Theme.onAccent
+                                        }
+                                    }
+                                    // Tiny presence dot bottom-right.
+                                    Rectangle {
+                                        anchors.right: parent.right
+                                        anchors.bottom: parent.bottom
+                                        anchors.rightMargin: -1
+                                        anchors.bottomMargin: -1
+                                        width: 7; height: 7; radius: 3.5
+                                        readonly property string _state: {
+                                            var s = serverManager.activeServer;
+                                            return s ? s.presenceFor(modelData.peerId) : "offline";
+                                        }
+                                        color: _state === "online" ? Theme.online : Theme.bg1
+                                        border.width: 1.5
+                                        border.color: _state === "offline" ? Theme.fg3 : Theme.bg1
+                                    }
+                                }
+
+                                Text {
+                                    text: modelData.peerDisplayName || modelData.peerId
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: Theme.fontSize.base
+                                    color: _active ? Theme.fg0 : Theme.fg1
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+                            }
+
+                            MouseArea {
+                                id: dmRowMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (serverManager.activeServer)
+                                        serverManager.activeServer.setActiveRoom(modelData.roomId);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Thin divider separating DMs from regular channels.
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: Theme.sp.s7
+                    Layout.rightMargin: Theme.sp.s5
+                    Layout.topMargin: Theme.sp.s3
+                    Layout.preferredHeight: 1
+                    color: Theme.lineSoft
+                }
+            }
+        }
+
         // Channel category header with "+" button
         Item {
             Layout.fillWidth: true
@@ -1494,6 +1650,36 @@ Rectangle {
         }
 
         ThemedRoomItem {
+            text: "Mark as Read"
+            iconName: "check"
+            enabled: {
+                channelListRoot.unreadGeneration;
+                if (!serverManager.activeServer) return false;
+                var rid = roomContextMenu.roomId;
+                if (!rid) return false;
+                // Only offer when there's actually something unread.
+                var s = serverManager.activeServer;
+                var groups = s.categorizedRooms;
+                for (var i = 0; i < groups.length; i++) {
+                    var ch = groups[i].channels || [];
+                    for (var j = 0; j < ch.length; j++) {
+                        if (ch[j].roomId === rid) {
+                            var lastMsg = ch[j].lastMessageTime || 0;
+                            var lastRead = appSettings.lastReadTs(rid);
+                            return lastMsg > 0 && lastRead < lastMsg;
+                        }
+                    }
+                }
+                return false;
+            }
+            onTriggered: {
+                var rid = roomContextMenu.roomId;
+                appSettings.setLastReadTs(rid, Date.now());
+                channelListRoot.unreadGeneration++;
+            }
+        }
+
+        ThemedRoomItem {
             text: appSettings.isRoomMuted(roomContextMenu.roomId)
                   ? "Unmute Channel" : "Mute Channel"
             iconName: "volume-off"
@@ -1943,6 +2129,130 @@ Rectangle {
         // open the shared create-prompt.
         onCreateChannelRequested: function(kind, catId) {
             channelListRoot.openCreatePrompt(kind, catId);
+        }
+    }
+
+    // New DM popup — asks for a user MXID (e.g. @alice:bsfchat.com)
+    // and calls createDirectMessage on the active server. On success
+    // the channel list rebuilds and drops the user into the new room.
+    Popup {
+        id: newDmPrompt
+        parent: Overlay.overlay
+        anchors.centerIn: Overlay.overlay
+        width: 400
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        padding: Theme.sp.s7
+
+        background: Rectangle {
+            color: Theme.bg1
+            radius: Theme.r3
+            border.color: Theme.line
+            border.width: 1
+        }
+
+        function submit() {
+            var target = dmTargetField.text.trim();
+            if (target.length === 0) return;
+            if (!serverManager.activeServer) return;
+            serverManager.activeServer.createDirectMessage(target);
+            close();
+        }
+
+        onOpened: { dmTargetField.text = ""; dmTargetField.forceActiveFocus(); }
+
+        contentItem: ColumnLayout {
+            spacing: Theme.sp.s4
+
+            Text {
+                text: "New Direct Message"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.lg
+                font.weight: Theme.fontWeight.semibold
+                color: Theme.fg0
+            }
+
+            Text {
+                text: "Enter the Matrix ID of a user on this server."
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.fg2
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            TextField {
+                id: dmTargetField
+                Layout.fillWidth: true
+                placeholderText: "@alice:bsfchat.com"
+                color: Theme.fg0
+                placeholderTextColor: Theme.fg3
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.md
+                background: Rectangle {
+                    color: Theme.bg0
+                    radius: Theme.r2
+                    border.color: dmTargetField.activeFocus ? Theme.accent : Theme.line
+                    border.width: 1
+                }
+                leftPadding: Theme.sp.s4
+                rightPadding: Theme.sp.s4
+                topPadding: Theme.sp.s3
+                bottomPadding: Theme.sp.s3
+                Keys.onReturnPressed: newDmPrompt.submit()
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.sp.s3
+                spacing: Theme.sp.s3
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    text: "Cancel"
+                    onClicked: newDmPrompt.close()
+                    contentItem: Text {
+                        text: parent.text
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        color: Theme.fg1
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: parent.hovered ? Theme.bg3 : Theme.bg2
+                        radius: Theme.r2
+                        implicitWidth: 100
+                        implicitHeight: 36
+                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                    }
+                }
+
+                Button {
+                    id: dmSubmitBtn
+                    text: "Start DM"
+                    enabled: dmTargetField.text.trim().length > 0
+                    onClicked: newDmPrompt.submit()
+                    contentItem: Text {
+                        text: parent.text
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.semibold
+                        color: dmSubmitBtn.enabled ? Theme.onAccent : Theme.fg3
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: !dmSubmitBtn.enabled
+                            ? Theme.bg2
+                            : (dmSubmitBtn.hovered ? Theme.accentDim : Theme.accent)
+                        radius: Theme.r2
+                        implicitWidth: 120
+                        implicitHeight: 36
+                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                    }
+                }
+            }
         }
     }
 }

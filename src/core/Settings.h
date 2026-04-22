@@ -141,8 +141,15 @@ public:
     // unread dot. Stored as a QStringList under mutedRooms.
     Q_INVOKABLE bool isRoomMuted(const QString& roomId) const;
     Q_INVOKABLE void setRoomMuted(const QString& roomId, bool muted);
+
+    // Screen-share quality preset chosen by the user (0=Low, 1=Medium,
+    // 2=High, 3=Ultra). Default is 1 (Medium). ScreenShareController
+    // reads this and clamps to the server's advertised max.
+    Q_INVOKABLE int screenShareQuality() const;
+    Q_INVOKABLE void setScreenShareQuality(int level);
 signals:
     void mutedRoomsChanged();
+    void screenShareQualityChanged();
 public:
 
 signals:

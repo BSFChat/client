@@ -42,12 +42,20 @@ public:
     // indicators per member.
     QMap<QString, QString> peerStates() const;
 
+    // Fan out a JPEG-encoded screen frame to every connected peer.
+    // Called from ScreenShareController at ~5 fps while sharing.
+    void broadcastScreenFrame(const QByteArray& jpegData);
+
 signals:
     void peerConnected(const QString& userId);
     void peerDisconnected(const QString& userId);
     void peerStateChanged(const QString& userId, const QString& state);
     void error(const QString& message);
     void micLevelChanged(float level);
+    // One JPEG-encoded screen frame received from a remote peer.
+    // Subscribed to by ScreenShareController to fan frames into the
+    // per-peer preview surface in VoiceRoom.
+    void peerScreenFrameReceived(const QString& userId, const QByteArray& jpegData);
 
 private:
     void addPeer(const QString& userId, bool isOfferer);

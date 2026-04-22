@@ -1,5 +1,6 @@
 #include "core/Settings.h"
 
+#include <algorithm>
 #include <QMediaDevices>
 #include <QAudioDevice>
 #include <QVariantMap>
@@ -362,4 +363,20 @@ void Settings::setRoomMuted(const QString& roomId, bool muted)
     else return;
     m_settings.setValue(QStringLiteral("mutedRooms"), list);
     emit mutedRoomsChanged();
+}
+
+int Settings::screenShareQuality() const
+{
+    // Clamp stored value to the valid 0..3 range in case an older
+    // version wrote something out-of-band.
+    int v = m_settings.value(QStringLiteral("screenShareQuality"), 1).toInt();
+    return std::clamp(v, 0, 3);
+}
+
+void Settings::setScreenShareQuality(int level)
+{
+    level = std::clamp(level, 0, 3);
+    if (level == screenShareQuality()) return;
+    m_settings.setValue(QStringLiteral("screenShareQuality"), level);
+    emit screenShareQualityChanged();
 }
