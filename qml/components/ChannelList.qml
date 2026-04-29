@@ -154,9 +154,519 @@ Rectangle {
         }
     }
 
+    // Unified Direct Messages view — overlays the regular channel
+    // list while `serverManager.viewingDms` is true. Aggregates
+    // every 1:1 room across every connected server into one flat
+    // list. Selecting a row routes to the hosting server + room
+    // without clearing DM mode, so the rail keeps the @ chip
+    // highlighted.
+    Item {
+        id: dmView
+        anchors.fill: parent
+        visible: serverManager.viewingDms
+        // Rebuilt whenever a connection reports a new DM / message.
+        property int _gen: 0
+        readonly property var _rooms: {
+            dmView._gen;  // dep
+            return serverManager.allDirectRooms();
+        }
+
+        Connections {
+            target: serverManager
+            ignoreUnknownSignals: true
+            function onActiveServerChanged() { dmView._gen++; }
+            function onViewingDmsChanged() {
+                if (serverManager.viewingDms) dmView._gen++;
+            }
+        }
+        // Per-connection signal wiring — every connection emits
+        // directRoomsChanged / roomListChanged independently, and
+        // we want to rebuild when any of them fire.
+        Instantiator {
+            model: serverManager.servers
+            active: true
+            delegate: QtObject {
+                property var conn: {
+                    var i = index;
+                    return serverManager.connectionAt(i);
+                }
+                property var directConn: conn
+                    ? conn.directRoomsChanged.connect(function() { dmView._gen++; })
+                    : null
+                property var listConn: conn
+                    ? conn.roomListChanged.connect(function() { dmView._gen++; })
+                    : null
+                // Typing state tick — bump the generation so
+                // delegates re-evaluate peerTyping and swap the
+                // timestamp for the typing-dots indicator.
+                property var typingConn: conn
+                    ? conn.roomTypingChanged.connect(function() { dmView._gen++; })
+                    : null
+                // Presence changes arrive as per-user events; we
+                // don't get a notification per DM peer, so just
+                // re-pull on any sync update. Cheap — capped by
+                // N DMs.
+                property var presenceConn: conn
+                    ? conn.messageReceived.connect(function() { dmView._gen++; })
+                    : null
+            }
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 0
+
+            // Header. Matches the normal server-name header's height
+            // + type scale so switching modes doesn't reflow the row
+            // below on desktop.
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 48
+                color: Theme.bg1
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: Theme.sp.s7
+                    anchors.rightMargin: Theme.sp.s5
+                    spacing: Theme.sp.s3
+                    Icon { name: "at"; size: 16; color: Theme.fg0 }
+                    Text {
+                        text: "Direct Messages"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.semibold
+                        color: Theme.fg0
+                        Layout.fillWidth: true
+                    }
+                }
+                Rectangle { anchors.bottom: parent.bottom; width: parent.width
+                    height: 1; color: Theme.line }
+            }
+
+            // "New DM" inline composer — accepts @user:host and
+            // routes through the currently-active server's
+            // createDirectMessage. As the user types, a suggestions
+            // list appears below showing matches from every
+            // connected server's known-members table so they can
+            // pick without remembering full MXIDs.
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: Theme.sp.s3
+                Layout.rightMargin: Theme.sp.s3
+                Layout.topMargin: Theme.sp.s3
+                spacing: Theme.sp.s2
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 44
+                    radius: Theme.r2
+                    color: Theme.bg0
+                    border.color: newDmField.activeFocus ? Theme.accent : Theme.line
+                    border.width: 1
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.sp.s3
+                        anchors.rightMargin: Theme.sp.s1
+                        spacing: Theme.sp.s3
+                        Icon { name: "plus"; size: 13; color: Theme.fg2 }
+                        TextField {
+                            id: newDmField
+                            Layout.fillWidth: true
+                            placeholderText: "New DM — search name or @user:server"
+                            background: Item {}
+                            color: Theme.fg0
+                            placeholderTextColor: Theme.fg3
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.sm
+                            selectByMouse: true
+                            Keys.onReturnPressed: dmView._submitNewDm()
+                            onTextChanged: dmView._refreshSuggestions()
+                        }
+                        Rectangle {
+                            Layout.preferredWidth: 32
+                            Layout.preferredHeight: 32
+                            radius: Theme.r1
+                            color: submitMouse.containsMouse
+                                   && newDmField.text.trim().length > 0
+                                   ? Theme.accentDim : Theme.accent
+                            opacity: newDmField.text.trim().length > 0 ? 1.0 : 0.5
+                            Icon { anchors.centerIn: parent; name: "send"
+                                   size: 12; color: Theme.onAccent }
+                            MouseArea {
+                                id: submitMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                enabled: newDmField.text.trim().length > 0
+                                cursorShape: enabled ? Qt.PointingHandCursor
+                                                     : Qt.ArrowCursor
+                                onClicked: dmView._submitNewDm()
+                            }
+                        }
+                    }
+                }
+
+                // Live match list — only visible while the input
+                // has content AND we have results. Click a row to
+                // start / open the DM with that user on the
+                // server they're known from.
+                Rectangle {
+                    visible: dmView._suggestions.length > 0
+                             && newDmField.text.trim().length > 0
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Math.min(
+                        dmView._suggestions.length * 44 + 4, 220)
+                    radius: Theme.r2
+                    color: Theme.bg0
+                    border.color: Theme.line
+                    border.width: 1
+
+                    ListView {
+                        id: suggestionList
+                        anchors.fill: parent
+                        anchors.margins: 2
+                        clip: true
+                        model: dmView._suggestions
+                        boundsBehavior: Flickable.StopAtBounds
+
+                        delegate: Rectangle {
+                            width: ListView.view ? ListView.view.width : 0
+                            height: 40
+                            radius: Theme.r1
+                            color: sugHover.containsMouse
+                                   ? Theme.bg2 : "transparent"
+                            Behavior on color {
+                                ColorAnimation { duration: Theme.motion.fastMs }
+                            }
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: Theme.sp.s3
+                                anchors.rightMargin: Theme.sp.s3
+                                spacing: Theme.sp.s3
+
+                                Rectangle {
+                                    Layout.preferredWidth: 22
+                                    Layout.preferredHeight: 22
+                                    radius: Theme.r1
+                                    color: Theme.senderColor(modelData.userId)
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: {
+                                            var n = modelData.displayName
+                                                  || modelData.userId;
+                                            var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                            return (s.length > 0 ? s.charAt(0) : "?")
+                                                .toUpperCase();
+                                        }
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: 11
+                                        font.weight: Theme.fontWeight.semibold
+                                        color: Theme.onAccent
+                                    }
+                                }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 0
+                                    Text {
+                                        text: modelData.displayName
+                                              || modelData.userId
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.sm
+                                        color: Theme.fg0
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                    Text {
+                                        text: modelData.userId
+                                              + (modelData.serverName
+                                                  ? " · " + modelData.serverName
+                                                  : "")
+                                        font.family: Theme.fontMono
+                                        font.pixelSize: 10
+                                        color: Theme.fg3
+                                        elide: Text.ElideMiddle
+                                        Layout.fillWidth: true
+                                    }
+                                }
+                            }
+                            MouseArea {
+                                id: sugHover
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: dmView._pickSuggestion(modelData)
+                            }
+                        }
+                    }
+                }
+            }
+
+            ListView {
+                id: dmListView
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.topMargin: Theme.sp.s2
+                clip: true
+                spacing: 0
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: ThemedScrollBar {}
+                model: dmView._rooms
+
+                Text {
+                    anchors.centerIn: parent
+                    visible: dmListView.count === 0
+                    text: "No direct messages yet.\n"
+                        + "Start one with @user:server above."
+                    horizontalAlignment: Text.AlignHCenter
+                    color: Theme.fg3
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.sm
+                }
+
+                delegate: Rectangle {
+                    id: dmRow
+                    width: ListView.view ? ListView.view.width : 0
+                    height: Theme.isMobile ? 60 : 52
+                    readonly property bool isActive: {
+                        var s = serverManager.activeServer;
+                        return s && s.serverUrl === modelData.serverUrl
+                            && s.activeRoomId === modelData.roomId;
+                    }
+                    color: isActive ? Theme.bg3
+                         : rowMouse.containsMouse ? Theme.bg2 : "transparent"
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.sp.s4
+                        anchors.rightMargin: Theme.sp.s4
+                        spacing: Theme.sp.s3
+
+                        Item {
+                            Layout.preferredWidth: 32
+                            Layout.preferredHeight: 32
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: Theme.r2
+                                color: Theme.senderColor(modelData.peerId)
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: {
+                                        var n = modelData.peerDisplayName
+                                              || modelData.peerId;
+                                        var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                        return (s.length > 0 ? s.charAt(0) : "?")
+                                            .toUpperCase();
+                                    }
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: 13
+                                    font.weight: Theme.fontWeight.semibold
+                                    color: Theme.onAccent
+                                }
+                            }
+                            // Presence dot overlaid on the bottom-
+                            // right of the avatar chip. Same
+                            // vocabulary as MemberList's presence
+                            // halo. Hidden when the server hasn't
+                            // told us anything about this user
+                            // (empty string) so we don't render a
+                            // misleading grey dot.
+                            Rectangle {
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                anchors.rightMargin: -1
+                                anchors.bottomMargin: -1
+                                width: 10; height: 10
+                                radius: 5
+                                border.color: Theme.bg1
+                                border.width: 2
+                                visible: modelData.peerPresence !== undefined
+                                         && modelData.peerPresence.length > 0
+                                color: {
+                                    switch (modelData.peerPresence) {
+                                    case "online":      return Theme.online;
+                                    case "unavailable": return Theme.warning;
+                                    default:            return Theme.fg3;
+                                    }
+                                }
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 0
+                            Text {
+                                text: modelData.peerDisplayName
+                                      || modelData.peerId
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.base
+                                font.weight: modelData.unreadCount > 0
+                                    ? Theme.fontWeight.semibold
+                                    : Theme.fontWeight.medium
+                                color: Theme.fg0
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                            // Sub-label: prefer the peer's custom
+                            // status message if they've set one,
+                            // else show the hosting server (which
+                            // is useful when the user is in DMs
+                            // across multiple servers).
+                            Text {
+                                text: {
+                                    if (modelData.peerStatusMessage
+                                        && modelData.peerStatusMessage.length > 0) {
+                                        return modelData.peerStatusMessage;
+                                    }
+                                    return modelData.serverName
+                                        || modelData.serverUrl;
+                                }
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.xs
+                                font.italic: modelData.peerStatusMessage
+                                    && modelData.peerStatusMessage.length > 0
+                                color: Theme.fg3
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                        }
+
+                        // Right-edge trailing: typing indicator
+                        // wins over the unread pill — if the peer
+                        // is live-typing we want that signal front
+                        // and centre. Three pulsing dots, same
+                        // vocabulary as MessageInput's upload
+                        // activity indicator.
+                        Row {
+                            visible: modelData.peerTyping === true
+                            spacing: 3
+                            Repeater {
+                                model: 3
+                                delegate: Rectangle {
+                                    required property int index
+                                    width: 5; height: 5; radius: 2.5
+                                    color: Theme.accent
+                                    opacity: 0.35
+                                    SequentialAnimation on opacity {
+                                        loops: Animation.Infinite
+                                        running: parent.parent.visible
+                                        PauseAnimation { duration: index * 140 }
+                                        NumberAnimation { to: 1.0; duration: 280 }
+                                        NumberAnimation { to: 0.35; duration: 280 }
+                                        PauseAnimation { duration: (2 - index) * 140 }
+                                    }
+                                }
+                            }
+                        }
+                        // Unread pill, suppressed while typing.
+                        Rectangle {
+                            visible: modelData.unreadCount > 0
+                                     && modelData.peerTyping !== true
+                            implicitWidth: Math.max(20, unreadText.implicitWidth + 10)
+                            implicitHeight: 18
+                            radius: 9
+                            color: Theme.danger
+                            Text {
+                                id: unreadText
+                                anchors.centerIn: parent
+                                text: modelData.unreadCount > 99
+                                    ? "99+" : modelData.unreadCount
+                                color: Theme.onAccent
+                                font.family: Theme.fontSans
+                                font.pixelSize: 10
+                                font.weight: Theme.fontWeight.semibold
+                            }
+                        }
+                    }
+
+                    MouseArea {
+                        id: rowMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            // Switch to the owning server without
+                            // clearing DM mode, then select the DM
+                            // room. The @ chip stays highlighted.
+                            serverManager.setActiveServer(
+                                modelData.serverIndex);
+                            if (serverManager.activeServer) {
+                                serverManager.activeServer
+                                    .setActiveRoom(modelData.roomId);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        property var _suggestions: []
+
+        function _refreshSuggestions() {
+            var q = newDmField.text.trim();
+            if (q.length === 0) { _suggestions = []; return; }
+            _suggestions = serverManager.searchKnownUsers(q, 8);
+        }
+
+        function _pickSuggestion(m) {
+            // Route createDirectMessage through the correct
+            // connection — otherwise a user known only on server B
+            // but typed while server A is active would end up with
+            // a DM against a different homeserver that doesn't
+            // host the account.
+            serverManager.setActiveServer(m.serverIndex);
+            var s = serverManager.activeServer;
+            if (!s) return;
+            if (m.userId === s.userId) return;
+            // Look for an existing DM so we jump instead of
+            // duplicating. matches directRooms() shape.
+            var existing = "";
+            var dms = s.directRooms();
+            for (var i = 0; i < dms.length; i++) {
+                if (dms[i].peerId === m.userId) {
+                    existing = dms[i].roomId;
+                    break;
+                }
+            }
+            if (existing.length > 0) {
+                s.setActiveRoom(existing);
+            } else {
+                s.createDirectMessage(m.userId);
+            }
+            newDmField.text = "";
+            _suggestions = [];
+        }
+
+        function _submitNewDm() {
+            // If there's exactly one suggestion and the user hits
+            // Enter without picking, take the first suggestion —
+            // that's the typical "I typed what I wanted, just go"
+            // flow. Otherwise fall back to raw MXID parsing.
+            if (_suggestions.length > 0) {
+                _pickSuggestion(_suggestions[0]);
+                return;
+            }
+            var target = newDmField.text.trim();
+            if (target.length === 0) return;
+            if (!target.startsWith("@") && target.indexOf(":") > 0) {
+                target = "@" + target;
+            }
+            var s = serverManager.activeServer;
+            if (!s) {
+                if (serverManager.servers.rowCount() > 0) {
+                    serverManager.setActiveServer(0);
+                    s = serverManager.activeServer;
+                }
+            }
+            if (!s) return;
+            if (target === s.userId) { newDmField.text = ""; return; }
+            s.createDirectMessage(target);
+            newDmField.text = "";
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
+        visible: !serverManager.viewingDms
 
         // Server name header (SPEC §3.2 top, 48h)
         Rectangle {
@@ -700,8 +1210,25 @@ Rectangle {
 
                                             RowLayout {
                                                 width: parent.width
-                                                height: 28
+                                                // Fatter rows on mobile so the
+                                                // tap target matches the 44 pt
+                                                // Apple / Material guideline.
+                                                height: Theme.isMobile ? 44 : 28
                                                 spacing: Theme.sp.s3
+
+                                                // Screen reader: announce
+                                                // as "Channel displayName,
+                                                // N unread" (or "Voice
+                                                // channel…") with Button
+                                                // role so TalkBack treats
+                                                // it as activatable.
+                                                Accessible.role: Accessible.Button
+                                                Accessible.name: (modelData.isVoice
+                                                    ? "Voice channel " : "Channel ")
+                                                    + modelData.displayName
+                                                    + (modelData.unreadCount > 0
+                                                       ? ", " + modelData.unreadCount
+                                                         + " unread" : "")
 
                                                 Icon {
                                                     name: modelData.isVoice ? "volume" : "hash"
@@ -1038,11 +1565,88 @@ Rectangle {
                                                 }
                                                 if (!serverManager.activeServer) return;
                                                 if (modelData.isVoice) {
-                                                    if (serverManager.activeServer.activeVoiceRoomId === modelData.roomId) {
-                                                        serverManager.activeServer.showVoiceRoom();
-                                                    } else {
-                                                        serverManager.activeServer.joinVoiceChannel(modelData.roomId);
+                                                    // Mobile voice needs TWO permissions before join:
+                                                    //   RECORD_AUDIO         — for the mic
+                                                    //   POST_NOTIFICATIONS   — for the foreground
+                                                    //                          service notification.
+                                                    // Without POST_NOTIFICATIONS on Android 13+ the
+                                                    // FGS silently fails to surface and the OS may
+                                                    // demote the service, killing the call the
+                                                    // moment the app backgrounds. We chain the two
+                                                    // dialogs so the user answers them in sequence.
+                                                    var rid = modelData.roomId;
+                                                    var srv = serverManager.activeServer;
+                                                    var join = function() {
+                                                        if (srv.activeVoiceRoomId === rid) {
+                                                            srv.showVoiceRoom();
+                                                        } else {
+                                                            srv.joinVoiceChannel(rid);
+                                                        }
+                                                    };
+
+                                                    if (!Theme.isMobile
+                                                        || typeof androidPerms === "undefined") {
+                                                        join();
+                                                        return;
                                                     }
+
+                                                    var askMic = function(afterMic) {
+                                                        if (androidPerms.hasMicrophone()) {
+                                                            afterMic(true);
+                                                            return;
+                                                        }
+                                                        var once = null;
+                                                        once = function(granted) {
+                                                            androidPerms.microphoneResult.disconnect(once);
+                                                            afterMic(granted);
+                                                        };
+                                                        androidPerms.microphoneResult.connect(once);
+                                                        androidPerms.requestMicrophone();
+                                                    };
+                                                    var askNotifs = function(afterNotifs) {
+                                                        if (androidPerms.hasNotifications()) {
+                                                            afterNotifs(true);
+                                                            return;
+                                                        }
+                                                        var once = null;
+                                                        once = function(granted) {
+                                                            androidPerms.notificationsResult.disconnect(once);
+                                                            // Non-fatal if user denies — the
+                                                            // foreground service will still run,
+                                                            // just without the persistent
+                                                            // notification, which Android may then
+                                                            // demote out of FGS state. We warn
+                                                            // but proceed.
+                                                            afterNotifs(granted);
+                                                        };
+                                                        androidPerms.notificationsResult.connect(once);
+                                                        androidPerms.requestNotifications();
+                                                    };
+
+                                                    askMic(function(micGranted) {
+                                                        if (!micGranted) {
+                                                            var w = Window.window;
+                                                            if (w && w.toast) {
+                                                                w.toast("Microphone permission "
+                                                                      + "is required to join voice.",
+                                                                      "error");
+                                                            }
+                                                            return;
+                                                        }
+                                                        askNotifs(function(notifGranted) {
+                                                            if (!notifGranted) {
+                                                                var w = Window.window;
+                                                                if (w && w.toast) {
+                                                                    w.toast("Allow notifications "
+                                                                          + "to keep voice running "
+                                                                          + "in the background.",
+                                                                          "info");
+                                                                }
+                                                            }
+                                                            join();
+                                                        });
+                                                    });
+                                                    return;
                                                 } else {
                                                     serverManager.activeServer.setActiveRoom(modelData.roomId);
                                                 }
@@ -1409,7 +2013,11 @@ Rectangle {
 
                 // Mute / deafen / settings trio (SPEC §3.2). Bound to the
                 // active ServerConnection so toggling here tracks the
-                // state shown in the VoiceDock and vice-versa.
+                // state shown in the VoiceDock and vice-versa. Hidden
+                // on mobile since voice is off there and the buttons
+                // eat precious horizontal space that the user's
+                // display name + MXID need (otherwise they elide to
+                // "@j…" / "@jo…" in the 272 px channel drawer).
                 FooterButton {
                     Layout.alignment: Qt.AlignVCenter
                     icon: serverManager.activeServer
@@ -1482,6 +2090,30 @@ Rectangle {
                     }
                 }
 
+                // Quick access to the presence + custom status
+                // picker. Users open this most often, hence top
+                // of menu. Renders a tiny presence dot in the
+                // text label so it doubles as a state indicator.
+                ThemedUserItem {
+                    text: {
+                        var s = serverManager.activeServer;
+                        if (!s) return "Set status…";
+                        var msg = s.selfStatusMessage();
+                        if (msg && msg.length > 0)
+                            return "Status: " + msg;
+                        switch (s.selfPresence()) {
+                        case "online":      return "Set status…  (Online)";
+                        case "unavailable": return "Set status…  (Away)";
+                        case "offline":     return "Set status…  (Offline)";
+                        }
+                        return "Set status…";
+                    }
+                    iconName: "smile"
+                    onTriggered: Window.window.openStatusPicker()
+                }
+
+                MenuSeparator { }
+
                 ThemedUserItem {
                     text: "Manage Account"
                     iconName: "shield"
@@ -1509,6 +2141,7 @@ Rectangle {
                 ThemedUserItem {
                     text: "Keyboard Shortcuts"
                     iconName: "crosshair"
+                    visible: !Theme.isMobile
                     onTriggered: Window.window.openShortcutsDialog()
                 }
             }
@@ -1686,6 +2319,55 @@ Rectangle {
             onTriggered: {
                 var rid = roomContextMenu.roomId;
                 appSettings.setRoomMuted(rid, !appSettings.isRoomMuted(rid));
+                channelListRoot.muteGeneration++;
+            }
+        }
+
+        // Three-state notification mode selector via stacked menu
+        // items (Menu doesn't support submenus that feel native on
+        // mobile, so we list the choices inline with a check on the
+        // currently-selected mode). Changes are persisted
+        // immediately and consumed by NotificationManager at the
+        // next inbound message.
+        MenuSeparator {
+            contentItem: Rectangle {
+                implicitWidth: 180
+                implicitHeight: 1
+                color: Theme.line
+            }
+        }
+        ThemedRoomItem {
+            text: appSettings.roomNotificationMode(roomContextMenu.roomId)
+                  === "all"
+                  ? "Notifications: All ✓" : "Notifications: All"
+            iconName: "inbox"
+            onTriggered: {
+                appSettings.setRoomNotificationMode(
+                    roomContextMenu.roomId, "all");
+                channelListRoot.muteGeneration++;
+            }
+        }
+        ThemedRoomItem {
+            text: appSettings.roomNotificationMode(roomContextMenu.roomId)
+                  === "mentions"
+                  ? "Notifications: @Mentions only ✓"
+                  : "Notifications: @Mentions only"
+            iconName: "at"
+            onTriggered: {
+                appSettings.setRoomNotificationMode(
+                    roomContextMenu.roomId, "mentions");
+                channelListRoot.muteGeneration++;
+            }
+        }
+        ThemedRoomItem {
+            text: appSettings.roomNotificationMode(roomContextMenu.roomId)
+                  === "none"
+                  ? "Notifications: None ✓"
+                  : "Notifications: None"
+            iconName: "minus"
+            onTriggered: {
+                appSettings.setRoomNotificationMode(
+                    roomContextMenu.roomId, "none");
                 channelListRoot.muteGeneration++;
             }
         }

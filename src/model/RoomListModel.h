@@ -45,6 +45,18 @@ public:
     // Used by the #channel-mention click handler. Returns "" if no match.
     Q_INVOKABLE QString roomIdForName(const QString& name) const;
     Q_INVOKABLE QString roomTopic(const QString& roomId) const;
+
+    // First text channel (non-voice) in display order. Used by the
+    // mobile shell to auto-select a landing channel on login so the
+    // user doesn't get dropped into an empty-state screen they have
+    // to actively dismiss. Returns "" if we have no text channels.
+    Q_INVOKABLE QString firstTextRoomId() const;
+
+    // Classifier used by the mobile shell's "remember last text
+    // channel" logic — voice rooms deliberately don't get auto-
+    // restored on launch (would transmit mic without consent).
+    Q_INVOKABLE bool isVoiceRoom(const QString& roomId) const;
+    Q_INVOKABLE bool hasRoom(const QString& roomId) const;
     void updateVoiceState(const QString& roomId, bool isVoice);
     void updateVoiceMemberCount(const QString& roomId, int count);
     void removeRoom(const QString& roomId);

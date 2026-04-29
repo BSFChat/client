@@ -71,6 +71,12 @@ public:
     // loaded. `body` is trimmed to ~160 chars for display.
     Q_INVOKABLE QVariantMap eventPreview(const QString& eventId) const;
 
+    // Returns the full edit history for a given event: a list of
+    // {body, timestamp} maps in chronological order, INCLUDING the
+    // original (index 0) and the current body (last index). Empty
+    // if the event isn't loaded or has no edits.
+    Q_INVOKABLE QVariantList editHistory(const QString& eventId) const;
+
     // Unread-divider helpers. `firstEventIdAfterTs` returns the oldest
     // loaded event whose ts is strictly greater than `tsMs` (empty if
     // none). `newestTimestampMs` returns the newest loaded event's ts
@@ -134,6 +140,11 @@ private:
         qint64 mediaFileSize = 0; // Size in bytes
         bool edited = false;    // True if ≥1 m.replace has been applied
         qint64 editedAt = 0;    // Timestamp of the latest edit
+        // Previous bodies (oldest → newest before the current one).
+        // Each pair is {body, editAt}. Kept in-memory only for now —
+        // new clients joining late won't see older edits unless the
+        // server supplies them via /room/.../relations.
+        QVector<QPair<QString, qint64>> history;
         // Reply metadata — populated when content.m.relates_to.m.in_reply_to
         // is present. replyToSender/replyPreview are best-effort snapshots
         // resolved from the local timeline when this message was ingested;

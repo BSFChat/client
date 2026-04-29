@@ -16,12 +16,97 @@ ColumnLayout {
     property string fileName: ""
     property real fileSize: 0
 
+    // Effective URL fed to MediaPlayer. On desktop this is identical to
+    // `source`. On Android we download first (see below) and swap in a
+    // local file:// URL once the bytes are on disk — Android's native
+    // MediaPlayer can't reliably stream several server-side containers
+    // (Matroska especially) and returns "Could not open file" without
+    // diagnostics for them. Streaming-via-local-file costs a one-time
+    // download but actually plays.
+    // Effective source is what we actually hand to the MediaPlayer.
+    // Desktop: identical to `source` so streaming works as-is. Mobile:
+    // starts empty and only becomes the local file:// URL once
+    // MediaDownloader has a full copy on disk — if we let MediaPlayer
+    // see the remote HTTPS URL it eagerly tries to open it, fails
+    // with "Could not open file" on many containers (MKV in
+    // particular), and stays wedged in the error state even after we
+    // later swap in a local path. Keeping it empty until the bytes
+    // land sidesteps that.
+    property url effectiveSource: Theme.isMobile ? "" : source
+    property double downloadProgress: 0
+    property bool downloading: false
+    property bool downloadFailed: false
+    property string downloadError: ""
+
+    Component.onCompleted: {
+        if (!Theme.isMobile) effectiveSource = source;
+    }
+    onSourceChanged: {
+        if (!Theme.isMobile) effectiveSource = source;
+    }
+
+    // Mobile: kicked off the first time the user asks to play.
+    // Pre-downloading every inline video on channel-load would thrash
+    // cellular data and chew through Android's per-app cache quota.
+    function _ensureDownloaded() {
+        if (!Theme.isMobile) return true;
+        var s = source.toString();
+        if (s.length === 0 || s.startsWith("file:") || s.startsWith("qrc:")) {
+            effectiveSource = source;
+            return true;
+        }
+        if (effectiveSource.toString().startsWith("file:")) return true;
+        if (downloading) return false;
+        downloadFailed = false;
+        downloading = true;
+        downloadProgress = 0;
+        mediaDownloader.request(s);
+        return false;
+    }
+
+    Connections {
+        target: typeof mediaDownloader !== "undefined"
+                && Theme.isMobile ? mediaDownloader : null
+        function onCompleted(remoteUrl, localFileUrl) {
+            if (remoteUrl === root.source.toString()) {
+                root.effectiveSource = localFileUrl;
+                root.downloading = false;
+                root.downloadProgress = 1.0;
+                if (root._pendingFullscreen) {
+                    root._pendingFullscreen = false;
+                    // Fall through to auto-play when the popup opens.
+                    root._pendingAutoPlay = false;
+                    root.openFullscreen();
+                } else if (root._pendingAutoPlay) {
+                    root._pendingAutoPlay = false;
+                    mediaPlayer.play();
+                }
+            }
+        }
+        function onFailed(remoteUrl, err) {
+            if (remoteUrl === root.source.toString()) {
+                root.downloading = false;
+                root.downloadFailed = true;
+                root.downloadError = err;
+                console.warn("[VideoPlayer] download failed:", err,
+                             "url=" + remoteUrl);
+            }
+        }
+        function onProgressChanged(remoteUrl, p) {
+            if (remoteUrl === root.source.toString())
+                root.downloadProgress = p;
+        }
+    }
+
     // Cap dimensions to the same 400×300 envelope as the inline image
     // renderer — keeps a long conversation with mixed media visually
     // consistent. The real aspect ratio is preserved by VideoOutput's
     // PreserveAspectFit fillMode.
-    property int maxWidth: 400
-    property int maxHeight: 300
+    // Mobile bubbles are ~260px wide (matches MessageBubble.qml's image
+    // cap); on a narrow phone a 400×300 card overflows the bubble and
+    // pushes off the right edge. Desktop keeps the original envelope.
+    property int maxWidth:  Theme.isMobile ? 260 : 400
+    property int maxHeight: Theme.isMobile ? 200 : 300
 
     // Audio state. Writable — the volume slider / mute button drive
     // these, and the AudioOutput binds to them. Starts at 1.0 so the
@@ -41,10 +126,17 @@ ColumnLayout {
         radius: Theme.r2
         clip: true
 
+        // Single MediaPlayer drives BOTH the inline VideoOutput and
+        // the fullscreen one. Two MediaPlayer instances on the same
+        // local file fight over Android MediaCodec's tiny decoder
+        // pool ("Cannot create codec, Failed to open FFmpeg codec
+        // context") — sharing one player sidesteps the race entirely.
+        // The `videoOutput` property is re-bound when the fullscreen
+        // popup opens / closes.
         MediaPlayer {
             id: mediaPlayer
-            source: root.source
-            videoOutput: videoOutput
+            source: root.effectiveSource
+            videoOutput: root._videoOutputTarget
             audioOutput: AudioOutput {
                 id: audioOut
                 // Persist user's last-picked video volume across cards
@@ -53,12 +145,23 @@ ColumnLayout {
                 volume: root.volume
                 muted: root.muted
             }
+            // Surface errors to logcat so we can diagnose mobile /
+            // codec / network problems without the user having to
+            // read small text from the error state.
+            onErrorOccurred: (error, errorString) => {
+                console.warn("[VideoPlayer]", error, errorString,
+                             "src=" + root.source);
+            }
         }
 
         VideoOutput {
             id: videoOutput
             anchors.fill: parent
             fillMode: VideoOutput.PreserveAspectFit
+            Component.onCompleted: {
+                if (root._videoOutputTarget === null)
+                    root._videoOutputTarget = videoOutput;
+            }
         }
 
         // Dim scrim while paused so the play overlay reads clearly
@@ -81,6 +184,7 @@ ColumnLayout {
             border.width: 2
             visible: mediaPlayer.playbackState !== MediaPlayer.PlayingState
                   && mediaPlayer.error === MediaPlayer.NoError
+                  && !root.downloading
             Icon {
                 anchors.centerIn: parent
                 // Nudge the triangle half a pixel right so it's
@@ -93,6 +197,43 @@ ColumnLayout {
             }
         }
 
+        // Download-in-progress overlay (mobile). We pre-download
+        // videos before feeding the native MediaPlayer a file:// URL,
+        // so there's a measurable gap between tapping the channel and
+        // the player being ready. An accent progress bar across the
+        // bottom + percentage label makes the wait legible.
+        Rectangle {
+            anchors.fill: parent
+            color: Qt.rgba(0, 0, 0, 0.55)
+            visible: root.downloading
+            ColumnLayout {
+                anchors.centerIn: parent
+                spacing: Theme.sp.s2
+                Icon {
+                    Layout.alignment: Qt.AlignHCenter
+                    name: "paperclip"; size: 22; color: "white"
+                    opacity: 0.85
+                }
+                Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: "Buffering video… "
+                        + Math.round(root.downloadProgress * 100) + "%"
+                    color: "white"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.sm
+                    font.weight: Theme.fontWeight.semibold
+                }
+            }
+            Rectangle {
+                anchors.bottom: parent.bottom
+                anchors.left: parent.left
+                height: 3
+                width: parent.width * root.downloadProgress
+                color: Theme.accent
+                Behavior on width { NumberAnimation { duration: 120 } }
+            }
+        }
+
         // Error state — couldn't decode / fetch the video. We surface
         // Qt's errorString too: on macOS it usually reads "Could not
         // decode media" for unsupported codecs, or a network-shaped
@@ -100,7 +241,9 @@ ColumnLayout {
         Rectangle {
             anchors.fill: parent
             color: Theme.bg2
-            visible: mediaPlayer.error !== MediaPlayer.NoError
+            visible: (mediaPlayer.error !== MediaPlayer.NoError
+                      && !root.downloading)
+                  || root.downloadFailed
             ColumnLayout {
                 anchors.centerIn: parent
                 anchors.leftMargin: Theme.sp.s5
@@ -437,7 +580,19 @@ ColumnLayout {
         }
     }
 
+    // True when a tap-to-play should auto-play as soon as the download
+    // settles. Set when the user taps while download is in flight;
+    // cleared once we actually call play().
+    property bool _pendingAutoPlay: false
+
     function togglePlay() {
+        // On mobile the first tap may just kick off the download; we
+        // set a pending-play flag so the download-completed signal
+        // auto-starts playback rather than making the user tap twice.
+        if (!_ensureDownloaded()) {
+            _pendingAutoPlay = true;
+            return;
+        }
         if (mediaPlayer.playbackState === MediaPlayer.PlayingState) {
             mediaPlayer.pause();
         } else {
@@ -466,15 +621,36 @@ ColumnLayout {
         return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
     }
 
+    // Set when openFullscreen() is invoked before the mobile download
+    // has finished. Once the download completes we open the popup and
+    // auto-play.
+    property bool _pendingFullscreen: false
+
     function openFullscreen() {
-        // Hand the current position + playback state to the fullscreen
-        // popup so it starts where the inline player is. We pause the
-        // inline one so two copies aren't playing simultaneously.
-        fullscreenPopup.seedPosition = mediaPlayer.position;
-        fullscreenPopup.seedPlaying = mediaPlayer.playbackState === MediaPlayer.PlayingState;
-        mediaPlayer.pause();
+        // Mobile: don't pop the fullscreen until we have a playable
+        // file. Otherwise the popup opens on top of an errored / empty
+        // MediaPlayer and the user stares at a black rectangle.
+        if (Theme.isMobile && !_ensureDownloaded()) {
+            _pendingFullscreen = true;
+            return;
+        }
+
+        // Single-player strategy: instead of spinning up a separate
+        // mediaPlayer (which hit "Cannot create codec" on Android
+        // because MediaCodec's decoder pool can't satisfy two
+        // instances of the same stream, and on desktop failed for
+        // analogous FFmpeg-context reasons), we hand the existing
+        // MediaPlayer's frames to the fullscreen VideoOutput by
+        // swapping `_videoOutputTarget`.
+        _videoOutputTarget = fsVideoOutput;
         fullscreenPopup.open();
     }
+
+    // Which VideoOutput the single MediaPlayer currently renders to.
+    // Defaults to the inline card's VideoOutput; openFullscreen()
+    // repoints it at the fullscreen one, fullscreenPopup.onClosed
+    // points it back.
+    property Item _videoOutputTarget: null
 
     // Full-window lightbox for video. Standalone MediaPlayer +
     // VideoOutput so QtMultimedia can honour fullscreen-worthy
@@ -498,33 +674,28 @@ ColumnLayout {
         background: Rectangle { color: Qt.rgba(0, 0, 0, 0.95) }
 
         onOpened: {
-            fsPlayer.source = root.source;
-            fsPlayer.position = seedPosition;
-            if (seedPlaying) fsPlayer.play();
-            else fsPlayer.pause();
+            console.log("[VideoPlayer] fullscreen opened, src="
+                        + root.effectiveSource
+                        + " pos=" + mediaPlayer.position
+                        + " state=" + mediaPlayer.playbackState);
+            // Fullscreen implies intent to watch — start playing if
+            // we weren't already (e.g. user tapped fullscreen on a
+            // paused / never-played card).
+            if (mediaPlayer.playbackState !== MediaPlayer.PlayingState)
+                mediaPlayer.play();
         }
         onClosed: {
-            // Seek inline to where the popup was, then resume if it was
-            // playing — playback feels continuous across the toggle.
-            mediaPlayer.position = fsPlayer.position;
-            var wasPlaying = fsPlayer.playbackState === MediaPlayer.PlayingState;
-            fsPlayer.stop();
-            fsPlayer.source = "";   // free decoder / network handle
-            if (wasPlaying) mediaPlayer.play();
+            // Return video frames to the inline card.
+            root._videoOutputTarget = videoOutput;
         }
 
         contentItem: Item {
             anchors.fill: parent
 
-            MediaPlayer {
-                id: fsPlayer
-                videoOutput: fsVideoOutput
-                audioOutput: AudioOutput {
-                    volume: root.volume
-                    muted: root.muted
-                }
-            }
-
+            // Fullscreen has its OWN VideoOutput. The shared
+            // mediaPlayer's `videoOutput` is swapped to point here
+            // when the popup opens (see openFullscreen), so the same
+            // decoder keeps running — we just redirect its frames.
             VideoOutput {
                 id: fsVideoOutput
                 anchors.fill: parent
@@ -546,7 +717,7 @@ ColumnLayout {
                 width: 72; height: 72; radius: 36
                 color: Qt.rgba(0, 0, 0, 0.55)
                 border.color: "white"; border.width: 2
-                visible: fsPlayer.playbackState !== MediaPlayer.PlayingState
+                visible: mediaPlayer.playbackState !== MediaPlayer.PlayingState
                 Icon {
                     anchors.centerIn: parent
                     anchors.horizontalCenterOffset: 2
@@ -555,7 +726,7 @@ ColumnLayout {
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: fsPlayer.play()
+                    onClicked: mediaPlayer.play()
                 }
             }
 
@@ -569,7 +740,7 @@ ColumnLayout {
                 height: 56
                 color: Qt.rgba(0, 0, 0, 0.75)
                 opacity: fsTransportHover.containsMouse
-                    || fsPlayer.playbackState !== MediaPlayer.PlayingState ? 1.0 : 0.0
+                    || mediaPlayer.playbackState !== MediaPlayer.PlayingState ? 1.0 : 0.0
                 Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
 
                 MouseArea {
@@ -595,8 +766,8 @@ ColumnLayout {
                         Icon {
                             anchors.centerIn: parent
                             anchors.horizontalCenterOffset:
-                                fsPlayer.playbackState === MediaPlayer.PlayingState ? 0 : 1
-                            name: fsPlayer.playbackState === MediaPlayer.PlayingState
+                                mediaPlayer.playbackState === MediaPlayer.PlayingState ? 0 : 1
+                            name: mediaPlayer.playbackState === MediaPlayer.PlayingState
                                 ? "pause" : "play"
                             size: 18
                             color: "white"
@@ -607,14 +778,14 @@ ColumnLayout {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                if (fsPlayer.playbackState === MediaPlayer.PlayingState)
-                                    fsPlayer.pause();
-                                else fsPlayer.play();
+                                if (mediaPlayer.playbackState === MediaPlayer.PlayingState)
+                                    mediaPlayer.pause();
+                                else mediaPlayer.play();
                             }
                         }
                     }
                     Text {
-                        text: formatTime(fsPlayer.position)
+                        text: formatTime(mediaPlayer.position)
                         color: "white"
                         font.family: Theme.fontMono
                         font.pixelSize: Theme.fontSize.sm
@@ -624,9 +795,9 @@ ColumnLayout {
                         id: fsSeekSlider
                         Layout.fillWidth: true
                         from: 0
-                        to: Math.max(1, fsPlayer.duration)
-                        value: pressed ? value : fsPlayer.position
-                        onMoved: fsPlayer.position = value
+                        to: Math.max(1, mediaPlayer.duration)
+                        value: pressed ? value : mediaPlayer.position
+                        onMoved: mediaPlayer.position = value
                         background: Rectangle {
                             x: fsSeekSlider.leftPadding
                             y: fsSeekSlider.topPadding
@@ -655,7 +826,7 @@ ColumnLayout {
                         }
                     }
                     Text {
-                        text: formatTime(fsPlayer.duration)
+                        text: formatTime(mediaPlayer.duration)
                         color: "white"
                         font.family: Theme.fontMono
                         font.pixelSize: Theme.fontSize.sm

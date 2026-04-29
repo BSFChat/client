@@ -324,7 +324,7 @@ Rectangle {
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return;
             if (xhr.status < 200 || xhr.status >= 400) {
-                _cache[origUrl] = null;
+                preview._cache[origUrl] = null;
                 _failed = true;
                 return;
             }
@@ -337,11 +337,11 @@ Rectangle {
                     image: "",
                     ready: !!j.title
                 };
-                _cache[origUrl] = parsed.ready ? parsed : null;
+                preview._cache[origUrl] = parsed.ready ? parsed : null;
                 if (parsed.ready) _apply(parsed);
                 else _failed = true;
             } catch (e) {
-                _cache[origUrl] = null;
+                preview._cache[origUrl] = null;
                 _failed = true;
             }
         };
@@ -379,13 +379,13 @@ Rectangle {
             }
 
             if (xhr.status < 200 || xhr.status >= 400) {
-                _cache[origUrl] = null;
+                preview._cache[origUrl] = null;
                 _failed = true;
                 return;
             }
             var ct = xhr.getResponseHeader("content-type") || "";
             if (ct.indexOf("text/html") < 0 && ct.indexOf("xhtml") < 0) {
-                _cache[origUrl] = null;
+                preview._cache[origUrl] = null;
                 _failed = true;
                 return;
             }
@@ -404,13 +404,13 @@ Rectangle {
             // content. Render nothing rather than a misleading card.
             // Fix is a server-side unfurler; this is the interim stop.
             if (_looksLikeChallenge(html)) {
-                _cache[origUrl] = null;
+                preview._cache[origUrl] = null;
                 _failed = true;
                 return;
             }
 
             var parsed = _parseOg(html, currentUrl);
-            _cache[origUrl] = parsed.ready ? parsed : null;
+            preview._cache[origUrl] = parsed.ready ? parsed : null;
             if (parsed.ready) _apply(parsed);
             else _failed = true;
         };

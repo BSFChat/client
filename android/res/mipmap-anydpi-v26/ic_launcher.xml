@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon wrapper — Android 8+ composites foreground +
+     background into whatever shape the launcher wants. Pre-O
+     devices fall back to the legacy round/square PNGs in
+     mipmap-*/ic_launcher.png, which we don't ship yet (the
+     platform auto-generates a square tile from this XML on those
+     older versions). -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

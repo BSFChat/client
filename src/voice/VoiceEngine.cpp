@@ -6,6 +6,7 @@
 #include <bsfchat/Constants.h>
 
 #include <QDateTime>
+#include <QLoggingCategory>
 #include <QRandomGenerator>
 #include <QDebug>
 
@@ -22,8 +23,22 @@ VoiceEngine::~VoiceEngine() {
     stop();
 }
 
+// Voice diagnostics live under a single QLoggingCategory so they
+// default off in release builds and can be opted into via
+//   QT_LOGGING_RULES="bsfchat.voice.debug=true"
+// or Settings → Advanced → "Verbose voice logging". Replaces the
+// earlier `qInfo` calls that would spam every user's logcat.
+Q_LOGGING_CATEGORY(logVoice, "bsfchat.voice",
+                   QtWarningMsg)  // warnings on, info/debug off
+
 void VoiceEngine::start(const QString& roomId, const QJsonArray& members, const QJsonObject& turnConfig) {
     if (m_running) stop();
+
+    qCInfo(logVoice, "start room=%s members=%lld turn=%s p2p=%s",
+          qPrintable(roomId),
+          static_cast<long long>(members.size()),
+          turnConfig.contains("uris") ? "yes" : "no",
+          turnConfig.value("allow_p2p").toBool(false) ? "yes" : "no");
 
     m_roomId = roomId;
     m_turnConfig = turnConfig;
@@ -37,9 +52,13 @@ void VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
         m_micLevel = level;
         emit micLevelChanged(level);
     });
+    connect(m_audioEngine, &AudioEngine::peerLevelChanged,
+            this, &VoiceEngine::peerLevelChanged);
     if (!m_audioEngine->start()) {
-        qWarning() << "Failed to start audio engine";
+        qCWarning(logVoice) << "AudioEngine::start failed";
         emit error("Failed to initialize audio");
+    } else {
+        qCInfo(logVoice, "AudioEngine started OK");
     }
 
     m_candidateBatchTimer.start();
@@ -49,8 +68,12 @@ void VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
         auto member = memberVal.toObject();
         QString userId = member.value("user_id").toString();
         if (!userId.isEmpty()) {
+            qCInfo(logVoice, "offering to peer %s", qPrintable(userId));
             addPeer(userId, true); // We are the offerer (we just joined)
         }
+    }
+    if (members.isEmpty()) {
+        qCInfo(logVoice, "no existing members — waiting for invites");
     }
 }
 
@@ -127,6 +150,10 @@ void VoiceEngine::addPeer(const QString& userId, bool isOfferer) {
             this, [this, userId](const QByteArray& jpeg) {
                 emit peerScreenFrameReceived(userId, jpeg);
             });
+    connect(peer, &PeerConnectionManager::cameraFrameReceived,
+            this, [this, userId](const QByteArray& jpeg) {
+                emit peerCameraFrameReceived(userId, jpeg);
+            });
 
     connect(peer, &PeerConnectionManager::connected,
             this, [this, userId]() { emit peerConnected(userId); });
@@ -164,7 +191,18 @@ void VoiceEngine::removePeer(const QString& userId) {
 }
 
 void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId, const std::string& sdp) {
-    if (!m_running || m_peers.contains(sender)) return;
+    if (!m_running) {
+        qCInfo(logVoice, "ignore invite from %s — engine not running",
+              qPrintable(sender));
+        return;
+    }
+    if (m_peers.contains(sender)) {
+        qCInfo(logVoice, "ignore duplicate invite from %s",
+              qPrintable(sender));
+        return;
+    }
+    qCInfo(logVoice, "recv invite from %s callId=%s sdp_bytes=%zu",
+          qPrintable(sender), qPrintable(callId), sdp.size());
 
     m_callIds[sender] = callId;
 
@@ -195,6 +233,10 @@ void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId,
             this, [this, sender](const QByteArray& jpeg) {
                 emit peerScreenFrameReceived(sender, jpeg);
             });
+    connect(peer, &PeerConnectionManager::cameraFrameReceived,
+            this, [this, sender](const QByteArray& jpeg) {
+                emit peerCameraFrameReceived(sender, jpeg);
+            });
 
     connect(peer, &PeerConnectionManager::connected,
             this, [this, sender]() { emit peerConnected(sender); });
@@ -206,8 +248,13 @@ void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId,
 }
 
 void VoiceEngine::handleCallAnswer(const QString& sender, const QString& callId, const std::string& sdp) {
+    qCInfo(logVoice, "recv answer from %s callId=%s sdp_bytes=%zu",
+          qPrintable(sender), qPrintable(callId), sdp.size());
     if (auto* peer = m_peers.value(sender)) {
         peer->applyAnswer(sdp);
+    } else {
+        qCWarning(logVoice, "answer from unknown peer %s",
+                 qPrintable(sender));
     }
 }
 
@@ -339,10 +386,22 @@ void VoiceEngine::broadcastScreenFrame(const QByteArray& jpegData) {
     if (!m_running) return;
     static int s_bc = 0;
     if (++s_bc % 25 == 1) {
-        qInfo("[voice] broadcastScreenFrame: %d peers, %d bytes",
+        qCDebug(logVoice, "broadcastScreenFrame: %d peers, %d bytes",
               int(m_peers.size()), int(jpegData.size()));
     }
     for (auto* peer : m_peers) {
         if (peer) peer->sendScreenFrame(jpegData);
+    }
+}
+
+void VoiceEngine::broadcastCameraFrame(const QByteArray& jpegData) {
+    if (!m_running) return;
+    static int s_cc = 0;
+    if (++s_cc % 25 == 1) {
+        qCDebug(logVoice, "broadcastCameraFrame: %d peers, %d bytes",
+              int(m_peers.size()), int(jpegData.size()));
+    }
+    for (auto* peer : m_peers) {
+        if (peer) peer->sendCameraFrame(jpegData);
     }
 }

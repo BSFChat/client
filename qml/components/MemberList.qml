@@ -224,13 +224,39 @@ Rectangle {
                                 Layout.fillWidth: true
                             }
 
+                            // Custom status — wins over the role tag
+                            // when set. Italic distinguishes user-
+                            // authored copy from the role label.
+                            Text {
+                                text: {
+                                    var s = serverManager.activeServer;
+                                    return s ? s.statusMessageFor(model.userId)
+                                             : "";
+                                }
+                                visible: text.length > 0
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.xs
+                                font.italic: true
+                                color: Theme.fg3
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
                             // Role tag under the name — only shown for
                             // hoisted roles so @everyone-only members
-                            // don't get a blank subtext line.
+                            // don't get a blank subtext line. Hidden
+                            // when a custom status is shown above.
                             Text {
                                 text: memberDelegate._role && memberDelegate._role.hoist
                                     ? (memberDelegate._role.name || "") : ""
-                                visible: text.length > 0
+                                // Hide when a custom status is being
+                                // shown above — keeps the row from
+                                // stacking two subtitle lines.
+                                readonly property bool _hasStatus: {
+                                    var s = serverManager.activeServer;
+                                    if (!s) return false;
+                                    return s.statusMessageFor(model.userId).length > 0;
+                                }
+                                visible: text.length > 0 && !_hasStatus
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.xs
                                 font.weight: Theme.fontWeight.medium
@@ -346,6 +372,35 @@ Rectangle {
                 memberProfileCard.userId = memberContextMenu.userId;
                 memberProfileCard.profileDisplayName = memberContextMenu.displayName;
                 memberProfileCard.open();
+            }
+        }
+        // Start or reveal a DM with the selected member. If we
+        // already have a DM room with them, jump there; otherwise
+        // create one (ServerConnection.createDirectMessage fires
+        // createRoomSuccess → setActiveRoom).
+        MemberCtxItem {
+            text: "Send direct message"
+            iconName: "send"
+            enabled: serverManager.activeServer
+                     && memberContextMenu.userId !== ""
+                     && memberContextMenu.userId !== serverManager.activeServer.userId
+            onTriggered: {
+                var s = serverManager.activeServer;
+                if (!s) return;
+                // Look for an existing DM room with this peer.
+                var existing = "";
+                var dms = s.directRooms();
+                for (var i = 0; i < dms.length; i++) {
+                    if (dms[i].peerId === memberContextMenu.userId) {
+                        existing = dms[i].roomId;
+                        break;
+                    }
+                }
+                if (existing.length > 0) {
+                    s.setActiveRoom(existing);
+                } else {
+                    s.createDirectMessage(memberContextMenu.userId);
+                }
             }
         }
         MemberCtxItem {

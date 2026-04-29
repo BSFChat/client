@@ -7,7 +7,14 @@ Dialog {
     id: dialog
     title: "Add Server"
     anchors.centerIn: parent
-    width: 400
+    // Clamp to viewport so the dialog doesn't overflow on narrow
+    // phone screens. Min margin of 16dp on each side; max 400 on
+    // large screens preserves the desktop look.
+    width: Math.min(400, (parent ? parent.width : 400) - 32)
+    // Also bound height so the dialog doesn't grow past the screen
+    // when the software keyboard is up.
+    height: Math.min(implicitHeight,
+        (parent ? parent.height : 800) - 32)
     modal: true
     standardButtons: Dialog.NoButton
 

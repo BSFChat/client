@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ splash-screen theme. The platform's built-in
+     SplashScreen compositor uses this theme to draw a branded
+     launch surface during the time between activity-start and the
+     first QML frame. Without this we get Qt's default white screen
+     until the QML engine has loaded + rendered — noticeable on
+     mid-range phones where cold starts take ~800ms.
+
+     The icon tint is applied by the platform — the launcher icon
+     drawable's foreground is used, drawn on top of the background
+     colour defined below. -->
+<resources>
+    <style name="Theme.BSFChat.Splash"
+           parent="android:Theme.DeviceDefault.DayNight">
+        <item name="android:windowSplashScreenBackground">#0C1821</item>
+        <item name="android:windowSplashScreenAnimatedIcon">
+            @drawable/ic_launcher_foreground</item>
+        <!-- Fade-out curve so we don't snap-cut into QML. -->
+        <item name="android:windowSplashScreenAnimationDuration">250</item>
+    </style>
+</resources>

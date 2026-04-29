@@ -32,6 +32,8 @@ public:
     // peers see the 0x02 frames as garbage and drop them. We keep
     // tag=0x01 on audio too so the wire format is symmetric.
     void sendScreenFrame(const QByteArray& jpegData);
+    // Camera JPEG frame — wire format [0x03][jpeg_payload].
+    void sendCameraFrame(const QByteArray& jpegData);
 
     // Connection quality
     enum class PeerState { New, Connecting, Connected, Disconnected, Failed };
@@ -50,6 +52,7 @@ signals:
     void peerStateChanged(PeerState state);
     void audioFrameReceived(const QByteArray& frame);
     void screenFrameReceived(const QByteArray& jpegData);
+    void cameraFrameReceived(const QByteArray& jpegData);
 
 private:
     void setupCallbacks();

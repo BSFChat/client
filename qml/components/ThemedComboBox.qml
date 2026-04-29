@@ -17,14 +17,18 @@ ComboBox {
     delegate: ItemDelegate {
         id: itemDelegate
         width: cb.width
+        implicitHeight: 32
         required property int index
         required property var modelData
         readonly property bool selected: index === cb.currentIndex
         contentItem: Text {
-            text: cb.textRole
-                  ? (Array.isArray(cb.model) ? itemDelegate.modelData[cb.textRole]
-                                             : cb.model[cb.textRole])
-                  : itemDelegate.modelData
+            // ComboBox.textAt(index) resolves through textRole against
+            // whatever model shape is in play — QVariantList-as-array,
+            // QAbstractListModel with roles, plain JS array. The
+            // previous Array.isArray + model[textRole] path produced
+            // empty strings on QVariantList models, which rendered as
+            // invisible rows (hence the "black on black" dropdown).
+            text: cb.textAt(itemDelegate.index) || ""
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.md
             font.weight: itemDelegate.selected

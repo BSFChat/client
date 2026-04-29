@@ -178,7 +178,45 @@ Rectangle {
             spacing: Theme.sp.s3
             Layout.alignment: Qt.AlignVCenter
 
+            // PTT mode replaces the toggle-mute button with a
+            // hold-to-talk variant. The underlying ServerConnection
+            // already wires setPttPressed() into the AudioEngine's
+            // effective-muted state — the dock button is just a
+            // chrome: press = transmit, release = silence. The
+            // button tints bright-accent while held so the user
+            // has a clear "you're live" signal.
             DockButton {
+                id: pttBtn
+                visible: appSettings
+                         && appSettings.voiceMode === "ptt"
+                icon: "mic"
+                toggled: serverManager.activeServer
+                         && serverManager.activeServer.pttPressed
+                tooltip: toggled ? "Transmitting" : "Hold to talk"
+                // Override colours: while held, paint with the
+                // accent (green) instead of the danger (red) tint
+                // DockButton normally applies to `toggled`. Inline
+                // the hover/normal branch so users see a calm
+                // "armed, not yet transmitting" state.
+                color: toggled ? Theme.accent
+                     : Theme.bg2
+
+                MouseArea {
+                    anchors.fill: parent
+                    onPressed: if (serverManager.activeServer)
+                                   serverManager.activeServer.setPttPressed(true)
+                    onReleased: if (serverManager.activeServer)
+                                    serverManager.activeServer.setPttPressed(false)
+                    // If the finger leaves the button entirely we
+                    // also release — prevents a stuck-open PTT
+                    // from dragging off the widget.
+                    onCanceled: if (serverManager.activeServer)
+                                    serverManager.activeServer.setPttPressed(false)
+                }
+            }
+
+            DockButton {
+                visible: !(appSettings && appSettings.voiceMode === "ptt")
                 icon: serverManager.activeServer
                       && serverManager.activeServer.voiceMuted ? "mic-off" : "mic"
                 toggled: serverManager.activeServer
@@ -199,22 +237,26 @@ Rectangle {
                                serverManager.activeServer.toggleDeafen()
             }
 
+            // Screen-share + camera are desktop-only — those context
+            // properties only exist on macOS/Windows/Linux (see
+            // main.cpp's #if defined(Q_OS_MACOS) gate). Mobile doesn't
+            // have MediaProjection / CameraX plumbing wired yet, so
+            // hide the buttons rather than ship disabled ones.
             DockButton {
+                visible: typeof screenShare !== "undefined"
                 icon: "screen-share"
-                tooltip: screenShare.active
+                tooltip: visible && screenShare.active
                     ? "Stop sharing screen"
                     : "Share screen or window…"
-                toggled: screenShare.active
+                toggled: visible && screenShare.active
                 onClicked: {
+                    if (!visible) return;
                     if (screenShare.active) screenShare.stop();
                     else screenShare.showPicker();
                 }
-                // Surface capture errors as a toast (silent QScreenCapture
-                // failures would otherwise just look like "the button did
-                // nothing"). No action buttons — we don't want a click to
-                // re-trigger any system-settings navigation.
                 Connections {
-                    target: screenShare
+                    target: typeof screenShare !== "undefined"
+                            ? screenShare : null
                     function onLastErrorChanged() {
                         var err = screenShare.lastError;
                         if (err && err.length > 0
@@ -226,9 +268,51 @@ Rectangle {
             }
 
             DockButton {
+                id: cameraBtn
+                visible: typeof camera !== "undefined"
                 icon: "video"
-                tooltip: "Video (coming soon)"
-                enabled2: false
+                tooltip: visible && camera.active
+                    ? "Stop camera" : "Start camera"
+                toggled: visible && camera.active
+                onClicked: {
+                    if (!visible) return;
+                    if (camera.active) {
+                        camera.stop();
+                        return;
+                    }
+                    // Mobile: ask for CAMERA runtime perm before the
+                    // first start. Desktop's hasCamera() short-
+                    // circuits to true so this branch is free there.
+                    if (Theme.isMobile
+                        && typeof androidPerms !== "undefined"
+                        && !androidPerms.hasCamera()) {
+                        var once = null;
+                        once = function(granted) {
+                            androidPerms.cameraResult.disconnect(once);
+                            if (granted) {
+                                camera.start();
+                            } else if (Window.window
+                                       && Window.window.toastError) {
+                                Window.window.toastError(
+                                    "Camera permission is required.");
+                            }
+                        };
+                        androidPerms.cameraResult.connect(once);
+                        androidPerms.requestCamera();
+                        return;
+                    }
+                    camera.start();
+                }
+                Connections {
+                    target: typeof camera !== "undefined" ? camera : null
+                    function onLastErrorChanged() {
+                        var err = camera.lastError;
+                        if (err && err.length > 0
+                            && Window.window && Window.window.toastError) {
+                            Window.window.toastError(err);
+                        }
+                    }
+                }
             }
 
             // Spacer before destructive action.

@@ -52,7 +52,9 @@ Item {
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        width: Math.min(420, parent.width * 0.5)
+        // 50% of the main area on desktop; full-width on mobile where
+        // a side drawer over a narrow phone screen is unusable.
+        width: Theme.isMobile ? parent.width : Math.min(420, parent.width * 0.5)
         color: Theme.bg1
         border.width: 0
 

@@ -15,6 +15,14 @@ class ServerManager : public QObject {
     Q_PROPERTY(ServerListModel* servers READ servers CONSTANT)
     Q_PROPERTY(ServerConnection* activeServer READ activeServer NOTIFY activeServerChanged)
     Q_PROPERTY(int activeServerIndex READ activeServerIndex WRITE setActiveServer NOTIFY activeServerChanged)
+    // "Direct Messages" sits at the top of the server rail as a
+    // server-shaped destination, even though DMs are hosted per-
+    // server underneath. While viewingDms is true the channel panel
+    // shows every DM across every connection; the active server +
+    // active room are still set (so the composer knows where to
+    // send), but the sidebar highlights the DM chip instead of the
+    // hosting server. Cleared when the user picks a server icon.
+    Q_PROPERTY(bool viewingDms READ viewingDms WRITE setViewingDms NOTIFY viewingDmsChanged)
 
 public:
     explicit ServerManager(Settings* settings, QObject* parent = nullptr);
@@ -47,6 +55,29 @@ public:
     Q_INVOKABLE void removeServer(int index);
     Q_INVOKABLE void setActiveServer(int index);
 
+    bool viewingDms() const { return m_viewingDms; }
+    Q_INVOKABLE void setViewingDms(bool v);
+
+    // Aggregate every connection's `directRooms()` into a single
+    // flat list with the server's URL + human name stamped on each
+    // row, newest-activity first. Used by the DM view in the
+    // channel list so users see all their 1:1s at once regardless
+    // of which server is technically hosting them.
+    //
+    // Each entry: {
+    //   roomId, peerId, peerDisplayName, lastMessageTime,
+    //   serverUrl, serverName, serverIndex, unreadCount
+    // }
+    Q_INVOKABLE QVariantList allDirectRooms() const;
+
+    // Union of searchKnownUsers across every connection with the
+    // hosting server's URL + index stamped on each row so the DM
+    // composer can route the resulting createDirectMessage to the
+    // correct connection. Same entry shape as ServerConnection's
+    // plus `serverUrl`, `serverName`, `serverIndex`.
+    Q_INVOKABLE QVariantList searchKnownUsers(const QString& query,
+                                              int limit = 12) const;
+
     // Full identity-first flow: OIDC to the identity service itself, then
     // fetch the user's server list and auto-connect each one via OIDC.
     // identityUrl defaults to https://id.bsfchat.com when empty.
@@ -63,6 +94,14 @@ public:
     // server is connected.
     Q_INVOKABLE bool openMessageLink(const QString& link);
 
+    // Best-effort voice disconnect for every connection that's currently
+    // in a voice channel. Called on application shutdown / Android
+    // onStop so the server doesn't keep stale presence for a client
+    // whose process just died. The HTTP leave request is fire-and-
+    // forget — if the OS kills us mid-flight, the server's ICE
+    // timeout will eventually catch the corpse.
+    Q_INVOKABLE void leaveAllVoice();
+
 signals:
     void activeServerChanged();
     void serverAdded(int index);
@@ -72,6 +111,7 @@ signals:
     void loginFlowsChecked(const QString& url, bool oidcAvailable, const QString& providerUrl, bool passwordAvailable);
     void identityLoginComplete(const QStringList& serverUrls);
     void identityLoginFailed(const QString& error);
+    void viewingDmsChanged();
 
 private:
     void onLoginSuccess(ServerConnection* conn);
@@ -85,6 +125,7 @@ private:
     QList<ServerConnection*> m_connections;
     ServerConnection* m_activeServer = nullptr;
     int m_activeServerIndex = -1;
+    bool m_viewingDms = false;
 
     // Identity-first login state. m_identityClient runs the OIDC browser
     // flow against the identity service itself; m_identityApi talks to its

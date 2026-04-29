@@ -1,18 +1,17 @@
 import QtQuick
-import QtQuick.Effects
 import BSFChat
 
 // Icon — tintable SVG line-icon helper.
 //
-// The kit ships 24×24 line icons that use `stroke="currentColor"`. Qt's
-// SVG renderer treats currentColor as black, so we need to post-tint.
+// Routes through the `tinted` QQuickImageProvider (registered in
+// main.cpp) which reads the qrc SVG, substitutes `currentColor` with
+// the caller-supplied hex, and rasterises with QSvgRenderer at the
+// requested size. Cached per-pixmap so the same icon in the same
+// colour doesn't re-render on every list delegate.
 //
-// The canonical Qt 6 pattern is `layer.enabled: true` on the source Item
-// with `layer.effect` attached — that funnels the source through an
-// implicit FBO texture before the effect runs, which gives clean alpha
-// and a reliable colorization result. Avoiding the MultiEffect-with-
-// hidden-source pattern (which in some Qt builds produced the dim /
-// black-tinged rendering we had before).
+// Avoids every QML tinting path (MultiEffect, ColorOverlay,
+// data-URI Image source) — all of which silently fail on the
+// Qt 6.5 Android arm64 GL backend.
 //
 // Usage:  Icon { name: "mic"; size: 20; color: Theme.fg1 }
 Item {
@@ -24,32 +23,24 @@ Item {
     implicitWidth: size
     implicitHeight: size
 
+    // Convert the QML `color` to a "rrggbb" string for the URL. Strip
+    // the leading '#' and any alpha so the cache key is stable.
+    readonly property string _hex: {
+        var s = root.color.toString();
+        if (s.length === 9) s = "#" + s.substr(3);
+        return s.charAt(0) === '#' ? s.substr(1) : s;
+    }
+
     Image {
         id: src
         anchors.fill: parent
-        // Render at 2× so tinting stays sharp on HiDPI displays.
-        sourceSize.width: root.size * 2
-        sourceSize.height: root.size * 2
+        // Request the icon at exactly our display size — no resampling
+        // step in QML. Avoids Qt's internal Image-scaling path which
+        // seems to drop the texture on the Qt 6.5 Android scene graph.
+        sourceSize.width: root.size
+        sourceSize.height: root.size
         source: root.name.length > 0
-                ? "qrc:/qt/qml/BSFChat/qml/icons/" + root.name + ".svg"
-                : ""
-        smooth: true
-        mipmap: true
-        fillMode: Image.PreserveAspectFit
-        visible: true
-
-        // Layer into an FBO so MultiEffect has a clean source texture
-        // (keeps alpha pristine instead of blending into the underlying
-        // default black render of the SVG).
-        layer.enabled: true
-        layer.effect: MultiEffect {
-            // brightness: 1.0 pushes source toward white, then colorization
-            // replaces the RGB with `root.color`, keeping the source alpha
-            // for stroke pixels. Combined, the icon comes out at EXACTLY
-            // root.color at the stroke pixels, transparent elsewhere.
-            brightness: 1.0
-            colorization: 1.0
-            colorizationColor: root.color
-        }
+            ? "image://tinted/" + root.name + "/" + root._hex
+            : ""
     }
 }

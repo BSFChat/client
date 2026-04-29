@@ -23,6 +23,8 @@ class NotificationSounds;
 #endif
 class IdentityClient;
 
+class Settings;
+
 class ServerConnection : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString displayName READ displayName NOTIFY displayNameChanged)
@@ -113,9 +115,13 @@ public:
     bool voiceMuted() const { return m_voiceMuted; }
     bool voiceDeafened() const { return m_voiceDeafened; }
     bool inVoiceChannel() const { return !m_activeVoiceRoomId.isEmpty(); }
+#ifdef BSFCHAT_VOICE_ENABLED
     // Accessor for the screen-share controller to bind to the
     // currently-running voice engine. Null when no voice session.
+    // Only present in voice-enabled builds (desktop); mobile MVP
+    // ships without voice until libdatachannel is wired on iOS.
     VoiceEngine* voiceEngine() const { return m_voiceEngine; }
+#endif
 
     // Receive side for screen share: the latest JPEG frame from each
     // remote peer, exposed as an encoded data URL the QML Image
@@ -127,6 +133,23 @@ public:
     }
     Q_INVOKABLE QStringList peersCurrentlySharing() const {
         return m_peerScreenData.keys();
+    }
+    // Same pattern for webcam — data URL per peer, keys = peers with
+    // an active camera stream.
+    Q_INVOKABLE QString peerCameraDataUrl(const QString& userId) const {
+        auto it = m_peerCameraData.constFind(userId);
+        if (it == m_peerCameraData.constEnd()) return {};
+        return *it;
+    }
+    Q_INVOKABLE bool peerHasCamera(const QString& userId) const {
+        return m_peerCameraData.contains(userId);
+    }
+
+    // 0..1 smoothed audio level for a remote peer, updated on every
+    // decoded Opus frame. ParticipantTile binds its speaking ring to
+    // this. Empty for unknown/silent peers.
+    Q_INVOKABLE float peerLevel(const QString& userId) const {
+        return m_peerLevels.value(userId, 0.0f);
     }
     // Returns the voice-member list with each member augmented by a
     // "peerState" key ("connected"/"connecting"/"failed"/etc.) so the
@@ -161,6 +184,9 @@ public:
     Q_INVOKABLE void disconnectFromServer();
     Q_INVOKABLE void setActiveRoom(const QString& roomId);
     Q_INVOKABLE void sendMessage(const QString& body);
+    // Send an m.emote message (the /me slash command). Renders in
+    // italics + "<sender> <body>" form on the receiving side.
+    Q_INVOKABLE void sendEmote(const QString& body);
     // Send a threaded reply. The message carries m.relates_to with
     // rel_type=m.thread and event_id=rootEventId. Uses the active room.
     Q_INVOKABLE void sendThreadReply(const QString& rootEventId, const QString& body);
@@ -228,6 +254,16 @@ public:
     // so clicking any text channel also flips the view.
     Q_INVOKABLE void showTextView();
     Q_INVOKABLE void toggleMute();
+
+    // Push-to-talk state. In PTT voice mode the mic is force-muted
+    // whenever `pttPressed` is false, regardless of the user's
+    // voiceMuted toggle. QML sets this from a global keyboard
+    // shortcut while the key is held, or (on mobile) from a
+    // hold-to-talk button in VoiceDock — which needs a reactive
+    // binding, hence the Q_PROPERTY + notify signal.
+    Q_PROPERTY(bool pttPressed READ pttPressed NOTIFY pttPressedChanged)
+    bool pttPressed() const { return m_pttPressed; }
+    Q_INVOKABLE void setPttPressed(bool pressed);
     Q_INVOKABLE void toggleDeafen();
     Q_INVOKABLE void createVoiceChannel(const QString& name);
 
@@ -323,6 +359,16 @@ public:
     Q_INVOKABLE void setSelfPresence(const QString& state);
     Q_INVOKABLE QString selfPresence() const { return m_selfPresence; }
 
+    // Custom status message — free-form text shown under display
+    // names. Persisted server-side via PUT /presence/{me}/status
+    // which delivers an m.presence to everyone in our shared rooms
+    // on their next sync. Empty clears.
+    Q_INVOKABLE QString selfStatusMessage() const { return m_selfStatusMessage; }
+    Q_INVOKABLE void setSelfStatusMessage(const QString& msg);
+    // Per-user lookup. Returns empty if we've never seen a status
+    // for this user.
+    Q_INVOKABLE QString statusMessageFor(const QString& userId) const;
+
     // Direct messages — 1:1 rooms with another user on this server.
     // createDirectMessage creates+invites then marks the room as DM
     // locally (persisted per-server in the settings file) so the
@@ -335,6 +381,15 @@ public:
     // List of all DM rooms in this server, newest-activity first.
     // Each entry: { roomId, peerId, peerDisplayName, lastMessageTime }.
     Q_INVOKABLE QVariantList directRooms() const;
+
+    // Fuzzy search over this connection's known users — everyone
+    // whose display name or MXID has crossed our /sync recently
+    // (tracked in m_userDisplayNames). Used by the DM composer's
+    // live-match list so users don't have to know a peer's full
+    // MXID to start a DM.
+    // Each entry: { userId, displayName }. `limit` caps results.
+    Q_INVOKABLE QVariantList searchKnownUsers(const QString& query,
+                                              int limit = 8) const;
 
     // Server-wide screen-share max quality preset (0..3). Written by
     // admins via a bsfchat.server.screenshare state event; read by
@@ -359,9 +414,15 @@ signals:
     // Emitted whenever a remote peer's screen-share frame has been
     // updated. QML rebinds peerScreenDataUrl(userId) off this.
     void peerScreenFrameChanged(const QString& userId);
+    void peerCameraFrameChanged(const QString& userId);
+    void peerLevelChanged(const QString& userId);
+    // Forwarded from MatrixClient; QML composer binds to this to show
+    // a progress bar while a file attachment is uploading.
+    void mediaUploadProgress(const QString& filename, double progress);
     void maxScreenShareQualityChanged();
     void userIdChanged();
     void activeRoomIdChanged();
+    void pttPressedChanged();
     void activeRoomNameChanged();
     void connectedChanged();
     void connectionStatusChanged();
@@ -383,6 +444,11 @@ signals:
     void micSilentChanged();
     void avatarUrlChanged();
     void typingDisplayChanged();
+    // User-facing send feedback — emitted when the server rejects
+    // a message with a useful-to-surface error (rate limits, size
+    // caps, permission errors). QML subscribes and routes to
+    // ToastHost. `kind` is "error" / "warning" / "info".
+    void sendFeedback(const QString& text, const QString& kind);
     void roomTypingChanged();
     void roomPinnedEventsChanged(const QString& roomId);
     void profileFetched(const QString& userId, const QString& displayName, const QString& avatarUrl);
@@ -454,10 +520,19 @@ public:
     QMap<QString, QStringList> m_roomPinnedEvents;
     QMap<QString, qint64> m_userLastActivityMs; // for activity-based presence
     QString m_selfPresence = QStringLiteral("online");
+    QString m_selfStatusMessage;
+    // Authoritative presence + status messages from sync, keyed by
+    // user_id. Beats the client-side "saw a message recently"
+    // heuristic when the server actually relays presence (which it
+    // does as of the PresenceHandler addition).
+    QMap<QString, QString> m_userPresenceFromSync;
+    QMap<QString, QString> m_userStatusMessage;
     // DM store: roomId -> peer user id. Persisted via Settings under
     // "dm/<serverUrl>/<roomId>". Loaded once on setup.
     QMap<QString, QString> m_directRoomPeers;
     QMap<QString, QString> m_peerScreenData; // userId -> data URL
+    QMap<QString, QString> m_peerCameraData; // userId -> data URL
+    QMap<QString, float> m_peerLevels;
     int m_maxScreenShareQuality = 3; // 3 = no limit by default
     // Global userId → display name, populated from all m.room.member events
     // across every room. MessageModel reads from this pointer.
@@ -485,6 +560,14 @@ public:
     bool m_micSilent = false;
     int m_zeroLevelFrames = 0; // consecutive frames with near-zero level
     bool m_voiceMuted = false;
+    bool m_pttPressed = false;
+    Settings* m_settings = nullptr;
+    void applyMicGate();  // recompute mute from voiceMuted + ptt mode
+public:
+    // Called once at startup by ServerManager so the mic gate can
+    // consult voiceMode / PTT prefs without a global singleton.
+    void setSettings(Settings* settings);
+private:
     bool m_voiceDeafened = false;
     QJsonArray m_voiceMembers;
     QTimer* m_voicePollTimer = nullptr;

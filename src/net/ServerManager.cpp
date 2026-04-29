@@ -1,6 +1,7 @@
 #include "net/ServerManager.h"
 #include "net/ServerConnection.h"
 #include "net/MatrixClient.h"
+#include "model/RoomListModel.h"
 #include "model/ServerListModel.h"
 #include "core/Settings.h"
 #include "identity/IdentityClient.h"
@@ -204,6 +205,99 @@ void ServerManager::setActiveServer(int index)
     emit activeServerChanged();
 }
 
+void ServerManager::setViewingDms(bool v)
+{
+    if (m_viewingDms == v) return;
+    m_viewingDms = v;
+    emit viewingDmsChanged();
+}
+
+// Called on every wired connection's activeRoomIdChanged — keeps
+// `viewingDms` true whenever the user is reading a DM, so the
+// sidebar's @ chip stays highlighted even if they got there via a
+// message-link deep-link or last-channel-restore that never went
+// through the DM list.
+static void syncViewingDmsForConnection(ServerManager* mgr,
+                                         ServerConnection* conn)
+{
+    if (!mgr || !conn) return;
+    if (conn != mgr->activeServer()) return;  // only care about the
+                                              // foreground server
+    QString rid = conn->activeRoomId();
+    if (rid.isEmpty()) return;
+    if (conn->isDirectRoom(rid)) {
+        mgr->setViewingDms(true);
+    }
+}
+
+QVariantList ServerManager::allDirectRooms() const
+{
+    QVariantList out;
+    for (int i = 0; i < m_connections.size(); ++i) {
+        ServerConnection* conn = m_connections[i];
+        if (!conn) continue;
+        QVariantList rooms = conn->directRooms();
+        for (const QVariant& v : rooms) {
+            QVariantMap m = v.toMap();
+            m[QStringLiteral("serverUrl")] = conn->serverUrl();
+            m[QStringLiteral("serverName")] = conn->serverName();
+            m[QStringLiteral("serverIndex")] = i;
+
+            // Unread pull: we don't currently expose per-room
+            // unread count as a simple scalar on ServerConnection,
+            // but the channel-list model tracks it. Look it up via
+            // RoomListModel for this room id.
+            int unread = 0;
+            if (auto* rlm = conn->roomListModel()) {
+                QString roomId = m.value("roomId").toString();
+                for (int r = 0; r < rlm->rowCount(); ++r) {
+                    auto rid = rlm->data(rlm->index(r),
+                        RoomListModel::RoomIdRole).toString();
+                    if (rid == roomId) {
+                        unread = rlm->data(rlm->index(r),
+                            RoomListModel::UnreadCountRole).toInt();
+                        break;
+                    }
+                }
+            }
+            m[QStringLiteral("unreadCount")] = unread;
+
+            out.append(m);
+        }
+    }
+    std::sort(out.begin(), out.end(),
+        [](const QVariant& a, const QVariant& b) {
+            return a.toMap().value("lastMessageTime").toLongLong()
+                 > b.toMap().value("lastMessageTime").toLongLong();
+        });
+    return out;
+}
+
+QVariantList ServerManager::searchKnownUsers(const QString& query,
+                                               int limit) const
+{
+    if (limit <= 0) limit = 12;
+    QVariantList out;
+    // Per-connection fetch (they're cheap — bounded by members seen
+    // in recent /sync) then merge-and-trim. We don't try to de-dup
+    // across servers: the same MXID on two different servers is two
+    // distinct chat identities, and a user might want to DM either.
+    for (int i = 0; i < m_connections.size(); ++i) {
+        ServerConnection* conn = m_connections[i];
+        if (!conn) continue;
+        auto hits = conn->searchKnownUsers(query, limit);
+        for (QVariant& v : hits) {
+            QVariantMap m = v.toMap();
+            m[QStringLiteral("serverUrl")] = conn->serverUrl();
+            m[QStringLiteral("serverName")] = conn->serverName();
+            m[QStringLiteral("serverIndex")] = i;
+            out.append(m);
+            if (int(out.size()) >= limit) return out;
+        }
+    }
+    return out;
+}
+
 void ServerManager::wireConnection(ServerConnection* conn)
 {
     // Keep the sidebar's per-server unread dot in sync with this
@@ -235,6 +329,15 @@ void ServerManager::wireConnection(ServerConnection* conn)
     };
     connect(conn, &ServerConnection::serverAvatarUrlChanged, this, pushIcon);
     pushIcon();
+
+    // When the active room becomes a DM (from any code path — user
+    // click, notification deep-link, last-room-restore), flip into
+    // DM view so the sidebar highlighting reflects reality.
+    connect(conn, &ServerConnection::activeRoomIdChanged, this,
+        [this, conn]() { syncViewingDmsForConnection(this, conn); });
+
+    // Settings plumbed in so the mic gate can read voiceMode / PTT.
+    conn->setSettings(m_settings);
 }
 
 void ServerManager::loginWithIdentity(const QString& identityUrl) {
@@ -384,6 +487,17 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
         });
 
     m_identityClient->startLogin(m_identityUrl);
+}
+
+void ServerManager::leaveAllVoice()
+{
+    for (auto* conn : m_connections) {
+        if (!conn) continue;
+        // leaveVoiceChannel() no-ops when m_activeVoiceRoomId is
+        // empty, so this is safe to fire on every connection even
+        // if only one is actually in voice.
+        conn->leaveVoiceChannel();
+    }
 }
 
 void ServerManager::copyToClipboard(const QString& text)

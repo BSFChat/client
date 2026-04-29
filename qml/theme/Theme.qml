@@ -29,6 +29,14 @@ QtObject {
     // that reads Theme.* — no manual refresh needed.
     property bool isDark: AppSettings.theme !== "light"
 
+    // Mobile form factor — true on iOS / Android. Components that render
+    // differently on touch (hide desktop-only affordances, cap dialog
+    // widths, swap hover rails for long-press) key off this flag. Only
+    // checks the OS rather than a viewport-size heuristic so a narrow
+    // desktop window still gets the desktop UX.
+    readonly property bool isMobile:
+        Qt.platform.os === "ios" || Qt.platform.os === "android"
+
     // ─── Layout density variant ──────────────────────────────
     // Bound to the AppSettings singleton so the Appearance pane can flip
     // between "standard" / "compact" / "focus" at runtime.

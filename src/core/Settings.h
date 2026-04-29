@@ -142,14 +142,46 @@ public:
     Q_INVOKABLE bool isRoomMuted(const QString& roomId) const;
     Q_INVOKABLE void setRoomMuted(const QString& roomId, bool muted);
 
+    // Per-room notification mode.
+    //   "all"      — notify for every inbound message (default)
+    //   "mentions" — only when the user is @-mentioned
+    //   "none"     — never (equivalent to muted for notification
+    //                purposes; the channel row still shows unread)
+    // Stored under notifMode/<roomId>. Empty/missing ⇒ "all".
+    Q_INVOKABLE QString roomNotificationMode(const QString& roomId) const;
+    Q_INVOKABLE void setRoomNotificationMode(const QString& roomId,
+                                             const QString& mode);
+
+    // Last-active text channel per server. Used on startup to drop
+    // the user back into the channel they were reading, rather than
+    // always jumping to the first text room. Keyed on the server URL
+    // (stable across sessions). Voice rooms deliberately never get
+    // persisted — auto-rejoining voice would transmit the user's mic
+    // the moment the app opens, which is a very bad default.
+    Q_INVOKABLE QString lastTextRoomFor(const QString& serverUrl) const;
+    Q_INVOKABLE void setLastTextRoomFor(const QString& serverUrl,
+                                        const QString& roomId);
+
     // Screen-share quality preset chosen by the user (0=Low, 1=Medium,
     // 2=High, 3=Ultra). Default is 1 (Medium). ScreenShareController
     // reads this and clamps to the server's advertised max.
     Q_INVOKABLE int screenShareQuality() const;
     Q_INVOKABLE void setScreenShareQuality(int level);
+
+    // Voice mode: "open" ⇒ open mic (current behaviour), "ptt" ⇒
+    // push-to-talk. In PTT the mic only transmits while the user is
+    // holding down `pttKeySequence`.
+    Q_PROPERTY(QString voiceMode READ voiceMode WRITE setVoiceMode NOTIFY voiceModeChanged)
+    Q_PROPERTY(QString pttKeySequence READ pttKeySequence WRITE setPttKeySequence NOTIFY pttKeySequenceChanged)
+    QString voiceMode() const;
+    void setVoiceMode(const QString& v);
+    QString pttKeySequence() const;
+    void setPttKeySequence(const QString& seq);
 signals:
     void mutedRoomsChanged();
     void screenShareQualityChanged();
+    void voiceModeChanged();
+    void pttKeySequenceChanged();
 public:
 
 signals:

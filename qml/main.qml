@@ -15,8 +15,16 @@ ApplicationWindow {
     minimumHeight: 500
     visible: true
     title: {
-        if (serverManager.activeServer && serverManager.activeServer.activeRoomName !== "")
-            return "BSFChat - #" + serverManager.activeServer.activeRoomName;
+        var s = serverManager.activeServer;
+        if (s && s.activeRoomId !== ""
+            && s.isDirectRoom && s.isDirectRoom(s.activeRoomId)) {
+            return "BSFChat — @" + s.directRoomPeer(s.activeRoomId);
+        }
+        if (serverManager.viewingDms) {
+            return "BSFChat — Direct Messages";
+        }
+        if (s && s.activeRoomName !== "")
+            return "BSFChat — #" + s.activeRoomName;
         return "BSFChat";
     }
 
@@ -50,6 +58,55 @@ ApplicationWindow {
         else if (vis === 5) visibility = ApplicationWindow.FullScreen;
 
         _restoredGeometry = true;
+
+        // Restore the last text channel so the app opens into the
+        // room the user was last reading, not the server's first
+        // text channel. Voice rooms deliberately never auto-restore
+        // (see MobileMain.qml for the same rationale).
+        _maybeRestoreLastRoom();
+    }
+
+    // Auto-restore persisted channel. Called from Component.onCompleted
+    // and re-invoked when the active server's room list populates
+    // from /sync — because on a cold launch the room model may be
+    // empty the moment we hit onCompleted.
+    function _maybeRestoreLastRoom() {
+        var s = serverManager ? serverManager.activeServer : null;
+        if (!s || !s.roomListModel) return;
+        if (s.activeRoomId && s.activeRoomId.length > 0) return;
+        var remembered = appSettings.lastTextRoomFor(s.serverUrl);
+        if (remembered && s.roomListModel.hasRoom(remembered)
+            && !s.roomListModel.isVoiceRoom(remembered)) {
+            s.setActiveRoom(remembered);
+        }
+    }
+    Connections {
+        target: serverManager && serverManager.activeServer
+                ? serverManager.activeServer.roomListModel : null
+        function onRowsInserted() { root._maybeRestoreLastRoom(); }
+    }
+    // Surface server-side send errors (429 rate-limit, M_FORBIDDEN,
+    // generic failures) as toasts. ServerConnection pre-formats the
+    // message + kind so QML just has to route.
+    Connections {
+        target: serverManager ? serverManager.activeServer : null
+        ignoreUnknownSignals: true
+        function onSendFeedback(text, kind) {
+            if (toastHostGlobal && toastHostGlobal.show)
+                toastHostGlobal.show(text, kind || "error");
+        }
+    }
+    Connections {
+        target: serverManager ? serverManager.activeServer : null
+        ignoreUnknownSignals: true
+        function onActiveRoomIdChanged() {
+            var s = serverManager.activeServer;
+            if (!s || !s.roomListModel) return;
+            var rid = s.activeRoomId;
+            if (!rid || rid.length === 0) return;
+            if (s.roomListModel.isVoiceRoom(rid)) return;
+            appSettings.setLastTextRoomFor(s.serverUrl, rid);
+        }
     }
     // Guard so geometry-save handlers ignore the restore-driven property
     // changes during the first paint.
@@ -158,7 +215,7 @@ ApplicationWindow {
                 currentIndex: (serverManager.activeServer
                                && serverManager.activeServer.viewingVoiceRoom) ? 1 : 0
 
-                MessageView { }
+                MessageView { id: messageViewInstance }
                 VoiceRoom  { }
             }
 
@@ -285,6 +342,43 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+Shift+,"; onActivated: clientSettingsGlobal.open() }
     Shortcut { sequence: "Ctrl+/"; onActivated: shortcutsDialogGlobal.open() }
     Shortcut { sequence: "Ctrl+K"; onActivated: searchPopupGlobal.open() }
+    // Ctrl+L focuses the message composer — standard "go to the
+    // input field" shortcut borrowed from terminals + Discord.
+    Shortcut {
+        sequence: "Ctrl+L"
+        onActivated: {
+            if (serverManager.activeServer
+                && serverManager.activeServer.activeRoomId) {
+                root.focusComposer();
+            }
+        }
+    }
+
+    // Push-to-talk hotkey. Only meaningful while voiceMode === "ptt" and
+    // the user is in a voice call. autoRepeat re-fires every ~30ms while
+    // held, so the release timer acts as a "finger off key" detector —
+    // once the shortcut stops firing for `interval` ms, we release PTT.
+    Shortcut {
+        sequence: appSettings.pttKeySequence
+        enabled: appSettings.voiceMode === "ptt"
+              && serverManager.activeServer
+              && serverManager.activeServer.inVoiceChannel
+        autoRepeat: true
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (serverManager.activeServer)
+                serverManager.activeServer.setPttPressed(true);
+            pttReleaseTimer.restart();
+        }
+    }
+    Timer {
+        id: pttReleaseTimer
+        interval: 120
+        onTriggered: {
+            if (serverManager.activeServer)
+                serverManager.activeServer.setPttPressed(false);
+        }
+    }
 
     // Global popup instances. ChannelList reaches these via
     // ApplicationWindow.window.openUserSettings() / openClientSettings()
@@ -319,6 +413,17 @@ ApplicationWindow {
         parent: Overlay.overlay
     }
 
+    // Direct-messages surface now lives inline in ChannelList
+    // (overlayed when `serverManager.viewingDms`); no separate
+    // popup. openDirectMessages() just flips the view flag.
+
+    // Presence + custom-status picker, reachable from the user
+    // menu in the channel-list footer (and the mobile overflow).
+    StatusPicker {
+        id: statusPickerGlobal
+        parent: Overlay.overlay
+    }
+
     // App-wide toast surface. Every subsystem reports success/failure
     // through `Window.window.toast(text, kind)` or one of the kind-
     // shortcut helpers. Parented to Overlay.overlay so toasts float
@@ -332,6 +437,20 @@ ApplicationWindow {
     function openClientSettings() { clientSettingsGlobal.open(); }
     function openShortcutsDialog() { shortcutsDialogGlobal.open(); }
     function openSearch() { searchPopupGlobal.open(); }
+    // DM chip click / overflow-menu / shortcut all route here.
+    // Flipping the view flag is cheaper than opening a popup and
+    // matches the "DMs sit in the sidebar as a destination" model.
+    function openDirectMessages() {
+        serverManager.setViewingDms(true);
+    }
+    function openStatusPicker() { statusPickerGlobal.open(); }
+    // Forward the Ctrl+L shortcut — MessageView exposes
+    // `focusComposer()` that walks to the MessageInput's TextArea
+    // and forceActiveFocus().
+    function focusComposer() {
+        if (messageViewInstance && messageViewInstance.focusComposer)
+            messageViewInstance.focusComposer();
+    }
     function openRoleAssignment(userId, displayName) {
         roleAssignGlobal.openFor(userId, displayName);
     }

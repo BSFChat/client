@@ -1,5 +1,30 @@
+# Build directories (CMake out-of-tree). Covers build/, build-ios-device/,
+# build-ios-simulator/, build-android/, build-android-arm64/, etc.
 build/
+build-*/
+
+# CMake incremental / tooling artefacts
 .cache/
 compile_commands.json
-build-ios-*/
+CMakeUserPresets.json
+
+# Vendored prebuilts — rebuilt via scripts/, not committed
 deps/
+
+# macOS metadata
+.DS_Store
+
+# Editor noise
+*.swp
+*~
+.vscode/
+.idea/
+
+# Signed APKs / installers etc. live in /tmp by convention; guard anyway
+*.apk
+*.aab
+*.keystore
+
+# macOS iconset is an intermediate dir consumed by iconutil to produce
+# branding/BSFChat.icns — regenerate with branding/generate_icons.py.
+branding/BSFChat.iconset/

@@ -1,6 +1,7 @@
 #include "core/Settings.h"
 
 #include <algorithm>
+#include <QCryptographicHash>
 #include <QMediaDevices>
 #include <QAudioDevice>
 #include <QVariantMap>
@@ -365,6 +366,68 @@ void Settings::setRoomMuted(const QString& roomId, bool muted)
     emit mutedRoomsChanged();
 }
 
+QString Settings::roomNotificationMode(const QString& roomId) const
+{
+    if (roomId.isEmpty()) return QStringLiteral("all");
+    // Hashed key keeps the QSettings group name safe for
+    // room-ids containing `!:/` etc. that QSettings would treat
+    // as sub-groups.
+    QString key = QStringLiteral("notifMode/")
+        + QString::fromLatin1(
+            QCryptographicHash::hash(roomId.toUtf8(),
+                                     QCryptographicHash::Sha1).toHex());
+    QString v = m_settings.value(key).toString();
+    if (v.isEmpty()) return QStringLiteral("all");
+    if (v == QStringLiteral("all")
+        || v == QStringLiteral("mentions")
+        || v == QStringLiteral("none")) return v;
+    return QStringLiteral("all");
+}
+
+void Settings::setRoomNotificationMode(const QString& roomId,
+                                       const QString& mode)
+{
+    if (roomId.isEmpty()) return;
+    QString normalized = mode;
+    if (normalized != QStringLiteral("all")
+        && normalized != QStringLiteral("mentions")
+        && normalized != QStringLiteral("none")) {
+        normalized = QStringLiteral("all");
+    }
+    QString key = QStringLiteral("notifMode/")
+        + QString::fromLatin1(
+            QCryptographicHash::hash(roomId.toUtf8(),
+                                     QCryptographicHash::Sha1).toHex());
+    if (normalized == QStringLiteral("all")) {
+        m_settings.remove(key);
+    } else {
+        m_settings.setValue(key, normalized);
+    }
+}
+
+QString Settings::lastTextRoomFor(const QString& serverUrl) const
+{
+    if (serverUrl.isEmpty()) return {};
+    // Key by URL hash so stray punctuation in the URL doesn't trip
+    // up QSettings' group parser. The hash is stable per URL.
+    QString key = QStringLiteral("lastTextRoom/")
+        + QString::fromLatin1(
+            QCryptographicHash::hash(serverUrl.toUtf8(),
+                                     QCryptographicHash::Sha1).toHex());
+    return m_settings.value(key).toString();
+}
+
+void Settings::setLastTextRoomFor(const QString& serverUrl,
+                                  const QString& roomId)
+{
+    if (serverUrl.isEmpty() || roomId.isEmpty()) return;
+    QString key = QStringLiteral("lastTextRoom/")
+        + QString::fromLatin1(
+            QCryptographicHash::hash(serverUrl.toUtf8(),
+                                     QCryptographicHash::Sha1).toHex());
+    m_settings.setValue(key, roomId);
+}
+
 int Settings::screenShareQuality() const
 {
     // Clamp stored value to the valid 0..3 range in case an older
@@ -379,4 +442,26 @@ void Settings::setScreenShareQuality(int level)
     if (level == screenShareQuality()) return;
     m_settings.setValue(QStringLiteral("screenShareQuality"), level);
     emit screenShareQualityChanged();
+}
+
+QString Settings::voiceMode() const
+{
+    return m_settings.value("voiceMode", "open").toString();
+}
+void Settings::setVoiceMode(const QString& v)
+{
+    if (v == voiceMode()) return;
+    m_settings.setValue("voiceMode", v);
+    emit voiceModeChanged();
+}
+
+QString Settings::pttKeySequence() const
+{
+    return m_settings.value("pttKeySequence", "Ctrl+Space").toString();
+}
+void Settings::setPttKeySequence(const QString& seq)
+{
+    if (seq == pttKeySequence()) return;
+    m_settings.setValue("pttKeySequence", seq);
+    emit pttKeySequenceChanged();
 }

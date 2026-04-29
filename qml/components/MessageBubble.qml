@@ -65,6 +65,7 @@ Item {
     // Right-click context-menu action: redact (delete) the message.
     // Allowed for the sender or anyone with MANAGE_MESSAGES.
     signal deleteRequested(string eventId)
+    signal editHistoryRequested(string eventId)
     // User chose "Reply in Thread" — MessageView opens the ThreadPanel
     // anchored on this event. If the message is already part of a
     // thread (threadRootId set), we open the thread, not a new one.
@@ -116,7 +117,12 @@ Item {
     // TapHandler instead of a MouseArea so it cooperates with the
     // TextEdit body's selectByMouse — children still handle their own
     // left-drag text selection, and we only grab the right button here.
+    // Desktop-only: on Android Qt synthesises a right-click from any
+    // touch that lingers past the long-press threshold, which was
+    // firing this handler on a simple video tap before the video's
+    // own MouseArea got the release. Mobile uses onLongPressed below.
     TapHandler {
+        enabled: !Theme.isMobile
         acceptedButtons: Qt.RightButton
         // popup() with no args uses the OS cursor position, which is
         // what we want for a right-click context menu. popup(pos)
@@ -125,6 +131,77 @@ Item {
         // the menu half a screen away from the actual click.
         onTapped: contextMenu.popup()
     }
+
+    // Mobile long-press → context menu. Separate handler so it only
+    // runs on iOS/Android — on desktop we don't want Qt's built-in
+    // touch-to-right-click synthesis (which fires an extra context
+    // menu half a second after any slow click).
+    TapHandler {
+        enabled: Theme.isMobile
+        acceptedButtons: Qt.LeftButton
+        // Default threshold is ~500ms on Android, which matches
+        // platform long-press feel.
+        onLongPressed: {
+            if (typeof haptics !== "undefined") haptics.longPress();
+            contextMenu.popup();
+        }
+    }
+
+    // Swipe-right-to-reply on mobile. Uses a DragHandler rather than
+    // a MouseArea so nested click-targets (links, attached images,
+    // video cards) still receive their own taps — PointerHandlers
+    // cooperate with each other via exclusive grabs rather than
+    // eating all input like a top-level MouseArea would. The handler
+    // only acts on horizontal motion so vertical scrolling still
+    // drives MessageView's Flickable.
+    DragHandler {
+        id: swipeReplyDrag
+        enabled: Theme.isMobile
+        target: null
+        xAxis.enabled: true
+        yAxis.enabled: false
+        // Small activation threshold so light taps don't trigger.
+        // Qt handles this via the QPointingDevice::MouseEmulation grab.
+        property real dragX: 0
+        onActiveTranslationChanged: {
+            if (active) {
+                // Only rightward, capped so the bubble doesn't slide
+                // off the right edge of the screen.
+                dragX = Math.max(0, Math.min(activeTranslation.x, 120));
+            }
+        }
+        onActiveChanged: {
+            if (!active) {
+                if (dragX > 80) {
+                    if (typeof haptics !== "undefined") haptics.longPress();
+                    bubble.replyRequested(bubble.eventId, bubble.body,
+                        bubble.senderDisplayName);
+                }
+                snapBack.from = dragX;
+                snapBack.start();
+            }
+        }
+    }
+    NumberAnimation {
+        id: snapBack
+        target: swipeReplyDrag
+        property: "dragX"
+        to: 0
+        duration: Theme.motion.fastMs
+        easing.type: Easing.OutCubic
+    }
+    // Reply hint peeks in from the left edge as the bubble drags.
+    Icon {
+        visible: Theme.isMobile && swipeReplyDrag.dragX > 4
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.leftMargin: Theme.sp.s4
+        name: "reply"
+        size: 22
+        color: Theme.accent
+        opacity: Math.min(1.0, swipeReplyDrag.dragX / 80)
+    }
+    transform: Translate { x: swipeReplyDrag.dragX }
 
     // True when we can show the "Delete" menu item. Either we sent the
     // message, or we have MANAGE_MESSAGES in the active room.
@@ -235,11 +312,38 @@ Item {
         }
 
         CtxItem {
+            text: "Show edit history"
+            iconName: "edit"
+            visible: bubble.edited
+            onTriggered: bubble.editHistoryRequested(bubble.eventId)
+        }
+        // Add reaction — mobile's only entry point for adding a
+        // new emoji reaction, since the hover-revealed smile-plus
+        // button never fires on touch. Desktop still uses the
+        // hover bar; we show this on both platforms so the context
+        // menu is a complete surface.
+        CtxItem {
+            text: "Add reaction"
+            iconName: "smile-plus"
+            onTriggered: bubble.openReactPicker()
+        }
+        CtxItem {
             text: "Copy text"
             iconName: "copy"
             onTriggered: {
                 if (serverManager) serverManager.copyToClipboard(bubble.body);
             }
+        }
+        // Mobile-only: Android's default long-press-to-select-text
+        // gesture is shadowed by our context menu's long-press
+        // trigger. Give the user an explicit affordance that opens
+        // a sheet with the message body inside a selectable TextEdit
+        // so native copy/share gestures work.
+        CtxItem {
+            text: "Select text"
+            iconName: "annotate"
+            visible: Theme.isMobile
+            onTriggered: textSelectionSheet.open()
         }
         CtxItem {
             text: "Copy message link"
@@ -459,7 +563,7 @@ Item {
             id: reactButton
             width: 28; height: 24
             radius: Theme.r1
-            color: reactMouse.containsMouse || reactPicker.visible
+            color: reactMouse.containsMouse || ctxReactPicker.visible
                    ? Theme.bg3 : Theme.bg1
             border.color: Theme.line
             border.width: 1
@@ -467,7 +571,7 @@ Item {
                 anchors.centerIn: parent
                 name: "smile-plus"
                 size: 14
-                color: reactMouse.containsMouse || reactPicker.visible
+                color: reactMouse.containsMouse || ctxReactPicker.visible
                        ? Theme.accent : Theme.fg1
             }
             MouseArea {
@@ -475,21 +579,10 @@ Item {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                    if (reactPicker.visible) reactPicker.close();
-                    else reactPicker.open();
-                }
-            }
-
-            EmojiPicker {
-                id: reactPicker
-                // Anchor above-right so the picker doesn't cover the bubble.
-                y: -height - Theme.sp.s1
-                x: -width + 28
-                onEmojiSelected: function(emoji) {
-                    bubble.reactionToggled(bubble.eventId, emoji);
-                    reactPicker.close();
-                }
+                // Route through bubble.openReactPicker() so the
+                // desktop hover bar and mobile context menu share
+                // one code path (and one picker instance).
+                onClicked: bubble.openReactPicker()
             }
         }
 
@@ -761,16 +854,24 @@ Item {
                         spacing: Theme.sp.s1
 
                         Rectangle {
-                            Layout.preferredWidth: Math.min(400, mediaImage.sourceSize.width > 0 ? mediaImage.sourceSize.width : 400)
+                            // Cap at 260 on mobile so the image doesn't
+                            // overflow the narrow phone bubble. Desktop
+                            // keeps the 400×300 inline-image norm.
+                            readonly property int maxW: Theme.isMobile ? 260 : 400
+                            readonly property int maxH: Theme.isMobile ? 240 : 300
+                            Layout.preferredWidth: Math.min(maxW,
+                                mediaImage.sourceSize.width > 0
+                                    ? mediaImage.sourceSize.width : maxW)
                             Layout.preferredHeight: {
                                 if (mediaImage.sourceSize.width > 0 && mediaImage.sourceSize.height > 0) {
-                                    var scale = Math.min(400 / mediaImage.sourceSize.width, 300 / mediaImage.sourceSize.height, 1.0);
+                                    var scale = Math.min(maxW / mediaImage.sourceSize.width,
+                                                          maxH / mediaImage.sourceSize.height, 1.0);
                                     return mediaImage.sourceSize.height * scale;
                                 }
-                                return 200;
+                                return Math.min(200, maxH);
                             }
-                            Layout.maximumWidth: 400
-                            Layout.maximumHeight: 300
+                            Layout.maximumWidth: maxW
+                            Layout.maximumHeight: maxH
                             radius: Theme.r2
                             color: Theme.bg3
                             clip: true
@@ -893,7 +994,7 @@ Item {
                                 font.pixelSize: Theme.fontSize.sm
                                 color: Theme.fg2
                                 elide: Text.ElideMiddle
-                                Layout.maximumWidth: 300
+                                Layout.maximumWidth: Theme.isMobile ? 200 : 300
                             }
 
                             Text {
@@ -1006,6 +1107,25 @@ Item {
                           && bubble.msgtype !== "m.file")
                 text: {
                     var base = bubble.formattedBody !== "" ? bubble.formattedBody : bubble.body;
+                    // m.emote ("/me foo") renders as "<sender> foo" in italics
+                    // and with accent colour, same convention Element / Fluffy
+                    // use. Italics + sender prefix means we always promote to
+                    // RichText for emotes.
+                    if (bubble.msgtype === "m.emote") {
+                        var senderEsc = bubble.senderDisplayName
+                            .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                            .replace(/>/g, "&gt;");
+                        var bodyEsc = bubble.body
+                            .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                            .replace(/>/g, "&gt;");
+                        var out = '<span style="color:' + Theme.accent
+                            + ';font-weight:600">* ' + senderEsc
+                            + '</span> <i>' + bodyEsc + '</i>';
+                        if (bubble.edited)
+                            out += '<span style="color:#8e9297;font-size:small">'
+                                 + ' (edited)</span>';
+                        return out;
+                    }
                     if (!bubble.edited) return base;
                     // RichText mode lets us style the badge; PlainText mode
                     // appends raw text. Promote to RichText when editing.
@@ -1016,7 +1136,9 @@ Item {
                     var escaped = base.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
                     return escaped + suffix;
                 }
-                textFormat: (bubble.formattedBody !== "" || bubble.edited)
+                textFormat: (bubble.msgtype === "m.emote"
+                             || bubble.formattedBody !== ""
+                             || bubble.edited)
                             ? TextEdit.RichText : TextEdit.PlainText
                 wrapMode: TextEdit.Wrap
                 font.family: Theme.fontSans
@@ -1184,5 +1306,136 @@ Item {
         if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
         if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
         return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
+    }
+
+    // Reaction picker reachable from both the hover-bar smile-plus
+    // button (desktop) and the context menu's "Add reaction" entry
+    // (both platforms, but mobile relies on it). Parented to
+    // Overlay.overlay so it floats correctly regardless of which
+    // trigger caused it to open — the in-line EmojiPicker inside
+    // the hover-bar's reactButton only works on desktop because
+    // the reactButton itself is hover-gated and thus hidden on
+    // mobile.
+    EmojiPicker {
+        id: ctxReactPicker
+        parent: Overlay.overlay
+        anchors.centerIn: Overlay.overlay
+        modal: true
+        onEmojiSelected: function(emoji) {
+            bubble.reactionToggled(bubble.eventId, emoji);
+            ctxReactPicker.close();
+        }
+    }
+    function openReactPicker() {
+        ctxReactPicker.open();
+    }
+
+    // Mobile text-selection sheet. Opened from the "Select text"
+    // context-menu entry. Renders the raw message body inside a
+    // TextEdit with mobile-native selection handles so the user
+    // can Android-copy part of a message rather than all of it.
+    Popup {
+        id: textSelectionSheet
+        parent: Overlay.overlay
+        anchors.centerIn: Overlay.overlay
+        width: parent ? parent.width - 32 : 320
+        height: parent ? Math.min(parent.height * 0.6, 480) : 360
+        modal: true
+        padding: Theme.sp.s4
+        background: Rectangle {
+            color: Theme.bg1
+            radius: Theme.r3
+            border.color: Theme.line
+            border.width: 1
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: Theme.sp.s3
+            Text {
+                text: "Select text"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.md
+                font.weight: Theme.fontWeight.semibold
+                color: Theme.fg0
+            }
+            Flickable {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                contentWidth: width
+                contentHeight: bodyEdit.contentHeight + 8
+                clip: true
+                TextEdit {
+                    id: bodyEdit
+                    width: parent.width
+                    text: bubble.body
+                    wrapMode: TextEdit.Wrap
+                    readOnly: true
+                    selectByMouse: true
+                    selectByKeyboard: true
+                    persistentSelection: true
+                    color: Theme.fg0
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.base
+                }
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                spacing: Theme.sp.s3
+
+                // Quick "Copy all" — Android's selection handles in
+                // a readonly TextEdit are reliable but not always
+                // obvious on first use. An explicit button gives
+                // new users a clear affordance.
+                Button {
+                    text: "Copy"
+                    onClicked: {
+                        var toCopy = bodyEdit.selectedText.length > 0
+                            ? bodyEdit.selectedText : bubble.body;
+                        if (serverManager)
+                            serverManager.copyToClipboard(toCopy);
+                        if (typeof haptics !== "undefined") haptics.tick();
+                        textSelectionSheet.close();
+                    }
+                    contentItem: Text {
+                        text: parent.text
+                        color: Theme.fg0
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.base
+                        font.weight: Theme.fontWeight.medium
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: parent.hovered ? Theme.bg3 : Theme.bg2
+                        border.color: Theme.line
+                        border.width: 1
+                        radius: Theme.r2
+                        implicitWidth: 88
+                        implicitHeight: 40
+                    }
+                }
+
+                Button {
+                    text: "Done"
+                    onClicked: textSelectionSheet.close()
+                    contentItem: Text {
+                        text: parent.text
+                        color: Theme.onAccent
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.base
+                        font.weight: Theme.fontWeight.semibold
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: parent.hovered ? Theme.accentDim : Theme.accent
+                        radius: Theme.r2
+                        implicitWidth: 88
+                        implicitHeight: 40
+                    }
+                }
+            }
+        }
     }
 }

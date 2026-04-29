@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive-icon background layer: flat accent tile. The Launcher
+     masks this with a platform shape (circle, squircle, etc.) so we
+     don't draw the rounding ourselves. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+       android:shape="rectangle">
+    <solid android:color="#7CE2C9" />
+</shape>

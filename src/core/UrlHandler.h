@@ -51,8 +51,21 @@ public:
     // HKCU registry entries. Linux writes a .desktop file. All are idempotent.
     void registerSchemeHandler();
 
+    // Android: read the Activity's launch intent and, if it's an
+    // ACTION_SEND, emit sharedPayloadReceived. Called once after
+    // engine.load() so QML listeners are wired. No-op off Android.
+    void checkAndroidShareIntent();
+
 signals:
     void urlReceived(const QString& url);
+    // Android ACTION_SEND share. `payloadUri` is either a content://
+    // URI (for EXTRA_STREAM, i.e. shared file) or a plain text blob
+    // (for EXTRA_TEXT). `mimeType` is whatever the source app declared.
+    // MobileMain wires this into the active room's composer /
+    // sendMediaMessage path.
+    void sharedPayloadReceived(const QString& payloadOrUri,
+                               const QString& mimeType,
+                               bool isFile);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* ev) override;

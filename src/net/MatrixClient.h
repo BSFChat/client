@@ -72,6 +72,8 @@ public:
     // standalone message (acceptable fallback).
     void sendThreadReply(const QString& roomId, const QString& body,
                           const QString& threadRootId);
+    // Send an m.room.message with msgtype=m.emote (the /me command).
+    void sendEmote(const QString& roomId, const QString& body);
     // Send an m.reaction event annotating targetEventId with `emoji`.
     // Server treats it as a normal event and distributes it through /sync;
     // the client aggregates state in MessageModel.
@@ -100,6 +102,12 @@ public:
     void getProfile(const QString& userId);
     void setDisplayName(const QString& userId, const QString& displayName);
     void setAvatarUrl(const QString& userId, const QString& avatarUrl);
+
+    // PUT /presence/{userId}/status — pushes presence + an optional
+    // free-form status message. Matrix delivers this to other clients
+    // in their next /sync's `presence` block.
+    void putPresence(const QString& userId, const QString& presence,
+                      const QString& statusMessage);
 
     // Typing
     void setTyping(const QString& roomId, const QString& userId, bool typing, int timeout = 5000);
@@ -170,6 +178,10 @@ signals:
     void messagesError(const QString& error);
 
     void mediaUploaded(const QString& contentUri);
+    // Per-upload progress 0..1. QNetworkAccessManager re-uses the
+    // same reply object until it finishes, so `filename` identifies
+    // which upload the tick belongs to when several run at once.
+    void mediaUploadProgress(const QString& filename, double progress);
     void mediaUploadError(const QString& error);
 
     void voiceJoined(const QString& roomId, const QJsonArray& members);

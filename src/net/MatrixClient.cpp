@@ -511,6 +511,34 @@ void MatrixClient::replyToMessage(const QString& roomId, const QString& body,
     });
 }
 
+void MatrixClient::sendEmote(const QString& roomId, const QString& body)
+{
+    static int txnCounter = 0;
+    QString txnId = QString("e%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
+    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
+                   + QUrl::toPercentEncoding(roomId)
+                   + "/send/m.room.message/" + txnId;
+    json content;
+    content["msgtype"] = "m.emote";
+    content["body"] = body.toStdString();
+    QByteArray reqBody = QByteArray::fromStdString(content.dump());
+    auto* reply = makeRequest("PUT", path, reqBody);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        auto data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit sendMessageError(QString::fromUtf8(data));
+            return;
+        }
+        try {
+            auto j = json::parse(data.toStdString());
+            emit messageSent(QString::fromStdString(j.value("event_id", "")));
+        } catch (const std::exception& e) {
+            emit sendMessageError(QString::fromStdString(e.what()));
+        }
+    });
+}
+
 void MatrixClient::sendThreadReply(const QString& roomId, const QString& body,
                                     const QString& threadRootId)
 {
@@ -660,8 +688,15 @@ void MatrixClient::uploadMedia(const QByteArray& data, const QString& contentTyp
     }
 
     auto* reply = m_nam.post(request, data);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::uploadProgress, this,
+        [this, filename](qint64 sent, qint64 total) {
+            if (total <= 0) return;
+            emit mediaUploadProgress(filename,
+                double(sent) / double(total));
+        });
+    connect(reply, &QNetworkReply::finished, this, [this, reply, filename]() {
         reply->deleteLater();
+        emit mediaUploadProgress(filename, 1.0);
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             emit mediaUploadError(QString::fromUtf8(data));
@@ -724,6 +759,29 @@ void MatrixClient::setDisplayName(const QString& userId, const QString& displayN
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) return;
         emit displayNameUpdated();
+    });
+}
+
+void MatrixClient::putPresence(const QString& userId,
+                                const QString& presence,
+                                const QString& statusMessage)
+{
+    QString path = QString::fromUtf8(bsfchat::api_path::kPresence)
+                   + QUrl::toPercentEncoding(userId) + "/status";
+
+    json body;
+    body["presence"] = presence.toStdString();
+    if (!statusMessage.isEmpty()) {
+        body["status_msg"] = statusMessage.toStdString();
+    }
+    QByteArray reqBody = QByteArray::fromStdString(body.dump());
+
+    auto* reply = makeRequest("PUT", path, reqBody);
+    // Fire-and-forget — server-side write failures aren't worth
+    // surfacing as toasts (presence is best-effort), but we still
+    // delete the reply so it doesn't leak.
+    connect(reply, &QNetworkReply::finished, this, [reply]() {
+        reply->deleteLater();
     });
 }
 

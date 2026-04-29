@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Foreground layer: a thick "B" glyph centered in the 108dp
+     adaptive-icon canvas. Keep all visible content inside the inner
+     72dp safe area (±18dp) so the Launcher's random shape masking
+     doesn't clip it. Vector drawable to avoid shipping multiple
+     DPI-rasterised PNGs. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Stylised speech-bubble outline. The 18dp inset from every
+         edge keeps the entire shape inside the mask safe area. -->
+    <path
+        android:pathData="M32,30
+                          L76,30
+                          A10,10 0 0 1 86,40
+                          L86,66
+                          A10,10 0 0 1 76,76
+                          L48,76
+                          L38,84
+                          L38,76
+                          L32,76
+                          A10,10 0 0 1 22,66
+                          L22,40
+                          A10,10 0 0 1 32,30
+                          Z"
+        android:fillColor="#0C1821" />
+    <!-- Bold "B" inside the bubble. -->
+    <path
+        android:pathData="M44,44
+                          L44,62
+                          L58,62
+                          A4,4 0 0 0 62,58
+                          A4,4 0 0 0 58,54
+                          L50,54
+                          M50,54
+                          L58,54
+                          A4,4 0 0 0 62,50
+                          A4,4 0 0 0 58,46
+                          L44,46
+                          L44,54"
+        android:strokeColor="#7CE2C9"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pre-Android-12 fallback. The v31 attributes above don't exist
+     on these APIs so we ship a stripped-down theme that just sets
+     the window background to our brand dark so we don't see a
+     momentary white flash. Platform splash composition is a no-op
+     here; the activity itself draws this background until QML
+     paints. -->
+<resources>
+    <style name="Theme.BSFChat.Splash"
+           parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_bg</item>
+    </style>
+</resources>

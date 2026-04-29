@@ -1,5 +1,11 @@
 #include "voice/PeerConnectionManager.h"
 #include <QDebug>
+#include <QLoggingCategory>
+
+// Mirror VoiceEngine's category. Each TU owns its own QLoggingCategory
+// instance — Qt coalesces them by name at runtime, so enabling
+// `bsfchat.voice.info=true` picks up both this file and VoiceEngine.
+Q_LOGGING_CATEGORY(logVoicePc, "bsfchat.voice", QtWarningMsg)
 
 namespace {
 const char* stateStr(rtc::PeerConnection::State s) {
@@ -41,14 +47,14 @@ PeerConnectionManager::PeerConnectionManager(const QString& peerId, const QStrin
     , m_peerId(peerId)
     , m_callId(callId)
 {
-    qInfo("[voice] Creating peer connection → %s (call %s)",
+    qCInfo(logVoicePc, " Creating peer connection → %s (call %s)",
           qPrintable(peerId), qPrintable(callId));
     m_pc = std::make_shared<rtc::PeerConnection>(config);
     setupCallbacks();
 }
 
 PeerConnectionManager::~PeerConnectionManager() {
-    qInfo("[voice] Destroying peer connection → %s (sent=%d recv=%d)",
+    qCInfo(logVoicePc, " Destroying peer connection → %s (sent=%d recv=%d)",
           qPrintable(m_peerId), m_framesSent, m_framesReceived);
     if (m_dc) m_dc->close();
     if (m_pc) m_pc->close();
@@ -59,7 +65,7 @@ void PeerConnectionManager::setupCallbacks() {
         std::string type = desc.typeString();
         std::string sdp = std::string(desc);
         QMetaObject::invokeMethod(this, [this, type, sdp]() {
-            qInfo("[voice] [%s] Local SDP %s ready",
+            qCInfo(logVoicePc, " [%s] Local SDP %s ready",
                   qPrintable(m_peerId), type.c_str());
             emit localDescriptionReady(type, sdp);
         }, Qt::QueuedConnection);
@@ -75,7 +81,7 @@ void PeerConnectionManager::setupCallbacks() {
 
     m_pc->onStateChange([this](rtc::PeerConnection::State state) {
         QMetaObject::invokeMethod(this, [this, state]() {
-            qInfo("[voice] [%s] PeerConnection state: %s",
+            qCInfo(logVoicePc, " [%s] PeerConnection state: %s",
                   qPrintable(m_peerId), stateStr(state));
 
             PeerState newState = m_peerState;
@@ -110,21 +116,21 @@ void PeerConnectionManager::setupCallbacks() {
 
     m_pc->onIceStateChange([this](rtc::PeerConnection::IceState state) {
         QMetaObject::invokeMethod(this, [this, state]() {
-            qInfo("[voice] [%s] ICE state: %s",
+            qCInfo(logVoicePc, " [%s] ICE state: %s",
                   qPrintable(m_peerId), iceStr(state));
         }, Qt::QueuedConnection);
     });
 
     m_pc->onGatheringStateChange([this](rtc::PeerConnection::GatheringState state) {
         QMetaObject::invokeMethod(this, [this, state]() {
-            qInfo("[voice] [%s] ICE gathering: %s",
+            qCInfo(logVoicePc, " [%s] ICE gathering: %s",
                   qPrintable(m_peerId), gatherStr(state));
         }, Qt::QueuedConnection);
     });
 
     m_pc->onDataChannel([this](std::shared_ptr<rtc::DataChannel> dc) {
         QMetaObject::invokeMethod(this, [this, dc]() {
-            qInfo("[voice] [%s] Incoming data channel",
+            qCInfo(logVoicePc, " [%s] Incoming data channel",
                   qPrintable(m_peerId));
             setupDataChannel(dc);
         }, Qt::QueuedConnection);
@@ -136,14 +142,14 @@ void PeerConnectionManager::setupDataChannel(std::shared_ptr<rtc::DataChannel> d
 
     m_dc->onOpen([this]() {
         QMetaObject::invokeMethod(this, [this]() {
-            qInfo("[voice] [%s] DataChannel open — audio can flow",
+            qCInfo(logVoicePc, " [%s] DataChannel open — audio can flow",
                   qPrintable(m_peerId));
         }, Qt::QueuedConnection);
     });
 
     m_dc->onClosed([this]() {
         QMetaObject::invokeMethod(this, [this]() {
-            qInfo("[voice] [%s] DataChannel closed",
+            qCInfo(logVoicePc, " [%s] DataChannel closed",
                   qPrintable(m_peerId));
         }, Qt::QueuedConnection);
     });
@@ -172,6 +178,12 @@ void PeerConnectionManager::setupDataChannel(std::shared_ptr<rtc::DataChannel> d
             QMetaObject::invokeMethod(this, [this, payload]() {
                 emit screenFrameReceived(payload);
             }, Qt::QueuedConnection);
+        } else if (tag == 0x03) {
+            payload = QByteArray(reinterpret_cast<const char*>(data.data() + 1),
+                                 static_cast<int>(data.size() - 1));
+            QMetaObject::invokeMethod(this, [this, payload]() {
+                emit cameraFrameReceived(payload);
+            }, Qt::QueuedConnection);
         } else {
             // Legacy untagged audio — no tag strip.
             payload = QByteArray(reinterpret_cast<const char*>(data.data()),
@@ -185,7 +197,7 @@ void PeerConnectionManager::setupDataChannel(std::shared_ptr<rtc::DataChannel> d
 }
 
 void PeerConnectionManager::createOffer() {
-    qInfo("[voice] [%s] Creating offer (we are offerer)",
+    qCInfo(logVoicePc, " [%s] Creating offer (we are offerer)",
           qPrintable(m_peerId));
     // Create unreliable DataChannel for audio
     rtc::DataChannelInit dcInit;
@@ -199,7 +211,7 @@ void PeerConnectionManager::createOffer() {
 }
 
 void PeerConnectionManager::applyOffer(const std::string& sdp) {
-    qInfo("[voice] [%s] Applying remote offer", qPrintable(m_peerId));
+    qCInfo(logVoicePc, " [%s] Applying remote offer", qPrintable(m_peerId));
     rtc::Description desc(sdp, rtc::Description::Type::Offer);
     m_pc->setRemoteDescription(desc);
     m_remoteDescriptionSet = true;
@@ -209,7 +221,7 @@ void PeerConnectionManager::applyOffer(const std::string& sdp) {
 }
 
 void PeerConnectionManager::applyAnswer(const std::string& sdp) {
-    qInfo("[voice] [%s] Applying remote answer", qPrintable(m_peerId));
+    qCInfo(logVoicePc, " [%s] Applying remote answer", qPrintable(m_peerId));
     rtc::Description desc(sdp, rtc::Description::Type::Answer);
     m_pc->setRemoteDescription(desc);
     m_remoteDescriptionSet = true;
@@ -226,7 +238,7 @@ void PeerConnectionManager::addRemoteCandidate(const std::string& candidate, con
 
 void PeerConnectionManager::flushPendingCandidates() {
     if (!m_pendingCandidates.empty()) {
-        qInfo("[voice] [%s] Flushing %d buffered ICE candidates",
+        qCInfo(logVoicePc, " [%s] Flushing %d buffered ICE candidates",
               qPrintable(m_peerId), int(m_pendingCandidates.size()));
     }
     for (const auto& [cand, mid] : m_pendingCandidates) {
@@ -254,6 +266,16 @@ void PeerConnectionManager::sendScreenFrame(const QByteArray& jpegData) {
     rtc::binary data;
     data.reserve(jpegData.size() + 1);
     data.push_back(std::byte{0x02});
+    auto* raw = reinterpret_cast<const std::byte*>(jpegData.constData());
+    data.insert(data.end(), raw, raw + jpegData.size());
+    m_dc->send(data);
+}
+
+void PeerConnectionManager::sendCameraFrame(const QByteArray& jpegData) {
+    if (!m_dc || !m_dc->isOpen()) return;
+    rtc::binary data;
+    data.reserve(jpegData.size() + 1);
+    data.push_back(std::byte{0x03});
     auto* raw = reinterpret_cast<const std::byte*>(jpegData.constData());
     data.insert(data.end(), raw, raw + jpegData.size());
     m_dc->send(data);

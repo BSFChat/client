@@ -158,6 +158,32 @@ QString RoomListModel::roomTopic(const QString& roomId) const
     return m_rooms[idx].topic;
 }
 
+bool RoomListModel::isVoiceRoom(const QString& roomId) const
+{
+    int idx = findRoom(roomId);
+    if (idx < 0) return false;
+    return m_rooms[idx].isVoice;
+}
+
+bool RoomListModel::hasRoom(const QString& roomId) const
+{
+    return findRoom(roomId) >= 0;
+}
+
+QString RoomListModel::firstTextRoomId() const
+{
+    // Pick the first room that isn't a voice channel, in current
+    // model order. We don't re-sort here — the channel list as the
+    // user sees it already follows category + sortOrder, and picking
+    // a different room than what's visually on top of the drawer
+    // would be confusing.
+    for (const auto& r : m_rooms) {
+        if (!r.isVoice && r.roomType != "m.space")
+            return r.roomId;
+    }
+    return {};
+}
+
 void RoomListModel::updateVoiceState(const QString& roomId, bool isVoice)
 {
     ensureRoom(roomId);

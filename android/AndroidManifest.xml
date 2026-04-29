@@ -1,0 +1,123 @@
+<?xml version="1.0"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.qtproject.example.bsfchat_app"
+    android:installLocation="auto"
+    android:versionCode="1"
+    android:versionName="1.0">
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Foreground-service plumbing so the OS doesn't kill the
+         process mid-voice-call while the app is backgrounded. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Camera FGS permission — Android 14+ requires this in
+         addition to CAMERA whenever the camera is used from a
+         foreground service. VoiceService declares type
+         "microphone|camera" so a single FGS anchors both uses
+         during a call. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <!-- Allow the foreground-service notification to appear on
+         Android 13+ which gates all notification posting behind
+         a runtime opt-in. We request this lazily before first
+         voice-join (see AndroidPermissions). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Keep wake during a call so the OS doesn't doze us off the
+         network mid-conversation. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    
+    <supports-screens
+        android:anyDensity="true"
+        android:largeScreens="true"
+        android:normalScreens="true"
+        android:smallScreens="true" />
+    <application
+        android:name="org.qtproject.qt.android.bindings.QtApplication"
+        android:hardwareAccelerated="true"
+        android:label="BSFChat"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:requestLegacyExternalStorage="true"
+        android:allowNativeHeapPointerTagging="false"
+        android:allowBackup="true"
+        android:fullBackupOnly="false">
+        <activity
+            android:name="com.bsfchat.client.BSFChatActivity"
+            android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density"
+            android:label="BSFChat"
+            android:theme="@style/Theme.BSFChat.Splash"
+            android:launchMode="singleTop"
+            android:screenOrientation="unspecified"
+            android:windowSoftInputMode="adjustResize"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Share target: let other apps "Share to BSFChat" a
+                 single file or snippet of text. We handle the intent
+                 on the Qt side (UrlHandler) by reading the activity
+                 intent at launch and, if it's ACTION_SEND, uploading
+                 the payload to the user's current channel. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="application/*" />
+            </intent-filter>
+
+          <meta-data
+                android:name="android.app.lib_name"
+                android:value="bsfchat-app" />
+
+          <meta-data
+                android:name="android.app.arguments"
+                android:value="" />
+
+            <meta-data
+                android:name="android.app.extract_android_style"
+                android:value="minimal" />
+        </activity>
+
+        <!-- Foreground service anchors the process while the user
+             is in a voice channel — without this Android 8+ will
+             kill the backgrounded app and drop the call the moment
+             the user switches to another app. Declared with
+             foregroundServiceType="microphone" so Android 14+
+             permission checks find the matching FGS permission. -->
+        <service
+            android:name="com.bsfchat.client.VoiceService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|camera" />
+        <!-- Sync service — keeps the Matrix /sync alive so inbound
+             messages can fire Android notifications while the app
+             is backgrounded. Low-priority ongoing notification so
+             users know we're there (and can turn us off via channel
+             settings if they don't want background sync). -->
+        <service
+            android:name="com.bsfchat.client.SyncService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <!-- Screen-share foreground service — the MediaProjection
+             API requires a foreground service with
+             foregroundServiceType="mediaProjection" on Android 10+,
+             and a matching FOREGROUND_SERVICE_MEDIA_PROJECTION
+             permission on 14+. Without both the platform throws
+             SecurityException the moment we try to create the
+             VirtualDisplay. -->
+        <service
+            android:name="com.bsfchat.client.MediaProjectionService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+    </application>
+</manifest>

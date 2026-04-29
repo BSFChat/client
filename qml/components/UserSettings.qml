@@ -7,7 +7,9 @@ import BSFChat
 Popup {
     id: userSettings
 
-    width: 380
+    // Phone viewport clamps to ~272 px in the worst case; cap at 380
+    // so tablet / desktop still gets a comfortable dialog.
+    width: Math.min(380, (parent ? parent.width : 380) - 32)
     // Let height derive from the content so nothing gets clipped. The
     // contentItem is a ColumnLayout that reports its implicitHeight — add
     // padding + a comfortable margin.

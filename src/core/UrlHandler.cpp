@@ -17,6 +17,11 @@
 #  include <QSettings>
 #endif
 
+#ifdef Q_OS_ANDROID
+#  include <QJniEnvironment>
+#  include <QJniObject>
+#endif
+
 namespace {
 // Per-user socket so two accounts on the same machine don't step on each
 // other. Qt normalizes this to %TEMP% / /tmp / XDG_RUNTIME_DIR as appropriate.
@@ -199,5 +204,63 @@ void UrlHandler::registerSchemeHandler()
 #else
     // macOS: CFBundleURLTypes is injected into Info.plist by the build
     // system (see client/CMakeLists.txt). Nothing to do at runtime.
+#endif
+}
+
+void UrlHandler::checkAndroidShareIntent()
+{
+#ifdef Q_OS_ANDROID
+    QJniObject activity(QNativeInterface::QAndroidApplication::context());
+    if (!activity.isValid()) return;
+    QJniObject intent = activity.callObjectMethod(
+        "getIntent", "()Landroid/content/Intent;");
+    if (!intent.isValid()) return;
+
+    QJniObject actionObj = intent.callObjectMethod(
+        "getAction", "()Ljava/lang/String;");
+    if (!actionObj.isValid()) return;
+    QString action = actionObj.toString();
+    if (action != QStringLiteral("android.intent.action.SEND")) return;
+
+    // Grab the MIME type the source app declared so we can sniff
+    // text-vs-binary paths.
+    QJniObject typeObj = intent.callObjectMethod(
+        "getType", "()Ljava/lang/String;");
+    QString mime = typeObj.isValid() ? typeObj.toString() : QString();
+
+    // text/* shares go through EXTRA_TEXT as a plain String.
+    if (mime.startsWith("text/")) {
+        QJniObject textKey = QJniObject::fromString(
+            QStringLiteral("android.intent.extra.TEXT"));
+        QJniObject text = intent.callObjectMethod(
+            "getStringExtra",
+            "(Ljava/lang/String;)Ljava/lang/String;",
+            textKey.object<jstring>());
+        if (text.isValid()) {
+            emit sharedPayloadReceived(text.toString(), mime, false);
+        }
+        // Clear the action so a rotate/resume doesn't re-fire it.
+        intent.callObjectMethod("setAction",
+            "(Ljava/lang/String;)Landroid/content/Intent;",
+            QJniObject::fromString("").object<jstring>());
+        return;
+    }
+
+    // Everything else (image/video/audio/application/*) arrives as an
+    // EXTRA_STREAM Uri.
+    QJniObject streamKey = QJniObject::fromString(
+        QStringLiteral("android.intent.extra.STREAM"));
+    QJniObject uri = intent.callObjectMethod(
+        "getParcelableExtra",
+        "(Ljava/lang/String;)Landroid/os/Parcelable;",
+        streamKey.object<jstring>());
+    if (!uri.isValid()) return;
+    QString uriStr = uri.callObjectMethod(
+        "toString", "()Ljava/lang/String;").toString();
+    if (uriStr.isEmpty()) return;
+    emit sharedPayloadReceived(uriStr, mime, true);
+    intent.callObjectMethod("setAction",
+        "(Ljava/lang/String;)Landroid/content/Intent;",
+        QJniObject::fromString("").object<jstring>());
 #endif
 }

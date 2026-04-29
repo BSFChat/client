@@ -441,6 +441,50 @@ Popup {
                         text: "Device changes apply the next time you join a voice channel — leave and rejoin to pick up a new selection mid-call. Volume sliders aren't applied yet."
                     }
 
+                    SectionHeader {
+                        text: "Voice Activity"
+                        Layout.topMargin: Theme.sp.s5
+                    }
+
+                    SettingRow {
+                        title: "Input mode"
+                        description: "Open mic sends whenever you speak. Push-to-talk only transmits while you hold the shortcut key."
+                        ThemedComboBox {
+                            implicitWidth: 220
+                            textRole: "label"
+                            model: [
+                                { label: "Open mic",     value: "open" },
+                                { label: "Push to talk", value: "ptt"  }
+                            ]
+                            Component.onCompleted:
+                                currentIndex = appSettings.voiceMode === "ptt" ? 1 : 0
+                            onActivated: appSettings.voiceMode = model[currentIndex].value
+                        }
+                    }
+
+                    SettingRow {
+                        title: "PTT key"
+                        description: "Hold this shortcut (application-wide) to transmit while push-to-talk is enabled."
+                        visible: appSettings.voiceMode === "ptt"
+                        TextField {
+                            implicitWidth: 220
+                            text: appSettings.pttKeySequence
+                            color: Theme.fg0
+                            placeholderText: "Ctrl+Space"
+                            background: Rectangle {
+                                color: Theme.bg0
+                                radius: Theme.r2
+                                border.color: parent.activeFocus ? Theme.accent : Theme.line
+                                border.width: 1
+                            }
+                            leftPadding: Theme.sp.s3
+                            rightPadding: Theme.sp.s3
+                            topPadding: Theme.sp.s2
+                            bottomPadding: Theme.sp.s2
+                            onEditingFinished: appSettings.pttKeySequence = text
+                        }
+                    }
+
                     Item { Layout.fillHeight: true }
                 }
             }

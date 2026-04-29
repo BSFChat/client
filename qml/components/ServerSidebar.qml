@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import BSFChat
 
 // ServerRail (per SPEC §3.1) — the 72px leftmost column. Server switcher
@@ -23,35 +24,72 @@ Rectangle {
         anchors.bottomMargin: Theme.sp.s5
         spacing: Theme.sp.s3
 
-        // DM entry point — placeholder until DMs land. The SPEC has this
-        // at the top with its own active state tied to settings.screen.
+        // DMs destination — sits at the top of the rail as a peer
+        // to the server icons, even though each DM is physically
+        // hosted on some server. Clicking flips the channel panel
+        // into DM-aggregate mode (every 1:1 across every connected
+        // server in one list). Clicking any server icon below
+        // reverts the mode; the sidebar is single-select across DMs
+        // + servers.
         Item {
+            id: dmEntry
             Layout.alignment: Qt.AlignHCenter
             Layout.preferredWidth: 44
             Layout.preferredHeight: 44
-            visible: false // hide until DM screen exists
+
+            readonly property bool _active: serverManager.viewingDms
 
             Rectangle {
                 anchors.fill: parent
-                radius: Theme.r3
-                color: Theme.bg2
-                Text {
+                radius: dmMouse.containsMouse || dmEntry._active
+                    ? Theme.r2 : Theme.r3
+                color: dmEntry._active ? Theme.accent
+                     : dmMouse.containsMouse ? Theme.bg3 : Theme.bg2
+                Behavior on radius { NumberAnimation { duration: Theme.motion.fastMs } }
+                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                Icon {
                     anchors.centerIn: parent
-                    text: "\u0040"
-                    font.pixelSize: 20
-                    font.bold: true
-                    color: Theme.fg1
+                    name: "at"
+                    size: 20
+                    color: dmEntry._active ? Theme.onAccent : Theme.fg1
                 }
+
+                MouseArea {
+                    id: dmMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: serverManager.setViewingDms(true)
+                }
+
+                ToolTip.visible: dmMouse.containsMouse
+                ToolTip.text: "Direct messages"
+                ToolTip.delay: 500
+            }
+
+            // Left-edge accent bar mirrors the server icons'
+            // selection affordance so the DMs destination looks
+            // native to the rail.
+            Rectangle {
+                visible: dmEntry._active
+                anchors.left: parent.left
+                anchors.leftMargin: -8
+                anchors.verticalCenter: parent.verticalCenter
+                width: 4
+                height: 28
+                radius: 2
+                color: Theme.fg0
             }
         }
 
-        // Thin divider under the DM icon. Hidden while DM is hidden.
+        // Thin divider separating DMs from the server list — makes
+        // the "DMs live above servers" grouping legible.
         Rectangle {
             Layout.alignment: Qt.AlignHCenter
             Layout.preferredWidth: 28
             Layout.preferredHeight: 1
             color: Theme.lineSoft
-            visible: false
         }
 
         // Server icons.
@@ -70,7 +108,14 @@ Rectangle {
                 width: ListView.view ? ListView.view.width : Theme.layout.serverRailW
                 height: 52
 
-                readonly property bool isActive: index === serverManager.activeServerIndex
+                // A server is "active" only when we're not viewing
+                // DMs. Otherwise the DM chip above owns the single
+                // selection state and the server tiles render as
+                // inactive, even though one of them is technically
+                // m_activeServer underneath.
+                readonly property bool isActive:
+                    index === serverManager.activeServerIndex
+                    && !serverManager.viewingDms
                 readonly property bool hasUnread: (model.unreadCount || 0) > 0
                 readonly property bool isHovered: hoverArea.containsMouse
 
@@ -180,7 +225,13 @@ Rectangle {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: serverManager.setActiveServer(index)
+                    onClicked: {
+                        // Picking a server icon is the primary
+                        // way to leave DM view — it's single-
+                        // select across the rail.
+                        serverManager.setViewingDms(false);
+                        serverManager.setActiveServer(index);
+                    }
                 }
 
                 ToolTip.visible: hoverArea.containsMouse

@@ -5,7 +5,11 @@ OutFile "BSFChat-Setup.exe"
 InstallDir "$PROGRAMFILES64\BSFChat"
 RequestExecutionLevel admin
 
-!define MUI_ICON "${NSISDIR}\Contrib\Graphics\Icons\modern-install.ico"
+; Brand icons for the installer + uninstaller. The CI workflow
+; copies branding\BSFChat.ico into the dist\ dir before invoking
+; makensis so this relative path resolves.
+!define MUI_ICON "BSFChat.ico"
+!define MUI_UNICON "BSFChat.ico"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY

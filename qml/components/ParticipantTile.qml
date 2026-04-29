@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtMultimedia
 import BSFChat
 
 // Single tile in VoiceRoom's participant grid (SPEC §3.3).
@@ -22,8 +23,25 @@ Rectangle {
     readonly property string peerState: member ? (member.peerState || "new") : "new"
     readonly property bool   isSelf: serverManager.activeServer
                                      && userId === serverManager.activeServer.userId
-    readonly property real   level: isSelf && serverManager.activeServer
-                                    ? serverManager.activeServer.micLevel : 0
+    // Self = our mic level (we know authoritatively). Remote = smoothed
+    // output from the Opus decoder, bumped via peerLevelChanged.
+    property int _levelGen: 0
+    Connections {
+        target: serverManager.activeServer
+        ignoreUnknownSignals: true
+        function onPeerLevelChanged(uid) {
+            if (uid === tile.userId) tile._levelGen++;
+        }
+    }
+    readonly property real   level: {
+        if (isSelf) {
+            return serverManager.activeServer
+                ? serverManager.activeServer.micLevel : 0;
+        }
+        _levelGen;
+        return serverManager.activeServer
+            ? serverManager.activeServer.peerLevel(userId) : 0;
+    }
     readonly property bool   speaking: level > 0.04
     // Muted state. For ourselves, authoritative from the connection;
     // for remote peers, we trust the per-member `muted` flag broadcast
@@ -50,10 +68,82 @@ Rectangle {
 
     Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
 
+    // Camera feed — either local (self, via CameraController's
+    // internal sink mirrored through a VideoOutput) or remote
+    // (base64 data URL refreshed on peerCameraFrameChanged).
+    readonly property bool hasCamera: {
+        tile._cameraTick;
+        if (isSelf) return camera && camera.active;
+        var s = serverManager.activeServer;
+        return s ? s.peerHasCamera(userId) : false;
+    }
+    property int _cameraTick: 0
+    Connections {
+        target: serverManager.activeServer
+        ignoreUnknownSignals: true
+        function onPeerCameraFrameChanged(u) {
+            if (u === tile.userId) tile._cameraTick++;
+        }
+    }
+
+    // Local self-preview video output. Hidden for remote peers.
+    VideoOutput {
+        id: selfCam
+        anchors.fill: parent
+        anchors.margins: 1
+        visible: tile.isSelf && tile.hasCamera
+        fillMode: VideoOutput.PreserveAspectCrop
+        Component.onCompleted: {
+            if (camera && videoSink) camera.forwardTo(videoSink);
+        }
+    }
+
+    // Remote camera — rendered as a JPEG data URL that refreshes
+    // whenever a new frame arrives from the peer.
+    Image {
+        id: peerCam
+        anchors.fill: parent
+        anchors.margins: 1
+        visible: !tile.isSelf && tile.hasCamera
+        fillMode: Image.PreserveAspectCrop
+        smooth: true
+        asynchronous: false
+        cache: false
+        source: {
+            tile._cameraTick;
+            if (!tile.hasCamera || tile.isSelf) return "";
+            var s = serverManager.activeServer;
+            return s ? s.peerCameraDataUrl(userId) : "";
+        }
+    }
+
+    // Bottom-left name pill only when the video is showing, so the
+    // peer's identity doesn't get lost behind the feed.
+    Rectangle {
+        visible: tile.hasCamera
+        anchors.left: parent.left
+        anchors.bottom: parent.bottom
+        anchors.margins: Theme.sp.s3
+        width: camNameTxt.implicitWidth + Theme.sp.s3 * 2
+        height: 22
+        radius: Theme.r1
+        color: Qt.rgba(0, 0, 0, 0.55)
+        Text {
+            id: camNameTxt
+            anchors.centerIn: parent
+            text: tile.dispName
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.sm
+            font.weight: Theme.fontWeight.medium
+            color: "white"
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: Theme.sp.s5
         spacing: Theme.sp.s3
+        visible: !tile.hasCamera
 
         // Top spacer.
         Item { Layout.fillHeight: true }

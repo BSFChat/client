@@ -21,8 +21,8 @@ Popup {
         open();
     }
 
-    width: 420
-    height: 520
+    width: Math.min(420, (parent ? parent.width : 420) - 32)
+    height: Math.min(520, (parent ? parent.height : 520) - 48)
     modal: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 

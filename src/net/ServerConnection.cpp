@@ -5,6 +5,7 @@
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
 #include "identity/IdentityClient.h"
+#include "core/Settings.h"
 #ifdef BSFCHAT_VOICE_ENABLED
 #include "voice/VoiceEngine.h"
 #include "voice/NotificationSounds.h"
@@ -39,6 +40,43 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 {
     m_client->setHomeserver(serverUrl);
     m_messageModel->setHomeserver(serverUrl);
+    // Bubble message-send errors up to QML as a friendly toast.
+    // Distinguishes rate-limit (server advertising retry_after)
+    // from generic failures; unknown errors fall through with the
+    // raw body.
+    connect(m_client, &MatrixClient::sendMessageError, this,
+        [this](const QString& raw) {
+            QString kind = QStringLiteral("error");
+            QString msg = raw;
+            // Matrix error bodies are JSON — try to pick them apart
+            // for the two error codes we want to surface nicely.
+            try {
+                auto j = nlohmann::json::parse(raw.toStdString());
+                std::string code = j.value("errcode", "");
+                std::string human = j.value("error", "");
+                if (code == "M_LIMIT_EXCEEDED") {
+                    long long retry = j.value("retry_after_ms", 0LL);
+                    msg = retry > 0
+                        ? QStringLiteral("Slow down — retry in %1s")
+                              .arg(int((retry + 999) / 1000))
+                        : QStringLiteral("Sending too fast — try again");
+                    kind = QStringLiteral("warning");
+                } else if (code == "M_FORBIDDEN") {
+                    msg = human.empty()
+                        ? QStringLiteral("You don't have permission "
+                                         "to send here")
+                        : QString::fromStdString(human);
+                } else if (!human.empty()) {
+                    msg = QString::fromStdString(human);
+                }
+            } catch (...) {
+                // Leave msg = raw; already user-readable-ish.
+            }
+            emit sendFeedback(msg, kind);
+        });
+
+    connect(m_client, &MatrixClient::mediaUploadProgress,
+            this, &ServerConnection::mediaUploadProgress);
 
     // Hydrate the DM map from QSettings so the "Direct Messages"
     // section survives restart. Empty if first-run. Group is scoped
@@ -210,6 +248,18 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
                     m_peerScreenData[userId] = url;
                     emit peerScreenFrameChanged(userId);
                 });
+            connect(m_voiceEngine, &VoiceEngine::peerCameraFrameReceived,
+                this, [this](const QString& userId, const QByteArray& jpeg) {
+                    QString url = QStringLiteral("data:image/jpeg;base64,")
+                        + QString::fromLatin1(jpeg.toBase64());
+                    m_peerCameraData[userId] = url;
+                    emit peerCameraFrameChanged(userId);
+                });
+            connect(m_voiceEngine, &VoiceEngine::peerLevelChanged, this,
+                [this](const QString& userId, float level) {
+                    m_peerLevels[userId] = level;
+                    emit peerLevelChanged(userId);
+                });
 
             // Mic level → transmit indicator + silence detection.
             m_zeroLevelFrames = 0;
@@ -241,6 +291,10 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
                     this, [this]() { emit voiceMembersChanged(); });
 
             m_voiceEngine->start(m_activeVoiceRoomId, m_voiceMembers, config);
+            // Apply PTT mute immediately on join so an open-mic user
+            // switching to PTT before a call starts silent rather
+            // than live.
+            applyMicGate();
         }
 #endif
     });
@@ -547,6 +601,15 @@ void ServerConnection::sendMessage(const QString& body)
     m_client->sendMessage(m_activeRoomId, body);
 }
 
+void ServerConnection::sendEmote(const QString& body)
+{
+    if (m_activeRoomId.isEmpty() || body.trimmed().isEmpty()) return;
+    m_typingTimer->stop();
+    m_typingStopTimer->stop();
+    m_client->setTyping(m_activeRoomId, m_userId, false);
+    m_client->sendEmote(m_activeRoomId, body);
+}
+
 void ServerConnection::sendThreadReply(const QString& rootEventId, const QString& body)
 {
     if (m_activeRoomId.isEmpty() || rootEventId.isEmpty()
@@ -660,26 +723,59 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         return;
     }
 
-    // Convert QML URL to local file path
+    // Convert QML URL to something QFile can open. On desktop this is
+    // the local POSIX path (file:///… → /…). On Android the SAF file
+    // picker returns content:// URIs; Qt's AndroidContentFileEngine
+    // lets QFile open those directly as long as we pass the URL
+    // through verbatim rather than strip the scheme.
     QUrl url(fileUrl);
-    QString filePath = url.isLocalFile() ? url.toLocalFile() : fileUrl;
+    QString openPath;
+    QString displayName;
+    if (url.isLocalFile()) {
+        openPath = url.toLocalFile();
+        displayName = QFileInfo(openPath).fileName();
+    } else if (url.scheme() == "content" || url.scheme() == "android.resource") {
+        // Keep full URI — QFile routes content:// through the
+        // AndroidContentFileEngine. QFileInfo on a content URI can't
+        // extract a useful filename, so fall back to the query's
+        // display-name hints or the URI tail.
+        openPath = fileUrl;
+        displayName = url.fileName();
+        if (displayName.isEmpty())
+            displayName = url.path().section('/', -1);
+        if (displayName.isEmpty())
+            displayName = QStringLiteral("attachment");
+    } else {
+        openPath = fileUrl;
+        displayName = QFileInfo(fileUrl).fileName();
+    }
 
-    QFile file(filePath);
+    QFile file(openPath);
     if (!file.open(QIODevice::ReadOnly)) {
-        emit mediaSendFailed("Cannot open file: " + filePath);
+        // User-facing toast: strip the raw URI so we don't bleed
+        // /data/… or content://com.android.providers… into the UI.
+        QString friendly = displayName.isEmpty() ? "file" : displayName;
+        emit mediaSendFailed("Couldn't read the selected " + friendly
+                             + " — " + file.errorString());
         return;
     }
 
     QByteArray fileData = file.readAll();
     file.close();
 
-    QFileInfo fileInfo(filePath);
-    QString fileName = fileInfo.fileName();
-    qint64 fileSize = fileInfo.size();
+    QString fileName = displayName;
+    qint64 fileSize = fileData.size();
 
-    // Determine MIME type
+    // Determine MIME type. For content:// URIs we can't sniff from
+    // the path — fall back to sniffing bytes we just read.
     QMimeDatabase mimeDb;
-    QString mimeType = mimeDb.mimeTypeForFile(filePath).name();
+    QString mimeType;
+    if (url.isLocalFile()) {
+        mimeType = mimeDb.mimeTypeForFile(openPath).name();
+    }
+    if (mimeType.isEmpty() || mimeType == "application/octet-stream") {
+        mimeType = mimeDb.mimeTypeForData(fileData).name();
+    }
 
     // Determine msgtype based on MIME
     QString msgtype = "m.file";
@@ -869,6 +965,11 @@ void ServerConnection::leaveVoiceChannel()
         m_peerScreenData.clear();
         for (const auto& uid : keys) emit peerScreenFrameChanged(uid);
     }
+    if (!m_peerCameraData.isEmpty()) {
+        auto keys = m_peerCameraData.keys();
+        m_peerCameraData.clear();
+        for (const auto& uid : keys) emit peerCameraFrameChanged(uid);
+    }
 #endif
     // Ensure UI drops the transmit indicator immediately, bypassing the
     // jitter threshold in the micLevelChanged forwarder.
@@ -879,15 +980,45 @@ void ServerConnection::leaveVoiceChannel()
     m_client->leaveVoice(m_activeVoiceRoomId);
 }
 
+void ServerConnection::setSettings(Settings* settings)
+{
+    m_settings = settings;
+    if (settings) {
+        // Refresh the mic gate whenever voice mode flips so a user
+        // switching Open-mic → PTT immediately goes silent (and vv).
+        connect(settings, &Settings::voiceModeChanged,
+                this, &ServerConnection::applyMicGate);
+    }
+}
+
+void ServerConnection::applyMicGate()
+{
+#ifdef BSFCHAT_VOICE_ENABLED
+    if (!m_voiceEngine) return;
+    // In PTT mode the mic is muted unless the key is held AND the
+    // user hasn't manually muted. In open-mic mode only the manual
+    // mute matters.
+    bool pttMode = m_settings && m_settings->voiceMode() == QStringLiteral("ptt");
+    bool effective = m_voiceMuted || (pttMode && !m_pttPressed);
+    m_voiceEngine->setMuted(effective);
+#endif
+}
+
+void ServerConnection::setPttPressed(bool pressed)
+{
+    if (m_pttPressed == pressed) return;
+    m_pttPressed = pressed;
+    applyMicGate();
+    emit pttPressedChanged();
+}
+
 void ServerConnection::toggleMute()
 {
     m_voiceMuted = !m_voiceMuted;
 #ifdef BSFCHAT_VOICE_ENABLED
     m_sounds->playMute();
 #endif
-#ifdef BSFCHAT_VOICE_ENABLED
-    if (m_voiceEngine) m_voiceEngine->setMuted(m_voiceMuted);
-#endif
+    applyMicGate();
     emit voiceMutedChanged();
     if (!m_activeVoiceRoomId.isEmpty()) {
         m_client->updateVoiceState(m_activeVoiceRoomId, m_voiceMuted, m_voiceDeafened);
@@ -1127,18 +1258,34 @@ void ServerConnection::uploadAvatar(const QString& fileUrl)
 {
     if (m_userId.isEmpty()) return;
 
+    // Mirror sendMediaMessage's SAF-aware open path: Android's
+    // document picker returns `content://…` URIs which aren't
+    // local files but ARE readable via QFile through the
+    // AndroidContentFileEngine. Without this branch, avatar upload
+    // on Android was silently failing at the `open()` call.
     QUrl url(fileUrl);
-    QString filePath = url.isLocalFile() ? url.toLocalFile() : fileUrl;
+    QString openPath = url.isLocalFile()
+        ? url.toLocalFile()
+        : ((url.scheme() == "content" || url.scheme() == "android.resource")
+            ? fileUrl : fileUrl);
 
-    QFile file(filePath);
+    QFile file(openPath);
     if (!file.open(QIODevice::ReadOnly)) return;
 
     QByteArray fileData = file.readAll();
     file.close();
 
+    // MIME sniffing: local path can use the filename, content://
+    // URIs force us to sniff from the bytes we just read.
     QMimeDatabase mimeDb;
-    QString mimeType = mimeDb.mimeTypeForFile(filePath).name();
-    QFileInfo fileInfo(filePath);
+    QString mimeType;
+    if (url.isLocalFile()) {
+        mimeType = mimeDb.mimeTypeForFile(openPath).name();
+    }
+    if (mimeType.isEmpty() || mimeType == "application/octet-stream") {
+        mimeType = mimeDb.mimeTypeForData(fileData).name();
+    }
+    QFileInfo fileInfo(openPath);
 
     QObject::connect(m_client, &MatrixClient::mediaUploaded, this,
         [this](const QString& contentUri) {
@@ -1166,6 +1313,45 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
         m_syncErrorMessage.clear();
         emit connectionStatusChanged();
         emit syncErrorMessageChanged();
+    }
+
+    // Top-level presence block — fold each m.presence event into
+    // our per-user maps. Emits presenceChanged once per delta so
+    // QML rebinds (member list, DM list, profile cards).
+    if (response.presence) {
+        bool anyChanged = false;
+        for (const auto& ev : response.presence->events) {
+            QString uid = QString::fromStdString(ev.sender);
+            if (uid.isEmpty()) continue;
+            QString state, msg;
+            if (ev.content.data.contains("presence")) {
+                state = QString::fromStdString(
+                    ev.content.data.value("presence", ""));
+            }
+            if (ev.content.data.contains("status_msg")) {
+                msg = QString::fromStdString(
+                    ev.content.data.value("status_msg", ""));
+            }
+            QString prevState = m_userPresenceFromSync.value(uid);
+            QString prevMsg = m_userStatusMessage.value(uid);
+            if (!state.isEmpty() && state != prevState) {
+                m_userPresenceFromSync[uid] = state;
+                anyChanged = true;
+            }
+            if (msg != prevMsg) {
+                if (msg.isEmpty()) m_userStatusMessage.remove(uid);
+                else m_userStatusMessage[uid] = msg;
+                anyChanged = true;
+            }
+            // If this presence is for us, mirror into the self
+            // copies so the picker reflects what the server now
+            // believes.
+            if (uid == m_userId) {
+                if (!state.isEmpty()) m_selfPresence = state;
+                m_selfStatusMessage = msg;
+            }
+        }
+        if (anyChanged) emit presenceChanged();
     }
 
     for (const auto& [roomIdStr, joinedRoom] : response.rooms.join) {
@@ -1900,6 +2086,13 @@ static constexpr qint64 kPresenceOnlineWindowMs = 5 * 60 * 1000;
 QString ServerConnection::presenceFor(const QString& userId) const
 {
     if (userId == m_userId) return m_selfPresence;
+    // Server-relayed presence wins over the legacy heuristic — when
+    // the user has actively set a state via PUT /presence we know
+    // it's right. Heuristic only kicks in when we've never received
+    // a presence event for them.
+    auto sit = m_userPresenceFromSync.constFind(userId);
+    if (sit != m_userPresenceFromSync.constEnd()) return *sit;
+
     auto it = m_userLastActivityMs.constFind(userId);
     if (it == m_userLastActivityMs.constEnd()) return QStringLiteral("offline");
     qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -1907,10 +2100,29 @@ QString ServerConnection::presenceFor(const QString& userId) const
     return QStringLiteral("offline");
 }
 
+QString ServerConnection::statusMessageFor(const QString& userId) const
+{
+    if (userId == m_userId) return m_selfStatusMessage;
+    return m_userStatusMessage.value(userId);
+}
+
 void ServerConnection::setSelfPresence(const QString& state)
 {
     if (state == m_selfPresence) return;
     m_selfPresence = state;
+    if (m_client && !m_userId.isEmpty()) {
+        m_client->putPresence(m_userId, state, m_selfStatusMessage);
+    }
+    emit presenceChanged();
+}
+
+void ServerConnection::setSelfStatusMessage(const QString& msg)
+{
+    if (msg == m_selfStatusMessage) return;
+    m_selfStatusMessage = msg;
+    if (m_client && !m_userId.isEmpty()) {
+        m_client->putPresence(m_userId, m_selfPresence, msg);
+    }
     emit presenceChanged();
 }
 
@@ -1968,6 +2180,12 @@ QVariantList ServerConnection::directRooms() const
         m[QStringLiteral("peerId")] = it.value();
         m[QStringLiteral("peerDisplayName")] =
             m_userDisplayNames.value(it.value(), it.value());
+        m[QStringLiteral("peerPresence")] = presenceFor(it.value());
+        m[QStringLiteral("peerStatusMessage")] = statusMessageFor(it.value());
+        // Peer-typing hint. `roomHasTyping` already knows per-room;
+        // we forward the single-boolean so the UI can swap the
+        // last-activity timestamp for animated dots.
+        m[QStringLiteral("peerTyping")] = roomHasTyping(it.key());
         // Pull last message time out of RoomListModel for sort.
         qint64 lastMs = 0;
         if (m_roomListModel) {
@@ -1991,6 +2209,56 @@ QVariantList ServerConnection::directRooms() const
         return a.toMap().value("lastMessageTime").toLongLong()
              > b.toMap().value("lastMessageTime").toLongLong();
     });
+    return out;
+}
+
+QVariantList ServerConnection::searchKnownUsers(const QString& query,
+                                                  int limit) const
+{
+    QVariantList out;
+    if (limit <= 0) limit = 8;
+    QString q = query.trimmed().toLower();
+
+    // Score: exact-prefix on displayName > substring in displayName
+    // > substring in MXID. Stable ordering among equal scores by
+    // display name for UI predictability.
+    struct Hit { int score; QString userId; QString displayName; };
+    QList<Hit> hits;
+    hits.reserve(m_userDisplayNames.size());
+
+    for (auto it = m_userDisplayNames.constBegin();
+         it != m_userDisplayNames.constEnd(); ++it) {
+        const QString& uid = it.key();
+        const QString& name = it.value();
+        if (uid == m_userId) continue;          // don't suggest self
+        if (q.isEmpty()) {
+            hits.append({0, uid, name});
+            continue;
+        }
+        QString lowerName = name.toLower();
+        QString lowerUid = uid.toLower();
+        int score = -1;
+        if (lowerName.startsWith(q))        score = 100;
+        else if (lowerUid.startsWith(q)
+                 || lowerUid.startsWith("@" + q)) score = 90;
+        else if (lowerName.contains(q))     score = 50;
+        else if (lowerUid.contains(q))      score = 40;
+        if (score < 0) continue;
+        hits.append({score, uid, name});
+    }
+
+    std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) {
+        if (a.score != b.score) return a.score > b.score;
+        return a.displayName.compare(b.displayName,
+                                      Qt::CaseInsensitive) < 0;
+    });
+
+    for (int i = 0; i < hits.size() && int(out.size()) < limit; ++i) {
+        QVariantMap m;
+        m[QStringLiteral("userId")] = hits[i].userId;
+        m[QStringLiteral("displayName")] = hits[i].displayName;
+        out.append(m);
+    }
     return out;
 }
 

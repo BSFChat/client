@@ -13,6 +13,22 @@ Rectangle {
     id: messageViewRoot
     color: Theme.bg0
 
+    // Called by Ctrl+L shortcut in main.qml. Walks to the composer's
+    // TextArea and gives it focus.
+    function focusComposer() {
+        if (messageInput && messageInput.inputArea)
+            messageInput.inputArea.forceActiveFocus();
+    }
+
+    // Thread-panel state exposed so the mobile shell's hardware-back
+    // handler can close the panel before popping any other UI.
+    function threadPanelOpen() {
+        return threadPanel && threadPanel.rootEventId !== "";
+    }
+    function closeThread() {
+        if (threadPanel) threadPanel.closePanel();
+    }
+
     // Drag-and-drop file uploads. Anchored over the whole MessageView
     // so dropping anywhere in the chat pane — message list, composer,
     // empty state — uploads the files into the current channel. Only
@@ -184,10 +200,14 @@ Rectangle {
         }
 
         // Header bar (SPEC §3.6 top, 40-48h) — hash + channel name, inline
-        // topic, right-aligned action cluster, bottom divider.
+        // topic, right-aligned action cluster, bottom divider. Hidden on
+        // mobile because MobileMain's own top bar already renders the
+        // channel + server name; stacking both would waste vertical space
+        // a phone doesn't have.
         Rectangle {
+            visible: !Theme.isMobile
             Layout.fillWidth: true
-            Layout.preferredHeight: 48
+            Layout.preferredHeight: visible ? 48 : 0
             color: Theme.bg0
 
             // Icon-button primitive for the action cluster. 28×28 ghost
@@ -411,7 +431,10 @@ Rectangle {
             // uses the latched value to decide whether to auto-scroll.
             property bool atBottom: true
             property bool initialLoad: true
-            readonly property int bottomTolerance: 80
+            // Tolerance for "near the bottom" — wider on mobile so a
+            // touch flick's kinetic overshoot doesn't flap `atBottom`
+            // false and flicker the jump-to-latest button.
+            readonly property int bottomTolerance: Theme.isMobile ? 160 : 80
 
             // Back-pagination bookkeeping. Record contentHeight AND contentY
             // just before we request older messages; after they prepend we
@@ -740,6 +763,9 @@ Rectangle {
                     onThreadOpenRequested: (rootId) => {
                         threadPanel.openFor(rootId);
                     }
+                    onEditHistoryRequested: (eid) => {
+                        editHistoryDialog.openFor(eid);
+                    }
 
                     onSenderClicked: (userId, displayName) => {
                         messageProfileCard.userId = userId;
@@ -839,19 +865,27 @@ Rectangle {
                 }
             }
 
-            // Scroll-to-bottom button — pill on bg1 with line border, hover
-            // tints into accent so the action reads as "live." SVG chevron
-            // replaces the bare unicode down-arrow.
+            // Scroll-to-bottom button. Desktop: compact bg1/line pill
+            // centred above the composer, hover-tints into accent.
+            // Mobile: 44×44 accent fab in the bottom-right corner so
+            // it sits in the natural reach zone of a one-handed grip.
             Rectangle {
                 id: scrollToBottomBtn
                 anchors.bottom: parent.bottom
-                anchors.horizontalCenter: parent.horizontalCenter
                 anchors.bottomMargin: Theme.sp.s3
-                width: 40; height: 32
-                radius: 16
-                color: scrollBottomMouse.containsMouse ? Theme.accent : Theme.bg1
-                border.color: scrollBottomMouse.containsMouse ? Theme.accent : Theme.line
-                border.width: 1
+                anchors.right: Theme.isMobile ? parent.right : undefined
+                anchors.rightMargin: Theme.isMobile ? Theme.sp.s5 : 0
+                anchors.horizontalCenter: Theme.isMobile ? undefined : parent.horizontalCenter
+                width: Theme.isMobile ? 44 : 40
+                height: Theme.isMobile ? 44 : 32
+                radius: Theme.isMobile ? 22 : 16
+                color: Theme.isMobile
+                    ? (scrollBottomMouse.containsMouse ? Theme.accentDim : Theme.accent)
+                    : (scrollBottomMouse.containsMouse ? Theme.accent : Theme.bg1)
+                border.color: Theme.isMobile
+                    ? Theme.bg0
+                    : (scrollBottomMouse.containsMouse ? Theme.accent : Theme.line)
+                border.width: Theme.isMobile ? 2 : 1
                 visible: !messageListView.atBottom && messageListView.count > 0
 
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
@@ -860,8 +894,10 @@ Rectangle {
                 Icon {
                     anchors.centerIn: parent
                     name: "chevron-down"
-                    size: 16
-                    color: scrollBottomMouse.containsMouse ? Theme.onAccent : Theme.fg1
+                    size: Theme.isMobile ? 20 : 16
+                    color: Theme.isMobile
+                        ? Theme.onAccent
+                        : (scrollBottomMouse.containsMouse ? Theme.onAccent : Theme.fg1)
                 }
 
                 MouseArea {
@@ -996,11 +1032,23 @@ Rectangle {
         MessageInput {
             id: messageInput
             Layout.fillWidth: true
-            Layout.leftMargin: Theme.sp.s7
-            Layout.rightMargin: Theme.sp.s7
+            // Tighter left/right margins on mobile so the composer
+            // gets the full viewport width minus a small gutter.
+            Layout.leftMargin: Theme.isMobile ? Theme.sp.s3 : Theme.sp.s7
+            Layout.rightMargin: Theme.isMobile ? Theme.sp.s3 : Theme.sp.s7
             Layout.topMargin: Theme.sp.s3
-            Layout.bottomMargin: Theme.sp.s7
-            Layout.minimumHeight: 48
+            // Extra bottom margin on mobile for the home-indicator /
+            // gesture bar so the composer isn't hugging the edge.
+            // When the software keyboard is up `adjustResize` has
+            // already shrunk the window — in that state the bar
+            // below us is the keyboard itself, not the gesture
+            // strip, so the home-indicator inset would waste space.
+            // Drop to a small gap so the send button doesn't sit
+            // flush against the top row of keys.
+            Layout.bottomMargin: Theme.isMobile
+                ? (Qt.inputMethod.visible ? Theme.sp.s2 : Theme.sp.s7 + 16)
+                : Theme.sp.s7
+            Layout.minimumHeight: Theme.isMobile ? 56 : 48
             visible: serverManager.activeServer !== null && serverManager.activeServer.activeRoomId !== ""
             roomName: serverManager.activeServer ? serverManager.activeServer.activeRoomName : ""
         }
@@ -1417,6 +1465,104 @@ Rectangle {
                             serverManager.activeServer.activeRoomId,
                             deleteConfirm.eventId);
                         deleteConfirm.close();
+                    }
+                }
+            }
+        }
+    }
+
+    // Edit history viewer — chronological list of all known
+    // revisions of the message. In-memory only for now.
+    Popup {
+        id: editHistoryDialog
+        parent: Overlay.overlay
+        anchors.centerIn: Overlay.overlay
+        width: 480
+        height: Math.min(parent ? parent.height * 0.7 : 480, 560)
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        property var entries: []
+        function openFor(eid) {
+            var s = serverManager.activeServer;
+            if (!s || !s.messageModel) return;
+            entries = s.messageModel.editHistory(eid);
+            open();
+        }
+        background: Rectangle {
+            color: Theme.bg1
+            radius: Theme.r3
+            border.color: Theme.line
+            border.width: 1
+        }
+        contentItem: ColumnLayout {
+            spacing: Theme.sp.s3
+            Text {
+                text: "EDIT HISTORY"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                font.weight: Theme.fontWeight.semibold
+                font.letterSpacing: Theme.trackWidest.xs
+                color: Theme.fg3
+            }
+            ListView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                spacing: Theme.sp.s3
+                ScrollBar.vertical: ThemedScrollBar {}
+                model: editHistoryDialog.entries
+                delegate: Rectangle {
+                    required property var modelData
+                    required property int index
+                    width: ListView.view.width
+                    readonly property bool current: modelData.isCurrent === true
+                    readonly property bool original: index === 0
+                    height: col.implicitHeight + Theme.sp.s4 * 2
+                    radius: Theme.r2
+                    color: current ? Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                             Theme.accent.b, 0.08)
+                                   : Theme.bg2
+                    border.color: current ? Theme.accent : Theme.line
+                    border.width: 1
+                    ColumnLayout {
+                        id: col
+                        anchors.fill: parent
+                        anchors.margins: Theme.sp.s4
+                        spacing: 4
+                        RowLayout {
+                            Text {
+                                text: {
+                                    if (original) return "Original";
+                                    if (current) return "Current";
+                                    return "Revision " + index;
+                                }
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.xs
+                                font.weight: Theme.fontWeight.semibold
+                                font.letterSpacing: Theme.trackWidest.xs
+                                color: current ? Theme.accent : Theme.fg3
+                                Layout.fillWidth: true
+                            }
+                            Text {
+                                text: {
+                                    var d = new Date(modelData.timestamp);
+                                    return d.toLocaleString(Qt.locale(),
+                                        "MMM d, h:mm:ss ap");
+                                }
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.xs
+                                color: Theme.fg3
+                            }
+                        }
+                        Text {
+                            text: modelData.body
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.base
+                            color: Theme.fg0
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                        }
                     }
                 }
             }

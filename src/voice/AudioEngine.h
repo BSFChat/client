@@ -33,6 +33,10 @@ signals:
     // 0..1 smoothed RMS of the most recent 20ms mic frame. Emits zero
     // when muted. Use as a UI transmit-level indicator.
     void micLevelChanged(float level);
+    // Smoothed audio level (0..1) from the most recent decoded frame
+    // of `peerId`. Used by the UI to pulse a speaking ring around
+    // each peer's participant tile.
+    void peerLevelChanged(const QString& peerId, float level);
 
 private:
     void onMicDataReady();
@@ -54,6 +58,7 @@ private:
 
     OpusEncoder* m_encoder = nullptr;
     QMap<QString, OpusDecoder*> m_decoders;
+    QMap<QString, float> m_peerLevels;  // smoothed 0..1 per peer
 
     AudioMixer* m_mixer = nullptr;
 

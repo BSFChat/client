@@ -6,11 +6,14 @@
 #include <memory>
 
 class QSystemTrayIcon;
+class QMenu;
+class QAction;
 class QWindow;
 class ServerManager;
 class ServerConnection;
 class Settings;
 class NotificationSounds;
+class AndroidNotifier;
 
 // Routes inbound ServerConnection::messageReceived signals to OS
 // notifications via QSystemTrayIcon (Qt 6's cross-platform notification
@@ -51,11 +54,22 @@ private:
     // is still required for showMessage to display on some platforms, but
     // we use an empty/transparent icon so it stays unobtrusive).
     std::unique_ptr<QSystemTrayIcon> m_tray;
+    std::unique_ptr<QMenu> m_trayMenu;
+    QAction* m_muteAction = nullptr;
+    QAction* m_deafenAction = nullptr;
+    int m_unreadTotal = 0;
+    void refreshUnreadBadge();
+    void rebuildTrayMenu();
 
     // Dedicated sounds instance so we don't reach into the voice-gated
     // per-connection NotificationSounds (which doesn't exist when
     // BSFCHAT_VOICE_ENABLED is off).
     NotificationSounds* m_sounds = nullptr;
+
+    // Android JNI bridge — starts the SyncService when the first
+    // server connects, posts actual Android notifications via
+    // NotificationManager API. No-op off Android.
+    AndroidNotifier* m_androidNotifier = nullptr;
 
     // Remember the server+room of the most recently shown notification so
     // messageClicked can navigate there. QSystemTrayIcon fires a single

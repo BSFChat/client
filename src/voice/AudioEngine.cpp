@@ -1,5 +1,6 @@
 #include "voice/AudioEngine.h"
 #include "voice/AudioMixer.h"
+#include "voice/AndroidAudioRouting.h"
 
 #include <QAudioFormat>
 #include <QMediaDevices>
@@ -44,6 +45,13 @@ AudioEngine::~AudioEngine() {
 
 bool AudioEngine::start() {
     if (m_running) return true;
+
+    // Flip Android into VoIP mode + route to speakerphone BEFORE we
+    // open QAudioSource. Done in MODE_NORMAL, Android routes capture
+    // to a "normal" profile that prefers earpiece for playback and
+    // skips hardware AEC — switching the mode after the device is
+    // open doesn't re-plumb the routing graph. No-op off Android.
+    bsfchat::audio_routing::enterVoiceMode();
 
     // Initialize Opus encoder
     int err;
@@ -145,6 +153,10 @@ void AudioEngine::stop() {
         opus_decoder_destroy(dec);
     }
     m_decoders.clear();
+
+    // Hand VoIP mode back to the OS. Balanced against enterVoiceMode()
+    // in start().
+    bsfchat::audio_routing::exitVoiceMode();
 }
 
 void AudioEngine::onMicDataReady() {
@@ -265,6 +277,19 @@ void AudioEngine::receivePeerAudio(const QString& peerId, const QByteArray& opus
 
     if (decoded > 0) {
         pcm.resize(decoded);
+        // Peak-magnitude → 0..1 level, EWMA-smoothed per peer so the
+        // UI ring doesn't flicker. Same vocabulary as micLevelChanged.
+        int16_t peak = 0;
+        for (auto v : pcm) {
+            int16_t a = v < 0 ? int16_t(-(v + 1)) : v;
+            if (a > peak) peak = a;
+        }
+        float raw = float(peak) / 32768.0f;
+        float prev = m_peerLevels.value(peerId, 0.0f);
+        float smoothed = prev * 0.75f + raw * 0.25f;
+        m_peerLevels[peerId] = smoothed;
+        emit peerLevelChanged(peerId, smoothed);
+
         m_mixer->addFrame(peerId, pcm);
     }
 }

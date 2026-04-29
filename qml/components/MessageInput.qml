@@ -28,8 +28,40 @@ Rectangle {
     // Editing state. When `editingEventId` is non-empty, pressing Enter
     // sends an edit event referencing that event_id rather than a new
     // m.room.message. Called from MessageView → MessageBubble.
+    // Exposed so MessageView.focusComposer() can force focus via
+    // Ctrl+L. alias avoids hardcoding the nested id path.
+    property alias inputArea: inputArea
+
     property string editingEventId: ""
     property string editingOriginalBody: ""
+
+    // Map of filename → progress (0..1) for currently-uploading files.
+    // Kept as a dictionary so multiple simultaneous uploads each get
+    // a row. A finished upload (progress == 1.0) stays in the map for
+    // 400ms so the "complete" state is visible before it disappears.
+    property var _uploads: ({})
+    Connections {
+        target: serverManager.activeServer
+        ignoreUnknownSignals: true
+        function onMediaUploadProgress(filename, progress) {
+            var m = Object.assign({}, inputRoot._uploads);
+            m[filename] = progress;
+            inputRoot._uploads = m;
+            if (progress >= 1.0) uploadSweepTimer.start();
+        }
+    }
+    Timer {
+        id: uploadSweepTimer
+        interval: 400
+        onTriggered: {
+            var m = {};
+            for (var k in inputRoot._uploads) {
+                if (inputRoot._uploads[k] < 1.0) m[k] = inputRoot._uploads[k];
+            }
+            inputRoot._uploads = m;
+        }
+    }
+    readonly property var _uploadKeys: Object.keys(inputRoot._uploads)
     function beginEditing(eventId, currentBody) {
         if (replyToEventId !== "") cancelReplying();
         editingEventId = eventId;
@@ -260,11 +292,69 @@ Rectangle {
         }
     }
 
+    // Upload progress strip — stacks rows while files are uploading.
+    // Each row is a filename + a thin accent-tinted progress bar.
+    Rectangle {
+        id: uploadBanner
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: inputRoot._uploadKeys.length > 0
+            ? 8 + inputRoot._uploadKeys.length * 22 : 0
+        visible: height > 0
+        color: Theme.bg0
+        radius: Theme.r2
+        Behavior on height { NumberAnimation { duration: Theme.motion.fastMs } }
+
+        Column {
+            anchors.fill: parent
+            anchors.leftMargin: Theme.sp.s4
+            anchors.rightMargin: Theme.sp.s4
+            anchors.topMargin: 4
+            anchors.bottomMargin: 4
+            spacing: 2
+            Repeater {
+                model: inputRoot._uploadKeys
+                delegate: Item {
+                    required property string modelData
+                    width: parent.width
+                    height: 18
+                    readonly property real p: inputRoot._uploads[modelData] || 0
+                    Text {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width * 0.5
+                        text: "Uploading " + modelData
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xs
+                        color: Theme.fg2
+                        elide: Text.ElideMiddle
+                    }
+                    Rectangle {
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width * 0.45
+                        height: 4
+                        radius: 2
+                        color: Theme.bg2
+                        Rectangle {
+                            width: parent.width * p
+                            height: parent.height
+                            radius: parent.radius
+                            color: p >= 1.0 ? Theme.online : Theme.accent
+                            Behavior on width { NumberAnimation { duration: 100 } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Banner for replies. Same slot as editingHeader; mutually exclusive.
     // Gets a curved-arrow reply icon + accent sender name + quiet preview.
     Rectangle {
         id: replyHeader
-        anchors.top: parent.top
+        anchors.top: uploadBanner.visible ? uploadBanner.bottom : parent.top
         anchors.left: parent.left
         anchors.right: parent.right
         height: visible ? 32 : 0
@@ -338,8 +428,8 @@ Rectangle {
 
         // Attachment button — hidden if user lacks ATTACH_FILES.
         Rectangle {
-            Layout.preferredWidth: 28
-            Layout.preferredHeight: 28
+            Layout.preferredWidth: Theme.isMobile ? 40 : 28
+            Layout.preferredHeight: Theme.isMobile ? 40 : 28
             Layout.alignment: Qt.AlignVCenter
             radius: Theme.r1
             color: attachHover.containsMouse ? Theme.bg2 : "transparent"
@@ -349,7 +439,7 @@ Rectangle {
             Icon {
                 anchors.centerIn: parent
                 name: "paperclip"
-                size: 16
+                size: Theme.isMobile ? 20 : 16
                 color: attachHover.containsMouse ? Theme.fg0 : Theme.fg2
             }
 
@@ -442,8 +532,12 @@ Rectangle {
                     }
                 }
                 Keys.onReturnPressed: (event) => {
-                    if (event.modifiers & Qt.ShiftModifier) {
-                        event.accepted = false; // Allow newline
+                    // Touch keyboards don't distinguish Shift+Enter
+                    // reliably and users expect Enter to insert a
+                    // newline the way SMS / WhatsApp do. On mobile,
+                    // always allow newline — send via the button.
+                    if (Theme.isMobile || (event.modifiers & Qt.ShiftModifier)) {
+                        event.accepted = false;
                     } else {
                         sendCurrentMessage();
                         event.accepted = true;
@@ -463,8 +557,8 @@ Rectangle {
 
         // Emoji button
         Rectangle {
-            Layout.preferredWidth: 28
-            Layout.preferredHeight: 28
+            Layout.preferredWidth: Theme.isMobile ? 40 : 28
+            Layout.preferredHeight: Theme.isMobile ? 40 : 28
             Layout.alignment: Qt.AlignVCenter
             radius: Theme.r1
             color: emojiHover.containsMouse || emojiPopup.visible ? Theme.bg2 : "transparent"
@@ -472,7 +566,7 @@ Rectangle {
             Icon {
                 anchors.centerIn: parent
                 name: "smile"
-                size: 16
+                size: Theme.isMobile ? 20 : 16
                 color: emojiHover.containsMouse || emojiPopup.visible
                        ? Theme.fg0 : Theme.fg2
             }
@@ -537,12 +631,29 @@ Rectangle {
         // pop-reflow on every key press.
         Rectangle {
             id: sendBtn
-            Layout.preferredWidth: 28
-            Layout.preferredHeight: 28
+            // 44 px on mobile to meet Apple / Material touch-target
+            // guidelines. Desktop stays compact since it's driven by
+            // Enter in most cases anyway.
+            Layout.preferredWidth: Theme.isMobile ? 44 : 28
+            Layout.preferredHeight: Theme.isMobile ? 44 : 28
             Layout.alignment: Qt.AlignVCenter
             radius: Theme.r1
-            readonly property bool armed: inputArea.text.trim().length > 0
-                                          && !inputRoot.uploading
+            // Screen readers: a "Send" button at all times — the
+            // visual disabled state already covers empty composers.
+            Accessible.role: Accessible.Button
+            Accessible.name: "Send message"
+            Accessible.description: sendBtn.armed
+                ? "Send the typed message"
+                : "Nothing to send yet"
+            Accessible.onPressAction: if (sendBtn.armed) sendCurrentMessage()
+            // `armed` must include preeditText so Android IMEs (which
+            // keep keystrokes in preedit until a commit char like space
+            // or newline) arm the send button on the first character,
+            // not just after the user types a newline.
+            readonly property bool armed:
+                (inputArea.text.trim().length > 0
+                 || inputArea.preeditText.length > 0)
+                && !inputRoot.uploading
             color: sendMouse.containsMouse && armed
                 ? Theme.accentDim : Theme.accent
             Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
@@ -719,10 +830,87 @@ Rectangle {
         }
     }
 
+    // Transform /me, /shrug, /tableflip, /unflip into the right message
+    // shape or body. /me sends an m.emote; the rest are just text macros.
+    // Returns { body, msgtype } or null if not a slash-command.
+    function _runSlashCommand(raw) {
+        if (!raw.startsWith("/")) return null;
+        var space = raw.indexOf(" ");
+        var cmd = (space < 0 ? raw : raw.substring(0, space)).toLowerCase();
+        var rest = space < 0 ? "" : raw.substring(space + 1);
+        switch (cmd) {
+        case "/me":
+            return { body: rest, msgtype: "m.emote" };
+        case "/shrug":
+            return { body: rest + (rest ? " " : "") + "¯\\_(ツ)_/¯",
+                     msgtype: "m.text" };
+        case "/tableflip":
+            return { body: rest + (rest ? " " : "") + "(╯°□°)╯︵ ┻━┻",
+                     msgtype: "m.text" };
+        case "/unflip":
+            return { body: rest + (rest ? " " : "") + "┬─┬ノ( º _ ºノ)",
+                     msgtype: "m.text" };
+        case "/lenny":
+            return { body: rest + (rest ? " " : "") + "( ͡° ͜ʖ ͡°)",
+                     msgtype: "m.text" };
+        }
+        return null;
+    }
+
+    // Expand markdown-lite formatting into HTML for the formatted_body
+    // field. Intentionally minimal — no full CommonMark — just the
+    // four things chat users actually want: **bold**, *italic*, `code`,
+    // and ```code blocks```. Input is already HTML-escaped before we
+    // run this, so we swap markers rather than inject tags.
+    function _markdownToHtml(escaped) {
+        var out = escaped;
+        // Fenced code blocks first so their contents don't get
+        // re-interpreted as inline markdown.
+        out = out.replace(/```([\s\S]*?)```/g, function(_, code) {
+            return "<pre><code>" + code + "</code></pre>";
+        });
+        out = out.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+        out = out.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+        // Single-asterisk italics — avoid matching leftovers from the
+        // **bold** pass by requiring a non-asterisk neighbour.
+        out = out.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<i>$2</i>");
+        // __underline__ (rare but convenient)
+        out = out.replace(/__([^_\n]+)__/g, "<u>$1</u>");
+        return out;
+    }
+    // Detect whether the body carries any of the markdown markers so
+    // we only pay the HTML formatted_body cost when useful.
+    function _hasMarkdown(text) {
+        return /`|\*\*|(?:^|[^*])\*[^*\n]/.test(text) || text.indexOf("__") >= 0;
+    }
+
     function sendCurrentMessage() {
+        // Commit any in-flight IME composition first so what the user
+        // sees (preedit text) becomes actual text before we read it.
+        // Without this, Android sending via button tap while mid-
+        // composition would drop the typed-but-uncommitted chars.
+        if (inputArea.preeditText && inputArea.preeditText.length > 0)
+            Qt.inputMethod.commit();
         var text = inputArea.text.trim();
         if (text.length === 0) return;
         if (!serverManager.activeServer) return;
+
+        // Slash-command intercept — takes priority over replies/edits
+        // since "/me fixed typo" inside a reply context would be a
+        // weird thing to commit to.
+        if (inputRoot.editingEventId === "" && inputRoot.replyToEventId === "") {
+            var cmd = _runSlashCommand(text);
+            if (cmd) {
+                if (cmd.msgtype === "m.emote") {
+                    serverManager.activeServer.sendEmote(cmd.body);
+                } else {
+                    serverManager.activeServer.sendMessage(cmd.body);
+                }
+                inputArea.text = "";
+                inputRoot.lastSentAt = Date.now();
+                return;
+            }
+        }
 
         if (inputRoot.editingEventId !== "") {
             // Edit path — server still gates on sender match. Don't apply
@@ -758,15 +946,18 @@ Rectangle {
             if (text.indexOf(t.token) >= 0) activeMentions.push(t);
         }
 
-        if (activeMentions.length > 0) {
+        var hasMarkdown = _hasMarkdown(text);
+        if (activeMentions.length > 0 || hasMarkdown) {
             // Escape HTML first so no user-typed `<` creates a spurious tag,
-            // then swap each tracked token for a proper anchor. The anchor
-            // uses our internal bsfchat://user/<id> scheme; MessageBubble
-            // intercepts it to open the profile card.
+            // then swap each tracked token for a proper anchor + expand
+            // markdown. Order matters: mentions replace EXACT tokens, which
+            // are plain text with no markdown characters, so markdown
+            // expansion after mention-swap is safe.
             var html = text.replace(/&/g, "&amp;")
                            .replace(/</g, "&lt;")
-                           .replace(/>/g, "&gt;")
-                           .replace(/\n/g, "<br>");
+                           .replace(/>/g, "&gt;");
+            if (hasMarkdown) html = _markdownToHtml(html);
+            html = html.replace(/\n/g, "<br>");
             var uids = [];
             for (var j = 0; j < activeMentions.length; j++) {
                 var m = activeMentions[j];
@@ -775,8 +966,6 @@ Rectangle {
                              + '" style="color:' + Theme.accent
                              + '; text-decoration:none; font-weight:bold;">'
                              + m.token + '</a>';
-                // Split/join to replace all occurrences without regex escape
-                // headaches (display names can contain regex metachars).
                 html = html.split(m.token).join(anchor);
                 if (uids.indexOf(m.userId) < 0) uids.push(m.userId);
             }

@@ -7,8 +7,9 @@ import "../data/EmojiData.js" as EmojiData
 Popup {
     id: emojiPicker
 
-    width: 350
-    height: 400
+    // Cap to viewport on narrow phone screens.
+    width: Math.min(350, (parent ? parent.width : 350) - 24)
+    height: Math.min(400, (parent ? parent.height : 400) - 48)
     padding: 0
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 

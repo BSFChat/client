@@ -10,8 +10,14 @@ import BSFChat
 Popup {
     id: searchPopup
     anchors.centerIn: Overlay.overlay
-    width: Math.min(parent ? parent.width * 0.7 : 640, 640)
-    height: Math.min(parent ? parent.height * 0.7 : 480, 520)
+    // Near-fullscreen on mobile where a 70% popup leaves too little
+    // room for results + the on-screen keyboard.
+    width: Theme.isMobile
+        ? (parent ? parent.width - 16 : 640)
+        : Math.min(parent ? parent.width * 0.7 : 640, 640)
+    height: Theme.isMobile
+        ? (parent ? parent.height - 80 : 520)
+        : Math.min(parent ? parent.height * 0.7 : 480, 520)
     modal: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 

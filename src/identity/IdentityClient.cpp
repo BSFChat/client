@@ -229,9 +229,18 @@ void IdentityClient::exchangeCodeForTokens(const QString& code)
         auto data = reply->readAll();
 
         if (reply->error() != QNetworkReply::NoError) {
-            emit loginFailed("Token exchange failed: " + QString::fromUtf8(data));
+            const int status = reply->attribute(
+                QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            QString msg = QString("Token exchange failed [%1]: %2")
+                .arg(status).arg(reply->errorString());
+            if (!data.isEmpty()) {
+                msg += " — " + QString::fromUtf8(data).left(200);
+            }
+            qWarning().noquote() << "[IdentityClient]" << msg;
+            emit loginFailed(msg);
             return;
         }
+        qDebug().noquote() << "[IdentityClient] token exchange OK";
 
         QJsonDocument doc = QJsonDocument::fromJson(data);
         if (!doc.isObject()) {

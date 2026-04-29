@@ -180,18 +180,46 @@ Popup {
                 property real pressX: 0
                 property real pressY: 0
 
+                // Mobile swipe-down-to-dismiss: only armed at (near-)fit
+                // zoom, otherwise the user is panning a zoomed image.
+                property real _dismissStartY: -1
+
                 onPressed: (m) => {
                     pressX = m.x;
                     pressY = m.y;
                     panOriginX = viewer.panX;
                     panOriginY = viewer.panY;
+                    if (Theme.isMobile && viewer.zoom <= 1.05)
+                        _dismissStartY = m.y;
                 }
                 onPositionChanged: (m) => {
                     if (!pressed) return;
                     viewer.panX = panOriginX + (m.x - pressX);
                     viewer.panY = panOriginY + (m.y - pressY);
                 }
+                onReleased: (m) => {
+                    if (Theme.isMobile && _dismissStartY >= 0) {
+                        var dy = m.y - _dismissStartY;
+                        if (dy > 120) viewer.close();
+                        _dismissStartY = -1;
+                    }
+                }
                 onWheel: (w) => applyZoom(w.angleDelta.y, w.x, w.y)
+
+                // Mobile pinch zoom. Sits inside the MouseArea so it
+                // cooperates with the drag-pan grab — PointerHandlers
+                // run alongside MouseArea's gesture machinery.
+                PinchHandler {
+                    enabled: Theme.isMobile
+                    target: null  // manual — keep our own zoom plumbing
+                    onActiveScaleChanged: {
+                        var newZoom = Math.max(viewer.minZoom,
+                            Math.min(viewer.maxZoom,
+                                viewer.zoom * activeScale));
+                        if (newZoom === viewer.zoom) return;
+                        viewer.zoom = newZoom;
+                    }
+                }
 
                 // Wheel→zoom implementation, shared with the outer
                 // close-MouseArea so scrolling over the empty border

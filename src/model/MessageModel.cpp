@@ -193,6 +193,28 @@ int MessageModel::threadReplyCount(const QString& rootEventId) const
     return n;
 }
 
+QVariantList MessageModel::editHistory(const QString& eventId) const
+{
+    QVariantList out;
+    int idx = indexForEventId(eventId);
+    if (idx < 0) return out;
+    const auto& m = m_messages[idx];
+    if (!m.edited || m.history.isEmpty()) return out;
+    for (const auto& h : m.history) {
+        QVariantMap row;
+        row[QStringLiteral("body")] = h.first;
+        row[QStringLiteral("timestamp")] = h.second;
+        out.append(row);
+    }
+    // Current body as the last entry.
+    QVariantMap cur;
+    cur[QStringLiteral("body")] = m.body;
+    cur[QStringLiteral("timestamp")] = m.editedAt;
+    cur[QStringLiteral("isCurrent")] = true;
+    out.append(cur);
+    return out;
+}
+
 QVariantMap MessageModel::eventPreview(const QString& eventId) const
 {
     QVariantMap out;
@@ -423,6 +445,13 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
                 && m_messages[i].msgtype == "m.text") {
                 newFormatted = MarkdownParser::toHtml(newBody);
             }
+            // Stash the previous body into history so "Show edit
+            // history" can recover it. We push EITHER the pristine
+            // original (before any edit) or the last edit — so the
+            // user sees every distinct version.
+            qint64 prevTs = m_messages[i].edited
+                ? m_messages[i].editedAt : m_messages[i].timestamp;
+            m_messages[i].history.append({m_messages[i].body, prevTs});
             m_messages[i].body = newBody;
             m_messages[i].formattedBody = newFormatted;
             m_messages[i].edited = true;

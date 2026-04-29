@@ -237,6 +237,10 @@ jobs:
           Get-ChildItem dist\ | Select-Object Name, Length
 
           Copy-Item installer.nsi dist\
+          # Brand icon for the NSIS installer chrome. installer.nsi
+          # references "BSFChat.ico" relative to the .nsi file, so
+          # ship it next to the script in dist\.
+          Copy-Item branding\BSFChat.ico dist\
           cd dist
           makensis installer.nsi
 
@@ -251,8 +255,25 @@ jobs:
       - name: Package Linux tarball
         if: matrix.platform == 'linux'
         run: |
-          mkdir -p BSFChat/bin BSFChat/lib BSFChat/plugins
+          mkdir -p BSFChat/bin BSFChat/lib BSFChat/plugins BSFChat/share
           cp build/bsfchat-app BSFChat/bin/
+          # Brand icon — placed at share/BSFChat.png so the
+          # generated .desktop file's `Icon=` entry resolves
+          # whether the user installs into ~/.local/share/ via
+          # xdg-desktop-menu or just runs from the extracted dir.
+          cp branding/BSFChat.png BSFChat/share/
+          cat > BSFChat/share/bsfchat.desktop << 'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=BSFChat
+          GenericName=Chat
+          Comment=Self-hosted Discord-style chat
+          Exec=bsfchat.sh %u
+          Icon=BSFChat
+          Terminal=false
+          Categories=Network;InstantMessaging;Chat;
+          MimeType=x-scheme-handler/bsfchat;
+          DESKTOP
           # Create a simple launch script
           cat > BSFChat/bsfchat.sh << 'SCRIPT'
           #!/bin/bash
