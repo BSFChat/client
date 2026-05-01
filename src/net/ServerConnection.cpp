@@ -1196,19 +1196,53 @@ void ServerConnection::updateServerName(const QString& name)
 
 void ServerConnection::setMaxScreenShareQuality(int level)
 {
-    level = std::clamp(level, 0, 3);
+    // Legacy preset entry-point — keep for old admin UI that
+    // didn't know about the per-axis knobs. Forwarded to the
+    // unified setter so the same room-state event carries every
+    // axis the server understands.
+    setScreenSharePolicy(m_maxScreenShareFps,
+                         m_maxScreenShareWidth,
+                         m_maxScreenShareJpeg);
+    Q_UNUSED(level);
+}
+
+void ServerConnection::setScreenSharePolicy(int maxFps, int maxWidth,
+                                             int maxJpeg)
+{
     QString targetRoom = m_activeRoomId;
     if (targetRoom.isEmpty() && m_roomListModel->rowCount() > 0) {
         targetRoom = m_roomListModel->data(
             m_roomListModel->index(0), RoomListModel::RoomIdRole).toString();
     }
     if (targetRoom.isEmpty()) return;
-    // Optimistic update — sync echo will confirm.
-    if (level != m_maxScreenShareQuality) {
-        m_maxScreenShareQuality = level;
+
+    // Optimistic update of the locally-cached policy so the UI
+    // reflects the change immediately. The sync echo will confirm
+    // (or revert if the room rejected the state event).
+    bool changed = false;
+    if (maxFps != m_maxScreenShareFps)     { m_maxScreenShareFps = maxFps; changed = true; }
+    if (maxWidth != m_maxScreenShareWidth) { m_maxScreenShareWidth = maxWidth; changed = true; }
+    if (maxJpeg != m_maxScreenShareJpeg)   { m_maxScreenShareJpeg = maxJpeg; changed = true; }
+    if (changed) emit maxScreenSharePolicyChanged();
+
+    // Build the wire event. -1 sentinels are dropped from the
+    // payload so they read as "absent / no cap" on older clients.
+    QJsonObject content;
+    if (maxFps >= 0)   content["max_fps"] = maxFps;
+    if (maxWidth >= 0) content["max_width"] = maxWidth;
+    if (maxJpeg >= 0)  content["max_jpeg_quality"] = maxJpeg;
+    // Keep the legacy preset field aligned so old clients see a
+    // sensible cap (largest preset that fits inside the new caps).
+    int legacyPreset = 3;  // assume Ultra unless an axis caps lower
+    if (maxFps >= 0   && maxFps   < 15) legacyPreset = std::min(legacyPreset, maxFps   < 5 ? 0 : maxFps   < 10 ? 1 : 2);
+    if (maxWidth >= 0 && maxWidth < 1920) legacyPreset = std::min(legacyPreset, maxWidth < 1280 ? 0 : maxWidth < 1600 ? 1 : 2);
+    if (maxJpeg >= 0  && maxJpeg  < 85) legacyPreset = std::min(legacyPreset, maxJpeg  < 60 ? 0 : maxJpeg  < 75 ? 1 : 2);
+    content["max_quality"] = legacyPreset;
+    if (legacyPreset != m_maxScreenShareQuality) {
+        m_maxScreenShareQuality = legacyPreset;
         emit maxScreenShareQualityChanged();
     }
-    QJsonObject content{{"max_quality", level}};
+
     QByteArray body = QJsonDocument(content).toJson(QJsonDocument::Compact);
     m_client->setRoomState(targetRoom,
         QString::fromUtf8(bsfchat::event_type::kServerScreenShare),
@@ -1372,6 +1406,20 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 if (q != m_maxScreenShareQuality) {
                     m_maxScreenShareQuality = q;
                     emit maxScreenShareQualityChanged();
+                }
+                // New explicit policy fields. Sentinel values
+                // (-1) mean "no cap"; the client applies them as
+                // INT_MAX-equivalents during clamping.
+                int maxFps = event.content.data.value("max_fps", -1);
+                int maxWidth = event.content.data.value("max_width", -1);
+                int maxJpeg = event.content.data.value("max_jpeg_quality", -1);
+                if (maxFps != m_maxScreenShareFps
+                    || maxWidth != m_maxScreenShareWidth
+                    || maxJpeg != m_maxScreenShareJpeg) {
+                    m_maxScreenShareFps = maxFps;
+                    m_maxScreenShareWidth = maxWidth;
+                    m_maxScreenShareJpeg = maxJpeg;
+                    emit maxScreenSharePolicyChanged();
                 }
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomPinnedEvents)) {
                 // Matrix canonical pinned list is a JSON array under "pinned".

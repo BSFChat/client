@@ -121,6 +121,33 @@ ScreenShareController::ScreenShareController(QObject* parent)
             &ScreenShareController::pushFrameToPeers);
 }
 
+// Forward decl — definition is below applyEffectiveQuality, which
+// itself depends on the static globals declared above. Keeps the
+// "smallest hop down the file" reading order while letting
+// setSettings() bind a lambda that calls apply.
+static void applyEffectiveQuality(Settings*, ServerManager*);
+
+void ScreenShareController::setSettings(Settings* settings)
+{
+    if (m_settings == settings) return;
+    m_settings = settings;
+    if (!settings) return;
+    // Live-reapply when any of the user-facing knobs change so a
+    // slider tweak takes effect immediately mid-share.
+    auto reapply = [this]() {
+        applyEffectiveQuality(m_settings, m_servers);
+        if (m_active) {
+            m_throttle->setInterval(g_frameIntervalMs);
+#ifdef Q_OS_MACOS
+            if (m_mac) m_mac->setFps(1000 / g_frameIntervalMs);
+#endif
+        }
+    };
+    connect(settings, &Settings::screenShareFpsChanged, this, reapply);
+    connect(settings, &Settings::screenShareMaxWidthChanged, this, reapply);
+    connect(settings, &Settings::screenShareJpegQualityChanged, this, reapply);
+}
+
 QVariantList ScreenShareController::availableScreens() const
 {
     QVariantList out;
@@ -139,28 +166,68 @@ QVariantList ScreenShareController::availableScreens() const
 
 void ScreenShareController::start() { startForScreen(-1); }
 
-// Apply the currently-selected quality preset (min of user pref and
-// server max) to the encoder + throttle globals. Called at the top
-// of every start path so a just-changed preference or server policy
-// takes effect on the next share without requiring a restart.
+// ROADMAP — H.264 / VP9 over RTP migration
+// ----------------------------------------
+// The current pipeline is per-frame JPEG over an SCTP data channel.
+// That works at any resolution but is wildly bandwidth-inefficient
+// vs. a real video codec — every frame is a full keyframe, no
+// inter-frame compression. To hit "4K near-lossless on a LAN" we
+// need to migrate to:
+//   1. A platform encoder (VideoToolbox on macOS, MediaCodec on
+//      Android, libavcodec/x264 on Linux+Windows). Add a
+//      VideoEncoder C++ abstraction at src/voice/VideoEncoder.h
+//      with a NAL-out / config-in API.
+//   2. libdatachannel rtc::Track + H264RtpPacketizer in
+//      PeerConnectionManager — the SDP offer needs a video m-line.
+//      Receive side: rtc::Track::onMessage → depacketize → feed a
+//      mirror VideoDecoder.
+//   3. Quality config carries bitrate (kbps) + keyframe interval
+//      + profile in addition to fps/resolution.
+// This file's preset/clamp logic is the right hook point for that
+// migration: the resolved Config struct just gains a `codec: enum
+// {JPEG, H264, VP9}` field and the encode dispatch swaps on it.
+// Until then, JPEG with arbitrary user-controllable fps/quality is
+// good enough to give users the full flexibility envelope.
+
+// Resolve the user's chosen quality + the active server's policy
+// caps into the live encoder/throttle globals. Honoured envelope:
+//   fps         1 .. 60
+//   maxWidth    480 .. 3840 (long edge)
+//   jpegQuality 1 .. 100
+// Server caps (`maxScreenShare{Fps,Width,Jpeg}`) clamp downward
+// when set; -1 sentinels mean "no cap on this axis".
 static void applyEffectiveQuality(Settings* settings, ServerManager* servers)
 {
-    int userPref = settings ? settings->screenShareQuality() : 1;
-    int serverMax = 3;
+    int userFps   = settings ? settings->screenShareFps() : 5;
+    int userMaxW  = settings ? settings->screenShareMaxWidth() : 1280;
+    int userJpegQ = settings ? settings->screenShareJpegQuality() : 60;
+
+    int srvFps = -1, srvW = -1, srvJpegQ = -1;
     if (servers) {
         auto* active = servers->activeServer();
-        if (active) serverMax = active->maxScreenShareQuality();
+        if (active) {
+            srvFps    = active->maxScreenShareFps();
+            srvW      = active->maxScreenShareWidth();
+            srvJpegQ  = active->maxScreenShareJpeg();
+        }
     }
-    int effective = std::min(std::clamp(userPref, 0, 3),
-                             std::clamp(serverMax, 0, 3));
-    auto p = ScreenShareController::presetFor(effective);
-    g_frameIntervalMs = p.fps > 0 ? (1000 / p.fps) : 200;
-    g_jpegQuality = p.jpegQuality;
-    g_maxWidth = p.maxWidth;
-    qInfo("[screenshare] quality preset=%d (user=%d, serverMax=%d) "
-          "fps=%d maxW=%d Q=%d",
-          effective, userPref, serverMax,
-          p.fps, p.maxWidth, p.jpegQuality);
+
+    int fps   = (srvFps   >= 0) ? std::min(userFps,   srvFps)   : userFps;
+    int maxW  = (srvW     >= 0) ? std::min(userMaxW,  srvW)     : userMaxW;
+    int jpegQ = (srvJpegQ >= 0) ? std::min(userJpegQ, srvJpegQ) : userJpegQ;
+
+    fps   = std::clamp(fps,   1,  60);
+    maxW  = std::clamp(maxW,  480, 3840);
+    jpegQ = std::clamp(jpegQ, 1,  100);
+
+    g_frameIntervalMs = 1000 / fps;
+    g_jpegQuality = jpegQ;
+    g_maxWidth = maxW;
+    qInfo("[screenshare] effective fps=%d maxW=%d Q=%d "
+          "(user fps=%d maxW=%d Q=%d, server caps fps=%d maxW=%d Q=%d)",
+          fps, maxW, jpegQ,
+          userFps, userMaxW, userJpegQ,
+          srvFps, srvW, srvJpegQ);
 }
 
 void ScreenShareController::startForScreen(int screenIndex)

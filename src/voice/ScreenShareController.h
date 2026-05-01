@@ -57,8 +57,9 @@ public:
     // look up the active server's VoiceEngine on each frame push.
     // (Voice engines come and go — holding a pointer would race.)
     void setServerManager(ServerManager* mgr) { m_servers = mgr; }
-    // Lets the controller resolve the user's quality pref each start.
-    void setSettings(Settings* settings) { m_settings = settings; }
+    // Lets the controller resolve the user's quality pref each start
+    // AND re-apply mid-share when the user moves a slider.
+    void setSettings(Settings* settings);
 
     // Start capture of a specific screen by index into availableScreens.
     // Negative value ⇒ pick primary. Idempotent if already running.

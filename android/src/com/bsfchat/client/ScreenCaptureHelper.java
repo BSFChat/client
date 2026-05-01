@@ -41,12 +41,22 @@ public final class ScreenCaptureHelper {
     private static final String TAG = "BSFChatScreenCap";
     public static final int REQUEST_CODE = 7421;
 
-    // Pipeline targets. Long-edge 1024 keeps frame bytes modest;
-    // 15 fps is enough to follow a pointer without overwhelming
-    // the data-channel send queue.
-    private static final int MAX_LONG_EDGE = 1024;
-    private static final int TARGET_FPS = 15;
-    private static final int JPEG_QUALITY = 60;
+    // Pipeline targets. Defaults are conservative; the actual
+    // values are pushed in via configure() from C++ at start time
+    // so user/server settings (Settings.screenShare{Fps,MaxWidth,
+    // JpegQuality} clamped against the server policy) take effect
+    // here without needing a Java rebuild for every tweak.
+    private static int sMaxLongEdge = 1280;
+    private static int sTargetFps   = 5;
+    private static int sJpegQuality = 60;
+
+    public static synchronized void configure(int maxLongEdge,
+                                              int targetFps,
+                                              int jpegQuality) {
+        sMaxLongEdge = Math.max(480, Math.min(3840, maxLongEdge));
+        sTargetFps   = Math.max(1,   Math.min(60,   targetFps));
+        sJpegQuality = Math.max(1,   Math.min(100,  jpegQuality));
+    }
 
     private static ScreenCaptureHelper sInstance;
 
@@ -126,15 +136,15 @@ public final class ScreenCaptureHelper {
         }, null);
 
         // Resolution: scale display metrics so the long edge hits
-        // MAX_LONG_EDGE. Keeps aspect.
+        // sMaxLongEdge. Keeps aspect.
         DisplayMetrics dm = new DisplayMetrics();
         WindowManager wm = (WindowManager)
             activity.getSystemService(Activity.WINDOW_SERVICE);
         wm.getDefaultDisplay().getRealMetrics(dm);
         int srcW = dm.widthPixels, srcH = dm.heightPixels;
         int longEdge = Math.max(srcW, srcH);
-        float scale = longEdge > MAX_LONG_EDGE
-            ? (float) MAX_LONG_EDGE / longEdge : 1.0f;
+        float scale = longEdge > sMaxLongEdge
+            ? (float) sMaxLongEdge / longEdge : 1.0f;
         mCapWidth = Math.round(srcW * scale) & ~1;    // even
         mCapHeight = Math.round(srcH * scale) & ~1;
 
@@ -203,7 +213,7 @@ public final class ScreenCaptureHelper {
             if (img == null) return;
 
             long now = System.currentTimeMillis();
-            long minInterval = 1000L / TARGET_FPS;
+            long minInterval = 1000L / sTargetFps;
             if (now - mLastFrameMs < minInterval) return;
             mLastFrameMs = now;
 
@@ -230,7 +240,7 @@ public final class ScreenCaptureHelper {
 
             ByteArrayOutputStream baos = new ByteArrayOutputStream(
                 mCapWidth * mCapHeight);
-            tight.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, baos);
+            tight.compress(Bitmap.CompressFormat.JPEG, sJpegQuality, baos);
 
             byte[] jpeg = baos.toByteArray();
             if (bmp != tight) bmp.recycle();

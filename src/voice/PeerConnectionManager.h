@@ -68,4 +68,5 @@ private:
     PeerState m_peerState = PeerState::New;
     int m_framesSent = 0;
     int m_framesReceived = 0;
+    int m_screenFramesDropped = 0;  // bumped when bufferedAmount() exceeded
 };

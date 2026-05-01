@@ -169,6 +169,7 @@ int main(int argc, char *argv[])
     QQmlEngine::setObjectOwnership(&screenShare, QQmlEngine::CppOwnership);
     engine.rootContext()->setContextProperty("screenShare", &screenShare);
     screenShare.setServerManager(application.serverManager());
+    screenShare.setSettings(application.settings());
 #endif
 #if defined(BSFCHAT_VOICE_ENABLED)
     // CameraController is portable — QCamera works on desktop

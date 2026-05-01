@@ -263,6 +263,22 @@ void PeerConnectionManager::sendAudioFrame(const QByteArray& frame) {
 
 void PeerConnectionManager::sendScreenFrame(const QByteArray& jpegData) {
     if (!m_dc || !m_dc->isOpen()) return;
+    // Backpressure: drop the frame if the data channel has
+    // backed up beyond a sensible budget. Without this, raising
+    // the user's fps/quality past what their uplink can sustain
+    // makes libdatachannel's internal queue grow until SCTP
+    // panics or memory blows out — symptoms users would read as
+    // "the app is broken at high quality".
+    //
+    // Threshold is 4 MB (≈ 8 frames @ 500 KB ea, ≈ 0.5s of
+    // backlog at 15 fps). Tuned against the worst case of a
+    // 3840-px Q100 frame (~1.5 MB) so we drop after ~3 such
+    // frames pile up, well before SCTP starts to misbehave.
+    constexpr size_t kBufferedHighWatermark = 4 * 1024 * 1024;
+    if (m_dc->bufferedAmount() > kBufferedHighWatermark) {
+        ++m_screenFramesDropped;
+        return;
+    }
     rtc::binary data;
     data.reserve(jpegData.size() + 1);
     data.push_back(std::byte{0x02});

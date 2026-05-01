@@ -557,49 +557,116 @@ Popup {
                         wrapMode: Text.WordWrap
                     }
 
-                    ThemedComboBox {
-                        id: serverMaxQualityCombo
-                        Layout.maximumWidth: 260
-                        textRole: "label"
-                        model: [
-                            { label: "Low (2 fps · 960 px · Q40)",   value: 0 },
-                            { label: "Medium (5 fps · 1280 px · Q60)", value: 1 },
-                            { label: "High (10 fps · 1600 px · Q75)",  value: 2 },
-                            { label: "Ultra (15 fps · 1920 px · Q85)", value: 3 }
-                        ]
-                        enabled: {
-                            var s = serverManager.activeServer;
-                            if (!s) return false;
-                            if (s.permissionsGeneration < 0) return false;
-                            // Reuse manage-channel on the active room as a
-                            // proxy for "server admin" until a proper
-                            // manage-server check lands.
-                            return s.canManageChannel(s.activeRoomId);
+                    // Per-axis caps. Each row is a slider + a numeric
+                    // input + a "no cap" toggle (-1 sentinel) that
+                    // tells clients to honour their user prefs
+                    // verbatim. Edits are batched into a single
+                    // setScreenSharePolicy() call on commit so we
+                    // emit one room-state event per change.
+                    component PolicyRow: RowLayout {
+                        id: pr
+                        property string label: ""
+                        property int minVal: 0
+                        property int maxVal: 60
+                        property int stepVal: 1
+                        property string suffix: ""
+                        property int value: -1
+                        signal commit(int v)
+
+                        spacing: Theme.sp.s3
+                        Text {
+                            Layout.preferredWidth: 130
+                            text: pr.label
+                            color: Theme.fg1
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.sm
                         }
-                        Component.onCompleted: {
-                            var s = serverManager.activeServer;
-                            currentIndex = s ? s.maxScreenShareQuality : 3;
+                        ThemedSlider {
+                            implicitWidth: 220
+                            from: pr.minVal; to: pr.maxVal; stepSize: pr.stepVal
+                            enabled: pr.value >= 0 && policyEditorEnabled
+                            value: pr.value < 0 ? pr.minVal : pr.value
+                            onMoved: pr.commit(Math.round(value))
                         }
-                        onActivated: {
-                            if (!serverManager.activeServer) return;
-                            var v = model[currentIndex].value;
-                            serverManager.activeServer.setMaxScreenShareQuality(v);
+                        Text {
+                            Layout.preferredWidth: 80
+                            text: pr.value < 0 ? "no cap" : pr.value + pr.suffix
+                            font.family: Theme.fontMono
+                            font.pixelSize: Theme.fontSize.sm
+                            color: pr.value < 0 ? Theme.fg3 : Theme.fg0
+                            horizontalAlignment: Text.AlignRight
                         }
-                        // Reflect live updates (e.g. from another device).
-                        Connections {
-                            target: serverManager.activeServer
-                            ignoreUnknownSignals: true
-                            function onMaxScreenShareQualityChanged() {
-                                serverMaxQualityCombo.currentIndex =
-                                    serverManager.activeServer.maxScreenShareQuality;
+                        ThemedSwitch {
+                            text: "Cap"
+                            enabled: policyEditorEnabled
+                            checked: pr.value >= 0
+                            onToggled: {
+                                if (checked) pr.commit(pr.maxVal);
+                                else         pr.commit(-1);
                             }
                         }
                     }
 
+                    readonly property bool policyEditorEnabled: {
+                        var s = serverManager.activeServer;
+                        if (!s) return false;
+                        if (s.permissionsGeneration < 0) return false;
+                        return s.canManageChannel(s.activeRoomId);
+                    }
+                    function _commitPolicy() {
+                        var s = serverManager.activeServer;
+                        if (!s) return;
+                        s.setScreenSharePolicy(
+                            fpsPolicyRow.value,
+                            widthPolicyRow.value,
+                            jpegPolicyRow.value);
+                    }
+
+                    PolicyRow {
+                        id: fpsPolicyRow
+                        label: "Max frame rate"
+                        minVal: 1; maxVal: 60; stepVal: 1; suffix: " fps"
+                        value: serverManager.activeServer
+                            ? serverManager.activeServer.maxScreenShareFps : -1
+                        onCommit: (v) => { value = v; _commitPolicy(); }
+                    }
+                    PolicyRow {
+                        id: widthPolicyRow
+                        label: "Max long edge"
+                        minVal: 480; maxVal: 3840; stepVal: 80; suffix: " px"
+                        value: serverManager.activeServer
+                            ? serverManager.activeServer.maxScreenShareWidth : -1
+                        onCommit: (v) => { value = v; _commitPolicy(); }
+                    }
+                    PolicyRow {
+                        id: jpegPolicyRow
+                        label: "Max JPEG quality"
+                        minVal: 1; maxVal: 100; stepVal: 1; suffix: ""
+                        value: serverManager.activeServer
+                            ? serverManager.activeServer.maxScreenShareJpeg : -1
+                        onCommit: (v) => { value = v; _commitPolicy(); }
+                    }
+                    // Live-refresh the rows when an admin on another
+                    // device changes the policy.
+                    Connections {
+                        target: serverManager.activeServer
+                        ignoreUnknownSignals: true
+                        function onMaxScreenSharePolicyChanged() {
+                            var s = serverManager.activeServer;
+                            if (!s) return;
+                            fpsPolicyRow.value   = s.maxScreenShareFps;
+                            widthPolicyRow.value = s.maxScreenShareWidth;
+                            jpegPolicyRow.value  = s.maxScreenShareJpeg;
+                        }
+                    }
+
                     InfoBanner {
-                        Layout.maximumWidth: 420
+                        Layout.maximumWidth: 540
                         icon: "shield"
-                        text: "Only members with the Manage Server permission can change this cap."
+                        text: "Only Manage-Server members can change these caps. "
+                            + "Each axis caps independently — leave any of them on "
+                            + "\"no cap\" to honour the user's setting on that axis. "
+                            + "Effective stream params are min(user, cap)."
                     }
 
                     Item { Layout.fillHeight: true }

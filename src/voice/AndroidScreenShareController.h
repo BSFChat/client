@@ -18,6 +18,7 @@
 #include <QString>
 
 class ServerManager;
+class Settings;
 
 class AndroidScreenShareController : public QObject {
     Q_OBJECT
@@ -31,6 +32,11 @@ public:
     QString lastError() const { return m_lastError; }
 
     void setServerManager(ServerManager* m) { m_serverManager = m; }
+    // Settings drive the same fps / maxWidth / jpegQuality knobs the
+    // desktop controller honours; we forward the resolved values to
+    // ScreenCaptureHelper.configure() over JNI before the projection
+    // intent fires (and on every settings change while active).
+    void setSettings(Settings* s);
 
     // Match the desktop controller's verbs so QML bindings in
     // VoiceDock don't need a platform branch.
@@ -59,4 +65,6 @@ private:
     int m_width = 0;
     int m_height = 0;
     ServerManager* m_serverManager = nullptr;
+    Settings* m_settings = nullptr;
+    void pushConfigToHelper();
 };

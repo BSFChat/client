@@ -444,6 +444,79 @@ void Settings::setScreenShareQuality(int level)
     emit screenShareQualityChanged();
 }
 
+// ── Direct screen-share knobs ─────────────────────────────────────
+//
+// Defaults are hydrated from the legacy preset (if present) on first
+// read so an upgrade from <0.0.24 doesn't snap the user from their
+// chosen "Ultra" preset back to a hard-coded "Medium" floor. After
+// that initial read we honour whatever's in the explicit fields.
+//
+// Allowed envelopes are wide:
+//   fps         1 .. 60       (1 = ultra-low cellular, 60 = LAN+screen)
+//   maxWidth    480 .. 3840   (480p .. 4K long edge)
+//   jpegQuality 1 .. 100      (1 = postage-stamp, 100 = near-lossless)
+// ScreenShareController.applyEffectiveQuality() additionally clamps
+// the chosen value against the active server's advertised policy
+// (`maxScreenShare*`) before configuring the encoder.
+namespace {
+struct LegacyPreset { int fps; int maxWidth; int jpeg; };
+LegacyPreset legacyPreset(int level) {
+    switch (std::clamp(level, 0, 3)) {
+    case 0:  return {2,  960, 40};
+    case 1:  return {5, 1280, 60};
+    case 2:  return {10, 1600, 75};
+    case 3:  default: return {15, 1920, 85};
+    }
+}
+}  // namespace
+
+int Settings::screenShareFps() const
+{
+    if (m_settings.contains(QStringLiteral("screenShare/fps")))
+        return std::clamp(m_settings.value("screenShare/fps").toInt(), 1, 60);
+    return legacyPreset(screenShareQuality()).fps;
+}
+
+void Settings::setScreenShareFps(int fps)
+{
+    fps = std::clamp(fps, 1, 60);
+    if (fps == screenShareFps()) return;
+    m_settings.setValue(QStringLiteral("screenShare/fps"), fps);
+    emit screenShareFpsChanged();
+}
+
+int Settings::screenShareMaxWidth() const
+{
+    if (m_settings.contains(QStringLiteral("screenShare/maxWidth")))
+        return std::clamp(m_settings.value("screenShare/maxWidth").toInt(),
+                          480, 3840);
+    return legacyPreset(screenShareQuality()).maxWidth;
+}
+
+void Settings::setScreenShareMaxWidth(int px)
+{
+    px = std::clamp(px, 480, 3840);
+    if (px == screenShareMaxWidth()) return;
+    m_settings.setValue(QStringLiteral("screenShare/maxWidth"), px);
+    emit screenShareMaxWidthChanged();
+}
+
+int Settings::screenShareJpegQuality() const
+{
+    if (m_settings.contains(QStringLiteral("screenShare/jpegQuality")))
+        return std::clamp(m_settings.value("screenShare/jpegQuality").toInt(),
+                          1, 100);
+    return legacyPreset(screenShareQuality()).jpeg;
+}
+
+void Settings::setScreenShareJpegQuality(int q)
+{
+    q = std::clamp(q, 1, 100);
+    if (q == screenShareJpegQuality()) return;
+    m_settings.setValue(QStringLiteral("screenShare/jpegQuality"), q);
+    emit screenShareJpegQualityChanged();
+}
+
 QString Settings::voiceMode() const
 {
     return m_settings.value("voiceMode", "open").toString();

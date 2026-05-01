@@ -397,6 +397,22 @@ public:
     // downward to this value. Default 3 (Ultra ⇒ no limit) when the
     // server has never set a policy.
     Q_INVOKABLE int maxScreenShareQuality() const { return m_maxScreenShareQuality; }
+
+    // Per-axis screen-share caps, settable by a server admin via
+    // the bsfchat.server.screenshare state event. -1 means "no
+    // cap"; the client treats those as effectively unlimited and
+    // honours the user's setting verbatim. Older servers that
+    // only set the legacy `max_quality` preset will continue to
+    // see -1 here, which is correct: their preset cap still
+    // applies via maxScreenShareQuality().
+    Q_PROPERTY(int maxScreenShareFps READ maxScreenShareFps NOTIFY maxScreenSharePolicyChanged)
+    Q_PROPERTY(int maxScreenShareWidth READ maxScreenShareWidth NOTIFY maxScreenSharePolicyChanged)
+    Q_PROPERTY(int maxScreenShareJpeg READ maxScreenShareJpeg NOTIFY maxScreenSharePolicyChanged)
+    int maxScreenShareFps() const { return m_maxScreenShareFps; }
+    int maxScreenShareWidth() const { return m_maxScreenShareWidth; }
+    int maxScreenShareJpeg() const { return m_maxScreenShareJpeg; }
+    Q_INVOKABLE void setScreenSharePolicy(int maxFps, int maxWidth,
+                                          int maxJpeg);
     Q_INVOKABLE void setMaxScreenShareQuality(int level);
     Q_INVOKABLE void uploadAvatar(const QString& fileUrl);
     Q_INVOKABLE void fetchProfile(const QString& userId);
@@ -420,6 +436,7 @@ signals:
     // a progress bar while a file attachment is uploading.
     void mediaUploadProgress(const QString& filename, double progress);
     void maxScreenShareQualityChanged();
+    void maxScreenSharePolicyChanged();
     void userIdChanged();
     void activeRoomIdChanged();
     void pttPressedChanged();
@@ -534,6 +551,10 @@ public:
     QMap<QString, QString> m_peerCameraData; // userId -> data URL
     QMap<QString, float> m_peerLevels;
     int m_maxScreenShareQuality = 3; // 3 = no limit by default
+    // -1 sentinels = "no cap, honour user setting verbatim"
+    int m_maxScreenShareFps   = -1;
+    int m_maxScreenShareWidth = -1;
+    int m_maxScreenShareJpeg  = -1;
     // Global userId → display name, populated from all m.room.member events
     // across every room. MessageModel reads from this pointer.
     QMap<QString, QString> m_userDisplayNames;

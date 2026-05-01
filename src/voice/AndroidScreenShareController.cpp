@@ -4,9 +4,12 @@
 
 #if defined(Q_OS_ANDROID) && defined(BSFCHAT_VOICE_ENABLED)
 
+#include "core/Settings.h"
 #include "net/ServerConnection.h"
 #include "net/ServerManager.h"
 #include "voice/VoiceEngine.h"
+
+#include <algorithm>
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -130,6 +133,12 @@ AndroidScreenShareController::AndroidScreenShareController(QObject* parent)
 void AndroidScreenShareController::showPicker()
 {
     setLastError(QString());
+    // Push the latest user/server-resolved config into the Java
+    // helper before we ask for projection consent — the helper
+    // bakes those values into the VirtualDisplay it creates,
+    // so they need to be in place at that moment.
+    pushConfigToHelper();
+
     QJniObject h = helper();
     if (!h.isValid()) {
         setLastError(QStringLiteral("Screen capture helper unavailable"));
@@ -142,6 +151,49 @@ void AndroidScreenShareController::showPicker()
     }
     h.callMethod<void>("requestPermission",
         "(Landroid/app/Activity;)V", act.object());
+}
+
+void AndroidScreenShareController::setSettings(Settings* s)
+{
+    if (m_settings == s) return;
+    m_settings = s;
+    if (!s) return;
+    auto reapply = [this]() { pushConfigToHelper(); };
+    QObject::connect(s, &Settings::screenShareFpsChanged, this, reapply);
+    QObject::connect(s, &Settings::screenShareMaxWidthChanged, this, reapply);
+    QObject::connect(s, &Settings::screenShareJpegQualityChanged, this, reapply);
+}
+
+void AndroidScreenShareController::pushConfigToHelper()
+{
+    if (!m_settings) return;
+
+    int userFps   = m_settings->screenShareFps();
+    int userW     = m_settings->screenShareMaxWidth();
+    int userJ     = m_settings->screenShareJpegQuality();
+
+    int srvFps = -1, srvW = -1, srvJ = -1;
+    if (m_serverManager) {
+        ServerConnection* conn = m_serverManager->activeServer();
+        if (conn) {
+            srvFps = conn->maxScreenShareFps();
+            srvW   = conn->maxScreenShareWidth();
+            srvJ   = conn->maxScreenShareJpeg();
+        }
+    }
+    int fps = (srvFps >= 0) ? std::min(userFps, srvFps) : userFps;
+    int maxW = (srvW >= 0) ? std::min(userW, srvW) : userW;
+    int jpeg = (srvJ >= 0) ? std::min(userJ, srvJ) : userJ;
+
+    QJniEnvironment env;
+    QJniObject::callStaticMethod<void>(
+        "com/bsfchat/client/ScreenCaptureHelper",
+        "configure", "(III)V",
+        jint(maxW), jint(fps), jint(jpeg));
+    qCInfo(logScreenShare,
+        "config pushed → fps=%d maxW=%d Q=%d (user fps=%d maxW=%d Q=%d, "
+        "server caps fps=%d maxW=%d Q=%d)",
+        fps, maxW, jpeg, userFps, userW, userJ, srvFps, srvW, srvJ);
 }
 
 void AndroidScreenShareController::stop()

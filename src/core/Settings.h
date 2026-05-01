@@ -162,11 +162,29 @@ public:
     Q_INVOKABLE void setLastTextRoomFor(const QString& serverUrl,
                                         const QString& roomId);
 
-    // Screen-share quality preset chosen by the user (0=Low, 1=Medium,
-    // 2=High, 3=Ultra). Default is 1 (Medium). ScreenShareController
-    // reads this and clamps to the server's advertised max.
+    // Legacy screen-share quality preset (0=Low..3=Ultra). Retained
+    // for migration only — readers should use the explicit fps /
+    // maxWidth / jpegQuality fields below. We translate the preset
+    // to those values on first launch and never write the preset
+    // again. Removing it entirely would break upgrades from <0.0.24
+    // by losing the user's existing preference.
     Q_INVOKABLE int screenShareQuality() const;
     Q_INVOKABLE void setScreenShareQuality(int level);
+
+    // Direct screen-share quality knobs — what users actually want
+    // to control. Allowed ranges are wide enough to cover "1 fps
+    // metered cellular" through "60 fps 4K Q100"; the
+    // ScreenShareController clamps the effective value to
+    // min(user, server-policy).
+    Q_PROPERTY(int screenShareFps READ screenShareFps WRITE setScreenShareFps NOTIFY screenShareFpsChanged)
+    Q_PROPERTY(int screenShareMaxWidth READ screenShareMaxWidth WRITE setScreenShareMaxWidth NOTIFY screenShareMaxWidthChanged)
+    Q_PROPERTY(int screenShareJpegQuality READ screenShareJpegQuality WRITE setScreenShareJpegQuality NOTIFY screenShareJpegQualityChanged)
+    int screenShareFps() const;
+    void setScreenShareFps(int fps);
+    int screenShareMaxWidth() const;
+    void setScreenShareMaxWidth(int px);
+    int screenShareJpegQuality() const;
+    void setScreenShareJpegQuality(int q);
 
     // Voice mode: "open" ⇒ open mic (current behaviour), "ptt" ⇒
     // push-to-talk. In PTT the mic only transmits while the user is
@@ -180,6 +198,9 @@ public:
 signals:
     void mutedRoomsChanged();
     void screenShareQualityChanged();
+    void screenShareFpsChanged();
+    void screenShareMaxWidthChanged();
+    void screenShareJpegQualityChanged();
     void voiceModeChanged();
     void pttKeySequenceChanged();
 public:

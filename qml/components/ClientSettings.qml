@@ -498,66 +498,122 @@ Popup {
 
                     SectionHeader { text: "Screen Share" }
 
+                    // Helper used inline below to render the active
+                    // server's per-axis cap as a small badge after
+                    // the slider, e.g. " · capped @ 30". When the
+                    // server hasn't set a cap (-1 sentinel) the
+                    // badge reads " · uncapped".
+                    component CapBadge: Text {
+                        property int cap: -1
+                        property string suffix: ""
+                        text: cap < 0 ? " · server: uncapped"
+                                      : " · server cap: " + cap + suffix
+                        color: cap < 0 ? Theme.fg3 : Theme.warning
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xs
+                    }
+
                     SettingRow {
-                        title: "Stream quality"
-                        description: {
-                            var s = serverManager.activeServer;
-                            var serverMax = s ? s.maxScreenShareQuality : 3;
-                            var base = "Bandwidth-vs-fidelity tradeoff applied when "
-                                     + "you share a screen. Lower presets reduce fps, "
-                                     + "resolution, and JPEG quality.";
-                            var labels = ["Low", "Medium", "High", "Ultra"];
-                            if (serverMax < 3)
-                                return base + " This server caps the maximum at "
-                                     + labels[serverMax] + ".";
-                            return base;
-                        }
-                        ThemedComboBox {
-                            id: ssQualityCombo
-                            implicitWidth: 300
-                            textRole: "label"
-                            // Reactive to server-max changes so items disable
-                            // live when an admin tightens the policy.
-                            model: {
-                                var s = serverManager.activeServer;
-                                var max = s ? s.maxScreenShareQuality : 3;
-                                var entries = [];
-                                var labels = ["Low (2 fps · 960 px · Q40)",
-                                              "Medium (5 fps · 1280 px · Q60)",
-                                              "High (10 fps · 1600 px · Q75)",
-                                              "Ultra (15 fps · 1920 px · Q85)"];
-                                for (var i = 0; i <= 3; ++i) {
-                                    entries.push({
-                                        label: i > max
-                                            ? labels[i] + " — server max exceeded"
-                                            : labels[i],
-                                        value: i,
-                                        enabled: i <= max
-                                    });
-                                }
-                                return entries;
+                        title: "Frame rate"
+                        description: "Frames per second sent to peers. "
+                                   + "Higher = smoother; bandwidth scales "
+                                   + "roughly linearly. 1 fps is fine for "
+                                   + "static content, 60 only makes sense "
+                                   + "on a fast LAN."
+                        RowLayout {
+                            spacing: Theme.sp.s3
+                            ThemedSlider {
+                                id: fpsSlider
+                                implicitWidth: 240
+                                from: 1; to: 60; stepSize: 1
+                                value: appSettings.screenShareFps
+                                onMoved: appSettings.screenShareFps = Math.round(value)
                             }
-                            Component.onCompleted:
-                                currentIndex = appSettings.screenShareQuality
-                            onActivated: {
-                                var entry = model[currentIndex];
-                                if (!entry.enabled) {
-                                    var s = serverManager.activeServer;
-                                    var cap = s ? s.maxScreenShareQuality : 3;
-                                    currentIndex = cap;
-                                    appSettings.screenShareQuality = cap;
-                                } else {
-                                    appSettings.screenShareQuality = entry.value;
-                                }
+                            Text {
+                                Layout.preferredWidth: 56
+                                text: appSettings.screenShareFps + " fps"
+                                font.family: Theme.fontMono
+                                font.pixelSize: Theme.fontSize.sm
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignRight
+                            }
+                            CapBadge {
+                                cap: serverManager.activeServer
+                                    ? serverManager.activeServer.maxScreenShareFps : -1
+                                suffix: " fps"
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        title: "Maximum resolution"
+                        description: "The long edge of the captured frame "
+                                   + "before encode. 1280 px ≈ 720p, 1920 ≈ 1080p, "
+                                   + "2560 ≈ 1440p, 3840 ≈ 4K. Aspect ratio is "
+                                   + "preserved."
+                        RowLayout {
+                            spacing: Theme.sp.s3
+                            ThemedSlider {
+                                id: widthSlider
+                                implicitWidth: 240
+                                from: 480; to: 3840; stepSize: 80
+                                value: appSettings.screenShareMaxWidth
+                                onMoved: appSettings.screenShareMaxWidth = Math.round(value)
+                            }
+                            Text {
+                                Layout.preferredWidth: 64
+                                text: appSettings.screenShareMaxWidth + " px"
+                                font.family: Theme.fontMono
+                                font.pixelSize: Theme.fontSize.sm
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignRight
+                            }
+                            CapBadge {
+                                cap: serverManager.activeServer
+                                    ? serverManager.activeServer.maxScreenShareWidth : -1
+                                suffix: " px"
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        title: "JPEG quality"
+                        description: "1 is postage-stamp lossy, 100 is "
+                                   + "near-lossless. The default 60 hits a "
+                                   + "good readability/bandwidth balance for "
+                                   + "code + text. For video content, 75–85 "
+                                   + "looks notably better."
+                        RowLayout {
+                            spacing: Theme.sp.s3
+                            ThemedSlider {
+                                id: qSlider
+                                implicitWidth: 240
+                                from: 1; to: 100; stepSize: 1
+                                value: appSettings.screenShareJpegQuality
+                                onMoved: appSettings.screenShareJpegQuality = Math.round(value)
+                            }
+                            Text {
+                                Layout.preferredWidth: 48
+                                text: "Q" + appSettings.screenShareJpegQuality
+                                font.family: Theme.fontMono
+                                font.pixelSize: Theme.fontSize.sm
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignRight
+                            }
+                            CapBadge {
+                                cap: serverManager.activeServer
+                                    ? serverManager.activeServer.maxScreenShareJpeg : -1
+                                suffix: ""
                             }
                         }
                     }
 
                     InfoBanner {
                         icon: "signal"
-                        text: "The chosen preset applies the next time you start a "
-                            + "share. Your current stream is unaffected until you "
-                            + "stop and restart it."
+                        text: "Settings apply live — moving a slider mid-share "
+                            + "takes effect on the next frame. The server admin "
+                            + "may cap individual axes; effective values clamp "
+                            + "to min(your-pick, server-cap)."
                     }
 
                     Item { Layout.fillHeight: true }
