@@ -140,6 +140,10 @@ void NotificationManager::wireConnection(ServerConnection* conn)
     // When the user opens a room, clear any Android notifications
     // we'd posted for that room — they're already seeing the
     // messages, so leaving the shade entry would be redundant.
+    // Lambdas can't use Qt::UniqueConnection (Qt requires a
+    // pointer-to-member-function for the dedup) — the
+    // wireConnection call site only fires once per server-add
+    // anyway so duplicate connects aren't a real risk.
     connect(conn, &ServerConnection::activeRoomIdChanged, this,
         [this, conn]() {
             if (!m_androidNotifier) return;
@@ -147,7 +151,7 @@ void NotificationManager::wireConnection(ServerConnection* conn)
             if (roomId.isEmpty()) return;
             m_androidNotifier->cancelByTag(conn->serverUrl()
                 + QStringLiteral("|") + roomId);
-        }, Qt::UniqueConnection);
+        });
 }
 
 void NotificationManager::rebuildTrayMenu()

@@ -156,8 +156,8 @@ set_target_properties(bsfchat-app PROPERTIES
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_BUNDLE_NAME "BSFChat"
     MACOSX_BUNDLE_GUI_IDENTIFIER "${BSFCHAT_BUNDLE_ID}"
-    MACOSX_BUNDLE_BUNDLE_VERSION "0.0.22"
-    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.0.22"
+    MACOSX_BUNDLE_BUNDLE_VERSION "0.0.23"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.0.23"
     MACOSX_BUNDLE_INFO_STRING "BSFChat"
     MACOSX_BUNDLE_ICON_FILE "BSFChat.icns"
     WIN32_EXECUTABLE TRUE
@@ -237,12 +237,13 @@ set_source_files_properties(qml/theme/Theme.qml PROPERTIES
 qt_add_qml_module(bsfchat-app
     URI BSFChat
     VERSION 1.0
-    # Icon.qml uses Qt5Compat.GraphicalEffects' ColorOverlay — declare
-    # the dependency explicitly so Qt's Android deployment picks up
-    # the plugin and its qmldir registers at launch. Without this,
-    # the Qt5Compat module is bundled in the APK but not loaded
-    # (icons silently render as transparent/black).
-    IMPORTS Qt5Compat.GraphicalEffects
+    # NOTE: an earlier draft of Icon.qml used Qt5Compat.GraphicalEffects'
+    # ColorOverlay and we declared `IMPORTS Qt5Compat.GraphicalEffects`
+    # here so Android deployment would bundle the plugin. The icon
+    # path was rewritten to use the C++ TintedIconProvider, but the
+    # IMPORTS line was left in — which made every desktop build that
+    # didn't ship the module crash on launch with
+    # "module Qt5Compat.GraphicalEffects is not installed". Removed.
     QML_FILES
         qml/main.qml
         qml/mobile/MobileMain.qml
