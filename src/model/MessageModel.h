@@ -37,6 +37,8 @@ public:
         MediaUrlRole,       // Resolved HTTP URL for media messages
         MediaFileNameRole,  // Filename from media content
         MediaFileSizeRole,  // File size from media content info
+        MediaWidthRole,     // Intrinsic width  in px from m.image/m.video info.w
+        MediaHeightRole,    // Intrinsic height in px from m.image/m.video info.h
         EditedRole,         // Whether this message has been edited at least once
         ReplyToEventIdRole, // Event ID of the message being replied to (empty if not a reply)
         ReplyToSenderRole,  // Display name of the replied-to message's sender
@@ -138,6 +140,8 @@ private:
         QString mediaUrl;       // Resolved HTTP URL for m.image/m.file
         QString mediaFileName;  // Filename from content
         qint64 mediaFileSize = 0; // Size in bytes
+        int    mediaWidth  = 0;   // intrinsic px from info.w (0 = unknown)
+        int    mediaHeight = 0;   // intrinsic px from info.h (0 = unknown)
         bool edited = false;    // True if ≥1 m.replace has been applied
         qint64 editedAt = 0;    // Timestamp of the latest edit
         // Previous bodies (oldest → newest before the current one).

@@ -483,8 +483,12 @@ Rectangle {
                         serverManager.activeServer.sendTypingNotification();
                     }
                     inputRoot._refreshMentionQuery();
+                    inputRoot._refreshSlashQuery();
                 }
-                onCursorPositionChanged: inputRoot._refreshMentionQuery()
+                onCursorPositionChanged: {
+                    inputRoot._refreshMentionQuery();
+                    inputRoot._refreshSlashQuery();
+                }
 
                 Keys.onPressed: (event) => {
                     // Intercept nav keys while the mention popup is open so
@@ -526,6 +530,43 @@ Rectangle {
                         if (event.key === Qt.Key_Escape) {
                             inputRoot.mentionQuery = "";
                             inputRoot.mentionAnchor = -1;
+                            event.accepted = true;
+                            return;
+                        }
+                    }
+
+                    // Same nav semantics for the slash-command popup.
+                    // Up/Down change selection, Tab/Enter accept,
+                    // Esc dismisses without submitting. We don't
+                    // intercept Enter when no matches remain so the
+                    // user can still send `/foo bar` for an unknown
+                    // command (it'll fall through as a literal
+                    // message — matching Discord's behaviour).
+                    if (inputRoot.slashAnchor >= 0) {
+                        var matches = inputRoot._slashMatches();
+                        if (matches.length === 0) return;
+                        if (event.key === Qt.Key_Down) {
+                            inputRoot.slashSelected =
+                                (inputRoot.slashSelected + 1) % matches.length;
+                            event.accepted = true;
+                            return;
+                        }
+                        if (event.key === Qt.Key_Up) {
+                            inputRoot.slashSelected =
+                                (inputRoot.slashSelected - 1 + matches.length)
+                                % matches.length;
+                            event.accepted = true;
+                            return;
+                        }
+                        if (event.key === Qt.Key_Tab) {
+                            inputRoot._insertSlash(
+                                matches[inputRoot.slashSelected]);
+                            event.accepted = true;
+                            return;
+                        }
+                        if (event.key === Qt.Key_Escape) {
+                            inputRoot.slashQuery = "";
+                            inputRoot.slashAnchor = -1;
                             event.accepted = true;
                             return;
                         }
@@ -804,6 +845,104 @@ Rectangle {
         }
     }
 
+    // Slash-command autocomplete popup. Mirrors mentionPopup's
+    // visual + interaction language so users don't have to learn
+    // a second affordance: same chrome, same arrow/Tab/Esc keys,
+    // anchored above the composer in the same spot.
+    Popup {
+        id: slashPopup
+        parent: inputRoot
+        y: -height - 4
+        x: Theme.sp.s3
+        width: 320
+        padding: 4
+        modal: false
+        focus: false
+        closePolicy: Popup.NoAutoClose
+        visible: inputRoot.slashAnchor >= 0 && matches.length > 0
+
+        property var matches: inputRoot.slashAnchor >= 0
+                              ? inputRoot._slashMatches() : []
+
+        background: Rectangle {
+            color: Theme.bg1
+            border.color: Theme.line
+            border.width: 1
+            radius: Theme.r2
+        }
+
+        contentItem: Column {
+            spacing: 0
+
+            Text {
+                leftPadding: Theme.sp.s3
+                topPadding: Theme.sp.s2
+                bottomPadding: Theme.sp.s2
+                text: "SLASH COMMANDS"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                font.weight: Theme.fontWeight.semibold
+                font.letterSpacing: Theme.trackWidest.xs
+                color: Theme.fg3
+            }
+
+            Repeater {
+                model: slashPopup.matches
+                delegate: Rectangle {
+                    required property int index
+                    required property var modelData
+                    width: slashPopup.width - 8
+                    height: 40
+                    radius: Theme.r1
+                    color: (index === inputRoot.slashSelected)
+                           ? Theme.accent
+                           : (slashRowHover.containsMouse ? Theme.bg3 : "transparent")
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.sp.s3
+                        anchors.rightMargin: Theme.sp.s3
+                        spacing: Theme.sp.s3
+
+                        // Command name — monospaced so users
+                        // immediately read it as something to type.
+                        Text {
+                            text: modelData.name
+                                + (modelData.usage ? " " + modelData.usage : "")
+                            font.family: Theme.fontMono
+                            font.pixelSize: Theme.fontSize.sm
+                            font.weight: Theme.fontWeight.medium
+                            color: index === inputRoot.slashSelected
+                                   ? Theme.onAccent : Theme.fg0
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            text: modelData.description
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.xs
+                            color: index === inputRoot.slashSelected
+                                   ? Qt.rgba(0, 0, 0, 0.6) : Theme.fg3
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignRight
+                        }
+                    }
+                    MouseArea {
+                        id: slashRowHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            inputRoot._insertSlash(modelData);
+                            inputArea.forceActiveFocus();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Platform.FileDialog {
         id: fileDialog
         title: "Select a file to upload"
@@ -830,6 +969,207 @@ Rectangle {
         }
     }
 
+    // Canonical catalogue of supported slash commands. Drives both
+    // the autocomplete popup (definitions visible to the UI) and
+    // the at-send transformation (`_runSlashCommand` walks the same
+    // table). Adding a new command is a single entry here.
+    //
+    // Each definition:
+    //   name        canonical "/foo"
+    //   aliases     extra names that map to the same handler
+    //   description short one-liner shown in the popup
+    //   usage       hint for the argument shape, "" if none
+    //   handler(rest) returns { body, msgtype }, or null to skip
+    //
+    // Handlers run on send; the popup itself doesn't execute them
+    // (it only completes the typed text). Server-side / UI side
+    // effects (DM creation, etc.) happen via the handler's optional
+    // `sideEffect: function(rest)` field, called before send.
+    readonly property var slashCatalogue: [
+        {
+            name: "/me",
+            aliases: [],
+            description: "Send an action message",
+            usage: "<action>",
+            handler: function(rest) {
+                return { body: rest, msgtype: "m.emote" };
+            }
+        },
+        {
+            name: "/shrug",
+            aliases: [],
+            description: "¯\\_(ツ)_/¯",
+            usage: "[message]",
+            handler: function(rest) {
+                return {
+                    body: rest + (rest ? " " : "") + "¯\\_(ツ)_/¯",
+                    msgtype: "m.text"
+                };
+            }
+        },
+        {
+            name: "/tableflip",
+            aliases: [],
+            description: "(╯°□°)╯︵ ┻━┻",
+            usage: "[message]",
+            handler: function(rest) {
+                return {
+                    body: rest + (rest ? " " : "") + "(╯°□°)╯︵ ┻━┻",
+                    msgtype: "m.text"
+                };
+            }
+        },
+        {
+            name: "/unflip",
+            aliases: [],
+            description: "┬─┬ノ( º _ ºノ)",
+            usage: "[message]",
+            handler: function(rest) {
+                return {
+                    body: rest + (rest ? " " : "") + "┬─┬ノ( º _ ºノ)",
+                    msgtype: "m.text"
+                };
+            }
+        },
+        {
+            name: "/lenny",
+            aliases: [],
+            description: "( ͡° ͜ʖ ͡°)",
+            usage: "[message]",
+            handler: function(rest) {
+                return {
+                    body: rest + (rest ? " " : "") + "( ͡° ͜ʖ ͡°)",
+                    msgtype: "m.text"
+                };
+            }
+        },
+        // Spoiler — Matrix renders <span data-mx-spoiler> with a
+        // hidden-by-default style. The plain `body` carries a
+        // textual fallback for clients that don't render HTML.
+        {
+            name: "/spoiler",
+            aliases: ["/sp"],
+            description: "Hide text behind a spoiler",
+            usage: "<text>",
+            handler: function(rest) {
+                if (!rest) return null;
+                // The send path expands HTML when m_richMessage; the
+                // command therefore returns a plain body and lets
+                // sendCurrentMessage's hasMarkdown path do the
+                // rest. We use a raw HTML wrapper distinguishable
+                // from any markdown we'd otherwise generate.
+                return {
+                    body: "[spoiler] " + rest,
+                    msgtype: "m.text",
+                    formattedHtml: "<span data-mx-spoiler>"
+                                   + rest.replace(/&/g, "&amp;")
+                                         .replace(/</g, "&lt;")
+                                         .replace(/>/g, "&gt;")
+                                   + "</span>"
+                };
+            }
+        },
+        // Quick DM-jump — completes via the existing DM create
+        // path (ServerConnection.createDirectMessage) and skips
+        // sending anything in the current channel. The handler
+        // returns null (no message sent); sideEffect creates the
+        // room.
+        {
+            name: "/dm",
+            aliases: ["/msg"],
+            description: "Open a DM with someone",
+            usage: "@user:server",
+            handler: function(rest) { return null; },
+            sideEffect: function(rest) {
+                if (!serverManager.activeServer || !rest) return;
+                var t = rest.trim();
+                if (!t.startsWith("@") && t.indexOf(":") > 0) t = "@" + t;
+                serverManager.activeServer.createDirectMessage(t);
+            }
+        },
+        {
+            name: "/clear",
+            aliases: [],
+            description: "Clear the composer (or use Esc)",
+            usage: "",
+            handler: function(rest) { return null; },
+            sideEffect: function(rest) { inputArea.text = ""; }
+        }
+    ]
+
+    // Active query state. mentionQuery / mentionAnchor have a parallel
+    // pair for slash commands; -1 means "no slash popup right now".
+    property string slashQuery: ""
+    property int slashAnchor: -1
+    property int slashSelected: 0
+
+    function _slashMatches() {
+        // Return up to N catalogue entries whose name or alias
+        // matches the current slashQuery. The first / is included
+        // in slashQuery so we can match exactly without re-prepending.
+        var q = slashQuery.toLowerCase();
+        var out = [];
+        for (var i = 0; i < slashCatalogue.length; ++i) {
+            var c = slashCatalogue[i];
+            var names = [c.name].concat(c.aliases || []);
+            var hit = false;
+            for (var j = 0; j < names.length; ++j) {
+                if (names[j].toLowerCase().indexOf(q) === 0) {
+                    hit = true; break;
+                }
+            }
+            if (hit) out.push(c);
+        }
+        return out;
+    }
+
+    // Re-evaluate whether the cursor is on a slash command and what
+    // the user has typed so far. Mirrors `_refreshMentionQuery` —
+    // walks back from the cursor until a `/` at start-of-input or
+    // start-of-line is found, otherwise clears the slash state.
+    function _refreshSlashQuery() {
+        var text = inputArea.text;
+        var cp = inputArea.cursorPosition;
+        // Slash commands are only valid at the very start of the
+        // composer — typing "hello /me" should not pop the menu,
+        // matching every other chat client's convention.
+        var hasSlashAtStart = text.startsWith("/");
+        if (!hasSlashAtStart) {
+            slashQuery = "";
+            slashAnchor = -1;
+            return;
+        }
+        // Find the first space; the slash query is everything up to
+        // it (or to the cursor).
+        var sp = text.indexOf(" ");
+        var end = sp >= 0 ? sp : text.length;
+        if (cp > end) {
+            // Cursor moved past the command word — popup hides; we
+            // still let the send path run the command.
+            slashQuery = "";
+            slashAnchor = -1;
+            return;
+        }
+        slashAnchor = 0;
+        slashQuery = text.substring(0, end);
+        slashSelected = 0;
+    }
+
+    // Replace the partial slash typed so far with the chosen
+    // command + a trailing space (or just commit immediately for
+    // commands that take no argument and are intended as one-tap
+    // macros, like /shrug).
+    function _insertSlash(cmd) {
+        if (slashAnchor < 0) return;
+        var current = inputArea.text;
+        var sp = current.indexOf(" ");
+        var rest = sp >= 0 ? current.substring(sp) : "";
+        inputArea.text = cmd.name + (rest.length > 0 ? rest : " ");
+        inputArea.cursorPosition = cmd.name.length + 1;
+        slashQuery = "";
+        slashAnchor = -1;
+    }
+
     // Transform /me, /shrug, /tableflip, /unflip into the right message
     // shape or body. /me sends an m.emote; the rest are just text macros.
     // Returns { body, msgtype } or null if not a slash-command.
@@ -838,21 +1178,12 @@ Rectangle {
         var space = raw.indexOf(" ");
         var cmd = (space < 0 ? raw : raw.substring(0, space)).toLowerCase();
         var rest = space < 0 ? "" : raw.substring(space + 1);
-        switch (cmd) {
-        case "/me":
-            return { body: rest, msgtype: "m.emote" };
-        case "/shrug":
-            return { body: rest + (rest ? " " : "") + "¯\\_(ツ)_/¯",
-                     msgtype: "m.text" };
-        case "/tableflip":
-            return { body: rest + (rest ? " " : "") + "(╯°□°)╯︵ ┻━┻",
-                     msgtype: "m.text" };
-        case "/unflip":
-            return { body: rest + (rest ? " " : "") + "┬─┬ノ( º _ ºノ)",
-                     msgtype: "m.text" };
-        case "/lenny":
-            return { body: rest + (rest ? " " : "") + "( ͡° ͜ʖ ͡°)",
-                     msgtype: "m.text" };
+        for (var i = 0; i < slashCatalogue.length; ++i) {
+            var c = slashCatalogue[i];
+            var names = [c.name].concat(c.aliases || []);
+            if (names.indexOf(cmd) < 0) continue;
+            if (c.sideEffect) c.sideEffect(rest);
+            return c.handler(rest);
         }
         return null;
     }
@@ -899,13 +1230,41 @@ Rectangle {
         // since "/me fixed typo" inside a reply context would be a
         // weird thing to commit to.
         if (inputRoot.editingEventId === "" && inputRoot.replyToEventId === "") {
+            // _runSlashCommand can return null even on a recognised
+            // command (e.g. /clear, /dm) — those have side-effects
+            // only and shouldn't post anything in the channel.
+            // We detect that by re-checking whether the catalogue
+            // recognises the leading word.
+            var lead = text.split(/\s/)[0].toLowerCase();
+            var recognised = false;
+            for (var i = 0; i < slashCatalogue.length; ++i) {
+                var c = slashCatalogue[i];
+                var names = [c.name].concat(c.aliases || []);
+                if (names.indexOf(lead) >= 0) { recognised = true; break; }
+            }
             var cmd = _runSlashCommand(text);
             if (cmd) {
                 if (cmd.msgtype === "m.emote") {
                     serverManager.activeServer.sendEmote(cmd.body);
+                } else if (cmd.formattedHtml
+                    && serverManager.activeServer.sendRichMessage) {
+                    // /spoiler returns formattedHtml so the receiver
+                    // sees a real <span data-mx-spoiler>; clients
+                    // that don't render HTML fall back to the
+                    // bracketed plain body.
+                    serverManager.activeServer.sendRichMessage(
+                        cmd.body, cmd.formattedHtml, []);
                 } else {
                     serverManager.activeServer.sendMessage(cmd.body);
                 }
+                inputArea.text = "";
+                inputRoot.lastSentAt = Date.now();
+                return;
+            }
+            if (recognised) {
+                // Recognised command with a null handler return
+                // (e.g. /clear, /dm). Side-effects already ran;
+                // skip posting, just clear.
                 inputArea.text = "";
                 inputRoot.lastSentAt = Date.now();
                 return;

@@ -58,14 +58,24 @@ Rectangle {
     // null) so we don't hammer the URL on every re-render.
     property var _cache: ({})
 
-    visible: ready && !_failed
-    // Two different shapes: video-embed cards are landscape with the
-    // thumbnail as the hero; standard og cards are horizontal with a
-    // square thumbnail on the right.
-    implicitHeight: !ready ? 0
-        : isVideoEmbed
-            ? (videoCol.implicitHeight + Theme.sp.s4 * 2)
-            : (hasImage ? 120 : previewCol.implicitHeight + Theme.sp.s4 * 2)
+    // Video embeds are visible immediately — we know the full
+    // geometry from the URL pattern alone (16:9 thumbnail + reserved
+    // title rows), so we render the skeleton before the OG fetch
+    // resolves. This is what stops a YouTube card resolving mid-
+    // settle from shoving the rest of the message list around and
+    // parking the user above the bottom on channel open.
+    //
+    // OG cards (non-video) still gate on `ready` because we don't
+    // know their geometry until fetch completes, but their height
+    // delta is small (~120px) and they're rare enough that the
+    // layout shift is tolerable.
+    visible: isVideoEmbed
+        ? !_failed
+        : (ready && !_failed)
+    implicitHeight: isVideoEmbed
+        ? (videoCol.implicitHeight + Theme.sp.s4 * 2)
+        : (!ready ? 0
+            : (hasImage ? 120 : previewCol.implicitHeight + Theme.sp.s4 * 2))
     implicitWidth: isVideoEmbed ? 480 : 420
 
     radius: Theme.r2
@@ -160,9 +170,15 @@ Rectangle {
             }
         }
 
-        // Title + channel name under the thumbnail.
+        // Title + channel name under the thumbnail. Heights are
+        // reserved at the 2-line / 1-line maximum from the start so
+        // `videoCol.implicitHeight` doesn't grow when ogTitle finally
+        // arrives from the OG fetch — that's the whole point of
+        // rendering video embeds eagerly: a known, stable footprint.
         Text {
             Layout.fillWidth: true
+            Layout.preferredHeight: Math.ceil(
+                Theme.fontSize.md * 1.3 * 2)
             text: preview.ogTitle
             color: Theme.accent
             font.family: Theme.fontSans
@@ -171,6 +187,7 @@ Rectangle {
             wrapMode: Text.Wrap
             maximumLineCount: 2
             elide: Text.ElideRight
+            verticalAlignment: Text.AlignTop
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
@@ -179,13 +196,20 @@ Rectangle {
         }
         Text {
             Layout.fillWidth: true
+            Layout.preferredHeight: Math.ceil(
+                Theme.fontSize.xs * 1.3)
+            // Always render — `hostName` is derived from the URL
+            // synchronously, so the row is populated before the OG
+            // fetch resolves. ogSiteName replaces it if/when it
+            // arrives. Avoid a `visible:` toggle here so we don't
+            // collapse the row mid-load.
             text: preview.ogSiteName.length > 0
                 ? preview.ogSiteName : preview.hostName
-            visible: text.length > 0
             color: Theme.fg3
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.xs
             elide: Text.ElideRight
+            verticalAlignment: Text.AlignTop
         }
     }
 

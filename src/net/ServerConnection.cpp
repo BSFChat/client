@@ -549,6 +549,20 @@ void ServerConnection::setActiveRoom(const QString& roomId)
     }
     if (m_activeRoomId == roomId) return;
 
+    // Persist the newest-seen timestamp for the room we're leaving
+    // BEFORE we wipe its model — otherwise the QML-side persist hook
+    // races the clear and writes a 0, and the next time the user
+    // opens this room the unread-divider lookup treats every loaded
+    // event as "newer than nothing" and lands them at the top of
+    // the channel. Centralising the persist on the C++ side closes
+    // that race and is a no-op if no Settings is wired (e.g. tests).
+    if (!m_activeRoomId.isEmpty() && m_messageModel && m_settings) {
+        qint64 newestTs = m_messageModel->newestTimestampMs();
+        if (newestTs > 0) {
+            m_settings->setLastReadTs(m_activeRoomId, newestTs);
+        }
+    }
+
     m_activeRoomId = roomId;
     m_messageModel->clear();
     m_memberListModel->clear();

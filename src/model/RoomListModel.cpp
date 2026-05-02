@@ -158,6 +158,13 @@ QString RoomListModel::roomTopic(const QString& roomId) const
     return m_rooms[idx].topic;
 }
 
+int RoomListModel::unreadCountFor(const QString& roomId) const
+{
+    int idx = findRoom(roomId);
+    if (idx < 0) return 0;
+    return m_rooms[idx].unreadCount;
+}
+
 bool RoomListModel::isVoiceRoom(const QString& roomId) const
 {
     int idx = findRoom(roomId);

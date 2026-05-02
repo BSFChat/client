@@ -17,6 +17,13 @@ Item {
     property string mediaUrl: ""
     property string mediaFileName: ""
     property real mediaFileSize: 0
+    // Intrinsic media dimensions from the m.image / m.video event's
+    // info block. Used to reserve the right-shaped row box at
+    // create time so the bubble's height doesn't change when the
+    // image / video bytes finish downloading. 0 = unknown (older
+    // server, missing field) — fall back to a 4:3 default.
+    property int mediaWidth: 0
+    property int mediaHeight: 0
     property bool isOwnMessage
     property bool showSender
     property bool edited: false
@@ -857,19 +864,38 @@ Item {
                             // Cap at 260 on mobile so the image doesn't
                             // overflow the narrow phone bubble. Desktop
                             // keeps the 400×300 inline-image norm.
+                            //
+                            // Box dimensions resolve from the
+                            // event's intrinsic info.w/info.h —
+                            // fixed at row-create time, never
+                            // depending on mediaImage.sourceSize.
+                            // This kills the reflow that previously
+                            // happened when the image bytes finished
+                            // downloading and the row resized
+                            // mid-scroll. Falls back to a 4:3 box
+                            // at the cap when the server omitted
+                            // the dimensions.
                             readonly property int maxW: Theme.isMobile ? 260 : 400
                             readonly property int maxH: Theme.isMobile ? 240 : 300
-                            Layout.preferredWidth: Math.min(maxW,
-                                mediaImage.sourceSize.width > 0
-                                    ? mediaImage.sourceSize.width : maxW)
-                            Layout.preferredHeight: {
-                                if (mediaImage.sourceSize.width > 0 && mediaImage.sourceSize.height > 0) {
-                                    var scale = Math.min(maxW / mediaImage.sourceSize.width,
-                                                          maxH / mediaImage.sourceSize.height, 1.0);
-                                    return mediaImage.sourceSize.height * scale;
+                            readonly property int boxW: {
+                                if (bubble.mediaWidth > 0 && bubble.mediaHeight > 0) {
+                                    var s = Math.min(maxW / bubble.mediaWidth,
+                                                     maxH / bubble.mediaHeight, 1.0);
+                                    return Math.round(bubble.mediaWidth * s);
                                 }
-                                return Math.min(200, maxH);
+                                return maxW;
                             }
+                            readonly property int boxH: {
+                                if (bubble.mediaWidth > 0 && bubble.mediaHeight > 0) {
+                                    var s = Math.min(maxW / bubble.mediaWidth,
+                                                     maxH / bubble.mediaHeight, 1.0);
+                                    return Math.round(bubble.mediaHeight * s);
+                                }
+                                // 4:3 fallback at the cap.
+                                return Math.round(maxW * 3 / 4);
+                            }
+                            Layout.preferredWidth: boxW
+                            Layout.preferredHeight: boxH
                             Layout.maximumWidth: maxW
                             Layout.maximumHeight: maxH
                             radius: Theme.r2

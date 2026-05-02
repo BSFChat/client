@@ -45,6 +45,10 @@ public:
     // Used by the #channel-mention click handler. Returns "" if no match.
     Q_INVOKABLE QString roomIdForName(const QString& name) const;
     Q_INVOKABLE QString roomTopic(const QString& roomId) const;
+    // Unread count for a specific room. Authoritative source —
+    // updated from server-side state, not derived from any local
+    // last-read timestamp. Returns 0 if the room is unknown.
+    Q_INVOKABLE int unreadCountFor(const QString& roomId) const;
 
     // First text channel (non-voice) in display order. Used by the
     // mobile shell to auto-select a landing channel on login so the

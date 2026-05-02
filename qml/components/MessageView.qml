@@ -364,6 +364,19 @@ Rectangle {
 
             ScrollBar.vertical: ThemedScrollBar {}
 
+            // Hide the list while it's mid-settle on a fresh channel
+            // open. Without this, every batch of messages and every
+            // async delegate-height resolution kicks off another
+            // _scrollToEndSoon, and the user sees contentY bounce
+            // through several intermediate positions before parking
+            // at the divider / bottom. Fading in only once initialLoad
+            // clears makes the room appear "ready" instead of churning.
+            opacity: initialLoad ? 0 : 1
+            Behavior on opacity {
+                NumberAnimation { duration: Theme.motion.fastMs
+                                  easing.type: Easing.OutCubic }
+            }
+
             model: serverManager.activeServer ? serverManager.activeServer.messageModel : null
 
             // ── Unread-messages divider ───────────────────────────────
@@ -395,6 +408,25 @@ Rectangle {
                 if (ts > 0) appSettings.setLastReadTs(_currentRoomId, ts);
             }
 
+            // Continuously refresh the persisted last-read marker
+            // while the user is parked at the bottom of the loaded
+            // history. Called from `onCountChanged` whenever new
+            // rows arrive while atBottom is true: by definition,
+            // the user is reading those rows as they appear, so
+            // the persisted ts should track the model's newest.
+            // This makes the divider on next room re-entry
+            // correspond to "messages that arrived after I left",
+            // not "messages I might have missed because we raced
+            // the model-clear at switch time".
+            function _persistLastReadIfAtBottom() {
+                if (!atBottom) return;
+                if (!_currentRoomId) return;
+                var mm = model;
+                if (!mm) return;
+                var ts = mm.newestTimestampMs();
+                if (ts > 0) appSettings.setLastReadTs(_currentRoomId, ts);
+            }
+
             // React to room changes: write the OUTGOING room's lastRead,
             // then load the INCOMING room's boundary for divider placement.
             Connections {
@@ -411,6 +443,18 @@ Rectangle {
                     // Defer recompute until the model has repopulated
                     // for the new room. Trigger via onCountChanged below.
                     messageListView.unreadDividerEventId = "";
+                    // Reset scroll state so the new room enters its own
+                    // initial-load grace window. Without this, switching
+                    // rooms reuses the previous room's atBottom/initialLoad
+                    // values — which, after a back-paginate or any non-
+                    // bottom dwell, leaves both false and skips the scroll-
+                    // to-end on re-entry. The model object is shared across
+                    // rooms on a given server, so onModelChanged doesn't
+                    // fire here and can't be relied on for this reset.
+                    messageListView.initialLoad = true;
+                    messageListView.atBottom = true;
+                    messageListView._forceFollow = false;
+                    scrollTimer.restart();
                 }
             }
 
@@ -481,15 +525,15 @@ Rectangle {
 
             onContentYChanged: {
                 if (contentHeight <= height) return;
-                if (_isAtEnd()) {
-                    atBottom = true;
-                } else {
-                    if (initialLoad) {
-                        initialLoad = false;
-                        scrollTimer.stop();
-                    }
-                    atBottom = false;
-                }
+                // Don't clear `initialLoad` here. ListView shifts contentY
+                // on its own during async delegate creation / incremental
+                // height correction; reading those programmatic shifts as
+                // "user scrolled away from end" used to clear initialLoad
+                // before our deferred scroll-to-end could fire, parking
+                // the user at the top of a freshly opened channel.
+                // initialLoad is now cleared only by movementStarted
+                // (real user input) or scrollTimer expiry.
+                atBottom = _isAtEnd();
                 if (!initialLoad && contentY < paginationTriggerPx) {
                     _maybeLoadOlder();
                 }
@@ -566,6 +610,23 @@ Rectangle {
             onMovementStarted: {
                 initialLoad = false;
                 scrollTimer.stop();
+                // User dragging / wheeling means they explicitly
+                // want to leave the bottom — release every pin
+                // mechanism: the post-send follow lock AND the
+                // tolerance-band atBottom flag. Without the
+                // latter, a small upward drag stays inside the
+                // 80-px tolerance band → atBottom remains true →
+                // any subsequent contentHeight reflow (link
+                // preview resolving, an edit, an emoji react) re-
+                // pins them and they appear to "bounce back" the
+                // moment they let go.
+                //
+                // movementEnded re-evaluates _isAtEnd, so if the
+                // user lets go while still inside the tolerance
+                // band, atBottom will correctly snap back to true
+                // and the normal pin behaviour resumes.
+                _forceFollow = false;
+                atBottom = false;
             }
 
             onMovementEnded: {
@@ -597,16 +658,83 @@ Rectangle {
                     paginationAnchorContentHeight = -1;
                     return;
                 }
-                if (initialLoad || atBottom) _scrollToEndSoon();
+                // Three paths into here:
+                //   • atBottom — normal pin-to-bottom for incoming
+                //     messages while the user's at the end.
+                //   • _forceFollow — the user just sent a message,
+                //     and we need to chase the bottom while the
+                //     new row's delegate spins up + contentHeight
+                //     settles.
+                //   • initialLoad — first paint after switching
+                //     rooms.
+                //
+                // _forceFollow being honoured here is what lets a
+                // post-send jump catch up to the actual bottom
+                // when the new delegate's height materialises a
+                // few frames after the count change. movementStarted
+                // clears it so a user dragging up isn't fought by
+                // an in-flight reflow.
+                if (initialLoad || atBottom || _forceFollow) _scrollToEndSoon();
+            }
+
+            // Sticky "follow latest" flag. Set when the user sends
+            // a message; cleared the moment they manually scroll
+            // away (movementStarted on the Flickable) or once we
+            // reach the bottom and atBottom takes over.
+            //
+            // Replaces an earlier 5-second `_justSent` window that
+            // had two failure modes: it expired before slow media
+            // finished loading, and (worse) it kept overriding
+            // every contentHeight reflow during those 5s, so users
+            // couldn't scroll up at all if they tried within the
+            // window.
+            property bool _forceFollow: false
+
+            Connections {
+                target: messageInput
+                ignoreUnknownSignals: true
+                function onLastSentAtChanged() {
+                    if (messageInput.lastSentAt > 0) {
+                        messageListView._forceFollow = true;
+                    }
+                }
+            }
+
+            // Once we successfully reach the bottom, the regular
+            // atBottom pin-to-end behaviour takes over and we no
+            // longer need the post-send override. Also persist
+            // last-read here so a user who scrolls down to catch
+            // up (without any new messages arriving while they
+            // do) still gets their position recorded.
+            onAtBottomChanged: {
+                if (atBottom) {
+                    _forceFollow = false;
+                    _persistLastReadIfAtBottom();
+                }
             }
 
             onCountChanged: {
-                if (initialLoad || atBottom) {
+                if (initialLoad || atBottom || _forceFollow) {
                     _scrollToEndSoon();
                     if (initialLoad) scrollTimer.restart();
+                    // _forceFollow is consumed by `_scrollToEndSoon`
+                    // itself once the deferred jump runs — clearing
+                    // it here would invalidate the deferred lambda's
+                    // own re-check and silently no-op the scroll.
                 }
                 _recomputeUnreadDivider();
+                // Roll the persisted last-read forward if the user
+                // is at the bottom — they're seeing the newest row
+                // as it lands, so it's "read".
+                _persistLastReadIfAtBottom();
             }
+
+            // Don't try to scroll the moment lastSentAt advances —
+            // the message hasn't landed yet, so jumping immediately
+            // parks us at the bottom of the *old* content, and the
+            // subsequent insert pushes the new row below the
+            // viewport. We rely on onCountChanged + _forceFollow to
+            // pick up the scroll AFTER the row is in the model.
 
             // Jump to the end. We used to call the builtin
             // `positionViewAtEnd()`, but during layout flap (async image
@@ -625,17 +753,119 @@ Rectangle {
 
             // Guarded callLater — re-checks the pin state at fire time so
             // a mid-frame user scroll can abort a pending auto-scroll.
+            // `_forceFollow` opts in even when the user has
+            // scrolled up — the local user explicitly authored
+            // that message and expects to see it land. We DON'T
+            // consume it here: ListView creates the new row's
+            // delegate lazily, so the first jump may run before
+            // the delegate's height is committed and undershoots
+            // by ~1 row. Leaving _forceFollow set means subsequent
+            // contentHeight / count changes (delegate creation,
+            // image-info resolve, etc.) keep chasing the bottom
+            // until atBottom flips true (normal pin takes over)
+            // or the user starts scrolling (movementStarted clears
+            // it).
             function _scrollToEndSoon() {
                 Qt.callLater(function() {
-                    if (initialLoad || atBottom) _jumpToEnd();
+                    if (initialLoad) {
+                        // First positioning after a room switch:
+                        // prefer landing on the unread divider if
+                        // there's one resolved in the loaded
+                        // history, otherwise fall through to the
+                        // bottom. Either way we forceLayout first so
+                        // contentHeight / row indices are real.
+                        forceLayout();
+                        if (!_jumpToUnreadDivider()) _jumpToEnd();
+                        // First successful positioning — reveal the
+                        // list. Subsequent contentHeight / count
+                        // changes (delegate height correction, new
+                        // messages arriving) are handled by the
+                        // atBottom path and produce smooth single-
+                        // step jumps instead of the multi-bounce
+                        // settle the user otherwise sees on room
+                        // switch. scrollTimer is still armed as a
+                        // fallback in case the first jump was a no-op
+                        // (e.g. count was 0).
+                        if (count > 0) {
+                            initialLoad = false;
+                            scrollTimer.stop();
+                        }
+                        return;
+                    }
+                    if (atBottom || _forceFollow) {
+                        // Force the ListView to commit any pending
+                        // delegate heights so contentHeight is the
+                        // real post-insert value instead of a
+                        // pre-creation snapshot. Without this the
+                        // jump consistently lands ~1 row short of
+                        // the actual end.
+                        forceLayout();
+                        _jumpToEnd();
+                    }
                 });
+            }
+
+            // If the user has genuinely-unread messages in this
+            // room, position the first-unread row at the top of
+            // the viewport so they can read forward from where
+            // they left off.
+            //
+            // Source of truth is the SERVER's per-room unread
+            // count exposed by RoomListModel.unreadCountFor —
+            // authoritative, not derived from a local last-read
+            // timestamp. The earlier `firstEventIdAfterTs(stored)`
+            // approach raced the model-clear at room-switch time:
+            // if the user left the channel before all newer
+            // messages had loaded, we'd persist a partial-history
+            // timestamp that on every subsequent re-entry resolved
+            // to the same intermediate event, dragging them up.
+            // Server unread counts have no such race — they reset
+            // on read-marker and only grow on actual new events.
+            function _jumpToUnreadDivider() {
+                // Source of truth is `unreadDividerEventId` —
+                // computed by `_recomputeUnreadDivider` from the
+                // local last-read timestamp persisted as the user
+                // dwells at the bottom of the channel (see
+                // _persistLastReadIfAtBottom below). This avoids
+                // depending on the server's `count_unread` which
+                // can lag behind read-marker writes and lead to
+                // phantom-unread positioning. If the user's
+                // last-read ts equals the newest loaded message,
+                // firstEventIdAfterTs returns "" → no divider →
+                // fall through to scroll-to-end.
+                if (!unreadDividerEventId
+                    || unreadDividerEventId.length === 0) return false;
+                if (!serverManager.activeServer) return false;
+                var mm = serverManager.activeServer.messageModel;
+                if (!mm) return false;
+                var idx = mm.indexForEventId(unreadDividerEventId);
+                if (idx < 0) return false;
+                // If the divider lands at row 0 the user can't
+                // distinguish it from "top of channel" — fall
+                // through to scroll-to-end so they at least see
+                // the newest. Better than parking them at the
+                // top of paginated history pretending it's
+                // "first unread".
+                if (idx === 0) return false;
+                positionViewAtIndex(idx, ListView.Beginning);
+                atBottom = false;
+                return true;
             }
 
             Timer {
                 id: scrollTimer
                 interval: 2000
                 onTriggered: {
-                    if (messageListView.initialLoad || messageListView.atBottom) {
+                    // Final pass after the 2-second initial-load
+                    // grace window. Same dispatch as _scrollToEndSoon's
+                    // first branch — divider takes priority if one's
+                    // pending; otherwise pin to end.
+                    if (messageListView.initialLoad) {
+                        messageListView.forceLayout();
+                        if (!messageListView._jumpToUnreadDivider()) {
+                            messageListView._jumpToEnd();
+                        }
+                    } else if (messageListView.atBottom) {
                         messageListView._jumpToEnd();
                     }
                     messageListView.initialLoad = false;
@@ -751,6 +981,8 @@ Rectangle {
                     mediaUrl: model.mediaUrl || ""
                     mediaFileName: model.mediaFileName || ""
                     mediaFileSize: model.mediaFileSize || 0
+                    mediaWidth: model.mediaWidth || 0
+                    mediaHeight: model.mediaHeight || 0
                     isOwnMessage: model.isOwnMessage
                     showSender: model.showSender
                     edited: model.edited || false

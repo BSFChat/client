@@ -48,6 +48,8 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
     case MediaUrlRole: return msg.mediaUrl;
     case MediaFileNameRole: return msg.mediaFileName;
     case MediaFileSizeRole: return msg.mediaFileSize;
+    case MediaWidthRole: return msg.mediaWidth;
+    case MediaHeightRole: return msg.mediaHeight;
     case EditedRole: return msg.edited;
     case ReplyToEventIdRole: return msg.replyToEventId;
     case ReplyToSenderRole: return msg.replyToSender;
@@ -75,6 +77,8 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {MediaUrlRole, "mediaUrl"},
         {MediaFileNameRole, "mediaFileName"},
         {MediaFileSizeRole, "mediaFileSize"},
+        {MediaWidthRole, "mediaWidth"},
+        {MediaHeightRole, "mediaHeight"},
         {EditedRole, "edited"},
         {ReplyToEventIdRole, "replyToEventId"},
         {ReplyToSenderRole, "replyToSender"},
@@ -327,6 +331,14 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
         if (event.content.data.contains("info") && event.content.data["info"].is_object()) {
             const auto& info = event.content.data["info"];
             entry.mediaFileSize = info.value("size", 0);
+            // Pull intrinsic dimensions from the upload metadata so
+            // MessageBubble can reserve the right box before the
+            // image / video data finishes downloading. Without this
+            // the row's height reflows once Image::sourceSize
+            // resolves, which forces the scroll-pin logic to
+            // chase a moving bottom while async media loads in.
+            entry.mediaWidth  = info.value("w", 0);
+            entry.mediaHeight = info.value("h", 0);
         }
     }
 
