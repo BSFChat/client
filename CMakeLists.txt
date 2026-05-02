@@ -60,6 +60,7 @@ qt_add_executable(bsfchat-app
     src/core/Settings.cpp
     src/core/TintedIconProvider.cpp
     src/core/MediaDownloader.cpp
+    src/core/Updater.cpp
     src/core/Haptics.cpp
     src/core/AndroidPermissions.cpp
     src/core/AndroidNotifier.cpp
@@ -152,12 +153,21 @@ if(NOT DEFINED BSFCHAT_BUNDLE_ID)
         set(BSFCHAT_BUNDLE_ID "com.bsfchat.app.dev")
     endif()
 endif()
+# Single source of truth for the user-visible version string. Read by
+# the .icns bundle, the Windows .exe metadata, and — crucially — the
+# Updater class, which compares this against GitHub Releases'
+# tag_name to decide whether to prompt for update. Bump this in step
+# with the git tag when cutting a release.
+set(BSFCHAT_VERSION "0.0.26")
+target_compile_definitions(bsfchat-app PRIVATE
+    BSFCHAT_VERSION="${BSFCHAT_VERSION}")
+
 set_target_properties(bsfchat-app PROPERTIES
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_BUNDLE_NAME "BSFChat"
     MACOSX_BUNDLE_GUI_IDENTIFIER "${BSFCHAT_BUNDLE_ID}"
-    MACOSX_BUNDLE_BUNDLE_VERSION "0.0.25"
-    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.0.25"
+    MACOSX_BUNDLE_BUNDLE_VERSION "${BSFCHAT_VERSION}"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${BSFCHAT_VERSION}"
     MACOSX_BUNDLE_INFO_STRING "BSFChat"
     MACOSX_BUNDLE_ICON_FILE "BSFChat.icns"
     WIN32_EXECUTABLE TRUE
@@ -274,6 +284,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/ImageViewer.qml
         qml/components/ShortcutsDialog.qml
         qml/components/SearchPopup.qml
+        qml/components/UpdateDialog.qml
         qml/components/StatusPicker.qml
         qml/components/ThreadPanel.qml
         qml/components/RoleAssignPopup.qml

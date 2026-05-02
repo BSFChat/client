@@ -15,6 +15,7 @@
 #include "core/TintedIconProvider.h"
 #include "core/MediaDownloader.h"
 #include "core/Haptics.h"
+#include "core/Updater.h"
 #include "core/AndroidPermissions.h"
 #if defined(Q_OS_MACOS) && !defined(Q_OS_IOS)
 #include "voice/ScreenShareController.h"
@@ -119,6 +120,20 @@ int main(int argc, char *argv[])
     Haptics haptics;
     QQmlEngine::setObjectOwnership(&haptics, QQmlEngine::CppOwnership);
     engine.rootContext()->setContextProperty("haptics", &haptics);
+
+    // Auto-update — desktop only. We don't ship the dialog into the
+    // mobile QML on Android / iOS because (a) Play Store / TestFlight
+    // own the update mechanism, and (b) the platform apply paths
+    // don't make sense for a sandboxed install.
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    Updater updater;
+    QQmlEngine::setObjectOwnership(&updater, QQmlEngine::CppOwnership);
+    engine.rootContext()->setContextProperty("updater", &updater);
+    if (application.settings()
+        && application.settings()->autoUpdateCheck()) {
+        updater.startAutoCheckSchedule();
+    }
+#endif
 
     // Android runtime-permission bridge — QML calls
     // `androidPerms.requestMicrophone()` before joining voice and

@@ -195,6 +195,15 @@ public:
     void setVoiceMode(const QString& v);
     QString pttKeySequence() const;
     void setPttKeySequence(const QString& seq);
+
+    // Auto-update check on launch + periodic re-poll. Defaults to
+    // ON for desktop builds — Windows users in particular have
+    // been complaining about the manual-MSI-download cadence, and
+    // the Updater class hits GitHub Releases at a polite 6h
+    // interval so the network impact is minimal.
+    Q_PROPERTY(bool autoUpdateCheck READ autoUpdateCheck WRITE setAutoUpdateCheck NOTIFY autoUpdateCheckChanged)
+    bool autoUpdateCheck() const;
+    void setAutoUpdateCheck(bool v);
 signals:
     void mutedRoomsChanged();
     void screenShareQualityChanged();
@@ -203,6 +212,7 @@ signals:
     void screenShareJpegQualityChanged();
     void voiceModeChanged();
     void pttKeySequenceChanged();
+    void autoUpdateCheckChanged();
 public:
 
 signals:

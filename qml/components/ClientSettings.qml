@@ -137,7 +137,8 @@ Popup {
                 }
 
                 Repeater {
-                    model: ["Appearance", "Audio", "Screen Share", "Notifications"]
+                    model: ["Appearance", "Audio", "Screen Share",
+                            "Notifications", "Updates"]
                     delegate: Rectangle {
                         Layout.fillWidth: true
                         height: 36
@@ -652,6 +653,156 @@ Popup {
                         icon: "bolt"
                         tint: Theme.warn
                         text: "OS-level notification permissions may need to be granted separately in your system preferences."
+                    }
+
+                    Item { Layout.fillHeight: true }
+                }
+            }
+
+            // ---- Updates (index 4) ----
+            // Backed by the C++ Updater object exposed as `updater`
+            // on desktop builds. Mobile sees an empty placeholder
+            // since the OS store owns updates there.
+            Item {
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: Theme.sp.s7 * 2
+                    spacing: Theme.sp.s7
+
+                    SectionHeader { text: "Updates" }
+
+                    SettingRow {
+                        title: "Check for updates automatically"
+                        description: "Polls GitHub Releases on launch and "
+                                   + "every six hours afterwards. When a "
+                                   + "newer build is published, you'll see "
+                                   + "a one-click \"Restart to install\" "
+                                   + "prompt — no manual download."
+                        ThemedSwitch {
+                            checked: appSettings.autoUpdateCheck
+                            onToggled: appSettings.autoUpdateCheck = checked
+                        }
+                    }
+
+                    // Status row: shows current version + latest known +
+                    // a manual-check button. State string is derived
+                    // inline so it tracks the C++ Updater::State enum
+                    // without needing Q_ENUM marshalling on QML side.
+                    SettingRow {
+                        title: "Current version"
+                        description: {
+                            if (typeof updater === "undefined")
+                                return "Updater unavailable on this build.";
+                            if (updater.state === 1) return "Checking GitHub…";
+                            if (updater.state === 2) return "You're up to date.";
+                            if (updater.state === 3) return "v" + updater.availableVersion + " is available.";
+                            if (updater.state === 4) return "Downloading v" + updater.availableVersion + "…";
+                            if (updater.state === 5) return "v" + updater.availableVersion + " ready to install.";
+                            if (updater.state === 7) return updater.lastError;
+                            return "Click \"Check now\" to see if there's a new release.";
+                        }
+                        Text {
+                            text: typeof updater !== "undefined"
+                                ? "v" + updater.currentVersion : "?"
+                            color: Theme.fg0
+                            font.family: Theme.fontMono
+                            font.pixelSize: Theme.fontSize.sm
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.sp.s3
+
+                        Button {
+                            text: "Check now"
+                            enabled: typeof updater !== "undefined"
+                                     && updater.state !== 1
+                                     && updater.state !== 4
+                                     && updater.state !== 6
+                            onClicked: if (typeof updater !== "undefined")
+                                            updater.checkNow()
+                            contentItem: Text {
+                                text: parent.text
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                font.weight: Theme.fontWeight.medium
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                color: parent.hovered ? Theme.bg3 : Theme.bg2
+                                border.color: Theme.line
+                                border.width: 1
+                                radius: Theme.r2
+                                implicitWidth: 120
+                                implicitHeight: 36
+                            }
+                        }
+
+                        // Manual download button — only meaningful when
+                        // an update has been discovered but not pulled
+                        // yet. Saves the user from waiting for the
+                        // popup if they're already on this tab.
+                        Button {
+                            visible: typeof updater !== "undefined"
+                                     && updater.state === 3
+                            text: "Download " + (typeof updater !== "undefined"
+                                ? "v" + updater.availableVersion : "")
+                            onClicked: if (typeof updater !== "undefined")
+                                            updater.downloadUpdate()
+                            contentItem: Text {
+                                text: parent.text
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                font.weight: Theme.fontWeight.semibold
+                                color: Theme.onAccent
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                color: parent.hovered ? Theme.accentDim : Theme.accent
+                                radius: Theme.r2
+                                implicitWidth: 160
+                                implicitHeight: 36
+                            }
+                        }
+
+                        // Apply button — once download finished.
+                        Button {
+                            visible: typeof updater !== "undefined"
+                                     && updater.state === 5
+                            text: "Restart to install"
+                            onClicked: if (typeof updater !== "undefined")
+                                            updater.applyUpdate()
+                            contentItem: Text {
+                                text: parent.text
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                font.weight: Theme.fontWeight.semibold
+                                color: Theme.onAccent
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                color: parent.hovered ? Theme.accentDim : Theme.accent
+                                radius: Theme.r2
+                                implicitWidth: 160
+                                implicitHeight: 36
+                            }
+                        }
+
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    InfoBanner {
+                        icon: "shield"
+                        text: "Updates are fetched directly from the BSFChat "
+                            + "GitHub Releases over HTTPS. Linux users get "
+                            + "redirected to the release page to use their "
+                            + "distro's package manager rather than an "
+                            + "in-place upgrade."
                     }
 
                     Item { Layout.fillHeight: true }

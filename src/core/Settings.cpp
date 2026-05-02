@@ -517,6 +517,18 @@ void Settings::setScreenShareJpegQuality(int q)
     emit screenShareJpegQualityChanged();
 }
 
+bool Settings::autoUpdateCheck() const
+{
+    return m_settings.value(QStringLiteral("autoUpdateCheck"), true).toBool();
+}
+
+void Settings::setAutoUpdateCheck(bool v)
+{
+    if (v == autoUpdateCheck()) return;
+    m_settings.setValue(QStringLiteral("autoUpdateCheck"), v);
+    emit autoUpdateCheckChanged();
+}
+
 QString Settings::voiceMode() const
 {
     return m_settings.value("voiceMode", "open").toString();

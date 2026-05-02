@@ -433,7 +433,20 @@ ApplicationWindow {
         parent: Overlay.overlay
     }
 
+    // Auto-update dialog — opens itself when the C++ Updater
+    // reports an actionable state. Disabled on builds where the
+    // `updater` context property is absent (mobile).
+    Loader {
+        active: typeof updater !== "undefined"
+        sourceComponent: UpdateDialog { }
+    }
+
     function openUserSettings() { userSettingsGlobal.open(); }
+    // Manual "Check for updates" — surfaced from ClientSettings →
+    // About via Window.window.checkForUpdates().
+    function checkForUpdates() {
+        if (typeof updater !== "undefined") updater.checkNow();
+    }
     function openClientSettings() { clientSettingsGlobal.open(); }
     function openShortcutsDialog() { shortcutsDialogGlobal.open(); }
     function openSearch() { searchPopupGlobal.open(); }
