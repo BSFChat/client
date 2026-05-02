@@ -57,7 +57,33 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          choco install nsis -y
+          # Chocolatey's CDN is flaky (504s) — wrap the install in
+          # a retry loop so a transient gateway error doesn't drop
+          # the whole release. Three tries with backoff covers the
+          # vast majority of v2-feed hiccups.
+          $ok = $false
+          foreach ($i in 1..3) {
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -eq 0 -and (Test-Path "C:\Program Files (x86)\NSIS\makensis.exe")) {
+              $ok = $true
+              break
+            }
+            Write-Warning "NSIS install attempt $i failed; retrying in $(5 * $i)s"
+            Start-Sleep -Seconds (5 * $i)
+          }
+          # Last-ditch: pull NSIS direct from sourceforge if every
+          # choco try 504'd. Idempotent — runs only when makensis
+          # isn't on disk yet.
+          if (-not $ok) {
+            Write-Warning "Falling back to direct download of NSIS"
+            $url = "https://sourceforge.net/projects/nsis/files/NSIS%203/3.10/nsis-3.10-setup.exe/download"
+            Invoke-WebRequest -UseBasicParsing $url -OutFile "$env:RUNNER_TEMP\nsis.exe"
+            Start-Process -FilePath "$env:RUNNER_TEMP\nsis.exe" -ArgumentList "/S" -Wait
+          }
+          if (-not (Test-Path "C:\Program Files (x86)\NSIS\makensis.exe")) {
+            Write-Error "makensis.exe not present after install"
+            exit 1
+          }
           Add-Content -Path $env:GITHUB_PATH -Value "C:\Program Files (x86)\NSIS"
 
       - name: Configure (macOS)
