@@ -298,12 +298,17 @@ void Updater::applyMac(const QString&) {}
 #if defined(Q_OS_WIN)
 void Updater::applyWindows(const QString& exePath)
 {
-    // Launch the NSIS installer with `/SD` (silent default install
-    // directory). The installer kills the running BSFChat.exe via
-    // its built-in process-lock detection; once it finishes it
-    // relaunches us per installer.nsi. Detached so we can exit
-    // immediately and free the binary for replacement.
-    QProcess::startDetached(exePath, {"/SD"});
+    // `/S` is NSIS's silent-install flag (must be uppercase and
+    // first). installer.nsi taskkills any leftover bsfchat-app.exe,
+    // overwrites in place using the InstallLocation reg key, and
+    // relaunches us in its .onInstSuccess when ${Silent} is true.
+    // Detached so this process can exit and free the binary.
+    //
+    // UAC: not silenceable. installer.nsi has
+    // `RequestExecutionLevel admin`, so launching it from this
+    // (non-elevated) process triggers the consent prompt before
+    // the silent install can begin.
+    QProcess::startDetached(exePath, {"/S"});
     QCoreApplication::quit();
 }
 #else

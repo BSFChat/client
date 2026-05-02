@@ -158,7 +158,7 @@ endif()
 # Updater class, which compares this against GitHub Releases'
 # tag_name to decide whether to prompt for update. Bump this in step
 # with the git tag when cutting a release.
-set(BSFCHAT_VERSION "0.0.27")
+set(BSFCHAT_VERSION "0.0.28")
 target_compile_definitions(bsfchat-app PRIVATE
     BSFCHAT_VERSION="${BSFCHAT_VERSION}")
 
