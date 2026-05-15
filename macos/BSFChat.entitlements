@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the macOS .app bundle. Applied at
+  codesign time in CI; the bundle won't pass notarization without
+  them because the runtime hardens by default and would deny mic /
+  camera / network access at runtime even if the user grants TCC.
+
+  Screen recording is intentionally absent: macOS has no
+  hardened-runtime entitlement for it. The TCC grant is the sole
+  gate, and the prompt text is system-managed (you cannot customise
+  it from this file or from Info.plist).
+-->
+<plist version="1.0">
+<dict>
+    <!-- Microphone (voice chat). Pairs with NSMicrophoneUsageDescription
+         in Info.plist, which supplies the TCC prompt's body text. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- Camera (video calls). Pairs with NSCameraUsageDescription. -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
+
+    <!-- Outbound network. The Matrix client, identity OIDC token
+         exchange, and media downloader all open client sockets. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.20...3.31)
-project(bsfchat-client VERSION 0.1.0 LANGUAGES CXX)
+
+# Resolve BSFCHAT_VERSION (and its derived strict / NSIS / Android-code
+# variants) BEFORE project() because project(VERSION ...) wants the
+# strict M.N.P value. cmake/Version.cmake honours an explicit
+# -DBSFCHAT_VERSION= override and otherwise reads `git describe`.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Version.cmake)
+
+project(bsfchat-client VERSION ${BSFCHAT_VERSION_DOTS} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -117,6 +124,14 @@ if(ANDROID)
     set_property(TARGET bsfchat-app PROPERTY
         QT_ANDROID_PACKAGE_SOURCE_DIR
         "${CMAKE_CURRENT_SOURCE_DIR}/android")
+    # androiddeployqt substitutes -- %%INSERT_VERSION_*%% in the
+    # manifest from these properties. Keeping them out of the
+    # manifest source means the version doesn't drift from the rest
+    # of the build.
+    set_property(TARGET bsfchat-app PROPERTY
+        QT_ANDROID_VERSION_NAME "${BSFCHAT_VERSION}")
+    set_property(TARGET bsfchat-app PROPERTY
+        QT_ANDROID_VERSION_CODE "${BSFCHAT_VERSION_CODE}")
 
     # Bundle OpenSSL with the APK. Qt for Android ships without SSL, so
     # HTTPS requests (OIDC token exchange, the Matrix/JSON client,
@@ -153,12 +168,11 @@ if(NOT DEFINED BSFCHAT_BUNDLE_ID)
         set(BSFCHAT_BUNDLE_ID "com.bsfchat.app.dev")
     endif()
 endif()
-# Single source of truth for the user-visible version string. Read by
-# the .icns bundle, the Windows .exe metadata, and — crucially — the
-# Updater class, which compares this against GitHub Releases'
-# tag_name to decide whether to prompt for update. Bump this in step
-# with the git tag when cutting a release.
-set(BSFCHAT_VERSION "0.0.28")
+# The user-visible version string. Read by the Updater for its
+# semver comparison with GitHub Releases' tag_name. BSFCHAT_VERSION
+# may carry a -suffix (e.g. "0.0.0-dev"); BSFCHAT_VERSION_DOTS is the
+# strict M.N.P form needed by Apple bundle keys that reject
+# non-numeric components. Both come from cmake/Version.cmake.
 target_compile_definitions(bsfchat-app PRIVATE
     BSFCHAT_VERSION="${BSFCHAT_VERSION}")
 
@@ -166,8 +180,8 @@ set_target_properties(bsfchat-app PROPERTIES
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_BUNDLE_NAME "BSFChat"
     MACOSX_BUNDLE_GUI_IDENTIFIER "${BSFCHAT_BUNDLE_ID}"
-    MACOSX_BUNDLE_BUNDLE_VERSION "${BSFCHAT_VERSION}"
-    MACOSX_BUNDLE_SHORT_VERSION_STRING "${BSFCHAT_VERSION}"
+    MACOSX_BUNDLE_BUNDLE_VERSION "${BSFCHAT_VERSION_DOTS}"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${BSFCHAT_VERSION_DOTS}"
     MACOSX_BUNDLE_INFO_STRING "BSFChat"
     MACOSX_BUNDLE_ICON_FILE "BSFChat.icns"
     WIN32_EXECUTABLE TRUE

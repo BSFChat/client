@@ -27,6 +27,38 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags so cmake/Version.cmake's git-describe
+          # fallback works for non-tag pushes. Tag builds use the
+          # explicit -D override regardless.
+          fetch-depth: 0
+
+      - name: Derive version
+        id: version
+        shell: bash
+        run: |
+          # On tag pushes GITHUB_REF_NAME is "v0.0.28" → strip the v.
+          # On branch/PR pushes we synthesise a -dev suffix so the
+          # Updater treats real releases as newer.
+          REF="${GITHUB_REF_NAME:-}"
+          if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            VER="${REF#v}"
+          else
+            # Compose from the most recent tag + short SHA so two
+            # main-branch CI builds produce distinguishable artefacts.
+            LAST=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+            LAST="${LAST#v}"
+            VER="${LAST}-dev.$(git rev-parse --short HEAD)"
+          fi
+          # NSIS VIProductVersion needs MAJOR.MINOR.PATCH.BUILD (four
+          # numeric components). Derive by stripping any -suffix and
+          # appending .0.
+          STRICT="${VER%%-*}"
+          NSIS="${STRICT}.0"
+          echo "version=$VER"          >> "$GITHUB_OUTPUT"
+          echo "version_strict=$STRICT" >> "$GITHUB_OUTPUT"
+          echo "version_nsis=$NSIS"     >> "$GITHUB_OUTPUT"
+          echo "BSFChat version: $VER (strict=$STRICT nsis=$NSIS)"
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
@@ -91,17 +123,19 @@ jobs:
         run: |
           export PATH="$HOME/Library/Python/3.12/bin:$HOME/Library/Python/3.13/bin:$PATH"
           cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev \
+            -DBSFCHAT_VERSION="${{ steps.version.outputs.version }}" \
             -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
 
       - name: Configure (Linux)
         if: matrix.platform == 'linux'
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev \
+            -DBSFCHAT_VERSION="${{ steps.version.outputs.version }}"
 
       - name: Configure (Windows)
         if: matrix.platform == 'windows'
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev -DBSFCHAT_VERSION="${{ steps.version.outputs.version }}"
 
       - name: Build
         run: cmake --build build --config Release -j4
@@ -174,12 +208,55 @@ jobs:
           Imports = Resources/qml
           QmlImports = Resources/qml
           QTCONF
-          # Code sign
+          # === Code sign with hardened runtime + entitlements ===
+          #
+          # The bundle has to pass the notary service, which requires
+          # every Mach-O inside it to be signed by us with the same
+          # identity, hardened runtime enabled, a secure timestamp,
+          # and our entitlements. We walk leaves-first because
+          # codesign refuses to overwrite a signed container before
+          # the contents are signed (`--deep` does this implicitly
+          # but is unreliable — it skips items it thinks are already
+          # signed, leaving Qt frameworks with macdeployqt's adhoc
+          # signature instead of ours).
+          ENTITLEMENTS="$GITHUB_WORKSPACE/macos/BSFChat.entitlements"
+          if [ ! -f "$ENTITLEMENTS" ]; then
+            echo "ERROR: entitlements file missing at $ENTITLEMENTS"
+            exit 1
+          fi
+
+          sign_one() {
+            codesign --force \
+                     --options runtime \
+                     --timestamp \
+                     --entitlements "$ENTITLEMENTS" \
+                     --sign "$CODESIGN_IDENTITY" \
+                     "$1"
+          }
+
           if [ -n "$CODESIGN_IDENTITY" ]; then
-            codesign --force --deep --sign "$CODESIGN_IDENTITY" \
-              --options runtime --timestamp "$APP_PATH"
-            echo "Signed with: $CODESIGN_IDENTITY"
+            echo "Signing with identity: $CODESIGN_IDENTITY"
+            # 1. Loose dylibs / .so files (deepest path first so a
+            #    framework's binary gets signed before its container).
+            while IFS= read -r f; do
+              [ -n "$f" ] && sign_one "$f"
+            done < <(find "$APP_PATH" \( -name "*.dylib" -o -name "*.so" \) -type f | sort -r)
+            # 2. Framework bundles (each as a unit — codesign on a
+            #    *.framework dir signs Versions/A correctly).
+            while IFS= read -r d; do
+              [ -n "$d" ] && sign_one "$d"
+            done < <(find "$APP_PATH" -name "*.framework" -type d | sort -r)
+            # 3. Main executable.
+            sign_one "$APP_PATH/Contents/MacOS/bsfchat-app"
+            # 4. Outer .app bundle.
+            sign_one "$APP_PATH"
+            # Verify the whole bundle is internally consistent before
+            # we ship it to the notary service. --strict catches the
+            # most common notarisation rejections at build time.
+            codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+            echo "Bundle signed and verified"
           else
+            echo "No Developer ID identity available — adhoc signing (won't notarize)"
             codesign --force --deep --sign - "$APP_PATH"
           fi
           # Create .dmg
@@ -194,6 +271,92 @@ jobs:
           if [ ! -f "BSFChat-macOS.dmg" ]; then
             ditto -c -k --keepParent "$APP_PATH" BSFChat-macOS.dmg
           fi
+          # Sign the DMG envelope itself. Gatekeeper validates the
+          # outer container's signature separately from the .app's
+          # signature inside; an unsigned DMG triggers "from an
+          # unidentified developer" even when its payload is signed.
+          if [ -n "$CODESIGN_IDENTITY" ] && [ -f BSFChat-macOS.dmg ]; then
+            codesign --force --sign "$CODESIGN_IDENTITY" --timestamp BSFChat-macOS.dmg
+            echo "DMG envelope signed"
+          fi
+
+      # === macOS: Notarize + staple ===
+      # Run as its own step so the failure mode is legible in the UI
+      # ("Notarize macOS .dmg" red) instead of buried inside the
+      # 200-line packaging script. Soft-fails when secrets are absent
+      # so PRs from forks (which don't get repo secrets) still
+      # produce a usable signed-but-unstapled DMG.
+      - name: Notarize macOS .dmg
+        if: matrix.platform == 'macos'
+        env:
+          NOTARY_API_KEY_BASE64: ${{ secrets.NOTARY_API_KEY_BASE64 }}
+          NOTARY_KEY_ID:         ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID:      ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          DMG="$GITHUB_WORKSPACE/build/BSFChat-macOS.dmg"
+          if [ ! -f "$DMG" ]; then
+            echo "ERROR: DMG not found at $DMG"
+            exit 1
+          fi
+          if [ -z "$CODESIGN_IDENTITY" ]; then
+            echo "::warning::Skipping notarisation — no Developer ID identity (likely a fork PR without MACOS_CERTIFICATE)."
+            exit 0
+          fi
+          if [ -z "$NOTARY_API_KEY_BASE64" ] || [ -z "$NOTARY_KEY_ID" ] || [ -z "$NOTARY_ISSUER_ID" ]; then
+            echo "::warning::Skipping notarisation — NOTARY_API_KEY_BASE64 / NOTARY_KEY_ID / NOTARY_ISSUER_ID secrets unset."
+            exit 0
+          fi
+
+          # Materialise the App Store Connect API key from the
+          # base64-encoded secret. The .p8 must live on disk because
+          # notarytool reads it by path, not by environment variable.
+          KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          echo "$NOTARY_API_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+
+          # Submit. --wait blocks until Apple's verdict comes back
+          # (typically 1–5 minutes) and exits non-zero on rejection.
+          # On rejection, fetch the log so we can see which binary
+          # is the problem instead of just "Invalid".
+          echo "Submitting $DMG to Apple notary service…"
+          SUBMIT_OUT=$(xcrun notarytool submit "$DMG" \
+            --key    "$KEY_PATH" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait \
+            --output-format json) || NOTARY_RC=$?
+
+          echo "$SUBMIT_OUT"
+          SUBMISSION_ID=$(echo "$SUBMIT_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+          STATUS=$(echo "$SUBMIT_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || true)
+
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "::error::Notarisation failed (status=$STATUS, id=$SUBMISSION_ID). Fetching log…"
+            if [ -n "$SUBMISSION_ID" ]; then
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --key    "$KEY_PATH" \
+                --key-id "$NOTARY_KEY_ID" \
+                --issuer "$NOTARY_ISSUER_ID" || true
+            fi
+            rm -f "$KEY_PATH"
+            exit 1
+          fi
+
+          # Staple the ticket into the DMG so Gatekeeper validates
+          # offline. Without this, the user's Mac has to phone home
+          # to Apple on first launch — works while online but fails
+          # silently if the user is offline / behind a captive
+          # portal.
+          xcrun stapler staple "$DMG"
+
+          # Final sanity check: spctl is what Gatekeeper itself uses.
+          # If this passes, the DMG will open cleanly on a fresh Mac.
+          spctl --assess --type open \
+                --context context:primary-signature \
+                --verbose "$DMG"
+
+          rm -f "$KEY_PATH"
+          echo "Notarisation + stapling complete"
 
       - name: Upload macOS artifact
         if: matrix.platform == 'macos'
@@ -258,6 +421,37 @@ jobs:
             Write-Host "Copied $($dc_dll.Name)"
           }
 
+          # FFmpeg runtime DLLs for QtMultimedia's FFmpeg backend.
+          # QScreenCapture (the engine behind ScreenShareController on
+          # Windows/Linux) loads this backend at runtime; without
+          # av*/sw*/postproc DLLs the backend silently fails to
+          # initialise and screen-share calls become no-ops. windeployqt
+          # bundles the Qt-side plugin (multimedia\ffmpegmediaplugin.dll)
+          # but NOT the underlying FFmpeg runtime DLLs.
+          $qtBin = "${env:QT_ROOT_DIR}\bin"
+          if (Test-Path $qtBin) {
+            $patterns = @("av*.dll", "sw*.dll", "postproc*.dll")
+            $copied = 0
+            foreach ($pat in $patterns) {
+              Get-ChildItem -Path $qtBin -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
+                Copy-Item $_.FullName dist\
+                $copied++
+              }
+            }
+            Write-Host "Copied $copied FFmpeg DLL(s) from $qtBin"
+          } else {
+            Write-Warning "QT_ROOT_DIR\bin not found ($qtBin); QScreenCapture will fail at runtime"
+          }
+          # Verify the QtMultimedia FFmpeg plugin made it in via
+          # windeployqt — without it the runtime backend doesn't load
+          # even when av*.dll are present.
+          $plug = Get-ChildItem -Path dist -Recurse -Filter "ffmpegmediaplugin*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $plug) {
+            Write-Warning "ffmpegmediaplugin.dll missing from dist — windeployqt didn't pull the QtMultimedia FFmpeg plugin; screen-share will be broken"
+          } else {
+            Write-Host "QtMultimedia FFmpeg plugin present: $($plug.FullName)"
+          }
+
           # MSVC runtime (usually handled by windeployqt, but be safe)
           Write-Host "Final dist contents:"
           Get-ChildItem dist\ | Select-Object Name, Length
@@ -268,7 +462,10 @@ jobs:
           # ship it next to the script in dist\.
           Copy-Item branding\BSFChat.ico dist\
           cd dist
-          makensis installer.nsi
+          # /D defines pass through to the .nsi as `${BSFCHAT_VERSION}`
+          # tokens, which feed VIProductVersion + the DisplayVersion
+          # registry write.
+          makensis "/DBSFCHAT_VERSION=${{ steps.version.outputs.version }}" "/DBSFCHAT_VERSION_NSIS=${{ steps.version.outputs.version_nsis }}" installer.nsi
 
       - name: Upload Windows artifact
         if: matrix.platform == 'windows'

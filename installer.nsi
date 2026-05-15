@@ -1,6 +1,17 @@
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 
+; Version metadata. CI passes both with `/D` so the strict 4-part
+; form (required by VIProductVersion) and the user-visible form
+; (which may carry a "-suffix") stay in sync. Local invocations
+; (`makensis installer.nsi`) fall through to the dev defaults.
+!ifndef BSFCHAT_VERSION
+    !define BSFCHAT_VERSION "0.0.0-dev"
+!endif
+!ifndef BSFCHAT_VERSION_NSIS
+    !define BSFCHAT_VERSION_NSIS "0.0.0.0"
+!endif
+
 Name "BSFChat"
 OutFile "BSFChat-Setup.exe"
 InstallDir "$PROGRAMFILES64\BSFChat"
@@ -9,6 +20,19 @@ InstallDir "$PROGRAMFILES64\BSFChat"
 ; instead of in the default Program Files dir.
 InstallDirRegKey HKLM "Software\BSFChat" "InstallLocation"
 RequestExecutionLevel admin
+
+; Windows file-version resource block. Shows up in Explorer →
+; Properties → Details and in Add/Remove Programs. Required for
+; SmartScreen reputation to accrue against this installer rather
+; than treating every build as a brand-new unknown binary.
+VIProductVersion "${BSFCHAT_VERSION_NSIS}"
+VIAddVersionKey  "ProductName"      "BSFChat"
+VIAddVersionKey  "CompanyName"      "BSFChat"
+VIAddVersionKey  "FileDescription"  "BSFChat Installer"
+VIAddVersionKey  "FileVersion"      "${BSFCHAT_VERSION}"
+VIAddVersionKey  "ProductVersion"   "${BSFCHAT_VERSION}"
+VIAddVersionKey  "OriginalFilename" "BSFChat-Setup.exe"
+VIAddVersionKey  "LegalCopyright"   "(c) BSFChat"
 
 ; Brand icons for the installer + uninstaller. The CI workflow
 ; copies branding\BSFChat.ico into the dist\ dir before invoking
@@ -61,6 +85,7 @@ Section "Install"
 
     ; Registry for Add/Remove Programs
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BSFChat" "DisplayName" "BSFChat"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BSFChat" "DisplayVersion" "${BSFCHAT_VERSION}"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BSFChat" "UninstallString" '"$INSTDIR\Uninstall.exe"'
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BSFChat" "Publisher" "BSFChat"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BSFChat" "InstallLocation" "$INSTDIR"
