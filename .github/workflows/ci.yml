@@ -146,7 +146,11 @@ jobs:
       # pins later without resurrecting this bug.
       - name: Configure (Windows)
         if: matrix.platform == 'windows'
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DBSFCHAT_VERSION="${{ steps.version.outputs.version }}"
+        # PowerShell parses bare `3.5` as a [double] literal and
+        # mangles it (we saw it arrive at cmake.exe as "3"), so the
+        # -D arg has to be a single quoted token. Same gotcha with
+        # BSFCHAT_VERSION; both stay fully quoted.
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" "-DBSFCHAT_VERSION=${{ steps.version.outputs.version }}"
 
       - name: Build
         run: cmake --build build --config Release -j4
