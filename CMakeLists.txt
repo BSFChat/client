@@ -387,26 +387,46 @@ if(APPLE AND NOT IOS)
         "-framework CoreVideo"
         "-framework Foundation")
 
-    # Stable dev-signing — if the user ran scripts/setup-dev-signing.sh
-    # the "BSFChat Dev Signer" identity lives in the login keychain;
-    # sign with it on every build so the cdhash stays stable across
-    # rebuilds. Without this, macOS invalidates the Screen Recording
-    # and Camera TCC grants on every recompile.
+    # Stable dev-signing — TCC grants for Screen Recording, Mic, and
+    # Camera are bound to (bundle ID × cdhash × signing identity), so
+    # adhoc-signed builds get their grants invalidated on every
+    # rebuild (cdhash churns with every recompile). Signing with a
+    # stable identity makes the cdhash deterministic per source state,
+    # and TCC keeps the grant across rebuilds.
+    #
+    # Resolution order:
+    #   1. Developer ID Application — preferred. Same cert CI uses
+    #      for production signing + notarisation. Trusted by macOS;
+    #      per-bundle-id TCC grants survive across rebuilds for as
+    #      long as the cert is in the keychain (5 years).
+    #   2. BSFChat Dev Signer — self-signed fallback for machines
+    #      that don't have the Developer ID cert. Created by
+    #      scripts/setup-dev-signing.sh.
+    #   3. None → adhoc. Every TCC grant burns on every rebuild.
     execute_process(
         COMMAND security find-identity -v -p codesigning
         OUTPUT_VARIABLE _codesign_identities
         ERROR_QUIET)
-    if(_codesign_identities MATCHES "BSFChat Dev Signer")
-        message(STATUS "Using stable dev-signing identity 'BSFChat Dev Signer'")
+    set(_dev_sign_identity "")
+    if(_codesign_identities MATCHES "\"(Developer ID Application: [^\"]+)\"")
+        set(_dev_sign_identity "${CMAKE_MATCH_1}")
+        message(STATUS "Stable dev-signing: ${_dev_sign_identity}")
+    elseif(_codesign_identities MATCHES "BSFChat Dev Signer")
+        set(_dev_sign_identity "BSFChat Dev Signer")
+        message(STATUS "Stable dev-signing: BSFChat Dev Signer (self-signed)")
+    else()
+        message(STATUS "No stable dev-signing identity — builds will be adhoc-signed.")
+        message(STATUS "  TCC grants will re-prompt on every rebuild. Fix by")
+        message(STATUS "  importing your Developer ID Application cert, or by")
+        message(STATUS "  running scripts/setup-dev-signing.sh.")
+    endif()
+    if(_dev_sign_identity)
         add_custom_command(TARGET bsfchat-app POST_BUILD
             COMMAND codesign --force --deep
-                    --sign "BSFChat Dev Signer"
+                    --sign "${_dev_sign_identity}"
                     --preserve-metadata=entitlements
                     "$<TARGET_BUNDLE_DIR:bsfchat-app>"
             VERBATIM)
-    else()
-        message(STATUS "No stable dev-signing identity — builds will be adhoc-signed.")
-        message(STATUS "  Run scripts/setup-dev-signing.sh once to fix TCC churn.")
     endif()
 endif()
 
