@@ -17,7 +17,11 @@
 #include "core/Haptics.h"
 #include "core/Updater.h"
 #include "core/AndroidPermissions.h"
-#if defined(Q_OS_MACOS) && !defined(Q_OS_IOS)
+// Mirror the platform gate below where these get instantiated.
+// Keep the includes paired with the use sites so a platform-gate
+// edit only has to be made in one place to widen support.
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN) \
+    || (defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID))
 #include "voice/ScreenShareController.h"
 #include "voice/VoiceEngine.h"
 #endif
