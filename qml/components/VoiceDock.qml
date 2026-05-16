@@ -237,11 +237,12 @@ Rectangle {
                                serverManager.activeServer.toggleDeafen()
             }
 
-            // Screen-share + camera are desktop-only — those context
-            // properties only exist on macOS/Windows/Linux (see
-            // main.cpp's #if defined(Q_OS_MACOS) gate). Mobile doesn't
-            // have MediaProjection / CameraX plumbing wired yet, so
-            // hide the buttons rather than ship disabled ones.
+            // Screen-share + camera context properties only get set
+            // on platforms where their capture path is implemented
+            // (macOS/Windows/Linux desktop + Android via its own
+            // controller; not iOS). The `typeof … !== "undefined"`
+            // guard hides the button cleanly on unsupported
+            // platforms — see main.cpp for the platform gate.
             DockButton {
                 visible: typeof screenShare !== "undefined"
                 icon: "screen-share"

@@ -162,12 +162,18 @@ int main(int argc, char *argv[])
 
     engine.rootContext()->setContextProperty("serverManager", application.serverManager());
     engine.rootContext()->setContextProperty("appSettings", application.settings());
-    // Screen-share + webcam controllers are desktop-macOS only for
-    // now. iOS / Android need different capture paths (platform
-    // media APIs + mobile-appropriate UX) that haven't been wired
-    // yet. Gating keeps the mobile binary lighter and avoids
-    // shipping disabled buttons.
-#if defined(Q_OS_MACOS) && !defined(Q_OS_IOS)
+    // Screen-share controller binds for every desktop platform.
+    // ScreenShareController internally branches on the build target:
+    // macOS uses our CG/ScreenCaptureKit-backed MacScreenCapturer
+    // (Homebrew Qt ships without QT_FEATURE_screen_capture), while
+    // Windows + Linux use Qt's QScreenCapture against the bundled
+    // FFmpeg multimedia backend. iOS / Android need entirely
+    // different capture paths (ReplayKit / MediaProjection) — the
+    // Android one lives in its own #if block below; iOS hasn't been
+    // wired yet so the QML button stays hidden there via the
+    // `typeof screenShare !== "undefined"` check in VoiceDock.
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN) \
+    || (defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID))
     ScreenShareController screenShare;
     QQmlEngine::setObjectOwnership(&screenShare, QQmlEngine::CppOwnership);
     engine.rootContext()->setContextProperty("screenShare", &screenShare);
