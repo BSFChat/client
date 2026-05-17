@@ -1529,6 +1529,12 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
         // so we can bump the server's read marker forward without waiting for
         // the next time the user clicks the channel.
         bool activeRoomHadNewMessage = false;
+        // Highest origin_server_ts among message events for the active room
+        // in this sync batch. Used to advance the client-side lastReadTs in
+        // step with the server-side read marker, so the cold-start
+        // notification suppression below doesn't fire for events the
+        // user has already seen in the live session.
+        qint64 activeRoomNewestMsgTs = 0;
 
         // Process timeline events
         for (const auto& event : joinedRoom.timeline.events) {
@@ -1613,6 +1619,8 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 }
                 if (roomId == m_activeRoomId && sender != m_userId) {
                     activeRoomHadNewMessage = true;
+                    const qint64 ts = static_cast<qint64>(event.origin_server_ts);
+                    if (ts > activeRoomNewestMsgTs) activeRoomNewestMsgTs = ts;
                 }
 
                 // Fire messageReceived for notification-worthy inbound
@@ -1661,8 +1669,22 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                             }
                         }
                     }
-                    emit messageReceived(roomId, displayName, body, eventId,
-                                         mentionsMe);
+                    // Suppress notifications for events the user has
+                    // already read in this room. Without this guard,
+                    // cold-start /sync (which catches us up since the
+                    // persisted next_batch token) fires a notification
+                    // for every event in the catch-up batch — including
+                    // ones the user already read in a previous session
+                    // or on another device. lastReadTs is advanced both
+                    // on room-switch (setActiveRoom) and below when
+                    // sync sees new events for the currently-active
+                    // room, so the live-message path stays unaffected.
+                    const qint64 eventTs = static_cast<qint64>(event.origin_server_ts);
+                    const qint64 readTs = m_settings ? m_settings->lastReadTs(roomId) : 0;
+                    if (eventTs > readTs) {
+                        emit messageReceived(roomId, displayName, body, eventId,
+                                             mentionsMe);
+                    }
                 }
             }
 
@@ -1711,6 +1733,13 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             m_roomListModel->setUnreadCount(roomId, 0);
             if (activeRoomHadNewMessage) {
                 m_client->sendReadMarker(roomId);
+                // Keep the client-side cursor in lockstep with the
+                // server marker. The notification-filter above uses
+                // this to suppress "already read" events on next
+                // cold start.
+                if (m_settings && activeRoomNewestMsgTs > 0) {
+                    m_settings->setLastReadTs(roomId, activeRoomNewestMsgTs);
+                }
             }
         } else {
             m_roomListModel->setUnreadCount(roomId, serverUnread);
