@@ -104,6 +104,39 @@ QVariantList CameraController::availableCameras() const
 #endif
 }
 
+void CameraController::setServerManager(ServerManager* mgr)
+{
+    if (m_servers == mgr) return;
+    m_servers = mgr;
+    if (!mgr) return;
+    // Re-evaluate the per-server signal binding whenever the active
+    // server changes, then prime it for the current active server.
+    connect(mgr, &ServerManager::activeServerChanged,
+            this, &CameraController::rewireVoiceLeaveWatch);
+    rewireVoiceLeaveWatch();
+}
+
+void CameraController::rewireVoiceLeaveWatch()
+{
+    // Drop any prior subscription before adding a new one — the old
+    // server's signal would still fire harmlessly but the lambda
+    // captures the old server pointer, which can dangle on server
+    // removal. Tracking the QMetaObject::Connection avoids that.
+    disconnect(m_voiceRoomConn);
+    auto* sc = m_servers ? m_servers->activeServer() : nullptr;
+    if (!sc) return;
+    m_voiceRoomConn = connect(sc, &ServerConnection::activeVoiceRoomIdChanged,
+                              this, [this, sc]() {
+        // Voice room ID changed. If the user just LEFT (room is now
+        // empty) and the camera is running, stop it — otherwise it
+        // would silently re-broadcast to whatever voice channel they
+        // join next. Camera state shouldn't outlive the call.
+        if (m_active && !sc->inVoiceChannel()) {
+            stop();
+        }
+    });
+}
+
 void CameraController::start() { startForCamera(-1); }
 
 void CameraController::startForCamera(int index)

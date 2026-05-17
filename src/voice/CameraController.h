@@ -40,7 +40,7 @@ public:
     QVariantList availableCameras() const;
     QString cameraDescription() const { return m_cameraDescription; }
 
-    void setServerManager(ServerManager* mgr) { m_servers = mgr; }
+    void setServerManager(ServerManager* mgr);
     void setSettings(Settings* settings) { m_settings = settings; }
 
     Q_INVOKABLE void start();
@@ -60,6 +60,11 @@ signals:
 
 private:
     void pushFrameToPeers();
+    // Rewires the per-server "voice room changed" subscription
+    // whenever the active server changes (and at initial setup),
+    // so leaving a voice channel reliably stops the camera instead
+    // of letting it silently re-broadcast on the next join.
+    void rewireVoiceLeaveWatch();
 
 #ifdef Q_OS_MACOS
     MacCameraCapturer* m_mac = nullptr;
@@ -71,6 +76,7 @@ private:
     QTimer* m_throttle = nullptr;
     ServerManager* m_servers = nullptr;
     Settings* m_settings = nullptr;
+    QMetaObject::Connection m_voiceRoomConn;  // connection to active server's voice-room signal
     QVideoFrame m_pendingFrame;
     bool m_active = false;
     QString m_lastError;

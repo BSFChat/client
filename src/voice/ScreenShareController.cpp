@@ -164,6 +164,32 @@ QVariantList ScreenShareController::availableScreens() const
     return out;
 }
 
+void ScreenShareController::setServerManager(ServerManager* mgr)
+{
+    if (m_servers == mgr) return;
+    m_servers = mgr;
+    if (!mgr) return;
+    connect(mgr, &ServerManager::activeServerChanged,
+            this, &ScreenShareController::rewireVoiceLeaveWatch);
+    rewireVoiceLeaveWatch();
+}
+
+void ScreenShareController::rewireVoiceLeaveWatch()
+{
+    disconnect(m_voiceRoomConn);
+    auto* sc = m_servers ? m_servers->activeServer() : nullptr;
+    if (!sc) return;
+    m_voiceRoomConn = connect(sc, &ServerConnection::activeVoiceRoomIdChanged,
+                              this, [this, sc]() {
+        // Mirror CameraController: tear down the share the moment the
+        // server confirms the user left voice, so a follow-up join
+        // doesn't silently resume sharing the screen.
+        if (m_active && !sc->inVoiceChannel()) {
+            stop();
+        }
+    });
+}
+
 void ScreenShareController::start() { startForScreen(-1); }
 
 // ROADMAP — H.264 / VP9 over RTP migration

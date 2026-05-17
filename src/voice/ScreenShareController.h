@@ -56,7 +56,9 @@ public:
     // Hand the controller a pointer to ServerManager so it can
     // look up the active server's VoiceEngine on each frame push.
     // (Voice engines come and go — holding a pointer would race.)
-    void setServerManager(ServerManager* mgr) { m_servers = mgr; }
+    // Also wires up the auto-stop-on-voice-leave subscription so
+    // share state can't outlive the call.
+    void setServerManager(ServerManager* mgr);
     // Lets the controller resolve the user's quality pref each start
     // AND re-apply mid-share when the user moves a slider.
     void setSettings(Settings* settings);
@@ -97,9 +99,15 @@ private:
     QTimer* m_throttle = nullptr;
     ServerManager* m_servers = nullptr;
     Settings* m_settings = nullptr;
+    QMetaObject::Connection m_voiceRoomConn;  // active server's voice-room signal
     QVideoFrame m_pendingFrame;
     bool m_active = false;
     QString m_lastError;
 
     void pushFrameToPeers();
+    // Rewires the per-server "voice room changed" subscription
+    // whenever the active server changes. Stops the screen share
+    // when the user leaves voice so share state can't outlive the
+    // call.
+    void rewireVoiceLeaveWatch();
 };
