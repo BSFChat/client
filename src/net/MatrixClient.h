@@ -174,7 +174,13 @@ signals:
     void messageSent(const QString& eventId);
     void sendMessageError(const QString& error);
 
-    void messagesResult(const bsfchat::MessagesResponse& response);
+    // roomId is carried alongside the response so the receiver can
+    // filter to the currently-active room. The server doesn't echo
+    // the roomId in the body, and without it the handler can apply
+    // results to the wrong model when a room switch happens between
+    // request and response (race on cold start, observed v0.0.34).
+    void messagesResult(const QString& roomId,
+                        const bsfchat::MessagesResponse& response);
     void messagesError(const QString& error);
 
     void mediaUploaded(const QString& contentUri);

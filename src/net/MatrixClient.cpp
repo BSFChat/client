@@ -962,7 +962,7 @@ void MatrixClient::getRoomMessages(const QString& roomId, const QString& from,
     }
 
     auto* reply = m_nam.get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
@@ -973,7 +973,7 @@ void MatrixClient::getRoomMessages(const QString& roomId, const QString& from,
             auto j = json::parse(data.toStdString());
             bsfchat::MessagesResponse resp;
             bsfchat::from_json(j, resp);
-            emit messagesResult(resp);
+            emit messagesResult(roomId, resp);
         } catch (const std::exception& e) {
             emit messagesError(QString::fromStdString(e.what()));
         }

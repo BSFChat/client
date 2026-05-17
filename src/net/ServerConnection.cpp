@@ -160,13 +160,37 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     //   resp.start non-empty → back-pagination; prepend the older batch and
     //     advance the token. resp.end being nullopt means we've hit the
     //     start of the room's history, so hasMoreHistory flips off.
-    connect(m_client, &MatrixClient::messagesResult, this, [this](const bsfchat::MessagesResponse& resp) {
+    //
+    // The roomId filter is the cure for an observed race on cold start:
+    // setActiveRoom("A") fires getRoomMessages(A); user (or QML restore)
+    // switches to B before A's response lands; without the filter, A's
+    // chunk got appended to model B and the user saw a stale snapshot
+    // until they switched away and back.
+    connect(m_client, &MatrixClient::messagesResult, this,
+            [this](const QString& roomId, const bsfchat::MessagesResponse& resp) {
+        if (roomId != m_activeRoomId) return;
         auto events = resp.chunk;
         // Server returns dir=b newest-first; reverse to chronological so
         // both append and prepend get oldest→newest.
         std::reverse(events.begin(), events.end());
         const bool isBackPaginate = resp.start.has_value() && !resp.start->empty();
         if (isBackPaginate) {
+            QVector<bsfchat::RoomEvent> vec;
+            vec.reserve(static_cast<int>(events.size()));
+            for (auto& e : events) vec.push_back(e);
+            m_messageModel->prependEvents(vec, m_userId);
+        } else if (m_messageModel->rowCount() > 0) {
+            // Cold-start ordering fix: the response is the most-recent
+            // 50 events, but /sync has likely already populated the
+            // model with the newest of those (the /sync long-poll
+            // races our getRoomMessages fetch on first launch). If we
+            // appendEvent here, the dedupe drops the events /sync
+            // already delivered and the events that /sync DIDN'T
+            // deliver — older history — land at the END of the model.
+            // That's exactly the bug observed pre-v0.0.37: scrolled
+            // to bottom shows YouTube-link messages from a week ago
+            // while April/May messages sit higher up. Treat this
+            // case as an older-history prepend instead.
             QVector<bsfchat::RoomEvent> vec;
             vec.reserve(static_cast<int>(events.size()));
             for (auto& e : events) vec.push_back(e);
