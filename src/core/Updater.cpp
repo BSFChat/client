@@ -253,36 +253,52 @@ void Updater::openReleasePage()
 #if defined(Q_OS_MACOS)
 void Updater::applyMac(const QString& dmgPath)
 {
-    // Spawn a tiny shell helper that:
-    //   1. attaches the .dmg to a unique mountpoint
-    //   2. ditto's BSFChat.app over the currently-installed bundle
-    //   3. detaches the dmg
-    //   4. relaunches the new app
+    // Spawn a detached shell helper that:
+    //   1. waits for our PID to exit (so ditto can replace the binary)
+    //   2. attaches the .dmg at a unique mountpoint
+    //   3. finds the .app inside the DMG (case-insensitive — the
+    //      bundle is bsfchat-app.app, not BSFChat.app; the previous
+    //      -name 'BSFChat*.app' silently failed to match and turned
+    //      the whole flow into a no-op, leaving the user on their
+    //      old version)
+    //   4. ditto's it over the currently-installed bundle
+    //   5. detaches the DMG and relaunches the new app
     //
-    // Done as a detached `bash -c` so that this process can exit
-    // immediately — ditto can't overwrite the running binary, but
-    // because BSFChat.app is signed and ditto preserves attributes,
-    // overwriting after the original PID dies is reliable.
+    // The whole script is wrapped in a logging block so future
+    // failures show up in ~/Library/Logs/BSFChat/update.log instead
+    // of disappearing into the detached-process void.
     QString appPath = QCoreApplication::applicationDirPath();
-    // applicationDirPath = .../BSFChat.app/Contents/MacOS — climb to the .app
+    // applicationDirPath = .../bsfchat-app.app/Contents/MacOS — climb to the .app
     QDir d(appPath);
     d.cdUp(); d.cdUp();
     QString bundlePath = d.absolutePath();
 
-    // Random-ish mountpoint so a stale leftover doesn't collide.
+    // Unique mountpoint so a stale leftover or a parallel update
+    // attempt can't collide on /Volumes/BSFChatUpdate.
     QString mountPt = QStringLiteral("/Volumes/BSFChatUpdate-%1")
         .arg(QCoreApplication::applicationPid());
 
     QString script = QStringLiteral(
-        // Wait for our PID to exit so ditto can replace the binary.
+        "LOG=\"$HOME/Library/Logs/BSFChat/update.log\"; "
+        "mkdir -p \"$(dirname \"$LOG\")\"; "
+        "exec >>\"$LOG\" 2>&1; "
+        "echo; echo \"=== Update started $(date) ===\"; "
+        "echo \"  pid_to_wait=%1 mount=%2 dmg=%3 dest=%4\"; "
         "while kill -0 %1 2>/dev/null; do sleep 0.2; done; "
-        "MOUNT=$(hdiutil attach -nobrowse -mountpoint %2 %3 | tail -1 | awk '{print $1}'); "
-        "SRC=$(find %2 -maxdepth 2 -name 'BSFChat*.app' -type d | head -1); "
+        "echo \"  old process exited, mounting dmg\"; "
+        "hdiutil attach -nobrowse -mountpoint %2 %3 || { echo \"ERROR: hdiutil attach failed\"; exit 1; }; "
+        "SRC=$(find %2 -maxdepth 2 -iname '*.app' -type d | head -1); "
+        "echo \"  src=$SRC\"; "
         "if [ -n \"$SRC\" ]; then "
         "  ditto \"$SRC\" %4; "
+        "  echo \"  ditto exit=$?\"; "
+        "else "
+        "  echo \"ERROR: no .app found inside DMG\"; "
         "fi; "
         "hdiutil detach %2 -force; "
-        "open %4")
+        "echo \"  relaunching %4\"; "
+        "open %4; "
+        "echo \"=== Update done $(date) ===\"")
         .arg(QCoreApplication::applicationPid())
         .arg(mountPt)
         .arg(dmgPath)
