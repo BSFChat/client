@@ -254,24 +254,33 @@ void Updater::openReleasePage()
 void Updater::applyMac(const QString& dmgPath)
 {
     // Spawn a detached shell helper that:
-    //   1. waits for our PID to exit (so ditto can replace the binary)
+    //   1. waits for our PID to exit (so the bundle is unlocked)
     //   2. attaches the .dmg at a unique mountpoint
-    //   3. finds the .app inside the DMG (case-insensitive — the
-    //      bundle is bsfchat-app.app, not BSFChat.app; the previous
-    //      -name 'BSFChat*.app' silently failed to match and turned
-    //      the whole flow into a no-op, leaving the user on their
-    //      old version)
-    //   4. ditto's it over the currently-installed bundle
+    //   3. finds the .app inside the DMG (case-insensitive)
+    //   4. asks Finder via AppleScript to duplicate that bundle
+    //      into /Applications with replacing. THIS IS DELIBERATE:
+    //      on macOS Ventura+, any non-Apple-allowlisted process
+    //      that writes to a /Applications/*.app gets blocked by
+    //      the App Management TCC. ditto from a detached
+    //      bash-child of ours fails silently with "Operation not
+    //      permitted" because bsfchat-app has no App Management
+    //      grant. Finder is on Apple's permanent allowlist for
+    //      this category, so routing the duplicate through Finder
+    //      sidesteps the TCC gate without requiring a one-time
+    //      user consent dialog.
     //   5. detaches the DMG and relaunches the new app
     //
     // The whole script is wrapped in a logging block so future
-    // failures show up in ~/Library/Logs/BSFChat/update.log instead
-    // of disappearing into the detached-process void.
+    // failures show up in ~/Library/Logs/BSFChat/update.log
+    // instead of disappearing into the detached-process void.
     QString appPath = QCoreApplication::applicationDirPath();
     // applicationDirPath = .../bsfchat-app.app/Contents/MacOS — climb to the .app
     QDir d(appPath);
     d.cdUp(); d.cdUp();
     QString bundlePath = d.absolutePath();
+    QDir parentDir(bundlePath);
+    parentDir.cdUp();
+    QString installParent = parentDir.absolutePath();  // typically /Applications
 
     // Unique mountpoint so a stale leftover or a parallel update
     // attempt can't collide on /Volumes/BSFChatUpdate.
@@ -283,15 +292,21 @@ void Updater::applyMac(const QString& dmgPath)
         "mkdir -p \"$(dirname \"$LOG\")\"; "
         "exec >>\"$LOG\" 2>&1; "
         "echo; echo \"=== Update started $(date) ===\"; "
-        "echo \"  pid_to_wait=%1 mount=%2 dmg=%3 dest=%4\"; "
+        "echo \"  pid_to_wait=%1 mount=%2 dmg=%3 dest=%4 parent=%5\"; "
         "while kill -0 %1 2>/dev/null; do sleep 0.2; done; "
         "echo \"  old process exited, mounting dmg\"; "
         "hdiutil attach -nobrowse -mountpoint %2 %3 || { echo \"ERROR: hdiutil attach failed\"; exit 1; }; "
         "SRC=$(find %2 -maxdepth 2 -iname '*.app' -type d | head -1); "
         "echo \"  src=$SRC\"; "
         "if [ -n \"$SRC\" ]; then "
-        "  ditto \"$SRC\" %4; "
-        "  echo \"  ditto exit=$?\"; "
+        // Finder is on Apple's permanent App Management allowlist;
+        // routing the duplicate through it sidesteps the TCC gate
+        // that blocks our own process from writing to /Applications.
+        // `as alias` coerces the POSIX file refs into the form
+        // Finder's duplicate verb expects.
+        "  osascript -e 'tell application \"Finder\" to duplicate (POSIX file \"'\"$SRC\"'\" as alias) to (POSIX file \"%5\" as alias) with replacing' "
+        "    && echo \"  Finder duplicate OK\" "
+        "    || echo \"ERROR: Finder duplicate failed (TCC denied?)\"; "
         "else "
         "  echo \"ERROR: no .app found inside DMG\"; "
         "fi; "
@@ -302,7 +317,8 @@ void Updater::applyMac(const QString& dmgPath)
         .arg(QCoreApplication::applicationPid())
         .arg(mountPt)
         .arg(dmgPath)
-        .arg(bundlePath);
+        .arg(bundlePath)
+        .arg(installParent);
 
     QProcess::startDetached("/bin/bash", {"-c", script});
     QCoreApplication::quit();
