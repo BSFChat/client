@@ -5,6 +5,9 @@
 #include <QByteArray>
 
 #include "voice/PeerCaps.h"
+#include "voice/video/VideoCodec.h"
+
+#include <QTimer>
 
 #include <rtc/rtc.hpp>
 #include <memory>
@@ -59,6 +62,22 @@ public:
     // peer's caps prove it's a new client — old clients misparse
     // unknown tags as audio (see onMessage's legacy fallback).
     void sendControl(const QByteArray& json);
+
+    // ---- RTP video tracks ----
+    // Add the vscreen/vcamera SendRecv tracks and renegotiate.
+    // Idempotent; only call for peers whose caps advertise video_rtp.
+    // The answerer side never calls this — it adopts the tracks
+    // delivered via onTrack and sends on them in the reverse
+    // direction (SendRecv m-lines, so no counter-renegotiation).
+    void ensureVideoTracks();
+    bool hasVideoTrackOpen(VideoStreamId stream) const;
+    // Packetize + send one encoded access unit. No-op while the track
+    // isn't open. RTP timestamps derive from EncodedFrame::captureTimeUs.
+    void sendVideoFrame(VideoStreamId stream, const EncodedFrame& frame);
+    // Ask the remote sender for an IDR on `stream` (0x04 "kf" control
+    // message — the guaranteed path; RTCP PLI in v0.24.5 can't be
+    // triggered app-side on the receive direction of our chain).
+    void requestPeerKeyframe(VideoStreamId stream);
     void sendAudioFrame(const QByteArray& frame);
     // Send a JPEG-encoded screen-share frame to this peer over the
     // same SCTP data channel. Wire format: [tag][payload] where
@@ -101,6 +120,12 @@ signals:
     // 0x05 lossless-video payload (framing stripped by the receiver
     // pipeline, not here). Wired up by the AV1 lossless tier.
     void losslessFrameReceived(const QByteArray& payload);
+    // Reassembled H.264 access unit from the remote's video track.
+    void videoFrameReceived(int streamId, const QByteArray& accessUnit);
+    // The send direction of a video track became usable.
+    void videoTrackOpen(int streamId);
+    // Remote sent RTCP PLI — it needs a keyframe on our send stream.
+    void keyframeRequestedByPeer(int streamId);
 
 private:
     void setupCallbacks();
@@ -108,6 +133,10 @@ private:
     void flushPendingCandidates();
     // Fires a queued renegotiation once the signaling state is stable.
     void maybeRenegotiateAgain();
+    // Build the RTP handler chain (packetizer → SR → NACK → PLI →
+    // depacketizer → receiving session) on a track, either one we
+    // added (offerer) or one delivered by onTrack (answerer).
+    void attachVideoTrack(VideoStreamId stream, std::shared_ptr<rtc::Track> track);
 
     QString m_peerId;
     QString m_callId;
@@ -132,4 +161,17 @@ private:
     // A renegotiation was requested (or rolled back) while another
     // exchange was in flight — re-fire when we return to stable.
     bool m_renegotiateAgain = false;
+
+    // Per-stream RTP track context. rtpConfig is shared between the
+    // packetizer and the SR reporter; timestamp advances manually per
+    // send (v0.24.5 has no sendFrame()).
+    struct VideoTrackCtx {
+        std::shared_ptr<rtc::Track> track;
+        std::shared_ptr<rtc::RtpPacketizationConfig> rtpConfig;
+        std::shared_ptr<rtc::RtcpSrReporter> srReporter;
+        qint64 startTimeUs = -1;
+        bool open = false;
+    };
+    VideoTrackCtx m_video[kVideoStreamCount];
+    QTimer* m_srTimer = nullptr;   // 1 s sender-report tick, lazily created
 };

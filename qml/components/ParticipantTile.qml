@@ -98,28 +98,32 @@ Rectangle {
         }
     }
 
-    // Remote camera frame URL — empty until the peer's first JPEG
-    // arrives. hasCamera can already be true off the announced
-    // camera_on flag, so the gap is bridged by the placeholder below.
-    readonly property string cameraFrameUrl: {
+    // Whether the remote camera stream is actually delivering frames
+    // (vs merely announced). Registry live-state, refreshed on the
+    // same _cameraTick the announced flag uses.
+    readonly property bool cameraLive: {
         tile._cameraTick;
-        if (!tile.hasCamera || tile.isSelf) return "";
+        if (!tile.hasCamera || tile.isSelf) return false;
         var s = serverManager.activeServer;
-        return s ? s.peerCameraDataUrl(userId) : "";
+        return s && s.videoRegistry
+            ? s.videoRegistry.hasLiveVideo(userId, 1) : false;
     }
 
-    // Remote camera — rendered as a JPEG data URL that refreshes
-    // whenever a new frame arrives from the peer.
-    Image {
+    // Remote camera — a VideoOutput fed by the per-peer sink in the
+    // VideoStreamRegistry (both RTP video and legacy JPEG frames land
+    // there). Replaces the per-frame data-URL Image, whose async
+    // reloads blanked the tile between frames.
+    VideoOutput {
         id: peerCam
         anchors.fill: parent
         anchors.margins: 1
         visible: !tile.isSelf && tile.hasCamera
-        fillMode: Image.PreserveAspectCrop
-        smooth: true
-        asynchronous: false
-        cache: false
-        source: tile.cameraFrameUrl
+        fillMode: VideoOutput.PreserveAspectCrop
+        Component.onCompleted: {
+            var s = serverManager.activeServer;
+            if (s && s.videoRegistry && videoSink)
+                s.videoRegistry.attachOutput(tile.userId, 1, videoSink);
+        }
     }
 
     // Camera announced but no frame yet — avatar + status line in
@@ -127,7 +131,7 @@ Rectangle {
     Column {
         anchors.centerIn: parent
         spacing: Theme.sp.s3
-        visible: !tile.isSelf && tile.hasCamera && tile.cameraFrameUrl === ""
+        visible: !tile.isSelf && tile.hasCamera && !tile.cameraLive
 
         Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter

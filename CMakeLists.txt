@@ -106,6 +106,14 @@ if(BSFCHAT_ENABLE_VOICE)
         src/voice/AndroidScreenShareController.cpp
         src/voice/ScreenShareController.cpp
         src/voice/CameraController.cpp
+        # Real-video pipeline: RTP H.264 tracks (+ AV1 lossless tier).
+        # Codec backends are per-platform; the factory (#ifdef matrix)
+        # lives in VideoCodecFactory.cpp.
+        src/voice/video/VideoCodecFactory.cpp
+        src/voice/video/FrameConverter.cpp
+        src/voice/video/VideoSendPipeline.cpp
+        src/voice/video/VideoReceivePipeline.cpp
+        src/voice/video/VideoStreamRegistry.cpp
         # macOS-only (not iOS): ScreenCaptureKit / AVCaptureDevice
         # device paths are desktop-shape and rely on Qt Multimedia
         # features (QVideoSink pipelines) that need rework for iOS.
@@ -114,6 +122,14 @@ if(BSFCHAT_ENABLE_VOICE)
         $<$<AND:$<PLATFORM_ID:Darwin>,$<NOT:$<BOOL:${IOS}>>>:src/voice/MacCameraCapturer.mm>
     )
     target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_VOICE_ENABLED)
+    if(BSFCHAT_HAVE_OPENH264)
+        target_sources(bsfchat-app PRIVATE
+            src/voice/video/OpenH264Encoder.cpp
+            src/voice/video/OpenH264Decoder.cpp
+        )
+        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_OPENH264)
+        target_link_libraries(bsfchat-app PRIVATE openh264::openh264)
+    endif()
 endif()
 
 # Android: point Qt at our custom package source dir which carries a

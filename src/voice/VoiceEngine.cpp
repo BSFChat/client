@@ -2,6 +2,9 @@
 #include "voice/AudioEngine.h"
 #include "voice/PeerCaps.h"
 #include "voice/PeerConnectionManager.h"
+#include "voice/video/VideoDecoder.h"
+#include "voice/video/VideoEncoder.h"
+#include "voice/video/VideoReceivePipeline.h"
 #include "net/MatrixClient.h"
 
 #include <bsfchat/Constants.h>
@@ -101,6 +104,11 @@ void VoiceEngine::stop() {
     m_pendingCandidates.clear();
     qDeleteAll(m_disconnectTimers);
     m_disconnectTimers.clear();
+    // Decode pipelines block on their worker threads in their dtors,
+    // so tear them down synchronously with the call.
+    qDeleteAll(m_recvPipelines);
+    m_recvPipelines.clear();
+    m_videoSendActive = false;
 
     // Stop audio
     if (m_audioEngine) {
@@ -177,6 +185,19 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
                 onControlMessage(userId, json);
             });
 
+    // RTP video receive: reassembled access units → per-peer decoder.
+    connect(peer, &PeerConnectionManager::videoFrameReceived,
+            this, [this, userId](int streamId, const QByteArray& au) {
+                recvPipeline(userId, streamId)->submitAccessUnit(au);
+            });
+    // Peer PLI'd our send stream, or its track just opened — either
+    // way the next frame we send must be an IDR (a late joiner can't
+    // decode anything until one arrives).
+    connect(peer, &PeerConnectionManager::keyframeRequestedByPeer,
+            this, &VoiceEngine::videoKeyframeRequested);
+    connect(peer, &PeerConnectionManager::videoTrackOpen,
+            this, &VoiceEngine::videoKeyframeRequested);
+
     // Route screen-share frames up to the UI.
     connect(peer, &PeerConnectionManager::screenFrameReceived,
             this, [this, userId](const QByteArray& jpeg) {
@@ -252,15 +273,19 @@ void VoiceEngine::removePeer(const QString& userId) {
     }
     m_callIds.remove(userId);
     m_pendingCandidates.remove(userId);
+    dropRecvPipelines(userId);
 }
 
 nlohmann::json VoiceEngine::localCapsJson() {
     PeerCaps caps;
-    // Renegotiation + control-channel support is unconditional in this
-    // build; codec lists stay empty until the encoder/decoder backends
-    // register themselves (P2+ of the video migration). Peers treat an
-    // empty codec intersection as "capable transport, no video yet".
     caps.videoRtp = true;
+    // Probe the codec backends compiled into this build. A platform
+    // with no encoder still advertises its decode side so it can
+    // receive video it can't send.
+    caps.h264ProfilesEncode = VideoEncoder::h264EncodeProfiles();
+    caps.h264ProfilesDecode = VideoDecoder::h264DecodeProfiles();
+    if (!caps.h264ProfilesEncode.isEmpty() || !caps.h264ProfilesDecode.isEmpty())
+        caps.videoCodecs << QStringLiteral("h264");
     return caps.toJson();
 }
 
@@ -276,13 +301,86 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
     const std::string t = doc.value("t", "");
     if (t == "caps") {
         // Mid-call capability refresh.
-        if (auto* peer = m_peers.value(userId))
+        if (auto* peer = m_peers.value(userId)) {
             peer->setRemoteCaps(PeerCaps::fromJson(doc.value("caps", nlohmann::json::object())));
+            maybeSetupVideoFor(userId);
+        }
+    } else if (t == "kf") {
+        // App-level keyframe request — the guaranteed cross-version
+        // recovery path (RTCP PLI also feeds videoKeyframeRequested).
+        const int stream = doc.value("stream", 0);
+        if (stream >= 0 && stream < kVideoStreamCount)
+            emit videoKeyframeRequested(stream);
     } else {
-        // "kf" (keyframe request) and "rr" (receiver report) are wired
-        // up by the video send pipeline / rate controller phases.
+        // "rr" (receiver report) is wired up by the rate controller.
         qCDebug(logVoice, "unhandled control '%s' from %s",
                t.c_str(), qPrintable(userId));
+    }
+}
+
+void VoiceEngine::maybeSetupVideoFor(const QString& userId) {
+    if (!m_videoSendActive) return;
+    auto* peer = m_peers.value(userId);
+    if (peer && peer->remoteSupportsVideoRtp()) peer->ensureVideoTracks();
+}
+
+void VoiceEngine::prepareVideoSend() {
+    if (!m_running) return;
+    m_videoSendActive = true;
+    for (auto it = m_peers.begin(); it != m_peers.end(); ++it) {
+        if (it.value()->remoteSupportsVideoRtp())
+            it.value()->ensureVideoTracks();
+    }
+}
+
+void VoiceEngine::broadcastEncodedVideo(VideoStreamId stream, const EncodedFrame& frame) {
+    if (!m_running) return;
+    for (auto* peer : m_peers) {
+        if (peer) peer->sendVideoFrame(stream, frame);
+    }
+}
+
+bool VoiceEngine::hasLegacyOpenPeers() const {
+    // "Needs the JPEG path": open data channel but no open screen
+    // track — covers legacy clients AND capable peers still mid-
+    // renegotiation (broadcastScreenFrame's transition-gap rule).
+    for (auto* peer : m_peers) {
+        if (peer && peer->isChannelOpen()
+            && !peer->hasVideoTrackOpen(VideoStreamId::Screen))
+            return true;
+    }
+    return false;
+}
+
+bool VoiceEngine::hasVideoCapablePeers() const {
+    for (auto* peer : m_peers) {
+        if (peer && peer->remoteSupportsVideoRtp()
+            && !peer->remoteCaps().videoCodecs.isEmpty())
+            return true;
+    }
+    return false;
+}
+
+VideoReceivePipeline* VoiceEngine::recvPipeline(const QString& userId, int streamId) {
+    const QPair<QString, int> key{userId, streamId};
+    if (auto* existing = m_recvPipelines.value(key)) return existing;
+    auto* pipeline = new VideoReceivePipeline(userId, VideoStreamId(streamId),
+                                              VideoCodecKind::H264, this);
+    m_recvPipelines[key] = pipeline;
+    connect(pipeline, &VideoReceivePipeline::frameDecoded,
+            this, &VoiceEngine::peerVideoFrameDecoded);
+    // Decode hiccup (loss/backlog) — ask THAT sender for an IDR.
+    connect(pipeline, &VideoReceivePipeline::keyframeNeeded,
+            this, [this](const QString& uid, int stream) {
+        if (auto* peer = m_peers.value(uid))
+            peer->requestPeerKeyframe(VideoStreamId(stream));
+    });
+    return pipeline;
+}
+
+void VoiceEngine::dropRecvPipelines(const QString& userId) {
+    for (int s = 0; s < kVideoStreamCount; ++s) {
+        if (auto* p = m_recvPipelines.take({userId, s})) p->deleteLater();
     }
 }
 
@@ -341,6 +439,10 @@ void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId,
     peer->setRemoteCaps(PeerCaps::fromJson(caps));
 
     peer->applyOffer(sdp);
+    // If we're mid-share, upgrade this newcomer to video right after
+    // the initial exchange (ensureVideoTracks queues the renegotiation
+    // until signaling is stable again).
+    maybeSetupVideoFor(sender);
 }
 
 void VoiceEngine::handleCallAnswer(const QString& sender, const QString& callId,
@@ -355,6 +457,7 @@ void VoiceEngine::handleCallAnswer(const QString& sender, const QString& callId,
     if (auto* peer = m_peers.value(sender)) {
         peer->setRemoteCaps(PeerCaps::fromJson(caps));
         peer->applyAnswer(sdp);
+        maybeSetupVideoFor(sender);
     } else {
         qCWarning(logVoice, "answer from unknown peer %s",
                  qPrintable(sender));
@@ -559,7 +662,13 @@ void VoiceEngine::broadcastScreenFrame(const QByteArray& jpegData) {
               int(m_peers.size()), int(jpegData.size()));
     }
     for (auto* peer : m_peers) {
-        if (peer) peer->sendScreenFrame(jpegData);
+        if (!peer) continue;
+        // Peers with an open video track get real video instead; the
+        // JPEG keeps flowing to legacy peers AND capable peers whose
+        // track is still renegotiating (long-poll signaling can take
+        // seconds), so nobody stares at a placeholder in between.
+        if (peer->hasVideoTrackOpen(VideoStreamId::Screen)) continue;
+        peer->sendScreenFrame(jpegData);
     }
 }
 

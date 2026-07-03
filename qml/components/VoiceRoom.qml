@@ -496,23 +496,32 @@ Rectangle {
                         border.width: 1
                         clip: true
 
-                        // Empty until the peer's first JPEG frame
-                        // lands — the tile itself can already exist
-                        // off the announced screen_sharing flag.
-                        readonly property string frameUrl: {
+                        // Live once frames actually arrive — the tile
+                        // itself can already exist off the announced
+                        // screen_sharing flag.
+                        readonly property bool live: {
                             room._shareTick;
                             var s = serverManager.activeServer;
-                            return s ? s.peerScreenDataUrl(modelData) : "";
+                            return s && s.videoRegistry
+                                ? s.videoRegistry.hasLiveVideo(modelData, 0)
+                                : false;
                         }
 
-                        Image {
+                        // Fed by the per-peer sink in the registry —
+                        // decoded RTP video and legacy JPEG frames
+                        // both land there. (The old data-URL Image
+                        // reloaded asynchronously per frame and
+                        // blanked in between — the flicker bug.)
+                        VideoOutput {
                             anchors.fill: parent
                             anchors.margins: 1
-                            fillMode: Image.PreserveAspectFit
-                            smooth: true
-                            source: remoteShareTile.frameUrl
-                            asynchronous: false
-                            cache: false
+                            fillMode: VideoOutput.PreserveAspectFit
+                            Component.onCompleted: {
+                                var s = serverManager.activeServer;
+                                if (s && s.videoRegistry && videoSink)
+                                    s.videoRegistry.attachOutput(
+                                        remoteShareTile.modelData, 0, videoSink);
+                            }
                         }
 
                         // Announced-but-not-yet-streaming placeholder:
@@ -522,7 +531,7 @@ Rectangle {
                         Column {
                             anchors.centerIn: parent
                             spacing: Theme.sp.s3
-                            visible: remoteShareTile.frameUrl === ""
+                            visible: !remoteShareTile.live
 
                             Rectangle {
                                 anchors.horizontalCenter: parent.horizontalCenter

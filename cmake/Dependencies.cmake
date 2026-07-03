@@ -57,6 +57,34 @@ if(BSFCHAT_ENABLE_VOICE)
         endif()
     endforeach()
 
+    # openh264 — BSD H.264 software encoder/decoder. The Linux default
+    # codec and the software fallback on macOS. NOT used on Windows
+    # (Media Foundation ships a guaranteed software H.264 MFT) or on
+    # mobile. Vendored prebuilt (make-based upstream build, so no
+    # FetchContent) — produce it with scripts/build-openh264.sh, which
+    # drops a static lib + headers into deps/openh264-<platform>/.
+    if(NOT WIN32 AND NOT ANDROID AND NOT IOS)
+        if(APPLE)
+            if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
+                set(_oh264_dir ${CMAKE_CURRENT_SOURCE_DIR}/deps/openh264-macos-arm64)
+            else()
+                set(_oh264_dir ${CMAKE_CURRENT_SOURCE_DIR}/deps/openh264-macos-x64)
+            endif()
+        else()
+            set(_oh264_dir ${CMAKE_CURRENT_SOURCE_DIR}/deps/openh264-linux-x64)
+        endif()
+        if(NOT EXISTS ${_oh264_dir}/lib/libopenh264.a)
+            message(FATAL_ERROR
+                "Vendored openh264 not found at ${_oh264_dir}. "
+                "Run scripts/build-openh264.sh first.")
+        endif()
+        add_library(openh264::openh264 STATIC IMPORTED)
+        set_target_properties(openh264::openh264 PROPERTIES
+            IMPORTED_LOCATION ${_oh264_dir}/lib/libopenh264.a
+            INTERFACE_INCLUDE_DIRECTORIES ${_oh264_dir}/include)
+        set(BSFCHAT_HAVE_OPENH264 ON)
+    endif()
+
     FetchContent_Declare(
         opus
         GIT_REPOSITORY https://github.com/xiph/opus.git

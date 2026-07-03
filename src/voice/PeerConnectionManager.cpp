@@ -1,6 +1,7 @@
 #include "voice/PeerConnectionManager.h"
 #include <QDebug>
 #include <QLoggingCategory>
+#include <QRandomGenerator>
 
 // Mirror VoiceEngine's category. Each TU owns its own QLoggingCategory
 // instance — Qt coalesces them by name at runtime, so enabling
@@ -38,6 +39,21 @@ const char* gatherStr(rtc::PeerConnection::GatheringState s) {
     case rtc::PeerConnection::GatheringState::Complete: return "Complete";
     }
     return "?";
+}
+
+// Fixed per-stream track identity. Both endpoints run this code, so
+// mids/PTs agree by construction; SSRCs are randomized per endpoint
+// (RTP requires sender-unique SSRCs within a session).
+struct VideoStreamSpec { const char* mid; uint8_t payloadType; const char* cname; };
+constexpr VideoStreamSpec kVideoSpecs[kVideoStreamCount] = {
+    {"vscreen", 96, "bsf-screen"},
+    {"vcamera", 97, "bsf-camera"},
+};
+
+int streamIndexForMid(const std::string& mid) {
+    for (int i = 0; i < kVideoStreamCount; ++i)
+        if (mid == kVideoSpecs[i].mid) return i;
+    return -1;
 }
 } // namespace
 
@@ -140,6 +156,21 @@ void PeerConnectionManager::setupCallbacks() {
             qCInfo(logVoicePc, " [%s] Incoming data channel",
                   qPrintable(m_peerId));
             setupDataChannel(dc);
+        }, Qt::QueuedConnection);
+    });
+
+    // Remote added video m-lines via renegotiation (we're the
+    // answerer side of the video upgrade) — adopt the tracks; the
+    // m-lines are SendRecv so this same track carries our outgoing
+    // video without another renegotiation.
+    m_pc->onTrack([this](std::shared_ptr<rtc::Track> track) {
+        QMetaObject::invokeMethod(this, [this, track]() {
+            const int idx = streamIndexForMid(track->mid());
+            qCInfo(logVoicePc, " [%s] Incoming track mid=%s",
+                  qPrintable(m_peerId), track->mid().c_str());
+            if (idx < 0) return;   // unknown m-line — future stream kind
+            if (m_video[idx].track) return;   // already have it
+            attachVideoTrack(VideoStreamId(idx), track);
         }, Qt::QueuedConnection);
     });
 }
@@ -321,6 +352,116 @@ void PeerConnectionManager::sendControl(const QByteArray& json) {
     auto* raw = reinterpret_cast<const std::byte*>(json.constData());
     data.insert(data.end(), raw, raw + json.size());
     m_dc->send(data);
+}
+
+void PeerConnectionManager::ensureVideoTracks() {
+    if (!m_pc || m_video[0].track) return;
+    if (!remoteSupportsVideoRtp()) return;
+    qCInfo(logVoicePc, " [%s] Adding video tracks + renegotiating",
+          qPrintable(m_peerId));
+    for (int i = 0; i < kVideoStreamCount; ++i) {
+        rtc::Description::Video media(kVideoSpecs[i].mid,
+                                      rtc::Description::Direction::SendRecv);
+        media.addH264Codec(kVideoSpecs[i].payloadType);
+        auto track = m_pc->addTrack(std::move(media));
+        attachVideoTrack(VideoStreamId(i), track);
+    }
+    triggerRenegotiation();
+}
+
+void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
+                                             std::shared_ptr<rtc::Track> track) {
+    const int idx = int(stream);
+    const auto& spec = kVideoSpecs[idx];
+    auto& ctx = m_video[idx];
+
+    ctx.track = track;
+    ctx.startTimeUs = -1;
+    ctx.rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
+        QRandomGenerator::global()->generate(), spec.cname,
+        spec.payloadType, rtc::H264RtpPacketizer::defaultClockRate);
+
+    // Chain: outgoing traverses head→tail (packetize, then SR/NACK
+    // bookkeeping); incoming traverses tail→head (RTCP session strips
+    // control packets, depacketizer reassembles AUs for onFrame; the
+    // send-side handlers pass incoming data through untouched).
+    auto packetizer = std::make_shared<rtc::H264RtpPacketizer>(
+        rtc::NalUnit::Separator::LongStartSequence, ctx.rtpConfig);
+    ctx.srReporter = std::make_shared<rtc::RtcpSrReporter>(ctx.rtpConfig);
+    packetizer->addToChain(ctx.srReporter);
+    packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
+    packetizer->addToChain(std::make_shared<rtc::PliHandler>([this, idx]() {
+        QMetaObject::invokeMethod(this, [this, idx]() {
+            emit keyframeRequestedByPeer(idx);
+        }, Qt::QueuedConnection);
+    }));
+    packetizer->addToChain(std::make_shared<rtc::H264RtpDepacketizer>(
+        rtc::NalUnit::Separator::LongStartSequence));
+    packetizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
+    track->setMediaHandler(packetizer);
+
+    track->onFrame([this, idx](rtc::binary data, rtc::FrameInfo) {
+        QByteArray au(reinterpret_cast<const char*>(data.data()),
+                      int(data.size()));
+        QMetaObject::invokeMethod(this, [this, idx, au]() {
+            emit videoFrameReceived(idx, au);
+        }, Qt::QueuedConnection);
+    });
+    track->onOpen([this, idx]() {
+        QMetaObject::invokeMethod(this, [this, idx]() {
+            qCInfo(logVoicePc, " [%s] Video track %s open",
+                  qPrintable(m_peerId), kVideoSpecs[idx].mid);
+            m_video[idx].open = true;
+            emit videoTrackOpen(idx);
+        }, Qt::QueuedConnection);
+    });
+    track->onClosed([this, idx]() {
+        QMetaObject::invokeMethod(this, [this, idx]() {
+            m_video[idx].open = false;
+        }, Qt::QueuedConnection);
+    });
+
+    // Sender reports let receivers map RTP timestamps to wall clock.
+    if (!m_srTimer) {
+        m_srTimer = new QTimer(this);
+        m_srTimer->setInterval(1000);
+        connect(m_srTimer, &QTimer::timeout, this, [this]() {
+            for (auto& v : m_video)
+                if (v.srReporter && v.track && v.open)
+                    v.srReporter->setNeedsToReport();
+        });
+        m_srTimer->start();
+    }
+}
+
+bool PeerConnectionManager::hasVideoTrackOpen(VideoStreamId stream) const {
+    const auto& ctx = m_video[int(stream)];
+    return ctx.open && ctx.track && ctx.track->isOpen();
+}
+
+void PeerConnectionManager::sendVideoFrame(VideoStreamId stream,
+                                           const EncodedFrame& frame) {
+    auto& ctx = m_video[int(stream)];
+    if (!ctx.open || !ctx.track || !ctx.track->isOpen()) return;
+    if (ctx.startTimeUs < 0) ctx.startTimeUs = frame.captureTimeUs;
+    const double elapsed = double(frame.captureTimeUs - ctx.startTimeUs) / 1e6;
+    ctx.rtpConfig->timestamp = ctx.rtpConfig->startTimestamp
+        + ctx.rtpConfig->secondsToTimestamp(elapsed);
+    try {
+        ctx.track->send(
+            reinterpret_cast<const std::byte*>(frame.data.constData()),
+            size_t(frame.data.size()));
+    } catch (const std::exception& e) {
+        // Transient (track closing mid-send) — the open flag will
+        // catch up via onClosed; don't spam.
+        qCDebug(logVoicePc, " [%s] video send failed: %s",
+               qPrintable(m_peerId), e.what());
+    }
+}
+
+void PeerConnectionManager::requestPeerKeyframe(VideoStreamId stream) {
+    sendControl(QByteArrayLiteral("{\"t\":\"kf\",\"stream\":")
+                + QByteArray::number(int(stream)) + "}");
 }
 
 void PeerConnectionManager::addRemoteCandidate(const std::string& candidate, const std::string& mid) {

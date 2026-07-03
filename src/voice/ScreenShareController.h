@@ -20,6 +20,7 @@ class MacScreenCapturer;
 class VoiceEngine;
 class ServerManager;
 class Settings;
+class VideoSendPipeline;
 
 // Controller around Qt6's QScreenCapture/QWindowCapture (macOS: a
 // ScreenCaptureKit-based capturer, see MacScreenCapturer). Exposes
@@ -132,6 +133,13 @@ private:
     QTimer* m_throttle = nullptr;
     ServerManager* m_servers = nullptr;
     Settings* m_settings = nullptr;
+    // H.264-over-RTP encode worker (screen stream). Capture frames go
+    // to it for RTP-capable peers; the JPEG branch below survives for
+    // legacy peers and the renegotiation transition gap.
+    VideoSendPipeline* m_pipeline = nullptr;
+    // Engine currently wired for keyframe requests — engines are
+    // per-voice-session, so the subscription re-targets on change.
+    QPointer<QObject> m_wiredEngine;
     // Per-connection voice-room subscriptions (one per server, not
     // just the active one — voice can be live on a backgrounded
     // server).

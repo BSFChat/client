@@ -1,5 +1,6 @@
 #include "voice/ScreenShareController.h"
 #include "voice/VoiceEngine.h"
+#include "voice/video/VideoSendPipeline.h"
 #include "net/ServerManager.h"
 #include "net/ServerConnection.h"
 
@@ -8,6 +9,7 @@
 #endif
 
 #include "core/Settings.h"
+#include <QDateTime>
 #include <QGuiApplication>
 #include <QScreen>
 #include <QBuffer>
@@ -42,6 +44,10 @@ ScreenShareController::presetFor(int level)
 static int g_frameIntervalMs = 200;
 static int g_jpegQuality = 60;
 static int g_maxWidth = 1280;
+// Resolved encoder config for the RTP path — same resolution/fps
+// source as the JPEG globals; bitrates are fixed until the quality
+// settings phase adds user/server knobs.
+static EncoderConfig g_encoderConfig;
 
 ScreenShareController::ScreenShareController(QObject* parent)
     : QObject(parent)
@@ -139,6 +145,19 @@ ScreenShareController::ScreenShareController(QObject* parent)
     m_throttle->setInterval(g_frameIntervalMs);
     connect(m_throttle, &QTimer::timeout, this,
             &ScreenShareController::pushFrameToPeers);
+
+    // Encode worker for the RTP video path. Encoded access units come
+    // back on a queued signal; the voice engine is re-resolved per
+    // frame (engines are per-session and churn with join/leave).
+    m_pipeline = new VideoSendPipeline(VideoStreamId::Screen, this);
+    connect(m_pipeline, &VideoSendPipeline::encodedFrameReady, this,
+        [this](int, const EncodedFrame& frame) {
+            if (!m_servers) return;
+            if (auto* vs = m_servers->voiceServer()) {
+                if (auto* voice = vs->voiceEngine())
+                    voice->broadcastEncodedVideo(VideoStreamId::Screen, frame);
+            }
+        });
 }
 
 // Forward decl — definition is below applyEffectiveQuality, which
@@ -350,6 +369,20 @@ static void applyEffectiveQuality(Settings* settings, ServerManager* servers)
     g_frameIntervalMs = 1000 / fps;
     g_jpegQuality = jpegQ;
     g_maxWidth = maxW;
+
+    // RTP encoder config shares the resolved fps/resolution envelope.
+    // width/height express the max long edge — the pipeline follows
+    // the source's actual (scaled) dimensions per frame. Bitrates are
+    // placeholder constants until the quality-settings phase.
+    g_encoderConfig.codec = VideoCodecKind::H264;
+    g_encoderConfig.width = maxW;
+    g_encoderConfig.height = maxW;
+    g_encoderConfig.fps = fps;
+    g_encoderConfig.targetBitrateKbps = 4000;
+    g_encoderConfig.maxBitrateKbps = 10000;
+    g_encoderConfig.keyframeIntervalSec = 3;
+    g_encoderConfig.screenContent = true;
+
     qInfo("[screenshare] effective fps=%d maxW=%d Q=%d "
           "(user fps=%d maxW=%d Q=%d, server caps fps=%d maxW=%d Q=%d)",
           fps, maxW, jpegQ,
@@ -497,28 +530,58 @@ void ScreenShareController::pushFrameToPeers()
     if (!voice) return;
     if (!m_pendingFrame.isValid()) return;
 
-    QImage img = m_pendingFrame.toImage();
-    if (img.isNull()) {
+    // Engines are per-voice-session; (re)wire this one's keyframe
+    // demands (RTCP PLI, app-level "kf", late-joiner track opens) to
+    // the encoder the first time we push a frame at it.
+    if (m_wiredEngine != voice) {
+        if (m_wiredEngine) disconnect(m_wiredEngine, nullptr, m_pipeline, nullptr);
+        connect(voice, &VoiceEngine::videoKeyframeRequested, m_pipeline,
+            [this](int streamId) {
+                if (streamId == int(VideoStreamId::Screen))
+                    m_pipeline->forceKeyframe();
+            });
+        m_wiredEngine = voice;
+    }
+
+    // RTP path: hand the raw frame to the encode worker. Capable
+    // peers get real H.264; adding tracks (with renegotiation) is
+    // kicked off lazily here so a share started before any capable
+    // peer joined still upgrades the moment one appears.
+    if (voice->hasVideoCapablePeers()) {
+        voice->prepareVideoSend();
+        m_pipeline->configure(g_encoderConfig);
+        m_pipeline->submitFrame(m_pendingFrame,
+                                QDateTime::currentMSecsSinceEpoch() * 1000);
+    }
+
+    // Legacy JPEG path — only when someone still needs it (no open
+    // video track): old clients, Android, or a capable peer whose
+    // renegotiation hasn't finished yet.
+    if (voice->hasLegacyOpenPeers()) {
+        QImage img = m_pendingFrame.toImage();
+        if (img.isNull()) {
+            if (s_tickCount % 25 == 1)
+                qWarning("[screenshare] toImage() returned null, frame format=%d",
+                         int(m_pendingFrame.pixelFormat()));
+            return;
+        }
+
+        if (img.width() > g_maxWidth)
+            img = img.scaledToWidth(g_maxWidth, Qt::SmoothTransformation);
+
+        QByteArray jpeg;
+        {
+            QBuffer buf(&jpeg);
+            buf.open(QIODevice::WriteOnly);
+            if (!img.save(&buf, "JPEG", g_jpegQuality)) return;
+        }
+
+        voice->broadcastScreenFrame(jpeg);
         if (s_tickCount % 25 == 1)
-            qWarning("[screenshare] toImage() returned null, frame format=%d",
-                     int(m_pendingFrame.pixelFormat()));
-        return;
+            qInfo("[screenshare] broadcast %d-byte JPEG (tick #%d)",
+                  int(jpeg.size()), s_tickCount);
     }
 
-    if (img.width() > g_maxWidth)
-        img = img.scaledToWidth(g_maxWidth, Qt::SmoothTransformation);
-
-    QByteArray jpeg;
-    {
-        QBuffer buf(&jpeg);
-        buf.open(QIODevice::WriteOnly);
-        if (!img.save(&buf, "JPEG", g_jpegQuality)) return;
-    }
-
-    voice->broadcastScreenFrame(jpeg);
     setTransmitting(canTransmit);
-    if (s_tickCount % 25 == 1)
-        qInfo("[screenshare] broadcast %d-byte JPEG (tick #%d)",
-              int(jpeg.size()), s_tickCount);
     m_pendingFrame = {};
 }

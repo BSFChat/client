@@ -1,11 +1,14 @@
 #pragma once
 
+#include "voice/video/VideoCodec.h"
+
 #include <QObject>
 #include <QMap>
 #include <QTimer>
 #include <QString>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QVideoFrame>
 
 #include <rtc/rtc.hpp>
 #include <nlohmann/json.hpp>
@@ -15,6 +18,7 @@
 class MatrixClient;
 class AudioEngine;
 class PeerConnectionManager;
+class VideoReceivePipeline;
 
 class VoiceEngine : public QObject {
     Q_OBJECT
@@ -68,11 +72,25 @@ public:
     // indicators per member.
     QMap<QString, QString> peerStates() const;
 
-    // Fan out a JPEG-encoded screen frame to every connected peer.
-    // Called from ScreenShareController at ~5 fps while sharing.
+    // Fan out a JPEG-encoded screen frame to every connected LEGACY
+    // peer (no video_rtp capability). RTP-capable peers get real video
+    // via broadcastEncodedVideo instead — sending them JPEG too would
+    // double the bandwidth for nothing.
     void broadcastScreenFrame(const QByteArray& jpegData);
     // Same fan-out as screen share but uses the 0x03 (camera) tag.
     void broadcastCameraFrame(const QByteArray& jpegData);
+
+    // ---- RTP video ----
+    // Local user started/stopped producing video. Adds tracks (with
+    // renegotiation) toward every capable peer; tracks persist after
+    // stop so a share restart costs no renegotiation.
+    void prepareVideoSend();
+    // Fan an encoded access unit out to every peer with an open track.
+    void broadcastEncodedVideo(VideoStreamId stream, const EncodedFrame& frame);
+    // True if any connected peer still needs the legacy JPEG path.
+    bool hasLegacyOpenPeers() const;
+    // True if any peer advertises video_rtp (drives encoder startup).
+    bool hasVideoCapablePeers() const;
 
 signals:
     void peerConnected(const QString& userId);
@@ -86,6 +104,14 @@ signals:
     // per-peer preview surface in VoiceRoom.
     void peerScreenFrameReceived(const QString& userId, const QByteArray& jpegData);
     void peerCameraFrameReceived(const QString& userId, const QByteArray& jpegData);
+    // Decoded RTP video frame from a remote peer — ServerConnection
+    // routes these into the VideoStreamRegistry.
+    void peerVideoFrameDecoded(const QString& userId, int streamId,
+                               const QVideoFrame& frame);
+    // Some peer needs a keyframe on our outgoing `streamId` (RTCP PLI,
+    // app-level "kf" request, or a track that just opened) — the send
+    // pipeline reacts by forcing an IDR.
+    void videoKeyframeRequested(int streamId);
 
 private:
     void addPeer(const QString& userId, bool isOfferer);
@@ -104,12 +130,18 @@ private:
     rtc::Configuration buildRtcConfig() const;
     QString generateCallId() const;
     // This client's media capabilities, advertised in every
-    // invite/answer we send. Codec/profile lists are filled in by the
-    // video backends' capability probes (empty until the encoder
-    // factory lands — an empty intersection safely means "no video").
+    // invite/answer we send. Codec/profile lists come from the video
+    // backends' capability probes (an empty intersection between two
+    // peers safely means "no video").
     static nlohmann::json localCapsJson();
     // Dispatch a 0x04 control message ({"t": ...}) from `userId`.
     void onControlMessage(const QString& userId, const QByteArray& json);
+    // Add video tracks toward `userId` when we're actively sending
+    // and its caps allow — called wherever caps become known.
+    void maybeSetupVideoFor(const QString& userId);
+    // Lazily create the per-peer decode pipeline for a stream.
+    VideoReceivePipeline* recvPipeline(const QString& userId, int streamId);
+    void dropRecvPipelines(const QString& userId);
 
     MatrixClient* m_client;
     QString m_roomId;
@@ -128,4 +160,10 @@ private:
     QMap<QString, std::vector<std::pair<std::string, std::string>>> m_pendingCandidates;
 
     float m_micLevel = 0.0f;
+
+    // RTP video state. m_videoSendActive latches while the local user
+    // produces video (screen or camera) so peers that join mid-share
+    // get tracks as soon as their caps arrive.
+    bool m_videoSendActive = false;
+    QMap<QPair<QString, int>, VideoReceivePipeline*> m_recvPipelines;
 };
