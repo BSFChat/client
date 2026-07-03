@@ -21,6 +21,7 @@ class VoiceEngine;
 class ServerManager;
 class Settings;
 class VideoSendPipeline;
+class VideoRateController;
 
 // Controller around Qt6's QScreenCapture/QWindowCapture (macOS: a
 // ScreenCaptureKit-based capturer, see MacScreenCapturer). Exposes
@@ -137,6 +138,8 @@ private:
     // to it for RTP-capable peers; the JPEG branch below survives for
     // legacy peers and the renegotiation transition gap.
     VideoSendPipeline* m_pipeline = nullptr;
+    // Adaptive bitrate/resolution governor fed by receiver reports.
+    VideoRateController* m_rate = nullptr;
     // Engine currently wired for keyframe requests — engines are
     // per-voice-session, so the subscription re-targets on change.
     QPointer<QObject> m_wiredEngine;

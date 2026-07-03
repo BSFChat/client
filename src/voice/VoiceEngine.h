@@ -118,6 +118,10 @@ signals:
     // app-level "kf" request, or a track that just opened) — the send
     // pipeline reacts by forcing an IDR.
     void videoKeyframeRequested(int streamId);
+    // Delivered/sent byte ratio for our outgoing `streamId` toward
+    // `userId`, derived from its latest receiver report. Feeds the
+    // rate controller ("worst recent peer governs").
+    void videoDeliveryRatio(const QString& userId, int streamId, double ratio);
 
 private:
     void addPeer(const QString& userId, bool isOfferer);
@@ -172,4 +176,13 @@ private:
     // get tracks as soon as their caps arrive.
     bool m_videoSendActive = false;
     QMap<QPair<QString, int>, VideoReceivePipeline*> m_recvPipelines;
+
+    // Receiver reports: every 500 ms each receive pipeline's cumulative
+    // counters go to its sender ({"t":"rr"}); on the send side, the
+    // last-seen (rx, tx) snapshots per peer×stream turn the next report
+    // into a windowed delivery ratio.
+    QTimer m_rrTimer;
+    struct RrSnapshot { quint64 rxBytes = 0; quint64 txBytes = 0; };
+    QMap<QPair<QString, int>, RrSnapshot> m_rrSnapshots;
+    void sendReceiverReports();
 };

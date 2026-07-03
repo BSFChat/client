@@ -395,6 +395,11 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
             emit keyframeRequestedByPeer(idx);
         }, Qt::QueuedConnection);
     }));
+    // Pace outgoing RTP so a large IDR doesn't burst-blast the path in
+    // one UDP salvo (bursts are what routers drop first). Budget sits
+    // far above any configured bitrate — it only shaves peaks.
+    packetizer->addToChain(std::make_shared<rtc::PacingHandler>(
+        20'000'000.0, std::chrono::milliseconds(5)));
     packetizer->addToChain(std::make_shared<rtc::H264RtpDepacketizer>(
         rtc::NalUnit::Separator::LongStartSequence));
     packetizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
@@ -451,6 +456,8 @@ void PeerConnectionManager::sendVideoFrame(VideoStreamId stream,
         ctx.track->send(
             reinterpret_cast<const std::byte*>(frame.data.constData()),
             size_t(frame.data.size()));
+        m_txFrames[int(stream)] += 1;
+        m_txBytes[int(stream)] += quint64(frame.data.size());
     } catch (const std::exception& e) {
         // Transient (track closing mid-send) — the open flag will
         // catch up via onClosed; don't spam.

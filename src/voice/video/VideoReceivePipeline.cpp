@@ -49,6 +49,8 @@ VideoReceivePipeline::~VideoReceivePipeline() {
 }
 
 void VideoReceivePipeline::submitAccessUnit(const QByteArray& au) {
+    m_rxFrames.fetch_add(1);
+    m_rxBytes.fetch_add(quint64(au.size()));
     bool overflowed = false;
     {
         QMutexLocker lock(&m_mutex);

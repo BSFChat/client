@@ -21,6 +21,9 @@ VoiceEngine::VoiceEngine(MatrixClient* client, QObject* parent)
     m_candidateBatchTimer.setInterval(500);
     m_candidateBatchTimer.setSingleShot(false);
     connect(&m_candidateBatchTimer, &QTimer::timeout, this, &VoiceEngine::flushCandidateBatch);
+
+    m_rrTimer.setInterval(500);
+    connect(&m_rrTimer, &QTimer::timeout, this, &VoiceEngine::sendReceiverReports);
 }
 
 VoiceEngine::~VoiceEngine() {
@@ -66,6 +69,7 @@ void VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
     }
 
     m_candidateBatchTimer.start();
+    m_rrTimer.start();
 
     // Initiate connections to existing members
     for (const auto& memberVal : members) {
@@ -109,6 +113,8 @@ void VoiceEngine::stop() {
     qDeleteAll(m_recvPipelines);
     m_recvPipelines.clear();
     m_videoSendActive = false;
+    m_rrTimer.stop();
+    m_rrSnapshots.clear();
 
     // Stop audio
     if (m_audioEngine) {
@@ -274,6 +280,8 @@ void VoiceEngine::removePeer(const QString& userId) {
     m_callIds.remove(userId);
     m_pendingCandidates.remove(userId);
     dropRecvPipelines(userId);
+    for (int s = 0; s < kVideoStreamCount; ++s)
+        m_rrSnapshots.remove({userId, s});
 }
 
 nlohmann::json VoiceEngine::localCapsJson() {
@@ -311,10 +319,42 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
         const int stream = doc.value("stream", 0);
         if (stream >= 0 && stream < kVideoStreamCount)
             emit videoKeyframeRequested(stream);
+    } else if (t == "rr") {
+        // Receiver report for OUR outgoing stream toward `userId`:
+        // cumulative received bytes. Windowed against our cumulative
+        // sent bytes since the previous report → delivery ratio.
+        const int stream = doc.value("stream", 0);
+        if (stream < 0 || stream >= kVideoStreamCount) return;
+        auto* peer = m_peers.value(userId);
+        if (!peer) return;
+        const quint64 rxBytes = doc.value("b", quint64(0));
+        const quint64 txBytes = peer->videoTxBytes(VideoStreamId(stream));
+        auto& snap = m_rrSnapshots[{userId, stream}];
+        const quint64 dRx = rxBytes - qMin(rxBytes, snap.rxBytes);
+        const quint64 dTx = txBytes - qMin(txBytes, snap.txBytes);
+        snap.rxBytes = rxBytes;
+        snap.txBytes = txBytes;
+        if (dTx == 0) return;   // idle window — nothing to grade
+        const double ratio = qMin(1.0, double(dRx) / double(dTx));
+        emit videoDeliveryRatio(userId, stream, ratio);
     } else {
-        // "rr" (receiver report) is wired up by the rate controller.
         qCDebug(logVoice, "unhandled control '%s' from %s",
                t.c_str(), qPrintable(userId));
+    }
+}
+
+void VoiceEngine::sendReceiverReports() {
+    for (auto it = m_recvPipelines.constBegin();
+         it != m_recvPipelines.constEnd(); ++it) {
+        auto* peer = m_peers.value(it.key().first);
+        if (!peer) continue;
+        nlohmann::json rr = {
+            {"t", "rr"},
+            {"stream", it.key().second},
+            {"f", it.value()->rxFrames()},
+            {"b", it.value()->rxBytes()},
+        };
+        peer->sendControl(QByteArray::fromStdString(rr.dump()));
     }
 }
 

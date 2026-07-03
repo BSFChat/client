@@ -114,6 +114,7 @@ if(BSFCHAT_ENABLE_VOICE)
         src/voice/video/VideoSendPipeline.cpp
         src/voice/video/VideoReceivePipeline.cpp
         src/voice/video/VideoStreamRegistry.cpp
+        src/voice/video/VideoRateController.cpp
         # macOS-only (not iOS): ScreenCaptureKit / AVCaptureDevice
         # device paths are desktop-shape and rely on Qt Multimedia
         # features (QVideoSink pipelines) that need rework for iOS.

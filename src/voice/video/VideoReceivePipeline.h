@@ -33,6 +33,12 @@ public:
 
     void submitAccessUnit(const QByteArray& au);   // thread-safe
 
+    // Cumulative receive counters, read by VoiceEngine's 500 ms
+    // receiver-report tick and sent to the remote sender, which
+    // derives delivery loss for its rate controller.
+    quint64 rxFrames() const { return m_rxFrames.load(); }
+    quint64 rxBytes() const { return m_rxBytes.load(); }
+
 signals:
     // Both emitted from the worker thread (queued to receivers).
     void frameDecoded(const QString& userId, int streamId,
@@ -52,6 +58,8 @@ private:
     QMutex m_mutex;
     QList<QByteArray> m_queue;
     std::atomic<bool> m_drainQueued{false};
+    std::atomic<quint64> m_rxFrames{0};
+    std::atomic<quint64> m_rxBytes{0};
 
     // Worker-thread-only state.
     std::unique_ptr<VideoDecoder> m_decoder;

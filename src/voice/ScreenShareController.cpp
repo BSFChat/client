@@ -1,5 +1,6 @@
 #include "voice/ScreenShareController.h"
 #include "voice/VoiceEngine.h"
+#include "voice/video/VideoRateController.h"
 #include "voice/video/VideoSendPipeline.h"
 #include "net/ServerManager.h"
 #include "net/ServerConnection.h"
@@ -158,6 +159,13 @@ ScreenShareController::ScreenShareController(QObject* parent)
                     voice->broadcastEncodedVideo(VideoStreamId::Screen, frame);
             }
         });
+
+    // The rate controller adjusts bitrate/resolution between capture
+    // ticks; pushFrameToPeers reads its outputs into the encoder
+    // config each frame, and a back-off forces an immediate IDR.
+    m_rate = new VideoRateController(VideoStreamId::Screen, this);
+    connect(m_rate, &VideoRateController::forceKeyframe,
+            m_pipeline, &VideoSendPipeline::forceKeyframe);
 }
 
 // Forward decl — definition is below applyEffectiveQuality, which
@@ -440,6 +448,7 @@ void ScreenShareController::stop()
     m_throttle->stop();
     m_pendingFrame = {};
     setTransmitting(false);
+    if (m_rate) m_rate->setActive(false);
     // Push an empty frame so QML previews blank out instead of
     // keeping the frozen last frame.
     m_sink->setVideoFrame(QVideoFrame());
@@ -534,11 +543,26 @@ void ScreenShareController::pushFrameToPeers()
     // demands (RTCP PLI, app-level "kf", late-joiner track opens) to
     // the encoder the first time we push a frame at it.
     if (m_wiredEngine != voice) {
-        if (m_wiredEngine) disconnect(m_wiredEngine, nullptr, m_pipeline, nullptr);
+        if (m_wiredEngine) {
+            disconnect(m_wiredEngine, nullptr, m_pipeline, nullptr);
+            disconnect(m_wiredEngine, nullptr, m_rate, nullptr);
+        }
         connect(voice, &VoiceEngine::videoKeyframeRequested, m_pipeline,
             [this](int streamId) {
                 if (streamId == int(VideoStreamId::Screen))
                     m_pipeline->forceKeyframe();
+            });
+        // Feed the rate controller: per-peer delivery ratios and
+        // keyframe-request pressure for our screen stream.
+        connect(voice, &VoiceEngine::videoDeliveryRatio, m_rate,
+            [this](const QString& userId, int streamId, double ratio) {
+                if (streamId == int(VideoStreamId::Screen))
+                    m_rate->reportDeliveryRatio(userId, ratio);
+            });
+        connect(voice, &VoiceEngine::videoKeyframeRequested, m_rate,
+            [this](int streamId) {
+                if (streamId == int(VideoStreamId::Screen))
+                    m_rate->reportKeyframeRequest();
             });
         m_wiredEngine = voice;
     }
@@ -552,7 +576,17 @@ void ScreenShareController::pushFrameToPeers()
         // Emit the best profile every current receiver decodes — a
         // profile flip rebuilds the encoder session and IDRs.
         g_encoderConfig.profile = voice->negotiatedH264Profile();
-        m_pipeline->configure(g_encoderConfig);
+        // Rate-controller outputs override the static envelope: the
+        // governor moves bitrate live and steps the resolution ladder
+        // down/up with the measured delivery ratio.
+        m_rate->setEnvelope(250, g_encoderConfig.maxBitrateKbps,
+                            g_encoderConfig.fps, g_maxWidth);
+        m_rate->setActive(true);
+        EncoderConfig cfg = g_encoderConfig;
+        cfg.targetBitrateKbps = m_rate->targetKbps();
+        cfg.maxBitrateKbps = m_rate->maxKbps();
+        cfg.width = cfg.height = qMin(g_maxWidth, m_rate->longEdge());
+        m_pipeline->configure(cfg);
         m_pipeline->submitFrame(m_pendingFrame,
                                 QDateTime::currentMSecsSinceEpoch() * 1000);
     }

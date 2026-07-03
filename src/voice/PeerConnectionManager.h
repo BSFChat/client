@@ -78,6 +78,10 @@ public:
     // message — the guaranteed path; RTCP PLI in v0.24.5 can't be
     // triggered app-side on the receive direction of our chain).
     void requestPeerKeyframe(VideoStreamId stream);
+    // Cumulative encoded-video send counters toward this peer —
+    // compared against the peer's receiver reports to derive loss.
+    quint64 videoTxFrames(VideoStreamId stream) const { return m_txFrames[int(stream)]; }
+    quint64 videoTxBytes(VideoStreamId stream) const { return m_txBytes[int(stream)]; }
     void sendAudioFrame(const QByteArray& frame);
     // Send a JPEG-encoded screen-share frame to this peer over the
     // same SCTP data channel. Wire format: [tag][payload] where
@@ -174,4 +178,6 @@ private:
     };
     VideoTrackCtx m_video[kVideoStreamCount];
     QTimer* m_srTimer = nullptr;   // 1 s sender-report tick, lazily created
+    quint64 m_txFrames[kVideoStreamCount] = {};
+    quint64 m_txBytes[kVideoStreamCount] = {};
 };
