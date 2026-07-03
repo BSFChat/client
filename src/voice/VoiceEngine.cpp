@@ -361,6 +361,19 @@ bool VoiceEngine::hasVideoCapablePeers() const {
     return false;
 }
 
+H264Profile VoiceEngine::negotiatedH264Profile() const {
+    static const QString kHigh = QStringLiteral("high");
+    if (!VideoEncoder::h264EncodeProfiles().contains(kHigh))
+        return H264Profile::ConstrainedBaseline;
+    for (auto* peer : m_peers) {
+        if (!peer || !peer->remoteSupportsVideoRtp()) continue;
+        if (peer->remoteCaps().videoCodecs.isEmpty()) continue;
+        if (!peer->remoteCaps().h264ProfilesDecode.contains(kHigh))
+            return H264Profile::ConstrainedBaseline;
+    }
+    return H264Profile::High;
+}
+
 VideoReceivePipeline* VoiceEngine::recvPipeline(const QString& userId, int streamId) {
     const QPair<QString, int> key{userId, streamId};
     if (auto* existing = m_recvPipelines.value(key)) return existing;

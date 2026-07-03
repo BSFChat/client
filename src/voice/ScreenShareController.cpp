@@ -549,6 +549,9 @@ void ScreenShareController::pushFrameToPeers()
     // peer joined still upgrades the moment one appears.
     if (voice->hasVideoCapablePeers()) {
         voice->prepareVideoSend();
+        // Emit the best profile every current receiver decodes — a
+        // profile flip rebuilds the encoder session and IDRs.
+        g_encoderConfig.profile = voice->negotiatedH264Profile();
         m_pipeline->configure(g_encoderConfig);
         m_pipeline->submitFrame(m_pendingFrame,
                                 QDateTime::currentMSecsSinceEpoch() * 1000);

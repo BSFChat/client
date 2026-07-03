@@ -35,5 +35,17 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
         Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test
         yuv openh264::openh264
     )
+    # Include the VideoToolbox backend on macOS so the round-trip and
+    # cross-backend (VT ↔ openh264, i.e. mac ↔ linux) tests cover the
+    # hardware path.
+    if(APPLE AND NOT IOS)
+        target_sources(test_video_codec PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm
+        )
+        target_compile_definitions(test_video_codec PRIVATE BSFCHAT_HAVE_VIDEOTOOLBOX)
+        target_link_libraries(test_video_codec PRIVATE
+            "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo")
+    endif()
     add_test(NAME test_video_codec COMMAND test_video_codec)
 endif()

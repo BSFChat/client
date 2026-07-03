@@ -10,6 +10,12 @@
 #include "voice/video/FrameConverter.h"
 #include "voice/video/VideoDecoder.h"
 #include "voice/video/VideoEncoder.h"
+#ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
+#include "voice/video/MacVTEncoder.h"
+#include "voice/video/MacVTDecoder.h"
+#include "voice/video/OpenH264Encoder.h"
+#include "voice/video/OpenH264Decoder.h"
+#endif
 
 namespace {
 
@@ -46,6 +52,11 @@ private slots:
     void frameConverterScalesToLongEdge();
     void h264RoundTrip();
     void h264DecoderRecoversAtKeyframe();
+#ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
+    // Cross-backend interop: the real mac ↔ linux stream matrix.
+    void vtEncodesOpenh264Decodes();
+    void openh264EncodesVtDecodes();
+#endif
 };
 
 void TestVideoCodec::frameConverterProducesI420() {
@@ -127,8 +138,10 @@ void TestVideoCodec::h264DecoderRecoversAtKeyframe() {
     QVERIFY(decoder->init(VideoCodecKind::H264));
 
     // Encode a GOP, feed the decoder ONLY frames 5.. (missing the
-    // IDR + early references) — it must not emit garbage as Ok
-    // forever; after reset + a fresh keyframe it must recover.
+    // IDR + early references) — it must never present garbage as a
+    // displayable frame. Backends differ in HOW they refuse (openh264
+    // errors with concealment disabled; VideoToolbox reports NeedMore
+    // while it lacks parameter sets) — both are acceptable, Ok is not.
     QList<EncodedFrame> frames;
     for (int i = 0; i < 10; ++i) {
         PlanarFrame planar = FrameConverter::toI420(
@@ -138,13 +151,11 @@ void TestVideoCodec::h264DecoderRecoversAtKeyframe() {
     }
     QVERIFY(frames.size() >= 8);
 
-    bool sawError = false;
     for (int i = 5; i < frames.size(); ++i) {
         QVideoFrame out;
-        if (decoder->decode(frames[i].data, out) == VideoDecoder::Result::Error)
-            sawError = true;
+        QVERIFY2(decoder->decode(frames[i].data, out) != VideoDecoder::Result::Ok,
+                 "mid-GOP data without references must not decode as Ok");
     }
-    QVERIFY2(sawError, "decoding mid-GOP without references should error");
 
     // Recovery: reset, then feed a fresh keyframe.
     decoder->reset();
@@ -156,6 +167,58 @@ void TestVideoCodec::h264DecoderRecoversAtKeyframe() {
     QVideoFrame out;
     QCOMPARE(int(decoder->decode(idr.data, out)), int(VideoDecoder::Result::Ok));
 }
+
+#ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
+namespace {
+
+// Shared harness: encode 20 frames with `enc`, decode with `dec`,
+// require ≥60% displayable output and matching dimensions.
+void crossDecode(VideoEncoder& enc, VideoDecoder& dec, H264Profile profile) {
+    EncoderConfig cfg;
+    cfg.width = 640;
+    cfg.height = 360;
+    cfg.fps = 30;
+    cfg.targetBitrateKbps = 2000;
+    cfg.maxBitrateKbps = 4000;
+    cfg.profile = profile;
+    QVERIFY(enc.init(cfg));
+    QVERIFY(dec.init(VideoCodecKind::H264));
+
+    int decoded = 0, encoded = 0;
+    for (int i = 0; i < 20; ++i) {
+        PlanarFrame planar = FrameConverter::toI420(
+            makeTestFrame(640, 360, i), 0, i * 33000);
+        EncodedFrame out;
+        if (!enc.encode(planar, i == 0, out)) continue;
+        ++encoded;
+        QVideoFrame frame;
+        if (dec.decode(out.data, frame) == VideoDecoder::Result::Ok) {
+            QCOMPARE(frame.width(), 640);
+            QCOMPARE(frame.height(), 360);
+            ++decoded;
+        }
+    }
+    QVERIFY2(encoded >= 15, qPrintable(QStringLiteral("encoded %1").arg(encoded)));
+    QVERIFY2(decoded >= encoded * 3 / 5,
+             qPrintable(QStringLiteral("decoded %1 of %2").arg(decoded).arg(encoded)));
+}
+
+} // namespace
+
+void TestVideoCodec::vtEncodesOpenh264Decodes() {
+    MacVTEncoder enc;
+    OpenH264Decoder dec;
+    // High profile: exactly what a mac sender emits toward a Linux
+    // receiver after the caps intersection.
+    crossDecode(enc, dec, H264Profile::High);
+}
+
+void TestVideoCodec::openh264EncodesVtDecodes() {
+    OpenH264Encoder enc;
+    MacVTDecoder dec;
+    crossDecode(enc, dec, H264Profile::ConstrainedBaseline);
+}
+#endif
 
 QTEST_GUILESS_MAIN(TestVideoCodec)
 #include "test_video_codec.moc"

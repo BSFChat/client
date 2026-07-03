@@ -130,6 +130,26 @@ if(BSFCHAT_ENABLE_VOICE)
         target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_OPENH264)
         target_link_libraries(bsfchat-app PRIVATE openh264::openh264)
     endif()
+    # Hardware codec backends: VideoToolbox on desktop macOS, Media
+    # Foundation on Windows. Both preferred by the factory, with
+    # openh264 / the MS software MFT as the automatic fallbacks.
+    if(APPLE AND NOT IOS)
+        target_sources(bsfchat-app PRIVATE
+            src/voice/video/MacVTEncoder.mm
+            src/voice/video/MacVTDecoder.mm
+        )
+        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_VIDEOTOOLBOX)
+        target_link_libraries(bsfchat-app PRIVATE
+            "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo")
+    elseif(WIN32)
+        target_sources(bsfchat-app PRIVATE
+            src/voice/video/MFEncoder.cpp
+            src/voice/video/MFDecoder.cpp
+        )
+        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_MEDIAFOUNDATION)
+        target_link_libraries(bsfchat-app PRIVATE
+            mfplat mfuuid mf mfreadwrite wmcodecdspuuid ole32 oleaut32)
+    endif()
 endif()
 
 # Android: point Qt at our custom package source dir which carries a

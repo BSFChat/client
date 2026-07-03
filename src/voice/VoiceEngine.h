@@ -91,6 +91,12 @@ public:
     bool hasLegacyOpenPeers() const;
     // True if any peer advertises video_rtp (drives encoder startup).
     bool hasVideoCapablePeers() const;
+    // Best H.264 profile every current video peer can decode AND we
+    // can encode: High when unanimous (platform encoders), else
+    // Constrained Baseline. Re-evaluated per share tick so a
+    // mid-call CB-only joiner downgrades the stream (the pipeline
+    // rebuilds the session and IDRs on the profile flip).
+    H264Profile negotiatedH264Profile() const;
 
 signals:
     void peerConnected(const QString& userId);
