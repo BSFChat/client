@@ -68,6 +68,13 @@ void PeerConnectionManager::setupCallbacks() {
             qCInfo(logVoicePc, " [%s] Local SDP %s ready",
                   qPrintable(m_peerId), type.c_str());
             emit localDescriptionReady(type, sdp);
+            // The emit above ran VoiceEngine's routing synchronously,
+            // so the FIRST answer went out as m.call.answer while the
+            // flag was still false; flipping it afterwards makes every
+            // subsequent description take the negotiate path. (The
+            // offerer side flips in applyAnswer instead.)
+            if (type == "answer" && !m_initialNegotiationDone)
+                m_initialNegotiationDone = true;
         }, Qt::QueuedConnection);
     });
 
@@ -184,6 +191,22 @@ void PeerConnectionManager::setupDataChannel(std::shared_ptr<rtc::DataChannel> d
             QMetaObject::invokeMethod(this, [this, payload]() {
                 emit cameraFrameReceived(payload);
             }, Qt::QueuedConnection);
+        } else if (tag == 0x04) {
+            // JSON control message (caps refresh / keyframe request /
+            // receiver report). Only new clients ever send these —
+            // gated by the caps handshake on the send side.
+            payload = QByteArray(reinterpret_cast<const char*>(data.data() + 1),
+                                 static_cast<int>(data.size() - 1));
+            QMetaObject::invokeMethod(this, [this, payload]() {
+                emit controlMessageReceived(payload);
+            }, Qt::QueuedConnection);
+        } else if (tag == 0x05) {
+            // Lossless-video frame (AV1 over the reliable channel).
+            payload = QByteArray(reinterpret_cast<const char*>(data.data() + 1),
+                                 static_cast<int>(data.size() - 1));
+            QMetaObject::invokeMethod(this, [this, payload]() {
+                emit losslessFrameReceived(payload);
+            }, Qt::QueuedConnection);
         } else {
             // Legacy untagged audio — no tag strip.
             payload = QByteArray(reinterpret_cast<const char*>(data.data()),
@@ -226,7 +249,78 @@ void PeerConnectionManager::applyAnswer(const std::string& sdp) {
     rtc::Description desc(sdp, rtc::Description::Type::Answer);
     m_pc->setRemoteDescription(desc);
     m_remoteDescriptionSet = true;
+    m_initialNegotiationDone = true;
     flushPendingCandidates();
+}
+
+void PeerConnectionManager::triggerRenegotiation() {
+    if (!m_pc) return;
+    if (m_localReofferPending
+        || m_pc->signalingState() != rtc::PeerConnection::SignalingState::Stable) {
+        // Mid-exchange — queue and re-fire from maybeRenegotiateAgain()
+        // once the connection settles.
+        m_renegotiateAgain = true;
+        return;
+    }
+    qCInfo(logVoicePc, " [%s] Triggering renegotiation", qPrintable(m_peerId));
+    m_localReofferPending = true;
+    // Unspec in stable state ⇒ a fresh offer reflecting current
+    // tracks/channels, delivered through onLocalDescription and routed
+    // to bsfchat.call.negotiate by VoiceEngine.
+    m_pc->setLocalDescription();
+}
+
+void PeerConnectionManager::applyNegotiateOffer(const std::string& sdp) {
+    qCInfo(logVoicePc, " [%s] Applying renegotiation offer", qPrintable(m_peerId));
+    rtc::Description desc(sdp, rtc::Description::Type::Offer);
+    m_pc->setRemoteDescription(desc);
+    m_pc->setLocalDescription(rtc::Description::Type::Answer);
+    maybeRenegotiateAgain();
+}
+
+void PeerConnectionManager::applyNegotiateAnswer(const std::string& sdp) {
+    if (!m_localReofferPending) {
+        qCInfo(logVoicePc, " [%s] Ignoring unexpected negotiate answer",
+              qPrintable(m_peerId));
+        return;
+    }
+    qCInfo(logVoicePc, " [%s] Applying renegotiation answer", qPrintable(m_peerId));
+    rtc::Description desc(sdp, rtc::Description::Type::Answer);
+    m_pc->setRemoteDescription(desc);
+    m_localReofferPending = false;
+    maybeRenegotiateAgain();
+}
+
+void PeerConnectionManager::rollbackLocalReoffer() {
+    if (!m_localReofferPending) return;
+    qCInfo(logVoicePc, " [%s] Rolling back local re-offer (glare, polite side)",
+          qPrintable(m_peerId));
+    m_pc->setLocalDescription(rtc::Description::Type::Rollback);
+    m_localReofferPending = false;
+    // Whatever we wanted to negotiate (added tracks) is still attached
+    // to the PC — re-offer once the winning exchange completes.
+    m_renegotiateAgain = true;
+}
+
+void PeerConnectionManager::maybeRenegotiateAgain() {
+    if (!m_renegotiateAgain) return;
+    if (m_pc->signalingState() != rtc::PeerConnection::SignalingState::Stable) return;
+    m_renegotiateAgain = false;
+    triggerRenegotiation();
+}
+
+void PeerConnectionManager::sendControl(const QByteArray& json) {
+    if (!m_dc || !m_dc->isOpen()) return;
+    // HARD compatibility gate: legacy clients misparse unknown tags as
+    // audio frames (see onMessage's fallback), so control traffic may
+    // only flow once the caps handshake proved the peer understands it.
+    if (!remoteSupportsVideoRtp()) return;
+    rtc::binary data;
+    data.reserve(json.size() + 1);
+    data.push_back(std::byte{0x04});
+    auto* raw = reinterpret_cast<const std::byte*>(json.constData());
+    data.insert(data.end(), raw, raw + json.size());
+    m_dc->send(data);
 }
 
 void PeerConnectionManager::addRemoteCandidate(const std::string& candidate, const std::string& mid) {

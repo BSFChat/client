@@ -42,11 +42,21 @@ public:
     // broadcast frames are actually reaching someone.
     bool hasOpenPeers() const;
 
-    void handleCallInvite(const QString& sender, const QString& callId, const std::string& sdp);
-    void handleCallAnswer(const QString& sender, const QString& callId, const std::string& sdp);
+    // `caps` is the raw `bsfchat_caps` object from the event content
+    // (empty object for legacy clients — parses to all-off PeerCaps).
+    void handleCallInvite(const QString& sender, const QString& callId,
+                          const std::string& sdp, const nlohmann::json& caps);
+    void handleCallAnswer(const QString& sender, const QString& callId,
+                          const std::string& sdp, const nlohmann::json& caps);
     void handleCallCandidates(const QString& sender, const QString& callId,
                                const std::vector<std::pair<std::string, std::string>>& candidates);
     void handleCallHangup(const QString& sender, const QString& callId);
+    // Mid-call renegotiation (bsfchat.call.negotiate). `type` is
+    // "offer" or "answer". Glare resolution: the lexicographically
+    // LESSER user id is impolite (its re-offer wins) — same tie-break
+    // as the invite glare rule above.
+    void handleCallNegotiate(const QString& sender, const QString& callId,
+                             const std::string& type, const std::string& sdp);
 
     void setMuted(bool muted);
     void setDeafened(bool deafened);
@@ -93,6 +103,13 @@ private:
     void sendCallEvent(const QString& eventType, const nlohmann::json& content);
     rtc::Configuration buildRtcConfig() const;
     QString generateCallId() const;
+    // This client's media capabilities, advertised in every
+    // invite/answer we send. Codec/profile lists are filled in by the
+    // video backends' capability probes (empty until the encoder
+    // factory lands — an empty intersection safely means "no video").
+    static nlohmann::json localCapsJson();
+    // Dispatch a 0x04 control message ({"t": ...}) from `userId`.
+    void onControlMessage(const QString& userId, const QByteArray& json);
 
     MatrixClient* m_client;
     QString m_roomId;

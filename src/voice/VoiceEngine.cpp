@@ -1,5 +1,6 @@
 #include "voice/VoiceEngine.h"
 #include "voice/AudioEngine.h"
+#include "voice/PeerCaps.h"
 #include "voice/PeerConnectionManager.h"
 #include "net/MatrixClient.h"
 
@@ -169,6 +170,13 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
         connect(m_audioEngine, &AudioEngine::audioFrameReady,
                 peer, &PeerConnectionManager::sendAudioFrame);
     }
+    // Control channel (caps refresh, keyframe requests, receiver
+    // reports) — new-client peers only; legacy peers never send 0x04.
+    connect(peer, &PeerConnectionManager::controlMessageReceived,
+            this, [this, userId](const QByteArray& json) {
+                onControlMessage(userId, json);
+            });
+
     // Route screen-share frames up to the UI.
     connect(peer, &PeerConnectionManager::screenFrameReceived,
             this, [this, userId](const QByteArray& jpeg) {
@@ -246,7 +254,40 @@ void VoiceEngine::removePeer(const QString& userId) {
     m_pendingCandidates.remove(userId);
 }
 
-void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId, const std::string& sdp) {
+nlohmann::json VoiceEngine::localCapsJson() {
+    PeerCaps caps;
+    // Renegotiation + control-channel support is unconditional in this
+    // build; codec lists stay empty until the encoder/decoder backends
+    // register themselves (P2+ of the video migration). Peers treat an
+    // empty codec intersection as "capable transport, no video yet".
+    caps.videoRtp = true;
+    return caps.toJson();
+}
+
+void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json) {
+    const auto doc = nlohmann::json::parse(json.constData(),
+                                           json.constData() + json.size(),
+                                           nullptr, /*allow_exceptions=*/false);
+    if (doc.is_discarded() || !doc.is_object()) {
+        qCWarning(logVoice, "malformed control message from %s (%d bytes)",
+                 qPrintable(userId), int(json.size()));
+        return;
+    }
+    const std::string t = doc.value("t", "");
+    if (t == "caps") {
+        // Mid-call capability refresh.
+        if (auto* peer = m_peers.value(userId))
+            peer->setRemoteCaps(PeerCaps::fromJson(doc.value("caps", nlohmann::json::object())));
+    } else {
+        // "kf" (keyframe request) and "rr" (receiver report) are wired
+        // up by the video send pipeline / rate controller phases.
+        qCDebug(logVoice, "unhandled control '%s' from %s",
+               t.c_str(), qPrintable(userId));
+    }
+}
+
+void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId,
+                                   const std::string& sdp, const nlohmann::json& caps) {
     if (!m_running) {
         qCInfo(logVoice, "ignore invite from %s — engine not running",
               qPrintable(sender));
@@ -297,11 +338,13 @@ void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId,
     auto* peer = new PeerConnectionManager(sender, callId, config, this);
     m_peers[sender] = peer;
     wirePeer(peer, sender);
+    peer->setRemoteCaps(PeerCaps::fromJson(caps));
 
     peer->applyOffer(sdp);
 }
 
-void VoiceEngine::handleCallAnswer(const QString& sender, const QString& callId, const std::string& sdp) {
+void VoiceEngine::handleCallAnswer(const QString& sender, const QString& callId,
+                                   const std::string& sdp, const nlohmann::json& caps) {
     qCInfo(logVoice, "recv answer from %s callId=%s sdp_bytes=%zu",
           qPrintable(sender), qPrintable(callId), sdp.size());
     if (callId != m_callIds.value(sender)) {
@@ -310,10 +353,55 @@ void VoiceEngine::handleCallAnswer(const QString& sender, const QString& callId,
         return;
     }
     if (auto* peer = m_peers.value(sender)) {
+        peer->setRemoteCaps(PeerCaps::fromJson(caps));
         peer->applyAnswer(sdp);
     } else {
         qCWarning(logVoice, "answer from unknown peer %s",
                  qPrintable(sender));
+    }
+}
+
+void VoiceEngine::handleCallNegotiate(const QString& sender, const QString& callId,
+                                      const std::string& type, const std::string& sdp) {
+    if (callId != m_callIds.value(sender)) {
+        qCInfo(logVoice, "ignore negotiate from %s — callId mismatch",
+              qPrintable(sender));
+        return;
+    }
+    auto* peer = m_peers.value(sender);
+    if (!peer) {
+        qCWarning(logVoice, "negotiate from unknown peer %s", qPrintable(sender));
+        return;
+    }
+    if (!peer->initialNegotiationDone()) {
+        // A negotiate event can't legitimately precede the initial
+        // offer/answer round-trip — likely a stale timeline replay.
+        qCInfo(logVoice, "ignore premature negotiate from %s", qPrintable(sender));
+        return;
+    }
+
+    if (type == "offer") {
+        if (peer->hasPendingLocalReoffer()) {
+            // Renegotiation glare: both sides re-offered at once. Same
+            // deterministic tie-break as the invite path — the
+            // lexicographically LESSER id is impolite and its offer
+            // wins; the polite side rolls back and answers.
+            if (sender < m_localUserId) {
+                qCInfo(logVoice, "negotiate glare with %s — remote wins, rolling back",
+                      qPrintable(sender));
+                peer->rollbackLocalReoffer();
+            } else {
+                qCInfo(logVoice, "negotiate glare with %s — we win, ignoring offer",
+                      qPrintable(sender));
+                return;
+            }
+        }
+        peer->applyNegotiateOffer(sdp);
+    } else if (type == "answer") {
+        peer->applyNegotiateAnswer(sdp);
+    } else {
+        qCWarning(logVoice, "negotiate from %s with unknown type '%s'",
+                 qPrintable(sender), type.c_str());
     }
 }
 
@@ -348,11 +436,28 @@ void VoiceEngine::setDeafened(bool deafened) {
 void VoiceEngine::onLocalDescription(const QString& peerId, const std::string& type, const std::string& sdp) {
     auto callId = m_callIds.value(peerId);
 
+    // After the initial offer/answer round-trip, descriptions are
+    // renegotiations (adding video m-lines etc.) and take the
+    // bsfchat.call.negotiate path — legacy clients never receive them
+    // because renegotiation is only ever triggered toward peers whose
+    // caps advertise video_rtp.
+    auto* peer = m_peers.value(peerId);
+    if (peer && peer->initialNegotiationDone()) {
+        nlohmann::json content = {
+            {"call_id", callId.toStdString()},
+            {"description", {{"type", type}, {"sdp", sdp}}},
+            {"version", 1}
+        };
+        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallNegotiate), content);
+        return;
+    }
+
     if (type == "offer") {
         nlohmann::json content = {
             {"call_id", callId.toStdString()},
             {"lifetime", 60000},
             {"offer", {{"type", "offer"}, {"sdp", sdp}}},
+            {"bsfchat_caps", localCapsJson()},
             {"version", 1}
         };
         sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallInvite), content);
@@ -360,6 +465,7 @@ void VoiceEngine::onLocalDescription(const QString& peerId, const std::string& t
         nlohmann::json content = {
             {"call_id", callId.toStdString()},
             {"answer", {{"type", "answer"}, {"sdp", sdp}}},
+            {"bsfchat_caps", localCapsJson()},
             {"version", 1}
         };
         sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallAnswer), content);

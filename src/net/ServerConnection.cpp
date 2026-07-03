@@ -1908,11 +1908,18 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     if (type == QString::fromUtf8(bsfchat::event_type::kCallInvite)) {
                         m_voiceEngine->handleCallInvite(sender,
                             QString::fromStdString(c.value("call_id", "")),
-                            c.value("offer", nlohmann::json::object()).value("sdp", ""));
+                            c.value("offer", nlohmann::json::object()).value("sdp", ""),
+                            c.value("bsfchat_caps", nlohmann::json::object()));
                     } else if (type == QString::fromUtf8(bsfchat::event_type::kCallAnswer)) {
                         m_voiceEngine->handleCallAnswer(sender,
                             QString::fromStdString(c.value("call_id", "")),
-                            c.value("answer", nlohmann::json::object()).value("sdp", ""));
+                            c.value("answer", nlohmann::json::object()).value("sdp", ""),
+                            c.value("bsfchat_caps", nlohmann::json::object()));
+                    } else if (type == QString::fromUtf8(bsfchat::event_type::kCallNegotiate)) {
+                        const auto desc = c.value("description", nlohmann::json::object());
+                        m_voiceEngine->handleCallNegotiate(sender,
+                            QString::fromStdString(c.value("call_id", "")),
+                            desc.value("type", ""), desc.value("sdp", ""));
                     } else if (type == QString::fromUtf8(bsfchat::event_type::kCallCandidates)) {
                         std::vector<std::pair<std::string, std::string>> cands;
                         for (const auto& ic : c.value("candidates", nlohmann::json::array())) {

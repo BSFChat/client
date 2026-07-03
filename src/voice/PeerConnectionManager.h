@@ -4,6 +4,8 @@
 #include <QString>
 #include <QByteArray>
 
+#include "voice/PeerCaps.h"
+
 #include <rtc/rtc.hpp>
 #include <memory>
 #include <vector>
@@ -24,6 +26,39 @@ public:
     void applyOffer(const std::string& sdp);
     void applyAnswer(const std::string& sdp);
     void addRemoteCandidate(const std::string& candidate, const std::string& mid);
+
+    // ---- Mid-call renegotiation (bsfchat.call.negotiate) ----
+    // The initial offer/answer pair is exchanged exactly once via
+    // m.call.invite/answer; every later SDP (adding video m-lines)
+    // flows through these. VoiceEngine routes local descriptions by
+    // initialNegotiationDone(): false → invite/answer, true → negotiate.
+    bool initialNegotiationDone() const { return m_initialNegotiationDone; }
+    // True while a locally-initiated re-offer is in flight (sent,
+    // no answer yet). VoiceEngine's glare logic reads this.
+    bool hasPendingLocalReoffer() const { return m_localReofferPending; }
+    // Kick off (or queue) a renegotiation. Safe to call in any
+    // signaling state: if we're mid-exchange the re-offer fires as
+    // soon as the connection returns to stable.
+    void triggerRenegotiation();
+    // Incoming negotiate-offer: set remote, produce answer.
+    void applyNegotiateOffer(const std::string& sdp);
+    // Incoming negotiate-answer to our re-offer.
+    void applyNegotiateAnswer(const std::string& sdp);
+    // Glare loser path (polite peer): discard our in-flight re-offer,
+    // then re-trigger once stable so local changes aren't lost.
+    void rollbackLocalReoffer();
+
+    // ---- Peer media capabilities ----
+    void setRemoteCaps(const PeerCaps& caps) { m_remoteCaps = caps; m_remoteCapsKnown = true; }
+    const PeerCaps& remoteCaps() const { return m_remoteCaps; }
+    bool remoteCapsKnown() const { return m_remoteCapsKnown; }
+    bool remoteSupportsVideoRtp() const { return m_remoteCapsKnown && m_remoteCaps.videoRtp; }
+
+    // JSON control message over the data channel, tag 0x04
+    // ({"t":"caps"|"kf"|"rr", ...}). MUST only be called once the
+    // peer's caps prove it's a new client — old clients misparse
+    // unknown tags as audio (see onMessage's legacy fallback).
+    void sendControl(const QByteArray& json);
     void sendAudioFrame(const QByteArray& frame);
     // Send a JPEG-encoded screen-share frame to this peer over the
     // same SCTP data channel. Wire format: [tag][payload] where
@@ -61,11 +96,18 @@ signals:
     void audioFrameReceived(const QByteArray& frame);
     void screenFrameReceived(const QByteArray& jpegData);
     void cameraFrameReceived(const QByteArray& jpegData);
+    // 0x04 control payload (JSON, tag stripped).
+    void controlMessageReceived(const QByteArray& json);
+    // 0x05 lossless-video payload (framing stripped by the receiver
+    // pipeline, not here). Wired up by the AV1 lossless tier.
+    void losslessFrameReceived(const QByteArray& payload);
 
 private:
     void setupCallbacks();
     void setupDataChannel(std::shared_ptr<rtc::DataChannel> dc);
     void flushPendingCandidates();
+    // Fires a queued renegotiation once the signaling state is stable.
+    void maybeRenegotiateAgain();
 
     QString m_peerId;
     QString m_callId;
@@ -78,4 +120,16 @@ private:
     int m_framesSent = 0;
     int m_framesReceived = 0;
     int m_screenFramesDropped = 0;  // bumped when bufferedAmount() exceeded
+
+    // Renegotiation state. m_initialNegotiationDone flips after the
+    // first offer/answer round-trip completes (offerer: answer
+    // applied; answerer: local answer emitted) and gates the
+    // invite/answer-vs-negotiate signaling split.
+    PeerCaps m_remoteCaps;
+    bool m_remoteCapsKnown = false;
+    bool m_initialNegotiationDone = false;
+    bool m_localReofferPending = false;
+    // A renegotiation was requested (or rolled back) while another
+    // exchange was in flight — re-fire when we return to stable.
+    bool m_renegotiateAgain = false;
 };
