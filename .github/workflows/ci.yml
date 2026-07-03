@@ -63,7 +63,24 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.8.0'
+          # 6.10.3: highest version installable on ALL three CI platforms.
+          # Clears the 2025-2026 QtSvg Criticals (CVE-2025-10728/10729),
+          # the QML SVG code-injection (CVE-2025-14576), Schannel TLS DoS
+          # (CVE-2025-6338) and the markdown/image/TLS fixes.
+          #
+          # Why NOT 6.8.x: 6.8 is LTS; the patch releases where these
+          # fixes landed (6.8.4+) are commercial-license only — the
+          # open-source aqt mirror carries just 6.8.0-6.8.3.
+          # Why NOT 6.11.1: the open-source mirror publishes NO Windows
+          # x64 desktop packages for 6.11.1 (windows_arm64 only), so the
+          # win64_msvc2022_64 job can't fetch it. 6.10.3 is the newest
+          # release present for windows/mac/linux desktop x64.
+          #
+          # RESIDUAL: CVE-2026-6210 (QtSvg marker heap overflow, High)
+          # was fixed in 6.8.8 / 6.11.1 and is NOT in the 6.10 line —
+          # revisit when 6.11.x publishes Windows x64 packages.
+          # Verified locally against Qt 6.10.2.
+          version: '6.10.3'
           modules: 'qtmultimedia'
           cache: true
 
@@ -216,6 +233,15 @@ jobs:
             # Try finding it
             find /Users/runner -name "QtQuick" -type d -path "*/qml/*" 2>/dev/null | head -3
           fi
+          # Strip build intermediates that Qt 6.11's QML modules ship
+          # inside their deployed dirs (e.g. Qt.labs.assetdownloader
+          # carries objects-*/**.cpp.o and .qt/rcc artifacts). They have
+          # no runtime purpose, but they ARE Mach-O objects, so the
+          # notary rejects the bundle with "binary is not signed / no
+          # secure timestamp" for each one. Remove them before signing.
+          find "$APP_PATH/Contents/Resources/qml" \
+            \( -name '*.o' -o -name '*.a' -o -name 'objects-*' -o -name '.qt' \) \
+            -exec rm -rf {} + 2>/dev/null || true
           # Set qt.conf to tell Qt where QML modules are
           cat > "$APP_PATH/Contents/Resources/qt.conf" << 'QTCONF'
           [Paths]

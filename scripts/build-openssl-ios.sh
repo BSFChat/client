@@ -2,16 +2,22 @@
 set -e
 
 # Build OpenSSL for iOS Simulator (arm64)
-# Downloads and cross-compiles OpenSSL 3.3.2
+# Downloads and cross-compiles OpenSSL.
+# 3.5.7 (current LTS): 3.3.2 is EOL and was affected by CVE-2025-15467
+# and CVE-2026-45447. Regenerate deps/openssl-ios-* after bumping.
 
-VERSION="3.3.2"
+VERSION="3.5.7"
 TARGET=${1:-simulator}
 PREFIX="$(pwd)/deps/openssl-ios-${TARGET}"
 
-if [ -f "$PREFIX/lib/libcrypto.a" ]; then
-    echo "OpenSSL already built at $PREFIX"
+# Skip only when the existing build matches VERSION — a version-blind
+# guard would keep shipping the stale OpenSSL after a bump.
+if [ -f "$PREFIX/lib/libcrypto.a" ] \
+   && [ "$(cat "$PREFIX/.bsfchat-openssl-version" 2>/dev/null)" = "$VERSION" ]; then
+    echo "OpenSSL $VERSION already built at $PREFIX"
     exit 0
 fi
+rm -rf "$PREFIX"
 
 echo "Building OpenSSL $VERSION for iOS ($TARGET)..."
 
@@ -32,4 +38,5 @@ fi
 make -j$(sysctl -n hw.ncpu)
 make install_sw
 
+echo "$VERSION" > "$PREFIX/.bsfchat-openssl-version"
 echo "OpenSSL built at $PREFIX"
