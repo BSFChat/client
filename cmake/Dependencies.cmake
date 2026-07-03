@@ -23,11 +23,39 @@ if(BSFCHAT_ENABLE_VOICE)
         GIT_TAG        v0.24.5
         GIT_SHALLOW    TRUE
     )
-    set(NO_MEDIA ON CACHE BOOL "" FORCE)
+    # Media transport ON: rtc::Track + RTP packetizers + DTLS-SRTP for
+    # the real-video path (H.264 over RTP). SRTP comes from the libsrtp
+    # checkout vendored inside libdatachannel (deps/libsrtp) — built
+    # statically with the OpenSSL backend the build already locates, so
+    # no new runtime libraries appear in the bundles.
+    set(NO_MEDIA OFF CACHE BOOL "" FORCE)
     set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)
     set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
     set(NO_TESTS ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(libdatachannel)
+
+    # libyuv — pixel-format conversion + scaling for the video encode/
+    # decode pipeline (QVideoFrame BGRA ↔ I420/NV12, and the identity-
+    # matrix I444 path the lossless tier needs). BSD, CMake, static.
+    # Pinned to the chromium `stable` branch head as of 2026-07.
+    FetchContent_Declare(
+        libyuv
+        GIT_REPOSITORY https://chromium.googlesource.com/libyuv/libyuv
+        GIT_TAG        eb6e7bb63738e29efd82ea3cf2a115238a89fa51
+    )
+    # Keep libyuv's optional MJPEG module off: it enables itself when a
+    # system libjpeg is *found* but never links it, breaking the shared
+    # lib / tools targets. We only use the conversion/scale kernels.
+    set(CMAKE_DISABLE_FIND_PACKAGE_JPEG TRUE)
+    FetchContent_MakeAvailable(libyuv)
+    unset(CMAKE_DISABLE_FIND_PACKAGE_JPEG)
+    # Only the static `yuv` target is linked; keep the shared lib and
+    # conversion tool out of the default build.
+    foreach(_yuv_extra yuv_shared yuvconvert i444tonv12_eg)
+        if(TARGET ${_yuv_extra})
+            set_target_properties(${_yuv_extra} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+        endif()
+    endforeach()
 
     FetchContent_Declare(
         opus

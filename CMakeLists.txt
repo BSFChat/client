@@ -369,7 +369,10 @@ target_link_libraries(bsfchat-app PRIVATE
 )
 
 if(BSFCHAT_ENABLE_VOICE)
-    target_link_libraries(bsfchat-app PRIVATE datachannel-static opus)
+    target_link_libraries(bsfchat-app PRIVATE datachannel-static opus yuv)
+    # libyuv's CMake is old-style — the `yuv` target carries no usage
+    # requirements, so its headers must be added explicitly.
+    target_include_directories(bsfchat-app PRIVATE ${libyuv_SOURCE_DIR}/include)
 endif()
 
 # CoreGraphics gives us CGRequestScreenCaptureAccess to trigger the
