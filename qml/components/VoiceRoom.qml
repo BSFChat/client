@@ -444,7 +444,17 @@ Rectangle {
                         Text {
                             id: notVisibleLabel
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "Not visible to others"
+                            // Alone in the channel = nothing wrong, just
+                            // nobody to receive frames yet. Only warn of
+                            // a transmission problem when peers exist.
+                            text: {
+                                var s = serverManager.activeServer;
+                                var members = s && s.voiceMembers
+                                    ? s.voiceMembers.length : 0;
+                                return members <= 1
+                                    ? "No one else is in the channel"
+                                    : "Not visible to others";
+                            }
                             font.family: Theme.fontSans
                             font.pixelSize: 10
                             font.weight: Theme.fontWeight.semibold
@@ -470,6 +480,7 @@ Rectangle {
                 Repeater {
                     model: room._peersSharing
                     delegate: Rectangle {
+                        id: remoteShareTile
                         required property string modelData
                         width: remoteShareColumn.width
                         height: {
@@ -485,18 +496,59 @@ Rectangle {
                         border.width: 1
                         clip: true
 
+                        // Empty until the peer's first JPEG frame
+                        // lands — the tile itself can already exist
+                        // off the announced screen_sharing flag.
+                        readonly property string frameUrl: {
+                            room._shareTick;
+                            var s = serverManager.activeServer;
+                            return s ? s.peerScreenDataUrl(modelData) : "";
+                        }
+
                         Image {
                             anchors.fill: parent
                             anchors.margins: 1
                             fillMode: Image.PreserveAspectFit
                             smooth: true
-                            source: {
-                                room._shareTick;
-                                var s = serverManager.activeServer;
-                                return s ? s.peerScreenDataUrl(modelData) : "";
-                            }
+                            source: remoteShareTile.frameUrl
                             asynchronous: false
                             cache: false
+                        }
+
+                        // Announced-but-not-yet-streaming placeholder:
+                        // avatar initial + status line, same vocabulary
+                        // as the participant tiles, so the announcement
+                        // shows up ahead of the first frame.
+                        Column {
+                            anchors.centerIn: parent
+                            spacing: Theme.sp.s3
+                            visible: remoteShareTile.frameUrl === ""
+
+                            Rectangle {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                width: Theme.avatar.xl
+                                height: Theme.avatar.xl
+                                radius: Theme.avatar.xl / 2
+                                color: Theme.senderColor(remoteShareTile.modelData)
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: (remoteShareTile.modelData
+                                          .replace(/^[^a-zA-Z0-9]+/, "")
+                                          .charAt(0) || "?").toUpperCase()
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: 28
+                                    font.weight: Theme.fontWeight.semibold
+                                    color: Theme.onAccent
+                                }
+                            }
+
+                            Text {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                text: "Starting share…"
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                color: Theme.fg2
+                            }
                         }
 
                         Rectangle {

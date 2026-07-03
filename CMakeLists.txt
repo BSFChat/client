@@ -305,6 +305,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/ToastHost.qml
         qml/components/VideoPlayerCard.qml
         qml/components/LinkPreview.qml
+        qml/components/ScreenPickerDialog.qml
         qml/theme/Theme.qml
     RESOURCES
         qml/data/EmojiData.js

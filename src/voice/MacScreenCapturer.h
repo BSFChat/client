@@ -60,11 +60,29 @@ signals:
 
 private:
     void grabWithFilter();
+    // Triggers the Screen Recording permission prompt when no valid
+    // grant exists (SCScreenshotManager itself never prompts). At most
+    // one request per app run.
+    void ensureScreenAccess();
 
     QTimer* m_timer = nullptr;
     uint32_t m_displayID = 0;
     bool m_active = false;
     int m_fps = 5;
+    // Consecutive captureImage failures. SCScreenshotManager fails
+    // per-call (e.g. "user declined TCC" when a stale grant no longer
+    // matches the binary's signature) rather than erroring the stream,
+    // so without a threshold the capturer retries silently forever.
+    // After kMaxConsecutiveFails we emit captureFailed once so the UI
+    // can explain instead of showing a black nothing.
+    static constexpr int kMaxConsecutiveFails = 5;
+    int m_consecutiveFails = 0;
+    bool m_failureNotified = false;
+    bool m_accessRequested = false;
+    // True between showPicker() and the resulting selection/cancel —
+    // outside a live capture, the only window in which a picker
+    // filter may start one.
+    bool m_pickerPending = false;
     // Currently-selected filter (opaque to the header). Nullptr ⇒
     // use legacy "primary display" path.
     SCContentFilter* m_filter = nullptr;

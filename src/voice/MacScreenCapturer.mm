@@ -79,9 +79,27 @@ MacScreenCapturer::~MacScreenCapturer() {
     }
 }
 
+void MacScreenCapturer::ensureScreenAccess()
+{
+    // SCScreenshotManager NEVER triggers the Screen Recording TCC
+    // prompt — it just fails with "user declined" when no valid grant
+    // exists (fresh install, tccutil reset, or a stale grant from a
+    // differently-signed build). CGRequestScreenCaptureAccess is the
+    // only API that asks. With no TCC entry it shows the real system
+    // prompt; with a denied/stale entry it opens System Settings —
+    // either way, once per app run is the right amount of nagging.
+    if (CGPreflightScreenCaptureAccess()) return;
+    if (m_accessRequested) return;
+    m_accessRequested = true;
+    qInfo("[mac-capture] no screen-capture grant — requesting");
+    CGRequestScreenCaptureAccess();
+}
+
 void MacScreenCapturer::showPicker()
 {
     if (@available(macOS 14.0, *)) {
+        ensureScreenAccess();
+        m_pickerPending = true;
         SCContentSharingPicker* picker = [SCContentSharingPicker sharedPicker];
         picker.active = YES;
         // Allow all source kinds (display / window / application).
@@ -102,6 +120,16 @@ void MacScreenCapturer::showPicker()
 
 void MacScreenCapturer::_onPickerSelection(SCContentFilter* filter)
 {
+    // Accept a filter only when we're capturing (user changed the
+    // shared window mid-share) or expecting one (showPicker pending).
+    // The shared system picker re-delivers filters at other times —
+    // e.g. a stale delivery racing a stop() — and acting on those
+    // would silently restart a share the user just ended.
+    if (!m_active && !m_pickerPending) {
+        qInfo("[mac-capture] ignoring unsolicited picker filter");
+        return;
+    }
+    m_pickerPending = false;
     // Replace prior filter (if any) with the newly-chosen one.
     if (m_filter) {
         [(id)m_filter release];
@@ -109,6 +137,10 @@ void MacScreenCapturer::_onPickerSelection(SCContentFilter* filter)
     }
     m_filter = (SCContentFilter*)[(id)filter retain];
     qInfo("[mac-capture] picker returned a filter; starting capture");
+    // Fresh share attempt — re-arm the failure notifier so a capture
+    // problem surfaces again (it latches per attempt, not per app run).
+    m_consecutiveFails = 0;
+    m_failureNotified = false;
     // Start polling immediately.
     if (!m_active) {
         m_timer->setInterval(m_fps > 0 ? (1000 / m_fps) : 200);
@@ -124,17 +156,21 @@ void MacScreenCapturer::_onPickerSelection(SCContentFilter* filter)
 void MacScreenCapturer::_onPickerCancel()
 {
     qInfo("[mac-capture] picker cancelled");
+    m_pickerPending = false;
     emit pickerCancelled();
 }
 
 void MacScreenCapturer::start(uint32_t displayID, int fps)
 {
     if (m_active) return;
+    ensureScreenAccess();
     m_displayID = displayID ? displayID : CGMainDisplayID();
     m_fps = fps > 0 ? fps : 5;
     m_timer->setInterval(1000 / m_fps);
     m_timer->start();
     m_active = true;
+    m_consecutiveFails = 0;
+    m_failureNotified = false;
     qInfo("[mac-capture] start displayID=%u fps=%d", m_displayID, m_fps);
     grabWithFilter();
 }
@@ -150,6 +186,17 @@ void MacScreenCapturer::stop()
     if (!m_active) return;
     m_timer->stop();
     m_active = false;
+    if (@available(macOS 14.0, *)) {
+        // End the system share session too. While the shared picker
+        // stays active, macOS keeps the "sharing" indicator on and
+        // RE-DELIVERS didUpdateWithFilter — which used to restart
+        // capture right after a stop (the "can't stop streaming" bug).
+        [SCContentSharingPicker sharedPicker].active = NO;
+    }
+    if (m_filter) {
+        [(id)m_filter release];
+        m_filter = nullptr;
+    }
     qInfo("[mac-capture] stop");
 }
 
@@ -176,6 +223,20 @@ void MacScreenCapturer::grabWithFilter()
                              err ? err.localizedDescription.UTF8String
                                  : "nil image");
                 }
+                // Per-call failures (stale TCC grant, revoked mid-share)
+                // must surface after a few consecutive misses — the
+                // completion runs off-thread, so count on the Qt thread.
+                QString desc = err
+                    ? QString::fromNSString(err.localizedDescription)
+                    : QStringLiteral("capture returned no image");
+                QMetaObject::invokeMethod(this, [this, desc]() {
+                    if (!m_active) return;
+                    if (++m_consecutiveFails >= kMaxConsecutiveFails
+                        && !m_failureNotified) {
+                        m_failureNotified = true;
+                        emit captureFailed(desc);
+                    }
+                }, Qt::QueuedConnection);
                 return;
             }
             static int s_okCount = 0;
@@ -205,6 +266,7 @@ void MacScreenCapturer::grabWithFilter()
                         QImage::Format_ARGB32_Premultiplied);
             QImage owned = qimg.copy();
             QMetaObject::invokeMethod(this, [this, owned]() {
+                m_consecutiveFails = 0;
                 emit frameReady(owned);
             }, Qt::QueuedConnection);
         };

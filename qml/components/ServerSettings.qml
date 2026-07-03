@@ -338,6 +338,10 @@ Popup {
             // ---- Overview (index 0) ----
             Item {
                 ColumnLayout {
+                    // id needed so the PolicyRow inline component can be
+                    // handed policyEditorEnabled — inline components
+                    // don't capture the enclosing item's scope.
+                    id: overviewPane
                     anchors.fill: parent
                     anchors.margins: Theme.sp.s7 * 2
                     spacing: Theme.sp.s7
@@ -571,6 +575,7 @@ Popup {
                         property int stepVal: 1
                         property string suffix: ""
                         property int value: -1
+                        property bool editable: false
                         signal commit(int v)
 
                         spacing: Theme.sp.s3
@@ -584,7 +589,7 @@ Popup {
                         ThemedSlider {
                             implicitWidth: 220
                             from: pr.minVal; to: pr.maxVal; stepSize: pr.stepVal
-                            enabled: pr.value >= 0 && policyEditorEnabled
+                            enabled: pr.value >= 0 && pr.editable
                             value: pr.value < 0 ? pr.minVal : pr.value
                             onMoved: pr.commit(Math.round(value))
                         }
@@ -598,7 +603,7 @@ Popup {
                         }
                         ThemedSwitch {
                             text: "Cap"
-                            enabled: policyEditorEnabled
+                            enabled: pr.editable
                             checked: pr.value >= 0
                             onToggled: {
                                 if (checked) pr.commit(pr.maxVal);
@@ -624,6 +629,7 @@ Popup {
 
                     PolicyRow {
                         id: fpsPolicyRow
+                        editable: overviewPane.policyEditorEnabled
                         label: "Max frame rate"
                         minVal: 1; maxVal: 60; stepVal: 1; suffix: " fps"
                         value: serverManager.activeServer
@@ -632,6 +638,7 @@ Popup {
                     }
                     PolicyRow {
                         id: widthPolicyRow
+                        editable: overviewPane.policyEditorEnabled
                         label: "Max long edge"
                         minVal: 480; maxVal: 3840; stepVal: 80; suffix: " px"
                         value: serverManager.activeServer
@@ -640,6 +647,7 @@ Popup {
                     }
                     PolicyRow {
                         id: jpegPolicyRow
+                        editable: overviewPane.policyEditorEnabled
                         label: "Max JPEG quality"
                         minVal: 1; maxVal: 100; stepVal: 1; suffix: ""
                         value: serverManager.activeServer

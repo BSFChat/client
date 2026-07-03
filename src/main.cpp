@@ -209,6 +209,49 @@ int main(int argc, char *argv[])
     camera.setServerManager(application.serverManager());
     camera.setSettings(application.settings());
 #endif
+#if defined(BSFCHAT_VOICE_ENABLED) && !defined(Q_OS_IOS)
+    // Explicit media announcement — mirror screen-share / camera
+    // activity into the voice server's member state (PUT voice/state
+    // {screen_sharing, camera_on}) so remote clients learn about a
+    // share up front instead of inferring it from arriving frames.
+    // Wired here because main() is the only scope that sees both
+    // controllers at once. iOS is excluded until it grows a capture
+    // controller (voice is off there by default anyway).
+    {
+        auto* mgr = application.serverManager();
+        auto announceMediaState = [mgr, &screenShare, &camera]() {
+            if (auto* vs = mgr->voiceServer())
+                vs->setLocalMediaState(screenShare.active(), camera.active());
+        };
+        // Any active-state flip announces the new pair; no-op unless
+        // some connection is in voice. Receiver is `camera` — declared
+        // after screenShare, so it's destroyed first and both connects
+        // auto-drop before either capture could dangle.
+        QObject::connect(&screenShare, &decltype(screenShare)::activeChanged,
+                         &camera, announceMediaState);
+        QObject::connect(&camera, &CameraController::activeChanged,
+                         &camera, announceMediaState);
+        // A voice join that happens while a controller is already live
+        // announces once — the server starts every fresh membership
+        // with both flags false, so without this the share would stay
+        // invisible until the next toggle.
+        auto wireJoinAnnounce = [mgr, &screenShare, &camera,
+                                 announceMediaState](int index) {
+            auto* sc = mgr->connectionAt(index);
+            if (!sc) return;
+            QObject::connect(sc, &ServerConnection::activeVoiceRoomIdChanged,
+                             &camera,
+                             [sc, &screenShare, &camera, announceMediaState]() {
+                if (sc->inVoiceChannel()
+                    && (screenShare.active() || camera.active()))
+                    announceMediaState();
+            });
+        };
+        for (int i = 0; i < mgr->connectionCount(); ++i) wireJoinAnnounce(i);
+        QObject::connect(mgr, &ServerManager::serverAdded,
+                         &camera, wireJoinAnnounce);
+    }
+#endif
     // Mobile builds (iOS / Android) load a phone-native shell that
     // wraps the same leaf components in a drawer-based navigation
     // instead of the desktop's three-panel layout. Everything below

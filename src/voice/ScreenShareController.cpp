@@ -56,14 +56,15 @@ ScreenShareController::ScreenShareController(QObject* parent)
     connect(m_mac, &MacScreenCapturer::captureFailed, this,
         [this](const QString& desc) {
             m_lastError = QStringLiteral(
-                "Screen capture refused (\"%1\"). On an adhoc-signed "
-                "dev build the TCC grant is bound to the binary's code "
-                "signature hash — rebuilding invalidates it even though "
-                "the toggle still looks on. Fix: open System Settings → "
-                "Privacy & Security → Screen & System Audio Recording, "
-                "remove the bsfchat-app entry (use the \"−\" button), "
-                "quit BSFChat, relaunch, click Share once to get a "
-                "fresh prompt, grant it, quit + relaunch one more time."
+                "Screen capture refused (\"%1\"). If a permission prompt "
+                "just appeared and you granted it, quit and reopen "
+                "BSFChat — macOS applies Screen Recording grants on the "
+                "next launch. If there was no prompt, the stored grant "
+                "is stale (it no longer matches this binary's code "
+                "signature after a rebuild): run  tccutil reset "
+                "ScreenCapture com.bsfchat.app.dev  in a terminal and "
+                "relaunch, or remove the entry in System Settings → "
+                "Privacy & Security → Screen & System Audio Recording."
             ).arg(desc);
             emit lastErrorChanged();
             stop();

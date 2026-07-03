@@ -136,8 +136,20 @@ public:
         if (it == m_peerScreenData.constEnd()) return {};
         return *it;
     }
+    // Union of peers whose polled voice-member row announces
+    // screen_sharing=true and anyone we hold cached frame data for.
+    // The announcement is the fast/authoritative path (tiles appear
+    // before the first JPEG lands); the frame-data fallback keeps a
+    // live share visible even if a flag update got lost or the
+    // server predates the media flags.
     Q_INVOKABLE QStringList peersCurrentlySharing() const {
-        return m_peerScreenData.keys();
+        QSet<QString> uids = m_announcedScreenSharers;
+        for (auto it = m_peerScreenData.constBegin();
+             it != m_peerScreenData.constEnd(); ++it)
+            uids.insert(it.key());
+        QStringList out(uids.constBegin(), uids.constEnd());
+        out.sort(); // stable tile order across re-evaluations
+        return out;
     }
     // Same pattern for webcam — data URL per peer, keys = peers with
     // an active camera stream.
@@ -146,8 +158,11 @@ public:
         if (it == m_peerCameraData.constEnd()) return {};
         return *it;
     }
+    // Announced camera flag OR cached frame data — same union
+    // semantics as peersCurrentlySharing().
     Q_INVOKABLE bool peerHasCamera(const QString& userId) const {
-        return m_peerCameraData.contains(userId);
+        return m_announcedCameraUsers.contains(userId)
+            || m_peerCameraData.contains(userId);
     }
 
     // 0..1 smoothed audio level for a remote peer, updated on every
@@ -270,6 +285,12 @@ public:
     bool pttPressed() const { return m_pttPressed; }
     Q_INVOKABLE void setPttPressed(bool pressed);
     Q_INVOKABLE void toggleDeafen();
+    // Announce (or retract) local screen-share / camera activity to
+    // the server via a media-flag-only voice/state PUT, so remote
+    // clients can render "peer is sharing" before any frame arrives.
+    // No-op when not in voice (the server would 403 it anyway).
+    // Wired from main.cpp off the controllers' activeChanged signals.
+    Q_INVOKABLE void setLocalMediaState(bool screenSharing, bool cameraOn);
     Q_INVOKABLE void createVoiceChannel(const QString& name);
 
     Q_INVOKABLE void sendTypingNotification();
@@ -555,6 +576,11 @@ public:
     QMap<QString, QString> m_directRoomPeers;
     QMap<QString, QString> m_peerScreenData; // userId -> data URL
     QMap<QString, QString> m_peerCameraData; // userId -> data URL
+    // Peers whose polled voice-member row carries screen_sharing /
+    // camera_on = true. Rebuilt on every voice/members result (and
+    // the join response) by reconcileAnnouncedMedia(); self excluded.
+    QSet<QString> m_announcedScreenSharers;
+    QSet<QString> m_announcedCameraUsers;
     QMap<QString, float> m_peerLevels;
     int m_maxScreenShareQuality = 3; // 3 = no limit by default
     // -1 sentinels = "no cap, honour user setting verbatim"
@@ -597,6 +623,11 @@ public:
     // mute/deafen/mic state. Every leave/switch/kick path funnels
     // through here so no path can leak a running engine.
     void teardownVoiceSession();
+    // Rebuild the announced-sharer sets from m_voiceMembers. Flag
+    // flips emit peerScreenFrameChanged / peerCameraFrameChanged so
+    // QML re-derives its tile lists; a flag dropping also erases the
+    // peer's cached frame so a frozen last frame can't linger.
+    void reconcileAnnouncedMedia();
     void setVoiceError(const QString& message);
     void clearVoiceError();
 public:

@@ -913,6 +913,28 @@ void MatrixClient::updateVoiceState(const QString& roomId, bool muted, bool deaf
     });
 }
 
+void MatrixClient::updateVoiceMediaState(const QString& roomId, bool screenSharing, bool cameraOn)
+{
+    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
+                   + QUrl::toPercentEncoding(roomId) + "/voice/state";
+
+    // Deliberately omits muted/deafened — the server treats omitted
+    // keys as "unchanged", so this announcement can never reset a
+    // mute state written by updateVoiceState().
+    json content;
+    content["screen_sharing"] = screenSharing;
+    content["camera_on"] = cameraOn;
+    QByteArray body = QByteArray::fromStdString(content.dump());
+
+    auto* reply = makeRequest("PUT", path, body);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit voiceError(QString::fromUtf8(reply->readAll()));
+        }
+    });
+}
+
 void MatrixClient::createVoiceChannel(const QString& name)
 {
     json content;

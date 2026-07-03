@@ -380,10 +380,46 @@ jobs:
           name: BSFChat-macOS
           path: build/BSFChat-macOS.dmg
 
+      # === Windows: Prepare Authenticode signing ===
+      # Mirrors the macOS notarisation soft-fail pattern: when the
+      # WINDOWS_CERT_PFX_BASE64 / WINDOWS_CERT_PASSWORD secrets are
+      # absent (fork PRs, or signing simply not set up yet) we log a
+      # notice and produce an unsigned build — the job still passes.
+      # When present, the .pfx is materialised into RUNNER_TEMP and
+      # WINDOWS_PFX_PATH / SIGNTOOL_PATH are exported for the
+      # packaging + installer-signing steps below.
+      - name: Prepare Windows signing certificate
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERT_PFX_BASE64 -or -not $env:WINDOWS_CERT_PASSWORD) {
+            Write-Host "::notice::Skipping Authenticode signing - WINDOWS_CERT_PFX_BASE64 / WINDOWS_CERT_PASSWORD secrets unset (likely a fork PR or signing not configured). Artifacts will be unsigned."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "authenticode.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          # signtool ships with the Windows SDK on the hosted runners;
+          # pick the newest x64 copy.
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like "*x64*" } |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) {
+            Write-Host "::warning::signtool.exe not found on runner - Authenticode signing will be skipped."
+            exit 0
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "WINDOWS_PFX_PATH=$pfx"
+          Add-Content -Path $env:GITHUB_ENV -Value "SIGNTOOL_PATH=$($signtool.FullName)"
+          Write-Host "Authenticode signing enabled (signtool: $($signtool.FullName))"
+
       # === Windows: Create NSIS installer ===
       - name: Package Windows installer
         if: matrix.platform == 'windows'
         shell: pwsh
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         run: |
           mkdir dist
           # Find the exe (could be in Release/ or directly in build/)
@@ -471,6 +507,19 @@ jobs:
           Write-Host "Final dist contents:"
           Get-ChildItem dist\ | Select-Object Name, Length
 
+          # Authenticode-sign the app exe BEFORE makensis packs it into
+          # the installer (the installer envelope gets its own signature
+          # in the follow-up step). Soft-fail scaffold: no-ops when the
+          # signing secrets weren't configured.
+          if ($env:WINDOWS_PFX_PATH -and $env:SIGNTOOL_PATH) {
+            & $env:SIGNTOOL_PATH sign /f $env:WINDOWS_PFX_PATH /p $env:WINDOWS_CERT_PASSWORD `
+              /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dist\bsfchat-app.exe
+            if ($LASTEXITCODE -ne 0) { Write-Error "signtool failed on bsfchat-app.exe"; exit 1 }
+            Write-Host "Signed dist\bsfchat-app.exe"
+          } else {
+            Write-Host "bsfchat-app.exe left unsigned (no signing certificate configured)"
+          }
+
           Copy-Item installer.nsi dist\
           # Brand icon for the NSIS installer chrome. installer.nsi
           # references "BSFChat.ico" relative to the .nsi file, so
@@ -482,6 +531,29 @@ jobs:
           # registry write.
           makensis "/DBSFCHAT_VERSION=${{ steps.version.outputs.version }}" "/DBSFCHAT_VERSION_NSIS=${{ steps.version.outputs.version_nsis }}" installer.nsi
 
+      # === Windows: Sign installer ===
+      # Own step so a signing failure is legible in the UI (same
+      # rationale as the macOS notarise step). Soft-fails to "unsigned
+      # but shippable" when the secrets are absent.
+      - name: Sign Windows installer
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $setup = "dist\BSFChat-Setup.exe"
+          if (-not (Test-Path $setup)) { Write-Error "$setup not found"; exit 1 }
+          if (-not $env:WINDOWS_PFX_PATH -or -not $env:SIGNTOOL_PATH) {
+            Write-Host "::notice::BSFChat-Setup.exe left unsigned - signing secrets not configured."
+            exit 0
+          }
+          & $env:SIGNTOOL_PATH sign /f $env:WINDOWS_PFX_PATH /p $env:WINDOWS_CERT_PASSWORD `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $setup
+          if ($LASTEXITCODE -ne 0) { Write-Error "signtool failed on BSFChat-Setup.exe"; exit 1 }
+          & $env:SIGNTOOL_PATH verify /pa $setup
+          if ($LASTEXITCODE -ne 0) { Write-Error "signature verification failed"; exit 1 }
+          Write-Host "Installer signed and verified"
+
       - name: Upload Windows artifact
         if: matrix.platform == 'windows'
         uses: actions/upload-artifact@v4
@@ -490,11 +562,90 @@ jobs:
           path: dist/BSFChat-Setup.exe
 
       # === Linux: Create tarball ===
+      # Self-contained bundle: Qt shared libs + plugins + QML imports
+      # travel with the binary. Historically we created lib/ and
+      # plugins/ and pointed the launch script at them but never
+      # populated them — anyone without a matching system Qt got a
+      # silent failure, and QtMultimedia's FFmpeg backend (screen and
+      # camera capture) is essentially never present system-wide.
+      # Plain ldd + cp on purpose: explicit, verifiable, and no
+      # linuxdeployqt dependency.
       - name: Package Linux tarball
         if: matrix.platform == 'linux'
         run: |
-          mkdir -p BSFChat/bin BSFChat/lib BSFChat/plugins BSFChat/share
+          set -euo pipefail
+          QT_DIR="${QT_ROOT_DIR:?install-qt-action did not export QT_ROOT_DIR}"
+          mkdir -p BSFChat/bin BSFChat/lib BSFChat/plugins BSFChat/qml BSFChat/share
           cp build/bsfchat-app BSFChat/bin/
+
+          # --- Qt runtime plugins -------------------------------------
+          # platforms/xcbglintegrations/wayland-*: display; multimedia:
+          # the FFmpeg capture/playback backend; tls: HTTPS for the
+          # Matrix client; the rest are the usual suspects Qt loads
+          # lazily and fails without.
+          for p in platforms multimedia imageformats iconengines tls \
+                   xcbglintegrations platforminputcontexts platformthemes \
+                   egldeviceintegrations wayland-decoration-client \
+                   wayland-graphics-integration-client \
+                   wayland-shell-integration; do
+            if [ -d "$QT_DIR/plugins/$p" ]; then
+              cp -a "$QT_DIR/plugins/$p" BSFChat/plugins/
+              echo "plugins: $p"
+            fi
+          done
+
+          # --- QML import dirs ----------------------------------------
+          # The app's own QML is compiled into the binary via
+          # qt_add_qml_module; only the Qt-provided modules it imports
+          # need shipping (QtQuick[.Controls/Layouts/Dialogs/Effects/
+          # Window], QtQml, QtMultimedia, Qt.labs.platform).
+          for m in QtQuick QtQml QtMultimedia QtCore; do
+            if [ -d "$QT_DIR/qml/$m" ]; then
+              cp -a "$QT_DIR/qml/$m" BSFChat/qml/
+              echo "qml: $m"
+            fi
+          done
+          if [ -d "$QT_DIR/qml/Qt/labs/platform" ]; then
+            mkdir -p BSFChat/qml/Qt/labs
+            cp -a "$QT_DIR/qml/Qt/labs/platform" BSFChat/qml/Qt/labs/
+            echo "qml: Qt/labs/platform"
+          fi
+
+          # --- Shared libraries ---------------------------------------
+          # ldd sweep over the app binary plus every bundled plugin and
+          # QML plugin .so, iterated to a fixpoint so transitive deps
+          # (icu, FFmpeg's libav*/libsw*, Qt private helpers) land in
+          # lib/ too. Only libs resolved from the Qt tree or our build
+          # tree are taken — glibc/libstdc++/X11 stay system-provided
+          # to avoid ABI mismatches on the target machine.
+          export LD_LIBRARY_PATH="$QT_DIR/lib"
+          copy_deps() {
+            # `|| true`: ldd exits non-zero on non-ELF input, which
+            # must not abort the sweep under pipefail.
+            ldd "$1" 2>/dev/null | awk '/=>/ { print $3 }' | while read -r lib; do
+              [ -n "$lib" ] || continue
+              case "$lib" in
+                "$QT_DIR"/*|"$GITHUB_WORKSPACE"/build/*)
+                  base=$(basename "$lib")
+                  if [ ! -e "BSFChat/lib/$base" ]; then
+                    cp -L "$lib" "BSFChat/lib/$base"
+                    echo "lib: $base"
+                  fi
+                  ;;
+              esac
+            done || true
+          }
+          prev=-1
+          count=0
+          while [ "$count" != "$prev" ]; do
+            prev="$count"
+            copy_deps BSFChat/bin/bsfchat-app
+            find BSFChat/plugins BSFChat/qml BSFChat/lib -name '*.so*' -type f 2>/dev/null \
+              | while read -r so; do copy_deps "$so"; done
+            count=$(ls BSFChat/lib | wc -l)
+          done
+          echo "Bundled $(ls BSFChat/lib | wc -l) shared libraries"
+
           # Brand icon — placed at share/BSFChat.png so the
           # generated .desktop file's `Icon=` entry resolves
           # whether the user installs into ~/.local/share/ via
@@ -516,12 +667,44 @@ jobs:
           cat > BSFChat/bsfchat.sh << 'SCRIPT'
           #!/bin/bash
           DIR="$(cd "$(dirname "$0")" && pwd)"
-          export LD_LIBRARY_PATH="$DIR/lib:$LD_LIBRARY_PATH"
+          export LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export QT_PLUGIN_PATH="$DIR/plugins"
+          export QML2_IMPORT_PATH="$DIR/qml${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
+          export QML_IMPORT_PATH="$DIR/qml${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
           exec "$DIR/bin/bsfchat-app" "$@"
           SCRIPT
           chmod +x BSFChat/bsfchat.sh
           tar czf BSFChat-linux-x86_64.tar.gz BSFChat/
+
+      # Mirror of the Windows job's ffmpegmediaplugin check: fail the
+      # job when the bits screen-share depends on are missing from the
+      # tarball, warn on the softer FFmpeg-runtime case.
+      - name: Verify Linux bundle
+        if: matrix.platform == 'linux'
+        run: |
+          set -euo pipefail
+          tar tzf BSFChat-linux-x86_64.tar.gz > /tmp/tar-contents.txt
+          fail=0
+          for want in \
+            "BSFChat/lib/libQt6Core.so" \
+            "BSFChat/lib/libQt6Multimedia.so" \
+            "BSFChat/plugins/multimedia/" \
+            "BSFChat/plugins/platforms/libqxcb.so" \
+            "BSFChat/qml/QtQuick/"; do
+            if ! grep -q "$want" /tmp/tar-contents.txt; then
+              echo "::error::Linux bundle is missing $want — end users without a matching system Qt will get a broken app"
+              fail=1
+            fi
+          done
+          if ! grep -q "BSFChat/plugins/multimedia/libffmpegmediaplugin.so" /tmp/tar-contents.txt; then
+            echo "::error::QtMultimedia FFmpeg plugin missing from bundle — screen/camera capture will silently no-op"
+            fail=1
+          fi
+          if ! grep -q "BSFChat/lib/libavcodec" /tmp/tar-contents.txt; then
+            echo "::warning::libavcodec not bundled — QtMultimedia's FFmpeg backend may fail to initialise at runtime"
+          fi
+          [ "$fail" -eq 0 ]
+          echo "Linux bundle verification passed"
 
       - name: Upload Linux artifact
         if: matrix.platform == 'linux'

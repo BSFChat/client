@@ -252,9 +252,27 @@ Rectangle {
                 toggled: visible && screenShare.active
                 onClicked: {
                     if (!visible) return;
-                    if (screenShare.active) screenShare.stop();
-                    else screenShare.showPicker();
+                    if (screenShare.active) {
+                        screenShare.stop();
+                        return;
+                    }
+                    // macOS has a native window/app/display picker
+                    // (SCContentSharingPicker) behind showPicker();
+                    // Windows/Linux fall back to our QML display
+                    // picker since Qt's QScreenCapture path can only
+                    // grab whole screens there. Single-monitor setups
+                    // skip the dialog — there is nothing to choose.
+                    if (Qt.platform.os === "osx") {
+                        screenShare.showPicker();
+                    } else {
+                        var screens = screenShare.availableScreens;
+                        if (screens.length === 1)
+                            screenShare.startForScreen(screens[0].index);
+                        else
+                            screenPickerDialog.open();
+                    }
                 }
+                ScreenPickerDialog { id: screenPickerDialog }
                 Connections {
                     target: typeof screenShare !== "undefined"
                             ? screenShare : null

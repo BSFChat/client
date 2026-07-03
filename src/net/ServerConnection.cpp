@@ -252,6 +252,10 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     connect(m_client, &MatrixClient::voiceJoined, this, [this](const QString& roomId, const QJsonArray& members) {
         m_activeVoiceRoomId = roomId;
         m_voiceMembers = members;
+        // Join responses carry the members' screen_sharing/camera_on
+        // flags too — seed the announced-sharer sets right away so a
+        // share that started before we joined is visible immediately.
+        reconcileAnnouncedMedia();
         m_voiceMuted = false;
         m_voiceDeafened = false;
         m_voicePollTimer->start();
@@ -396,6 +400,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     connect(m_client, &MatrixClient::voiceMembersResult, this, [this](const QString& roomId, const QJsonArray& members) {
         if (roomId == m_activeVoiceRoomId) {
             m_voiceMembers = members;
+            reconcileAnnouncedMedia();
             emit voiceMembersChanged();
 #ifdef BSFCHAT_VOICE_ENABLED
             // Mesh reconciliation: any polled member we hold no peer
@@ -1020,12 +1025,22 @@ QJsonArray ServerConnection::voiceMembers() const
         return uid;
     };
 
+    // Camel-cased media-flag role keys for QML (raw snake_case keys
+    // from the server stay on the row too). Announced flags let the
+    // member list / tiles mark who's sharing without waiting for
+    // frame data.
+    auto stampMediaFlags = [](QJsonObject& obj) {
+        obj["screenSharing"] = obj.value("screen_sharing").toBool();
+        obj["cameraOn"] = obj.value("camera_on").toBool();
+    };
+
     auto augment = [&](const QJsonArray& src) {
         QJsonArray out;
         for (const auto& v : src) {
             auto obj = v.toObject();
             QString uid = obj.value("user_id").toString();
             obj["displayName"] = displayFor(uid);
+            stampMediaFlags(obj);
             out.append(obj);
         }
         return out;
@@ -1039,6 +1054,7 @@ QJsonArray ServerConnection::voiceMembers() const
             auto obj = v.toObject();
             QString uid = obj.value("user_id").toString();
             obj["displayName"] = displayFor(uid);
+            stampMediaFlags(obj);
             if (uid == m_userId) {
                 obj["peerState"] = QStringLiteral("connected");
             } else {
@@ -1091,6 +1107,19 @@ void ServerConnection::teardownVoiceSession()
         for (const auto& uid : keys) emit peerCameraFrameChanged(uid);
     }
 #endif
+    // Announced share/camera flags die with the session too (the
+    // server resets them on leave) — otherwise peersCurrentlySharing()
+    // / peerHasCamera() would ghost stale sharers into the next join.
+    if (!m_announcedScreenSharers.isEmpty()) {
+        const auto uids = m_announcedScreenSharers;
+        m_announcedScreenSharers.clear();
+        for (const auto& uid : uids) emit peerScreenFrameChanged(uid);
+    }
+    if (!m_announcedCameraUsers.isEmpty()) {
+        const auto uids = m_announcedCameraUsers;
+        m_announcedCameraUsers.clear();
+        for (const auto& uid : uids) emit peerCameraFrameChanged(uid);
+    }
     m_voicePollTimer->stop();
     m_activeVoiceRoomId.clear();
     m_voiceMembers = QJsonArray();
@@ -1106,6 +1135,58 @@ void ServerConnection::teardownVoiceSession()
         m_micLevel = 0.0f;
         emit micLevelChanged();
     }
+}
+
+void ServerConnection::reconcileAnnouncedMedia()
+{
+    // Rebuild the announced-sharer sets from the current member rows.
+    // Self is excluded: the local share/camera render through the
+    // controllers' preview sinks, never through the remote-peer tile
+    // paths these sets feed — including ourselves would conjure a
+    // frameless "remote" tile for our own share.
+    QSet<QString> screen, cam;
+    for (const auto& v : m_voiceMembers) {
+        const auto obj = v.toObject();
+        const QString uid = obj.value("user_id").toString();
+        if (uid.isEmpty() || uid == m_userId) continue;
+        if (obj.value("screen_sharing").toBool()) screen.insert(uid);
+        if (obj.value("camera_on").toBool()) cam.insert(uid);
+    }
+    if (screen == m_announcedScreenSharers && cam == m_announcedCameraUsers)
+        return;
+
+    const QSet<QString> oldScreen = m_announcedScreenSharers;
+    const QSet<QString> oldCam = m_announcedCameraUsers;
+    m_announcedScreenSharers = screen;
+    m_announcedCameraUsers = cam;
+
+    for (const QString& uid : oldScreen) {
+        if (screen.contains(uid)) continue;
+        // Flag dropped (or the member left/went inactive) — erase the
+        // cached last frame so the UI can't keep a frozen share alive
+        // via the frame-data fallback.
+        m_peerScreenData.remove(uid);
+        emit peerScreenFrameChanged(uid);
+    }
+    for (const QString& uid : screen) {
+        // Newly-announced sharer — poke QML so the tile appears (as a
+        // placeholder) before the first frame lands.
+        if (!oldScreen.contains(uid)) emit peerScreenFrameChanged(uid);
+    }
+    for (const QString& uid : oldCam) {
+        if (cam.contains(uid)) continue;
+        m_peerCameraData.remove(uid);
+        emit peerCameraFrameChanged(uid);
+    }
+    for (const QString& uid : cam) {
+        if (!oldCam.contains(uid)) emit peerCameraFrameChanged(uid);
+    }
+}
+
+void ServerConnection::setLocalMediaState(bool screenSharing, bool cameraOn)
+{
+    if (m_activeVoiceRoomId.isEmpty()) return;
+    m_client->updateVoiceMediaState(m_activeVoiceRoomId, screenSharing, cameraOn);
 }
 
 void ServerConnection::setVoiceError(const QString& message)

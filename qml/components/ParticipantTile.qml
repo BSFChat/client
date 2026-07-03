@@ -98,6 +98,16 @@ Rectangle {
         }
     }
 
+    // Remote camera frame URL — empty until the peer's first JPEG
+    // arrives. hasCamera can already be true off the announced
+    // camera_on flag, so the gap is bridged by the placeholder below.
+    readonly property string cameraFrameUrl: {
+        tile._cameraTick;
+        if (!tile.hasCamera || tile.isSelf) return "";
+        var s = serverManager.activeServer;
+        return s ? s.peerCameraDataUrl(userId) : "";
+    }
+
     // Remote camera — rendered as a JPEG data URL that refreshes
     // whenever a new frame arrives from the peer.
     Image {
@@ -109,11 +119,43 @@ Rectangle {
         smooth: true
         asynchronous: false
         cache: false
-        source: {
-            tile._cameraTick;
-            if (!tile.hasCamera || tile.isSelf) return "";
-            var s = serverManager.activeServer;
-            return s ? s.peerCameraDataUrl(userId) : "";
+        source: tile.cameraFrameUrl
+    }
+
+    // Camera announced but no frame yet — avatar + status line in
+    // place of an empty tile, mirroring the audio-tile vocabulary.
+    Column {
+        anchors.centerIn: parent
+        spacing: Theme.sp.s3
+        visible: !tile.isSelf && tile.hasCamera && tile.cameraFrameUrl === ""
+
+        Rectangle {
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Theme.avatar.xl
+            height: Theme.avatar.xl
+            radius: Theme.avatar.xl / 2
+            color: Theme.senderColor(tile.userId)
+            Text {
+                anchors.centerIn: parent
+                text: {
+                    var stripped = tile.dispName.replace(/^[^a-zA-Z0-9]+/, "");
+                    return (stripped.length > 0
+                            ? stripped.charAt(0)
+                            : "?").toUpperCase();
+                }
+                font.family: Theme.fontSans
+                font.pixelSize: 28
+                font.weight: Theme.fontWeight.semibold
+                color: Theme.onAccent
+            }
+        }
+
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: "Starting camera…"
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.sm
+            color: Theme.fg2
         }
     }
 

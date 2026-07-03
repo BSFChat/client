@@ -180,8 +180,8 @@ Rectangle {
             }
         }
         // Per-connection signal wiring — every connection emits
-        // directRoomsChanged / roomListChanged independently, and
-        // we want to rebuild when any of them fire.
+        // directRoomsChanged / categorizedRoomsChanged independently,
+        // and we want to rebuild when any of them fire.
         Instantiator {
             model: serverManager.servers
             active: true
@@ -194,7 +194,7 @@ Rectangle {
                     ? conn.directRoomsChanged.connect(function() { dmView._gen++; })
                     : null
                 property var listConn: conn
-                    ? conn.roomListChanged.connect(function() { dmView._gen++; })
+                    ? conn.categorizedRoomsChanged.connect(function() { dmView._gen++; })
                     : null
                 // Typing state tick — bump the generation so
                 // delegates re-evaluate peerTyping and swap the

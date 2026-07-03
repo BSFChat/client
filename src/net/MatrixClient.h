@@ -134,6 +134,11 @@ public:
     void leaveVoice(const QString& roomId);
     void getVoiceMembers(const QString& roomId);
     void updateVoiceState(const QString& roomId, bool muted, bool deafened);
+    // Media-flag-only PUT to the same voice/state endpoint. The server
+    // leaves any omitted key unchanged, so sending just the two media
+    // flags can't clobber a mute/deafen toggle racing in from
+    // updateVoiceState().
+    void updateVoiceMediaState(const QString& roomId, bool screenSharing, bool cameraOn);
     void createVoiceChannel(const QString& name);
     void getTurnConfig();
 
