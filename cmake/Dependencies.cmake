@@ -16,7 +16,11 @@ if(BSFCHAT_ENABLE_VOICE)
     FetchContent_Declare(
         libdatachannel
         GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
-        GIT_TAG        v0.22.4
+        # 0.24.5 over 0.22.4: no CVE ids, but real network-facing fixes
+        # after 0.22.4 — heap use-after-free in IceTransport::RecvCallback
+        # (PR #1567), missing RTP/RTCP size checks (PR #1531), and a
+        # bundled-libjuice STUN HMAC-key crash (>64B key).
+        GIT_TAG        v0.24.5
         GIT_SHALLOW    TRUE
     )
     set(NO_MEDIA ON CACHE BOOL "" FORCE)

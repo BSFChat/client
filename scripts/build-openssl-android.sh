@@ -15,12 +15,24 @@ cd "$(dirname "$0")/.."
 OUT="$(pwd)/deps/openssl-android-arm64"
 SRC="$(pwd)/deps/openssl-src"
 
-if [ ! -d "$SRC" ]; then
-    echo "Fetching OpenSSL source…"
+# 3.5.7 (current LTS branch): 3.0.13 was affected by CVE-2025-15467
+# (CMS AuthEnvelopedData stack overflow) and CVE-2026-45447
+# (PKCS7_verify UAF). Regenerate deps/openssl-android-arm64 by
+# re-running this script after bumping.
+OPENSSL_VERSION="3.5.7"
+# Re-fetch when the checked-out source doesn't match OPENSSL_VERSION —
+# a bare `[ ! -d "$SRC" ]` guard would silently keep building a stale
+# version after a bump. deps/ is gitignored, so this only touches the
+# dev machine's cache.
+if [ ! -f "$SRC/.bsfchat-openssl-version" ] \
+   || [ "$(cat "$SRC/.bsfchat-openssl-version" 2>/dev/null)" != "$OPENSSL_VERSION" ]; then
+    echo "Fetching OpenSSL ${OPENSSL_VERSION} source…"
+    rm -rf "$SRC"
     mkdir -p deps
-    curl -sL https://www.openssl.org/source/openssl-3.0.13.tar.gz \
+    curl -sL "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
         | tar -xz -C deps
-    mv deps/openssl-3.0.13 "$SRC"
+    mv "deps/openssl-${OPENSSL_VERSION}" "$SRC"
+    echo "$OPENSSL_VERSION" > "$SRC/.bsfchat-openssl-version"
 fi
 
 cd "$SRC"
