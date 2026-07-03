@@ -4,7 +4,10 @@ include(FetchContent)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/CMakeLists.txt)
     FetchContent_Declare(bsfchat_protocol SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../protocol)
 else()
-    FetchContent_Declare(bsfchat_protocol GIT_REPOSITORY https://github.com/BSFChat/protocol.git GIT_TAG main GIT_SHALLOW TRUE)
+    # NOTE: pinned to the video-rtp branch (bsfchat.call.negotiate
+    # constant) while the RTP video migration is in review — flip back
+    # to main when both branches merge.
+    FetchContent_Declare(bsfchat_protocol GIT_REPOSITORY https://github.com/BSFChat/protocol.git GIT_TAG video-rtp GIT_SHALLOW TRUE)
 endif()
 
 set(GAMECHAT_PROTOCOL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
