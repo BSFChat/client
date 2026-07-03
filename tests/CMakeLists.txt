@@ -47,5 +47,13 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
         target_link_libraries(test_video_codec PRIVATE
             "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo")
     endif()
+    if(BSFCHAT_HAVE_AOM)
+        target_sources(test_video_codec PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/voice/video/AomLosslessEncoder.cpp
+            ${CMAKE_SOURCE_DIR}/src/voice/video/AomLosslessDecoder.cpp
+        )
+        target_compile_definitions(test_video_codec PRIVATE BSFCHAT_HAVE_AOM)
+        target_link_libraries(test_video_codec PRIVATE aom)
+    endif()
     add_test(NAME test_video_codec COMMAND test_video_codec)
 endif()

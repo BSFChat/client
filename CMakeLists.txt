@@ -131,6 +131,15 @@ if(BSFCHAT_ENABLE_VOICE)
         target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_OPENH264)
         target_link_libraries(bsfchat-app PRIVATE openh264::openh264)
     endif()
+    # AV1 lossless tier (libaom) — desktop platforms.
+    if(BSFCHAT_HAVE_AOM)
+        target_sources(bsfchat-app PRIVATE
+            src/voice/video/AomLosslessEncoder.cpp
+            src/voice/video/AomLosslessDecoder.cpp
+        )
+        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_AOM)
+        target_link_libraries(bsfchat-app PRIVATE aom)
+    endif()
     # Hardware codec backends: VideoToolbox on desktop macOS, Media
     # Foundation on Windows. Both preferred by the factory, with
     # openh264 / the MS software MFT as the automatic fallbacks.

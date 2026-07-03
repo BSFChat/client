@@ -153,9 +153,14 @@ void PeerConnectionManager::setupCallbacks() {
 
     m_pc->onDataChannel([this](std::shared_ptr<rtc::DataChannel> dc) {
         QMetaObject::invokeMethod(this, [this, dc]() {
-            qCInfo(logVoicePc, " [%s] Incoming data channel",
-                  qPrintable(m_peerId));
-            setupDataChannel(dc);
+            qCInfo(logVoicePc, " [%s] Incoming data channel \"%s\"",
+                  qPrintable(m_peerId), dc->label().c_str());
+            // Dispatch on label — the lossless-video channel must not
+            // clobber the audio/control channel.
+            if (dc->label() == "video-lossless")
+                setupLosslessChannel(dc);
+            else
+                setupDataChannel(dc);
         }, Qt::QueuedConnection);
     });
 
@@ -232,12 +237,9 @@ void PeerConnectionManager::setupDataChannel(std::shared_ptr<rtc::DataChannel> d
                 emit controlMessageReceived(payload);
             }, Qt::QueuedConnection);
         } else if (tag == 0x05) {
-            // Lossless-video frame (AV1 over the reliable channel).
-            payload = QByteArray(reinterpret_cast<const char*>(data.data() + 1),
-                                 static_cast<int>(data.size() - 1));
-            QMetaObject::invokeMethod(this, [this, payload]() {
-                emit losslessFrameReceived(payload);
-            }, Qt::QueuedConnection);
+            // Reserved. Lossless video moved to its own dedicated
+            // "video-lossless" channel; 0x05 stays claimed here so it
+            // can never fall through to the legacy-audio branch.
         } else {
             // Legacy untagged audio — no tag strip.
             payload = QByteArray(reinterpret_cast<const char*>(data.data()),
@@ -469,6 +471,68 @@ void PeerConnectionManager::sendVideoFrame(VideoStreamId stream,
 void PeerConnectionManager::requestPeerKeyframe(VideoStreamId stream) {
     sendControl(QByteArrayLiteral("{\"t\":\"kf\",\"stream\":")
                 + QByteArray::number(int(stream)) + "}");
+}
+
+void PeerConnectionManager::setupLosslessChannel(std::shared_ptr<rtc::DataChannel> dc) {
+    m_losslessDc = dc;
+    dc->onMessage([this](rtc::message_variant msg) {
+        if (!std::holds_alternative<rtc::binary>(msg)) return;
+        auto& data = std::get<rtc::binary>(msg);
+        if (data.size() < 10) return;  // [stream][flags][seq][tsMs]
+        const int stream = int(std::to_integer<uint8_t>(data[0]));
+        if (stream < 0 || stream >= kVideoStreamCount) return;
+        const bool keyframe = (std::to_integer<uint8_t>(data[1]) & 0x1) != 0;
+        QByteArray tu(reinterpret_cast<const char*>(data.data() + 10),
+                      int(data.size() - 10));
+        QMetaObject::invokeMethod(this, [this, stream, tu, keyframe]() {
+            emit losslessFrameReceived(stream, tu, keyframe);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void PeerConnectionManager::sendLosslessFrame(VideoStreamId stream,
+                                              const EncodedFrame& frame) {
+    if (!m_pc) return;
+    if (!remoteSupportsVideoRtp()) return;   // caps gate, like sendControl
+    if (!m_losslessDc) {
+        // Reliable + ordered are data-channel defaults — exactly what
+        // lossless wants. Opens in-band, no renegotiation.
+        try {
+            auto dc = m_pc->createDataChannel("video-lossless");
+            setupLosslessChannel(dc);
+        } catch (const std::exception& e) {
+            qCWarning(logVoicePc, " [%s] lossless channel create failed: %s",
+                     qPrintable(m_peerId), e.what());
+            return;
+        }
+    }
+    if (!m_losslessDc->isOpen()) return;
+
+    quint32& seq = m_losslessSeq[int(stream)];
+    const quint32 tsMs = quint32(frame.captureTimeUs / 1000);
+    rtc::binary data;
+    data.reserve(size_t(frame.data.size()) + 10);
+    data.push_back(std::byte(quint8(stream)));
+    data.push_back(std::byte(quint8(frame.keyframe ? 0x1 : 0x0)));
+    for (int shift = 24; shift >= 0; shift -= 8)
+        data.push_back(std::byte(quint8(seq >> shift)));
+    for (int shift = 24; shift >= 0; shift -= 8)
+        data.push_back(std::byte(quint8(tsMs >> shift)));
+    ++seq;
+    auto* raw = reinterpret_cast<const std::byte*>(frame.data.constData());
+    data.insert(data.end(), raw, raw + frame.data.size());
+    try {
+        m_losslessDc->send(data);
+        m_txFrames[int(stream)] += 1;
+        m_txBytes[int(stream)] += quint64(frame.data.size());
+    } catch (const std::exception& e) {
+        qCDebug(logVoicePc, " [%s] lossless send failed: %s",
+               qPrintable(m_peerId), e.what());
+    }
+}
+
+qint64 PeerConnectionManager::losslessBufferedAmount() const {
+    return m_losslessDc ? qint64(m_losslessDc->bufferedAmount()) : 0;
 }
 
 void PeerConnectionManager::addRemoteCandidate(const std::string& candidate, const std::string& mid) {

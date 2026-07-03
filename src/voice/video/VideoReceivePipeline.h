@@ -31,7 +31,12 @@ public:
                          VideoCodecKind codec, QObject* parent = nullptr);
     ~VideoReceivePipeline() override;
 
-    void submitAccessUnit(const QByteArray& au);   // thread-safe
+    VideoCodecKind codec() const { return m_codec; }
+
+    // Thread-safe. `keyframeHint` marks the AU as a keyframe when the
+    // transport knows (lossless framing carries a flag; H.264 AUs are
+    // scanned for IDR NALs instead and can pass false).
+    void submitAccessUnit(const QByteArray& au, bool keyframeHint = false);
 
     // Cumulative receive counters, read by VoiceEngine's 500 ms
     // receiver-report tick and sent to the remote sender, which
@@ -56,7 +61,8 @@ private:
     QObject m_worker;
 
     QMutex m_mutex;
-    QList<QByteArray> m_queue;
+    struct QueuedAu { QByteArray data; bool keyframe = false; };
+    QList<QueuedAu> m_queue;
     std::atomic<bool> m_drainQueued{false};
     std::atomic<quint64> m_rxFrames{0};
     std::atomic<quint64> m_rxBytes{0};

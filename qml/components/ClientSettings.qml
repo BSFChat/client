@@ -638,6 +638,34 @@ Popup {
                     }
 
                     SettingRow {
+                        title: "Lossless mode"
+                        description: "Mathematically lossless AV1 — every "
+                                   + "pixel arrives exactly as captured. "
+                                   + "Bandwidth is whatever the content "
+                                   + "costs (LAN-class links); frames drop "
+                                   + "rather than delay when it can't keep "
+                                   + "up. Used only when everyone in the "
+                                   + "call supports it."
+                        RowLayout {
+                            spacing: Theme.sp.s3
+                            ThemedSwitch {
+                                enabled: !serverManager.activeServer
+                                      || serverManager.activeServer.allowLossless
+                                checked: appSettings.screenShareLossless
+                                onToggled: appSettings.screenShareLossless = checked
+                            }
+                            Text {
+                                visible: serverManager.activeServer
+                                      && !serverManager.activeServer.allowLossless
+                                text: "disabled by server policy"
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.xs
+                                color: Theme.warning
+                            }
+                        }
+                    }
+
+                    SettingRow {
                         title: "JPEG quality (legacy peers)"
                         description: "Only used toward older clients that "
                                    + "don't speak the H.264 video path. 1 is "

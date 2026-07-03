@@ -46,9 +46,17 @@ static int g_frameIntervalMs = 200;
 static int g_jpegQuality = 60;
 static int g_maxWidth = 1280;
 // Resolved encoder config for the RTP path — same resolution/fps
-// source as the JPEG globals; bitrates are fixed until the quality
-// settings phase adds user/server knobs.
+// source as the JPEG globals.
 static EncoderConfig g_encoderConfig;
+// Lossless-tier resolution: user toggle ∧ server policy. The final
+// gate (every peer advertises av1-dc) is checked per push because
+// peers churn.
+static bool g_losslessWanted = false;
+static bool g_losslessAllowed = true;
+// Admission budget for the reliable lossless channel: with more than
+// this queued toward any peer, capture frames are DROPPED (never
+// delayed) until the channel drains.
+static constexpr qint64 kLosslessBufferBudget = 2 * 1024 * 1024;
 
 ScreenShareController::ScreenShareController(QObject* parent)
     : QObject(parent)
@@ -155,8 +163,12 @@ ScreenShareController::ScreenShareController(QObject* parent)
         [this](int, const EncodedFrame& frame) {
             if (!m_servers) return;
             if (auto* vs = m_servers->voiceServer()) {
-                if (auto* voice = vs->voiceEngine())
-                    voice->broadcastEncodedVideo(VideoStreamId::Screen, frame);
+                if (auto* voice = vs->voiceEngine()) {
+                    if (frame.codec == VideoCodecKind::Av1Lossless)
+                        voice->broadcastLosslessVideo(VideoStreamId::Screen, frame);
+                    else
+                        voice->broadcastEncodedVideo(VideoStreamId::Screen, frame);
+                }
             }
         });
 
@@ -195,6 +207,7 @@ void ScreenShareController::setSettings(Settings* settings)
     connect(settings, &Settings::screenShareJpegQualityChanged, this, reapply);
     connect(settings, &Settings::screenShareTargetKbpsChanged, this, reapply);
     connect(settings, &Settings::screenShareKeyframeSecChanged, this, reapply);
+    connect(settings, &Settings::screenShareLosslessChanged, this, reapply);
 }
 
 QVariantList ScreenShareController::availableScreens() const
@@ -399,6 +412,14 @@ static void applyEffectiveQuality(Settings* settings, ServerManager* servers)
     g_encoderConfig.keyframeIntervalSec = std::clamp(userGop, 1, 30);
     g_encoderConfig.screenContent = true;
 
+    g_losslessWanted = settings && settings->screenShareLossless();
+    g_losslessAllowed = true;
+    if (servers) {
+        auto* host = servers->voiceServer();
+        if (!host) host = servers->activeServer();
+        if (host) g_losslessAllowed = host->allowLossless();
+    }
+
     qInfo("[screenshare] effective fps=%d maxW=%d Q=%d "
           "(user fps=%d maxW=%d Q=%d, server caps fps=%d maxW=%d Q=%d)",
           fps, maxW, jpegQ,
@@ -581,22 +602,45 @@ void ScreenShareController::pushFrameToPeers()
     // peer joined still upgrades the moment one appears.
     if (voice->hasVideoCapablePeers()) {
         voice->prepareVideoSend();
-        // Emit the best profile every current receiver decodes — a
-        // profile flip rebuilds the encoder session and IDRs.
-        g_encoderConfig.profile = voice->negotiatedH264Profile();
-        // Rate-controller outputs override the static envelope: the
-        // governor moves bitrate live and steps the resolution ladder
-        // down/up with the measured delivery ratio.
-        m_rate->setEnvelope(250, g_encoderConfig.maxBitrateKbps,
-                            g_encoderConfig.fps, g_maxWidth);
-        m_rate->setActive(true);
-        EncoderConfig cfg = g_encoderConfig;
-        cfg.targetBitrateKbps = m_rate->targetKbps();
-        cfg.maxBitrateKbps = m_rate->maxKbps();
-        cfg.width = cfg.height = qMin(g_maxWidth, m_rate->longEdge());
-        m_pipeline->configure(cfg);
-        m_pipeline->submitFrame(m_pendingFrame,
-                                QDateTime::currentMSecsSinceEpoch() * 1000);
+        // True lossless (AV1 identity-I444 over the reliable channel)
+        // requires: user toggle + server policy + EVERY capable peer
+        // advertising av1-dc. Mixed fleets fall back to H.264 for
+        // everyone rather than running two encoders.
+        const bool lossless = g_losslessWanted && g_losslessAllowed
+            && voice->allPeersSupportLossless();
+        if (lossless) {
+            m_rate->setActive(false);   // bitrate is content-determined
+            // Admission control: never queue latency — drop this
+            // capture frame while any peer's channel is backed up.
+            if (voice->losslessBackpressure(kLosslessBufferBudget)) {
+                setTransmitting(canTransmit);
+                m_pendingFrame = {};
+                return;
+            }
+            EncoderConfig cfg = g_encoderConfig;
+            cfg.codec = VideoCodecKind::Av1Lossless;
+            cfg.lossless = true;
+            m_pipeline->configure(cfg);
+            m_pipeline->submitFrame(m_pendingFrame,
+                                    QDateTime::currentMSecsSinceEpoch() * 1000);
+        } else {
+            // Emit the best profile every current receiver decodes — a
+            // profile flip rebuilds the encoder session and IDRs.
+            g_encoderConfig.profile = voice->negotiatedH264Profile();
+            // Rate-controller outputs override the static envelope:
+            // the governor moves bitrate live and steps the resolution
+            // ladder down/up with the measured delivery ratio.
+            m_rate->setEnvelope(250, g_encoderConfig.maxBitrateKbps,
+                                g_encoderConfig.fps, g_maxWidth);
+            m_rate->setActive(true);
+            EncoderConfig cfg = g_encoderConfig;
+            cfg.targetBitrateKbps = m_rate->targetKbps();
+            cfg.maxBitrateKbps = m_rate->maxKbps();
+            cfg.width = cfg.height = qMin(g_maxWidth, m_rate->longEdge());
+            m_pipeline->configure(cfg);
+            m_pipeline->submitFrame(m_pendingFrame,
+                                    QDateTime::currentMSecsSinceEpoch() * 1000);
+        }
     }
 
     // Legacy JPEG path — only when someone still needs it (no open

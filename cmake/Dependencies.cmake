@@ -57,6 +57,27 @@ if(BSFCHAT_ENABLE_VOICE)
         endif()
     endforeach()
 
+    # libaom — AV1 reference codec (BSD-2), used exclusively for the
+    # mathematically-lossless tier (AV1E_SET_LOSSLESS + identity-matrix
+    # I444). Desktop only; needs nasm on x86 hosts.
+    if(NOT ANDROID AND NOT IOS)
+        FetchContent_Declare(
+            libaom
+            GIT_REPOSITORY https://aomedia.googlesource.com/aom
+            GIT_TAG        v3.12.1
+        )
+        set(ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+        set(ENABLE_TOOLS OFF CACHE BOOL "" FORCE)
+        set(ENABLE_DOCS OFF CACHE BOOL "" FORCE)
+        # libaom's optional internal libyuv OBJECT target is also named
+        # `yuv` and collides with the real libyuv above; it's only used
+        # by examples/tuning we don't build.
+        set(CONFIG_LIBYUV 0 CACHE INTERNAL "" FORCE)
+        FetchContent_MakeAvailable(libaom)
+        set(BSFCHAT_HAVE_AOM ON)
+    endif()
+
     # openh264 — BSD H.264 software encoder/decoder. The Linux default
     # codec and the software fallback on macOS. NOT used on Windows
     # (Media Foundation ships a guaranteed software H.264 MFT) or on

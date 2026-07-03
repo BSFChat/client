@@ -194,7 +194,14 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
     // RTP video receive: reassembled access units → per-peer decoder.
     connect(peer, &PeerConnectionManager::videoFrameReceived,
             this, [this, userId](int streamId, const QByteArray& au) {
-                recvPipeline(userId, streamId)->submitAccessUnit(au);
+                recvPipeline(userId, streamId,
+                             VideoCodecKind::H264)->submitAccessUnit(au);
+            });
+    // Lossless tier: AV1 temporal units off the reliable channel.
+    connect(peer, &PeerConnectionManager::losslessFrameReceived,
+            this, [this, userId](int streamId, const QByteArray& tu, bool kf) {
+                recvPipeline(userId, streamId, VideoCodecKind::Av1Lossless)
+                    ->submitAccessUnit(tu, kf);
             });
     // Peer PLI'd our send stream, or its track just opened — either
     // way the next frame we send must be an IDR (a late joiner can't
@@ -294,6 +301,8 @@ nlohmann::json VoiceEngine::localCapsJson() {
     caps.h264ProfilesDecode = VideoDecoder::h264DecodeProfiles();
     if (!caps.h264ProfilesEncode.isEmpty() || !caps.h264ProfilesDecode.isEmpty())
         caps.videoCodecs << QStringLiteral("h264");
+    if (VideoEncoder::queryCaps(VideoCodecKind::Av1Lossless).losslessSupported)
+        caps.lossless << QStringLiteral("av1-dc");
     return caps.toJson();
 }
 
@@ -380,6 +389,34 @@ void VoiceEngine::broadcastEncodedVideo(VideoStreamId stream, const EncodedFrame
     }
 }
 
+void VoiceEngine::broadcastLosslessVideo(VideoStreamId stream, const EncodedFrame& frame) {
+    if (!m_running) return;
+    static const QString kAv1Dc = QStringLiteral("av1-dc");
+    for (auto* peer : m_peers) {
+        if (peer && peer->remoteCaps().lossless.contains(kAv1Dc))
+            peer->sendLosslessFrame(stream, frame);
+    }
+}
+
+bool VoiceEngine::allPeersSupportLossless() const {
+    static const QString kAv1Dc = QStringLiteral("av1-dc");
+    bool any = false;
+    for (auto* peer : m_peers) {
+        if (!peer || !peer->remoteSupportsVideoRtp()) continue;
+        if (peer->remoteCaps().videoCodecs.isEmpty()) continue;
+        if (!peer->remoteCaps().lossless.contains(kAv1Dc)) return false;
+        any = true;
+    }
+    return any;
+}
+
+bool VoiceEngine::losslessBackpressure(qint64 budgetBytes) const {
+    for (auto* peer : m_peers) {
+        if (peer && peer->losslessBufferedAmount() > budgetBytes) return true;
+    }
+    return false;
+}
+
 bool VoiceEngine::hasLegacyOpenPeers(VideoStreamId stream) const {
     // "Needs the JPEG path": open data channel but no open video
     // track for this stream — covers legacy clients AND capable peers
@@ -414,11 +451,17 @@ H264Profile VoiceEngine::negotiatedH264Profile() const {
     return H264Profile::High;
 }
 
-VideoReceivePipeline* VoiceEngine::recvPipeline(const QString& userId, int streamId) {
+VideoReceivePipeline* VoiceEngine::recvPipeline(const QString& userId, int streamId,
+                                                VideoCodecKind codec) {
     const QPair<QString, int> key{userId, streamId};
-    if (auto* existing = m_recvPipelines.value(key)) return existing;
+    if (auto* existing = m_recvPipelines.value(key)) {
+        if (existing->codec() == codec) return existing;
+        // Sender switched codec mid-call (lossless toggle) — rebuild.
+        m_recvPipelines.remove(key);
+        existing->deleteLater();
+    }
     auto* pipeline = new VideoReceivePipeline(userId, VideoStreamId(streamId),
-                                              VideoCodecKind::H264, this);
+                                              codec, this);
     m_recvPipelines[key] = pipeline;
     connect(pipeline, &VideoReceivePipeline::frameDecoded,
             this, &VoiceEngine::peerVideoFrameDecoded);

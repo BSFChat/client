@@ -173,10 +173,45 @@ PlanarFrame toI420(const QVideoFrame& in, int maxLongEdge, qint64 captureTimeUs)
 }
 
 PlanarFrame toI444Identity(const QVideoFrame& in, qint64 captureTimeUs) {
-    Q_UNUSED(in);
-    Q_UNUSED(captureTimeUs);
-    // Implemented with the AV1 lossless tier (P7).
-    return {};
+    if (!in.isValid()) return {};
+    // Go through QImage/ARGB32 unconditionally: this path exists for
+    // bit-exactness, so a single well-defined RGB source beats a fast
+    // path per capture format. (For camera sources that arrive as
+    // 4:2:0 YUV, "lossless" means lossless relative to this RGB
+    // conversion — the subsampling already happened at capture.)
+    QImage img = in.toImage();
+    if (img.isNull()) return {};
+    if (img.format() != QImage::Format_ARGB32
+        && img.format() != QImage::Format_RGB32) {
+        img = img.convertToFormat(QImage::Format_ARGB32);
+    }
+    const int w = img.width() & ~1;
+    const int h = img.height() & ~1;
+    if (w < 16 || h < 16) return {};
+
+    PlanarFrame f;
+    f.layout = PlanarFrame::Layout::I444Identity;
+    f.width = w;
+    f.height = h;
+    f.strideY = f.strideU = f.strideV = w;
+    f.y.resize(w * h);
+    f.u.resize(w * h);
+    f.v.resize(w * h);
+    f.captureTimeUs = captureTimeUs;
+
+    // Identity-matrix CICP plane mapping: Y←G, U←B, V←R.
+    auto* g = reinterpret_cast<uint8_t*>(f.y.data());
+    auto* b = reinterpret_cast<uint8_t*>(f.u.data());
+    auto* r = reinterpret_cast<uint8_t*>(f.v.data());
+    for (int row = 0; row < h; ++row) {
+        const auto* src = img.constScanLine(row);   // B,G,R,A per pixel (LE)
+        for (int x = 0; x < w; ++x) {
+            b[row * w + x] = src[4 * x + 0];
+            g[row * w + x] = src[4 * x + 1];
+            r[row * w + x] = src[4 * x + 2];
+        }
+    }
+    return f;
 }
 
 } // namespace FrameConverter

@@ -58,6 +58,7 @@ struct EncoderConfig {
 struct EncodedFrame {
     QByteArray data;        // H264: Annex-B access unit (long start codes)
                             // AV1: complete temporal unit
+    VideoCodecKind codec = VideoCodecKind::H264;
     bool keyframe = false;
     qint64 captureTimeUs = 0;
     int width = 0;

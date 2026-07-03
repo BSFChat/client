@@ -87,6 +87,17 @@ public:
     void prepareVideoSend();
     // Fan an encoded access unit out to every peer with an open track.
     void broadcastEncodedVideo(VideoStreamId stream, const EncodedFrame& frame);
+    // Fan an AV1 lossless temporal unit out over the reliable
+    // "video-lossless" channels.
+    void broadcastLosslessVideo(VideoStreamId stream, const EncodedFrame& frame);
+    // True when every current video-capable peer advertises the
+    // av1-dc lossless capability — the sender's gate for enabling
+    // lossless mode (mixed fleets fall back to H.264 for everyone).
+    bool allPeersSupportLossless() const;
+    // Admission control: true when any peer's lossless channel has
+    // more than `budgetBytes` queued — the sender should drop the
+    // next capture frame instead of queueing latency.
+    bool losslessBackpressure(qint64 budgetBytes) const;
     // True if any connected peer still needs the legacy JPEG path for
     // `stream` (no open video track for it).
     bool hasLegacyOpenPeers(VideoStreamId stream) const;
@@ -150,8 +161,11 @@ private:
     // Add video tracks toward `userId` when we're actively sending
     // and its caps allow — called wherever caps become known.
     void maybeSetupVideoFor(const QString& userId);
-    // Lazily create the per-peer decode pipeline for a stream.
-    VideoReceivePipeline* recvPipeline(const QString& userId, int streamId);
+    // Lazily create the per-peer decode pipeline for a stream. A
+    // codec switch (H.264 ↔ AV1 lossless mid-call) tears the old
+    // pipeline down and builds a fresh one.
+    VideoReceivePipeline* recvPipeline(const QString& userId, int streamId,
+                                       VideoCodecKind codec);
     void dropRecvPipelines(const QString& userId);
 
     MatrixClient* m_client;

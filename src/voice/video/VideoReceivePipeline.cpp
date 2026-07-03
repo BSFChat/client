@@ -48,7 +48,8 @@ VideoReceivePipeline::~VideoReceivePipeline() {
     m_thread.wait();
 }
 
-void VideoReceivePipeline::submitAccessUnit(const QByteArray& au) {
+void VideoReceivePipeline::submitAccessUnit(const QByteArray& au,
+                                            bool keyframeHint) {
     m_rxFrames.fetch_add(1);
     m_rxBytes.fetch_add(quint64(au.size()));
     bool overflowed = false;
@@ -60,7 +61,7 @@ void VideoReceivePipeline::submitAccessUnit(const QByteArray& au) {
             m_queue.clear();
             overflowed = true;
         }
-        m_queue.append(au);
+        m_queue.append({au, keyframeHint});
     }
     if (overflowed) {
         qCWarning(logVideoRecv, "[%s/%d] decode backlog dropped",
@@ -79,12 +80,13 @@ void VideoReceivePipeline::submitAccessUnit(const QByteArray& au) {
 void VideoReceivePipeline::drainQueue() {
     m_drainQueued.store(false);
     for (;;) {
-        QByteArray au;
+        QueuedAu queued;
         {
             QMutexLocker lock(&m_mutex);
             if (m_queue.isEmpty()) return;
-            au = m_queue.takeFirst();
+            queued = m_queue.takeFirst();
         }
+        const QByteArray& au = queued.data;
 
         if (!m_decoder) {
             m_decoder = VideoDecoder::create(m_codec);
@@ -99,7 +101,11 @@ void VideoReceivePipeline::drainQueue() {
         }
 
         if (m_waitingForKeyframe) {
-            if (!containsIdr(au)) continue;
+            // H.264 AUs are scanned for an IDR NAL; other codecs rely
+            // on the transport-provided keyframe flag.
+            const bool isKey = m_codec == VideoCodecKind::H264
+                ? containsIdr(au) : queued.keyframe;
+            if (!isKey) continue;
             m_waitingForKeyframe = false;
         }
 

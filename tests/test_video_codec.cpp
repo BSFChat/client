@@ -57,6 +57,11 @@ private slots:
     void vtEncodesOpenh264Decodes();
     void openh264EncodesVtDecodes();
 #endif
+#ifdef BSFCHAT_HAVE_AOM
+    // The lossless tier's entire contract: RGB in == RGB out, bit for
+    // bit, across encode → decode.
+    void av1LosslessIsBitExact();
+#endif
 };
 
 void TestVideoCodec::frameConverterProducesI420() {
@@ -217,6 +222,57 @@ void TestVideoCodec::openh264EncodesVtDecodes() {
     OpenH264Encoder enc;
     MacVTDecoder dec;
     crossDecode(enc, dec, H264Profile::ConstrainedBaseline);
+}
+#endif
+
+#ifdef BSFCHAT_HAVE_AOM
+void TestVideoCodec::av1LosslessIsBitExact() {
+    auto encoder = VideoEncoder::create(VideoCodecKind::Av1Lossless);
+    QVERIFY(encoder != nullptr);
+    QVERIFY(encoder->caps().losslessSupported);
+    auto decoder = VideoDecoder::create(VideoCodecKind::Av1Lossless);
+    QVERIFY(decoder != nullptr);
+    QVERIFY(decoder->init(VideoCodecKind::Av1Lossless));
+
+    EncoderConfig cfg;
+    cfg.codec = VideoCodecKind::Av1Lossless;
+    cfg.lossless = true;
+    cfg.width = 320;
+    cfg.height = 240;
+    cfg.fps = 10;
+    QVERIFY(encoder->init(cfg));
+
+    for (int i = 0; i < 5; ++i) {
+        QVideoFrame src = makeTestFrame(320, 240, i);
+        PlanarFrame planar = FrameConverter::toI444Identity(src, i * 100000);
+        QVERIFY(planar.isValid());
+        QCOMPARE(planar.layout, PlanarFrame::Layout::I444Identity);
+
+        EncodedFrame enc;
+        QVERIFY(encoder->encode(planar, i == 0, enc));
+        QVideoFrame out;
+        QCOMPARE(int(decoder->decode(enc.data, out)),
+                 int(VideoDecoder::Result::Ok));
+        QCOMPARE(out.width(), 320);
+        QCOMPARE(out.height(), 240);
+
+        // Bit-exactness: decoded BGRA must equal the source pixels.
+        QImage decoded = out.toImage().convertToFormat(QImage::Format_ARGB32);
+        QImage original = src.toImage().convertToFormat(QImage::Format_ARGB32);
+        QVERIFY(!decoded.isNull() && !original.isNull());
+        for (int y = 0; y < 240; ++y) {
+            const auto* d = reinterpret_cast<const quint32*>(decoded.constScanLine(y));
+            const auto* o = reinterpret_cast<const quint32*>(original.constScanLine(y));
+            for (int x = 0; x < 320; ++x) {
+                if ((d[x] | 0xFF000000u) != (o[x] | 0xFF000000u)) {
+                    QFAIL(qPrintable(QStringLiteral(
+                        "pixel mismatch frame %1 at (%2,%3): %4 != %5")
+                        .arg(i).arg(x).arg(y)
+                        .arg(d[x], 8, 16).arg(o[x], 8, 16)));
+                }
+            }
+        }
+    }
 }
 #endif
 

@@ -21,6 +21,10 @@
 #include "voice/video/MFEncoder.h"
 #include "voice/video/MFDecoder.h"
 #endif
+#ifdef BSFCHAT_HAVE_AOM
+#include "voice/video/AomLosslessEncoder.h"
+#include "voice/video/AomLosslessDecoder.h"
+#endif
 
 std::unique_ptr<VideoEncoder> VideoEncoder::create(VideoCodecKind kind,
                                                    bool preferHardware) {
@@ -37,6 +41,10 @@ std::unique_ptr<VideoEncoder> VideoEncoder::create(VideoCodecKind kind,
         return std::make_unique<OpenH264Encoder>();
 #endif
     }
+#ifdef BSFCHAT_HAVE_AOM
+    if (kind == VideoCodecKind::Av1Lossless)
+        return std::make_unique<AomLosslessEncoder>();
+#endif
     Q_UNUSED(preferHardware);
     return nullptr;
 }
@@ -49,6 +57,9 @@ VideoEncoder::Caps VideoEncoder::queryCaps(VideoCodecKind kind) {
         return {false, false, false};
 #endif
     }
+#ifdef BSFCHAT_HAVE_AOM
+    if (kind == VideoCodecKind::Av1Lossless) return {false, true, false};
+#endif
     return {};
 }
 
@@ -77,6 +88,10 @@ std::unique_ptr<VideoDecoder> VideoDecoder::create(VideoCodecKind kind,
         return std::make_unique<OpenH264Decoder>();
 #endif
     }
+#ifdef BSFCHAT_HAVE_AOM
+    if (kind == VideoCodecKind::Av1Lossless)
+        return std::make_unique<AomLosslessDecoder>();
+#endif
     Q_UNUSED(preferHardware);
     return nullptr;
 }

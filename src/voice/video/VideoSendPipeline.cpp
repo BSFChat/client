@@ -84,8 +84,12 @@ void VideoSendPipeline::processPending() {
     m_processQueued.store(false);
     if (!frame.isValid()) return;
 
+    // Lossless takes the identity-I444 path at FULL capture size —
+    // any scaling would be lossy, defeating the tier's whole point.
     const int maxLongEdge = qMax(config.width, config.height);
-    PlanarFrame planar = FrameConverter::toI420(frame, maxLongEdge, tsUs);
+    PlanarFrame planar = config.lossless
+        ? FrameConverter::toI444Identity(frame, tsUs)
+        : FrameConverter::toI420(frame, maxLongEdge, tsUs);
     if (!planar.isValid()) return;
 
     // The session tracks the *converted* dimensions — sources change
@@ -126,5 +130,6 @@ void VideoSendPipeline::processPending() {
         if (kf) m_forceKeyframe.store(true); // don't lose the request
         return;
     }
+    out.codec = m_sessionConfig.codec;
     emit encodedFrameReady(int(m_streamId), out);
 }

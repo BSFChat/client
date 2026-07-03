@@ -82,6 +82,21 @@ public:
     // compared against the peer's receiver reports to derive loss.
     quint64 videoTxFrames(VideoStreamId stream) const { return m_txFrames[int(stream)]; }
     quint64 videoTxBytes(VideoStreamId stream) const { return m_txBytes[int(stream)]; }
+
+    // ---- Lossless tier (AV1 over a dedicated reliable channel) ----
+    // v0.24.5 has no AV1 RTP depacketizer, and lossless wants reliable
+    // delivery anyway (a lossy lossless stream is pointless), so these
+    // frames ride a separate ordered data channel "video-lossless",
+    // opened in-band (no renegotiation). Framing per message:
+    //   [u8 streamId][u8 flags][u32be seq][u32be tsMs][AV1 TU]
+    // flags bit0 = keyframe (AV1 keyframes aren't cheaply detectable
+    // from the bitstream; the receive pipeline needs the hint for
+    // post-error resync).
+    void sendLosslessFrame(VideoStreamId stream, const EncodedFrame& frame);
+    // Admission-control input: bytes queued but unsent on the channel.
+    // The sender drops capture frames (never delays them) while this
+    // exceeds its budget.
+    qint64 losslessBufferedAmount() const;
     void sendAudioFrame(const QByteArray& frame);
     // Send a JPEG-encoded screen-share frame to this peer over the
     // same SCTP data channel. Wire format: [tag][payload] where
@@ -121,9 +136,10 @@ signals:
     void cameraFrameReceived(const QByteArray& jpegData);
     // 0x04 control payload (JSON, tag stripped).
     void controlMessageReceived(const QByteArray& json);
-    // 0x05 lossless-video payload (framing stripped by the receiver
-    // pipeline, not here). Wired up by the AV1 lossless tier.
-    void losslessFrameReceived(const QByteArray& payload);
+    // AV1 temporal unit from the peer's "video-lossless" channel
+    // (framing already stripped).
+    void losslessFrameReceived(int streamId, const QByteArray& temporalUnit,
+                               bool keyframe);
     // Reassembled H.264 access unit from the remote's video track.
     void videoFrameReceived(int streamId, const QByteArray& accessUnit);
     // The send direction of a video track became usable.
@@ -141,6 +157,7 @@ private:
     // depacketizer → receiving session) on a track, either one we
     // added (offerer) or one delivered by onTrack (answerer).
     void attachVideoTrack(VideoStreamId stream, std::shared_ptr<rtc::Track> track);
+    void setupLosslessChannel(std::shared_ptr<rtc::DataChannel> dc);
 
     QString m_peerId;
     QString m_callId;
@@ -180,4 +197,9 @@ private:
     QTimer* m_srTimer = nullptr;   // 1 s sender-report tick, lazily created
     quint64 m_txFrames[kVideoStreamCount] = {};
     quint64 m_txBytes[kVideoStreamCount] = {};
+
+    // Lossless channel (created lazily by the sending side; adopted
+    // via onDataChannel label match on the receiving side).
+    std::shared_ptr<rtc::DataChannel> m_losslessDc;
+    quint32 m_losslessSeq[kVideoStreamCount] = {};
 };
