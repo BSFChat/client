@@ -517,6 +517,93 @@ void Settings::setScreenShareJpegQuality(int q)
     emit screenShareJpegQualityChanged();
 }
 
+// ── RTP-video knobs ───────────────────────────────────────────────
+// Envelopes:
+//   targetKbps  250 .. 100000  (metered link .. LAN near-lossless)
+//   keyframe    1 .. 30 s      (shorter = faster loss recovery,
+//                               longer = better compression)
+int Settings::screenShareTargetKbps() const
+{
+    return std::clamp(m_settings.value(
+        QStringLiteral("screenShare/targetKbps"), 4000).toInt(), 250, 100000);
+}
+
+void Settings::setScreenShareTargetKbps(int kbps)
+{
+    kbps = std::clamp(kbps, 250, 100000);
+    if (kbps == screenShareTargetKbps()) return;
+    m_settings.setValue(QStringLiteral("screenShare/targetKbps"), kbps);
+    emit screenShareTargetKbpsChanged();
+}
+
+int Settings::screenShareKeyframeSec() const
+{
+    return std::clamp(m_settings.value(
+        QStringLiteral("screenShare/keyframeSec"), 3).toInt(), 1, 30);
+}
+
+void Settings::setScreenShareKeyframeSec(int sec)
+{
+    sec = std::clamp(sec, 1, 30);
+    if (sec == screenShareKeyframeSec()) return;
+    m_settings.setValue(QStringLiteral("screenShare/keyframeSec"), sec);
+    emit screenShareKeyframeSecChanged();
+}
+
+bool Settings::screenShareLossless() const
+{
+    return m_settings.value(QStringLiteral("screenShare/lossless"), false).toBool();
+}
+
+void Settings::setScreenShareLossless(bool on)
+{
+    if (on == screenShareLossless()) return;
+    m_settings.setValue(QStringLiteral("screenShare/lossless"), on);
+    emit screenShareLosslessChanged();
+}
+
+int Settings::cameraFps() const
+{
+    return std::clamp(m_settings.value(
+        QStringLiteral("camera/fps"), 30).toInt(), 5, 60);
+}
+
+void Settings::setCameraFps(int fps)
+{
+    fps = std::clamp(fps, 5, 60);
+    if (fps == cameraFps()) return;
+    m_settings.setValue(QStringLiteral("camera/fps"), fps);
+    emit cameraFpsChanged();
+}
+
+int Settings::cameraMaxWidth() const
+{
+    return std::clamp(m_settings.value(
+        QStringLiteral("camera/maxWidth"), 1280).toInt(), 320, 1920);
+}
+
+void Settings::setCameraMaxWidth(int px)
+{
+    px = std::clamp(px, 320, 1920);
+    if (px == cameraMaxWidth()) return;
+    m_settings.setValue(QStringLiteral("camera/maxWidth"), px);
+    emit cameraMaxWidthChanged();
+}
+
+int Settings::cameraTargetKbps() const
+{
+    return std::clamp(m_settings.value(
+        QStringLiteral("camera/targetKbps"), 1500).toInt(), 150, 20000);
+}
+
+void Settings::setCameraTargetKbps(int kbps)
+{
+    kbps = std::clamp(kbps, 150, 20000);
+    if (kbps == cameraTargetKbps()) return;
+    m_settings.setValue(QStringLiteral("camera/targetKbps"), kbps);
+    emit cameraTargetKbpsChanged();
+}
+
 bool Settings::autoUpdateCheck() const
 {
     return m_settings.value(QStringLiteral("autoUpdateCheck"), true).toBool();

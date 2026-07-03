@@ -193,6 +193,8 @@ void ScreenShareController::setSettings(Settings* settings)
     connect(settings, &Settings::screenShareFpsChanged, this, reapply);
     connect(settings, &Settings::screenShareMaxWidthChanged, this, reapply);
     connect(settings, &Settings::screenShareJpegQualityChanged, this, reapply);
+    connect(settings, &Settings::screenShareTargetKbpsChanged, this, reapply);
+    connect(settings, &Settings::screenShareKeyframeSecChanged, this, reapply);
 }
 
 QVariantList ScreenShareController::availableScreens() const
@@ -351,8 +353,10 @@ static void applyEffectiveQuality(Settings* settings, ServerManager* servers)
     int userFps   = settings ? settings->screenShareFps() : 5;
     int userMaxW  = settings ? settings->screenShareMaxWidth() : 1280;
     int userJpegQ = settings ? settings->screenShareJpegQuality() : 60;
+    int userKbps  = settings ? settings->screenShareTargetKbps() : 4000;
+    int userGop   = settings ? settings->screenShareKeyframeSec() : 3;
 
-    int srvFps = -1, srvW = -1, srvJpegQ = -1;
+    int srvFps = -1, srvW = -1, srvJpegQ = -1, srvKbps = -1;
     if (servers) {
         // Caps come from the server hosting the voice session the
         // frames go to; fall back to the focused server when the
@@ -363,16 +367,19 @@ static void applyEffectiveQuality(Settings* settings, ServerManager* servers)
             srvFps    = host->maxScreenShareFps();
             srvW      = host->maxScreenShareWidth();
             srvJpegQ  = host->maxScreenShareJpeg();
+            srvKbps   = host->maxScreenShareBitrate();
         }
     }
 
     int fps   = (srvFps   >= 0) ? std::min(userFps,   srvFps)   : userFps;
     int maxW  = (srvW     >= 0) ? std::min(userMaxW,  srvW)     : userMaxW;
     int jpegQ = (srvJpegQ >= 0) ? std::min(userJpegQ, srvJpegQ) : userJpegQ;
+    int kbps  = (srvKbps  >= 0) ? std::min(userKbps,  srvKbps)  : userKbps;
 
     fps   = std::clamp(fps,   1,  60);
     maxW  = std::clamp(maxW,  480, 3840);
     jpegQ = std::clamp(jpegQ, 1,  100);
+    kbps  = std::clamp(kbps,  250, 100000);
 
     g_frameIntervalMs = 1000 / fps;
     g_jpegQuality = jpegQ;
@@ -380,15 +387,16 @@ static void applyEffectiveQuality(Settings* settings, ServerManager* servers)
 
     // RTP encoder config shares the resolved fps/resolution envelope.
     // width/height express the max long edge — the pipeline follows
-    // the source's actual (scaled) dimensions per frame. Bitrates are
-    // placeholder constants until the quality-settings phase.
+    // the source's actual (scaled) dimensions per frame. The target
+    // bitrate is the rate controller's CEILING; it converges up to it
+    // when delivery is clean and rides below it under loss.
     g_encoderConfig.codec = VideoCodecKind::H264;
     g_encoderConfig.width = maxW;
     g_encoderConfig.height = maxW;
     g_encoderConfig.fps = fps;
-    g_encoderConfig.targetBitrateKbps = 4000;
-    g_encoderConfig.maxBitrateKbps = 10000;
-    g_encoderConfig.keyframeIntervalSec = 3;
+    g_encoderConfig.targetBitrateKbps = kbps;
+    g_encoderConfig.maxBitrateKbps = std::min(kbps + kbps / 2, 100000);
+    g_encoderConfig.keyframeIntervalSec = std::clamp(userGop, 1, 30);
     g_encoderConfig.screenContent = true;
 
     qInfo("[screenshare] effective fps=%d maxW=%d Q=%d "

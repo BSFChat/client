@@ -23,17 +23,16 @@
 #include <algorithm>
 #include <cstring>
 
-// Capture ticks at RTP rate; the JPEG numbers only apply to the
-// legacy branch, which subsamples down to every 6th tick (~5 fps).
+// Capture ticks at RTP rate (interval re-resolved from Settings on
+// every start); the JPEG numbers only apply to the legacy branch,
+// which subsamples the ticks back down to ~5 fps.
 static constexpr int kFrameIntervalMs = 33;
-static constexpr int kLegacyTickDivisor = 6;
 static constexpr int kJpegQuality = 60;
 static constexpr int kMaxWidth = 640;
-// RTP camera envelope (user knobs arrive with the settings phase).
+// RTP camera fallbacks when Settings isn't wired.
 static constexpr int kRtpMaxLongEdge = 1280;
 static constexpr int kRtpFps = 30;
 static constexpr int kRtpTargetKbps = 1500;
-static constexpr int kRtpMaxKbps = 4000;
 
 CameraController::CameraController(QObject* parent)
     : QObject(parent)
@@ -179,6 +178,10 @@ void CameraController::start() { startForCamera(-1); }
 void CameraController::startForCamera(int index)
 {
     if (m_active) return;
+    // Capture cadence follows the user's camera fps (legacy JPEG
+    // subsamples from it); re-resolved on every start.
+    m_throttle->setInterval(1000 / (m_settings ? m_settings->cameraFps()
+                                               : kRtpFps));
 
 #ifdef Q_OS_MACOS
     auto s = mac_camera_permission::status();
@@ -309,28 +312,37 @@ void CameraController::pushFrameToPeers()
         m_wiredEngine = voice;
     }
 
-    // RTP path (capable peers).
+    // RTP path (capable peers). User knobs with hardcoded fallbacks
+    // when Settings isn't wired (tests).
     if (voice->hasVideoCapablePeers()) {
         voice->prepareVideoSend();
-        m_rate->setEnvelope(150, kRtpMaxKbps, kRtpFps, kRtpMaxLongEdge);
+        const int fps = m_settings ? m_settings->cameraFps() : kRtpFps;
+        const int maxEdge = m_settings ? m_settings->cameraMaxWidth()
+                                       : kRtpMaxLongEdge;
+        const int targetKbps = m_settings ? m_settings->cameraTargetKbps()
+                                          : kRtpTargetKbps;
+        m_rate->setEnvelope(150, targetKbps, fps, maxEdge);
         m_rate->setActive(true);
         EncoderConfig cfg;
         cfg.codec = VideoCodecKind::H264;
-        cfg.fps = kRtpFps;
+        cfg.fps = fps;
         cfg.screenContent = false;   // camera tuning: motion over text
         cfg.profile = voice->negotiatedH264Profile();
-        cfg.targetBitrateKbps = qMin(kRtpTargetKbps, m_rate->targetKbps());
+        cfg.targetBitrateKbps = m_rate->targetKbps();
         cfg.maxBitrateKbps = m_rate->maxKbps();
-        cfg.width = cfg.height = qMin(kRtpMaxLongEdge, m_rate->longEdge());
+        cfg.width = cfg.height = qMin(maxEdge, m_rate->longEdge());
         cfg.keyframeIntervalSec = 3;
         m_pipeline->configure(cfg);
         m_pipeline->submitFrame(m_pendingFrame,
                                 QDateTime::currentMSecsSinceEpoch() * 1000);
     }
 
-    // Legacy JPEG path, subsampled back down to ~5 fps.
+    // Legacy JPEG path, subsampled from the capture cadence back
+    // down to ~5 fps.
+    const int legacyDivisor = qMax(1,
+        (m_settings ? m_settings->cameraFps() : kRtpFps) / 5);
     if (voice->hasLegacyOpenPeers(VideoStreamId::Camera)
-        && (m_tick % kLegacyTickDivisor) == 0) {
+        && (m_tick % legacyDivisor) == 0) {
         QImage img = m_pendingFrame.toImage();
         if (img.isNull()) return;
         if (img.width() > kMaxWidth)

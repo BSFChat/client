@@ -578,12 +578,70 @@ Popup {
                     }
 
                     SettingRow {
-                        title: "JPEG quality"
-                        description: "1 is postage-stamp lossy, 100 is "
-                                   + "near-lossless. The default 60 hits a "
-                                   + "good readability/bandwidth balance for "
-                                   + "code + text. For video content, 75–85 "
-                                   + "looks notably better."
+                        title: "Target bitrate"
+                        description: "The steady-state budget for the H.264 "
+                                   + "stream. The adaptive controller climbs "
+                                   + "toward it on a clean link and backs off "
+                                   + "under loss — smoothness always wins over "
+                                   + "quality. 4 Mbps suits 1080p desktops; go "
+                                   + "big on a LAN."
+                        RowLayout {
+                            spacing: Theme.sp.s3
+                            ThemedSlider {
+                                id: bitrateSlider
+                                implicitWidth: 240
+                                from: 250; to: 50000; stepSize: 250
+                                value: appSettings.screenShareTargetKbps
+                                onMoved: appSettings.screenShareTargetKbps = Math.round(value)
+                            }
+                            Text {
+                                Layout.preferredWidth: 80
+                                text: appSettings.screenShareTargetKbps >= 1000
+                                    ? (appSettings.screenShareTargetKbps / 1000).toFixed(1) + " Mbps"
+                                    : appSettings.screenShareTargetKbps + " kbps"
+                                font.family: Theme.fontMono
+                                font.pixelSize: Theme.fontSize.sm
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignRight
+                            }
+                            CapBadge {
+                                cap: serverManager.activeServer
+                                    ? serverManager.activeServer.maxScreenShareBitrate : -1
+                                suffix: " kbps"
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        title: "Keyframe interval"
+                        description: "Seconds between full frames. Shorter "
+                                   + "recovers from packet loss faster; longer "
+                                   + "compresses better on stable links."
+                        RowLayout {
+                            spacing: Theme.sp.s3
+                            ThemedSlider {
+                                id: gopSlider
+                                implicitWidth: 240
+                                from: 1; to: 30; stepSize: 1
+                                value: appSettings.screenShareKeyframeSec
+                                onMoved: appSettings.screenShareKeyframeSec = Math.round(value)
+                            }
+                            Text {
+                                Layout.preferredWidth: 48
+                                text: appSettings.screenShareKeyframeSec + " s"
+                                font.family: Theme.fontMono
+                                font.pixelSize: Theme.fontSize.sm
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        title: "JPEG quality (legacy peers)"
+                        description: "Only used toward older clients that "
+                                   + "don't speak the H.264 video path. 1 is "
+                                   + "postage-stamp lossy, 100 near-lossless."
                         RowLayout {
                             spacing: Theme.sp.s3
                             ThemedSlider {

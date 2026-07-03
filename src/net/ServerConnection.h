@@ -424,11 +424,18 @@ public:
     Q_PROPERTY(int maxScreenShareFps READ maxScreenShareFps NOTIFY maxScreenSharePolicyChanged)
     Q_PROPERTY(int maxScreenShareWidth READ maxScreenShareWidth NOTIFY maxScreenSharePolicyChanged)
     Q_PROPERTY(int maxScreenShareJpeg READ maxScreenShareJpeg NOTIFY maxScreenSharePolicyChanged)
+    // Video-era policy axes: bitrate cap (kbps, -1 = uncapped) and
+    // whether the AV1 lossless tier may be used on this server.
+    Q_PROPERTY(int maxScreenShareBitrate READ maxScreenShareBitrate NOTIFY maxScreenSharePolicyChanged)
+    Q_PROPERTY(bool allowLossless READ allowLossless NOTIFY maxScreenSharePolicyChanged)
     int maxScreenShareFps() const { return m_maxScreenShareFps; }
     int maxScreenShareWidth() const { return m_maxScreenShareWidth; }
     int maxScreenShareJpeg() const { return m_maxScreenShareJpeg; }
+    int maxScreenShareBitrate() const { return m_maxScreenShareBitrate; }
+    bool allowLossless() const { return m_allowLossless; }
     Q_INVOKABLE void setScreenSharePolicy(int maxFps, int maxWidth,
-                                          int maxJpeg);
+                                          int maxJpeg, int maxBitrateKbps,
+                                          bool allowLossless);
     Q_INVOKABLE void setMaxScreenShareQuality(int level);
     Q_INVOKABLE void uploadAvatar(const QString& fileUrl);
     Q_INVOKABLE void fetchProfile(const QString& userId);
@@ -581,6 +588,8 @@ public:
     int m_maxScreenShareFps   = -1;
     int m_maxScreenShareWidth = -1;
     int m_maxScreenShareJpeg  = -1;
+    int m_maxScreenShareBitrate = -1;
+    bool m_allowLossless = true;
     // Global userId → display name, populated from all m.room.member events
     // across every room. MessageModel reads from this pointer.
     QMap<QString, QString> m_userDisplayNames;

@@ -1473,12 +1473,15 @@ void ServerConnection::setMaxScreenShareQuality(int level)
     // axis the server understands.
     setScreenSharePolicy(m_maxScreenShareFps,
                          m_maxScreenShareWidth,
-                         m_maxScreenShareJpeg);
+                         m_maxScreenShareJpeg,
+                         m_maxScreenShareBitrate,
+                         m_allowLossless);
     Q_UNUSED(level);
 }
 
 void ServerConnection::setScreenSharePolicy(int maxFps, int maxWidth,
-                                             int maxJpeg)
+                                             int maxJpeg, int maxBitrateKbps,
+                                             bool allowLossless)
 {
     QString targetRoom = m_activeRoomId;
     if (targetRoom.isEmpty() && m_roomListModel->rowCount() > 0) {
@@ -1494,6 +1497,8 @@ void ServerConnection::setScreenSharePolicy(int maxFps, int maxWidth,
     if (maxFps != m_maxScreenShareFps)     { m_maxScreenShareFps = maxFps; changed = true; }
     if (maxWidth != m_maxScreenShareWidth) { m_maxScreenShareWidth = maxWidth; changed = true; }
     if (maxJpeg != m_maxScreenShareJpeg)   { m_maxScreenShareJpeg = maxJpeg; changed = true; }
+    if (maxBitrateKbps != m_maxScreenShareBitrate) { m_maxScreenShareBitrate = maxBitrateKbps; changed = true; }
+    if (allowLossless != m_allowLossless)  { m_allowLossless = allowLossless; changed = true; }
     if (changed) emit maxScreenSharePolicyChanged();
 
     // Build the wire event. -1 sentinels are dropped from the
@@ -1502,6 +1507,8 @@ void ServerConnection::setScreenSharePolicy(int maxFps, int maxWidth,
     if (maxFps >= 0)   content["max_fps"] = maxFps;
     if (maxWidth >= 0) content["max_width"] = maxWidth;
     if (maxJpeg >= 0)  content["max_jpeg_quality"] = maxJpeg;
+    if (maxBitrateKbps >= 0) content["max_bitrate_kbps"] = maxBitrateKbps;
+    if (!allowLossless) content["allow_lossless"] = false;
     // Keep the legacy preset field aligned so old clients see a
     // sensible cap (largest preset that fits inside the new caps).
     int legacyPreset = 3;  // assume Ultra unless an axis caps lower
@@ -1684,12 +1691,18 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 int maxFps = event.content.data.value("max_fps", -1);
                 int maxWidth = event.content.data.value("max_width", -1);
                 int maxJpeg = event.content.data.value("max_jpeg_quality", -1);
+                int maxKbps = event.content.data.value("max_bitrate_kbps", -1);
+                bool allowLossless = event.content.data.value("allow_lossless", true);
                 if (maxFps != m_maxScreenShareFps
                     || maxWidth != m_maxScreenShareWidth
-                    || maxJpeg != m_maxScreenShareJpeg) {
+                    || maxJpeg != m_maxScreenShareJpeg
+                    || maxKbps != m_maxScreenShareBitrate
+                    || allowLossless != m_allowLossless) {
                     m_maxScreenShareFps = maxFps;
                     m_maxScreenShareWidth = maxWidth;
                     m_maxScreenShareJpeg = maxJpeg;
+                    m_maxScreenShareBitrate = maxKbps;
+                    m_allowLossless = allowLossless;
                     emit maxScreenSharePolicyChanged();
                 }
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomPinnedEvents)) {
