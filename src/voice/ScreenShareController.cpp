@@ -594,7 +594,7 @@ void ScreenShareController::pushFrameToPeers()
     // Legacy JPEG path — only when someone still needs it (no open
     // video track): old clients, Android, or a capable peer whose
     // renegotiation hasn't finished yet.
-    if (voice->hasLegacyOpenPeers()) {
+    if (voice->hasLegacyOpenPeers(VideoStreamId::Screen)) {
         QImage img = m_pendingFrame.toImage();
         if (img.isNull()) {
             if (s_tickCount % 25 == 1)

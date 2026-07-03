@@ -380,13 +380,13 @@ void VoiceEngine::broadcastEncodedVideo(VideoStreamId stream, const EncodedFrame
     }
 }
 
-bool VoiceEngine::hasLegacyOpenPeers() const {
-    // "Needs the JPEG path": open data channel but no open screen
-    // track — covers legacy clients AND capable peers still mid-
-    // renegotiation (broadcastScreenFrame's transition-gap rule).
+bool VoiceEngine::hasLegacyOpenPeers(VideoStreamId stream) const {
+    // "Needs the JPEG path": open data channel but no open video
+    // track for this stream — covers legacy clients AND capable peers
+    // still mid-renegotiation (the broadcast transition-gap rule).
     for (auto* peer : m_peers) {
         if (peer && peer->isChannelOpen()
-            && !peer->hasVideoTrackOpen(VideoStreamId::Screen))
+            && !peer->hasVideoTrackOpen(stream))
             return true;
     }
     return false;
@@ -733,6 +733,10 @@ void VoiceEngine::broadcastCameraFrame(const QByteArray& jpegData) {
               int(m_peers.size()), int(jpegData.size()));
     }
     for (auto* peer : m_peers) {
-        if (peer) peer->sendCameraFrame(jpegData);
+        if (!peer) continue;
+        // Same transition-gap rule as the screen stream: JPEG flows
+        // until the peer's camera track opens, then RTP takes over.
+        if (peer->hasVideoTrackOpen(VideoStreamId::Camera)) continue;
+        peer->sendCameraFrame(jpegData);
     }
 }

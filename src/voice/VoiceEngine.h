@@ -87,8 +87,9 @@ public:
     void prepareVideoSend();
     // Fan an encoded access unit out to every peer with an open track.
     void broadcastEncodedVideo(VideoStreamId stream, const EncodedFrame& frame);
-    // True if any connected peer still needs the legacy JPEG path.
-    bool hasLegacyOpenPeers() const;
+    // True if any connected peer still needs the legacy JPEG path for
+    // `stream` (no open video track for it).
+    bool hasLegacyOpenPeers(VideoStreamId stream) const;
     // True if any peer advertises video_rtp (drives encoder startup).
     bool hasVideoCapablePeers() const;
     // Best H.264 profile every current video peer can decode AND we
