@@ -199,6 +199,7 @@ void PeerConnectionManager::setupDataChannel(std::shared_ptr<rtc::DataChannel> d
 void PeerConnectionManager::createOffer() {
     qCInfo(logVoicePc, " [%s] Creating offer (we are offerer)",
           qPrintable(m_peerId));
+    m_isOfferer = true;
     // Create unreliable DataChannel for audio
     rtc::DataChannelInit dcInit;
     dcInit.reliability.unordered = true;

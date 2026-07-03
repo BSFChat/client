@@ -98,6 +98,8 @@ void VoiceEngine::stop() {
     m_peers.clear();
     m_callIds.clear();
     m_pendingCandidates.clear();
+    qDeleteAll(m_disconnectTimers);
+    m_disconnectTimers.clear();
 
     // Stop audio
     if (m_audioEngine) {
@@ -123,8 +125,30 @@ void VoiceEngine::addPeer(const QString& userId, bool isOfferer) {
     auto config = buildRtcConfig();
     auto* peer = new PeerConnectionManager(userId, callId, config, this);
     m_peers[userId] = peer;
+    wirePeer(peer, userId);
 
-    // Connect signaling
+    if (isOfferer) {
+        peer->createOffer();
+    }
+}
+
+void VoiceEngine::ensurePeer(const QString& userId) {
+    if (!m_running || userId.isEmpty()) return;
+    if (m_peers.contains(userId)) return;
+    qCInfo(logVoice, "reconcile: no peer for %s — offering",
+          qPrintable(userId));
+    addPeer(userId, true);
+}
+
+bool VoiceEngine::hasOpenPeers() const {
+    for (auto* peer : m_peers) {
+        if (peer && peer->isChannelOpen()) return true;
+    }
+    return false;
+}
+
+void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
+    // Signaling
     connect(peer, &PeerConnectionManager::localDescriptionReady,
             this, [this, userId](const std::string& type, const std::string& sdp) {
                 onLocalDescription(userId, type, sdp);
@@ -135,7 +159,7 @@ void VoiceEngine::addPeer(const QString& userId, bool isOfferer) {
                 onLocalCandidate(userId, candidate, mid);
             });
 
-    // Connect audio
+    // Audio
     if (m_audioEngine) {
         connect(peer, &PeerConnectionManager::audioFrameReceived,
                 this, [this, userId](const QByteArray& frame) {
@@ -158,17 +182,48 @@ void VoiceEngine::addPeer(const QString& userId, bool isOfferer) {
     connect(peer, &PeerConnectionManager::connected,
             this, [this, userId]() { emit peerConnected(userId); });
 
-    connect(peer, &PeerConnectionManager::disconnected,
-            this, [this, userId]() { emit peerDisconnected(userId); });
-
     connect(peer, &PeerConnectionManager::peerStateChanged,
             this, [this, userId](PeerConnectionManager::PeerState s) {
         static const char* names[] = {"new","connecting","connected","disconnected","failed"};
         emit peerStateChanged(userId, QString::fromLatin1(names[int(s)]));
+        // Dead-peer cleanup. Failed covers Closed too (PeerConnectionManager
+        // maps both to PeerState::Failed) — tear down immediately so the
+        // mesh reconciler can re-offer. Disconnected is often a transient
+        // ICE blip, so give it a grace period before giving up.
+        if (s == PeerConnectionManager::PeerState::Failed) {
+            removePeer(userId);
+            emit peerDisconnected(userId);
+        } else if (s == PeerConnectionManager::PeerState::Disconnected) {
+            startDisconnectGrace(userId);
+        } else if (s == PeerConnectionManager::PeerState::Connected) {
+            cancelDisconnectGrace(userId);
+        }
     });
+}
 
-    if (isOfferer) {
-        peer->createOffer();
+void VoiceEngine::startDisconnectGrace(const QString& userId) {
+    if (m_disconnectTimers.contains(userId)) return;
+    auto* timer = new QTimer(this);
+    timer->setSingleShot(true);
+    timer->setInterval(10000);
+    connect(timer, &QTimer::timeout, this, [this, userId]() {
+        cancelDisconnectGrace(userId);
+        auto* peer = m_peers.value(userId);
+        if (!peer) return;
+        if (peer->peerState() == PeerConnectionManager::PeerState::Connected) return;
+        qCInfo(logVoice, "peer %s did not recover from disconnect — removing",
+              qPrintable(userId));
+        removePeer(userId);
+        emit peerDisconnected(userId);
+    });
+    m_disconnectTimers[userId] = timer;
+    timer->start();
+}
+
+void VoiceEngine::cancelDisconnectGrace(const QString& userId) {
+    if (auto* timer = m_disconnectTimers.take(userId)) {
+        timer->stop();
+        timer->deleteLater();
     }
 }
 
@@ -182,6 +237,7 @@ QMap<QString, QString> VoiceEngine::peerStates() const {
 }
 
 void VoiceEngine::removePeer(const QString& userId) {
+    cancelDisconnectGrace(userId);
     if (auto* peer = m_peers.take(userId)) {
         if (m_audioEngine) m_audioEngine->removePeer(userId);
         peer->deleteLater();
@@ -196,53 +252,51 @@ void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId,
               qPrintable(sender));
         return;
     }
-    if (m_peers.contains(sender)) {
-        qCInfo(logVoice, "ignore duplicate invite from %s",
-              qPrintable(sender));
-        return;
-    }
     qCInfo(logVoice, "recv invite from %s callId=%s sdp_bytes=%zu",
           qPrintable(sender), qPrintable(callId), sdp.size());
+
+    if (auto* existing = m_peers.value(sender)) {
+        const auto state = existing->peerState();
+        if (state == PeerConnectionManager::PeerState::Failed
+            || state == PeerConnectionManager::PeerState::Disconnected) {
+            // Dead connection — the remote is retrying. Replace it.
+            qCInfo(logVoice, "invite from %s replaces dead peer",
+                  qPrintable(sender));
+            removePeer(sender);
+        } else if (existing->isOfferer()
+                   && state != PeerConnectionManager::PeerState::Connected) {
+            // Glare: both sides offered simultaneously. Deterministic
+            // tie-break — the lexicographically LESSER user id's offer
+            // wins; both sides apply the same rule so exactly one
+            // connection survives.
+            if (sender < m_localUserId) {
+                qCInfo(logVoice, "glare with %s — remote wins, answering",
+                      qPrintable(sender));
+                removePeer(sender);
+            } else {
+                qCInfo(logVoice, "glare with %s — we win, ignoring invite",
+                      qPrintable(sender));
+                return;
+            }
+        } else if (callId != m_callIds.value(sender)) {
+            // New call_id from a peer we already hold — they restarted
+            // their session; our existing connection is stale.
+            qCInfo(logVoice, "invite from %s carries new callId — replacing peer",
+                  qPrintable(sender));
+            removePeer(sender);
+        } else {
+            qCInfo(logVoice, "ignore duplicate invite from %s",
+                  qPrintable(sender));
+            return;
+        }
+    }
 
     m_callIds[sender] = callId;
 
     auto config = buildRtcConfig();
     auto* peer = new PeerConnectionManager(sender, callId, config, this);
     m_peers[sender] = peer;
-
-    connect(peer, &PeerConnectionManager::localDescriptionReady,
-            this, [this, sender](const std::string& type, const std::string& sdpOut) {
-                onLocalDescription(sender, type, sdpOut);
-            });
-
-    connect(peer, &PeerConnectionManager::localCandidateReady,
-            this, [this, sender](const std::string& candidate, const std::string& mid) {
-                onLocalCandidate(sender, candidate, mid);
-            });
-
-    if (m_audioEngine) {
-        connect(peer, &PeerConnectionManager::audioFrameReceived,
-                this, [this, sender](const QByteArray& frame) {
-                    if (m_audioEngine) m_audioEngine->receivePeerAudio(sender, frame);
-                });
-
-        connect(m_audioEngine, &AudioEngine::audioFrameReady,
-                peer, &PeerConnectionManager::sendAudioFrame);
-    }
-    connect(peer, &PeerConnectionManager::screenFrameReceived,
-            this, [this, sender](const QByteArray& jpeg) {
-                emit peerScreenFrameReceived(sender, jpeg);
-            });
-    connect(peer, &PeerConnectionManager::cameraFrameReceived,
-            this, [this, sender](const QByteArray& jpeg) {
-                emit peerCameraFrameReceived(sender, jpeg);
-            });
-
-    connect(peer, &PeerConnectionManager::connected,
-            this, [this, sender]() { emit peerConnected(sender); });
-
-    connect(peer, &PeerConnectionManager::disconnected,
-            this, [this, sender]() { emit peerDisconnected(sender); });
+    wirePeer(peer, sender);
 
     peer->applyOffer(sdp);
 }
@@ -250,6 +304,11 @@ void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId,
 void VoiceEngine::handleCallAnswer(const QString& sender, const QString& callId, const std::string& sdp) {
     qCInfo(logVoice, "recv answer from %s callId=%s sdp_bytes=%zu",
           qPrintable(sender), qPrintable(callId), sdp.size());
+    if (callId != m_callIds.value(sender)) {
+        qCInfo(logVoice, "ignore answer from %s — callId mismatch",
+              qPrintable(sender));
+        return;
+    }
     if (auto* peer = m_peers.value(sender)) {
         peer->applyAnswer(sdp);
     } else {
@@ -260,6 +319,7 @@ void VoiceEngine::handleCallAnswer(const QString& sender, const QString& callId,
 
 void VoiceEngine::handleCallCandidates(const QString& sender, const QString& callId,
                                         const std::vector<std::pair<std::string, std::string>>& candidates) {
+    if (callId != m_callIds.value(sender)) return;
     if (auto* peer = m_peers.value(sender)) {
         for (const auto& [cand, mid] : candidates) {
             peer->addRemoteCandidate(cand, mid);
@@ -268,7 +328,13 @@ void VoiceEngine::handleCallCandidates(const QString& sender, const QString& cal
 }
 
 void VoiceEngine::handleCallHangup(const QString& sender, const QString& callId) {
+    // Only honour a hangup for the call we actually hold — a late
+    // hangup from a session the peer already replaced must not kill
+    // the live connection. Empty stored id = no peer = no-op.
+    const QString stored = m_callIds.value(sender);
+    if (stored.isEmpty() || callId != stored) return;
     removePeer(sender);
+    emit peerDisconnected(sender);
 }
 
 void VoiceEngine::setMuted(bool muted) {
@@ -341,26 +407,23 @@ void VoiceEngine::sendCallEvent(const QString& eventType, const nlohmann::json& 
 rtc::Configuration VoiceEngine::buildRtcConfig() const {
     rtc::Configuration config;
 
-    // Add TURN server
-    QString turnUri = m_turnConfig.value("uris").toArray().isEmpty()
-        ? QString() : m_turnConfig.value("uris").toArray().first().toString();
+    const auto user = m_turnConfig.value("username").toString();
+    const auto pass = m_turnConfig.value("password").toString();
 
-    if (!turnUri.isEmpty() && turnUri.startsWith("turn:")) {
-        // Embed credentials in URL: turn:user:pass@host:port
-        auto user = m_turnConfig.value("username").toString();
-        auto pass = m_turnConfig.value("password").toString();
-        QString turnUrl = turnUri;
-        if (!user.isEmpty()) {
-            // turn:host:port -> turn:user:pass@host:port
-            turnUrl = QString("turn:%1:%2@%3").arg(user, pass, turnUri.mid(5));
-        }
-        config.iceServers.emplace_back(turnUrl.toStdString());
-    }
-
-    // Add STUN servers from uris
-    for (const auto& uri : m_turnConfig.value("uris").toArray()) {
-        QString u = uri.toString();
-        if (u.startsWith("stun:")) {
+    // The server may return several turn: URIs (udp + tcp transport
+    // variants) plus stun: URIs — feed them all to libdatachannel.
+    // Credentials are assigned via the IceServer struct fields, NOT
+    // embedded in the URL: the ephemeral TURN passwords are base64
+    // HMAC values that can contain '+'/'/' and would corrupt a
+    // turn:user:pass@host string.
+    for (const auto& uriVal : m_turnConfig.value("uris").toArray()) {
+        QString u = uriVal.toString();
+        if (u.startsWith("turn:") || u.startsWith("turns:")) {
+            rtc::IceServer turn(u.toStdString());
+            turn.username = user.toStdString();
+            turn.password = pass.toStdString();
+            config.iceServers.push_back(std::move(turn));
+        } else if (u.startsWith("stun:")) {
             rtc::IceServer stun(u.toStdString());
             config.iceServers.push_back(std::move(stun));
         }

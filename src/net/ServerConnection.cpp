@@ -239,6 +239,15 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         }
     });
 
+    // Voice error auto-clear. Errors surface via the voiceError
+    // property/toast and vanish on their own after 8 s (or sooner,
+    // on the next successful join).
+    m_voiceErrorTimer = new QTimer(this);
+    m_voiceErrorTimer->setSingleShot(true);
+    m_voiceErrorTimer->setInterval(8000);
+    connect(m_voiceErrorTimer, &QTimer::timeout,
+            this, &ServerConnection::clearVoiceError);
+
     // Voice signal connections
     connect(m_client, &MatrixClient::voiceJoined, this, [this](const QString& roomId, const QJsonArray& members) {
         m_activeVoiceRoomId = roomId;
@@ -246,6 +255,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         m_voiceMuted = false;
         m_voiceDeafened = false;
         m_voicePollTimer->start();
+        clearVoiceError();
         emit activeVoiceRoomIdChanged();
         emit voiceMembersChanged();
         emit voiceMutedChanged();
@@ -257,10 +267,41 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         m_client->getTurnConfig();
     });
 
+    connect(m_client, &MatrixClient::voiceError, this, [this](const QString& raw) {
+        // Matrix-style JSON error bodies carry a human string in
+        // "error"; fall back to the raw body for anything else.
+        QString msg = raw;
+        try {
+            auto j = nlohmann::json::parse(raw.toStdString());
+            std::string human = j.value("error", "");
+            if (!human.empty()) msg = QString::fromStdString(human);
+        } catch (...) {
+            // Leave msg = raw.
+        }
+        if (msg.trimmed().isEmpty()) msg = QStringLiteral("Voice request failed");
+        // A failed voice/join leaves the optimistically-flipped
+        // VoiceRoom view pointing at nothing — flip back to text.
+        // (activeVoiceRoomId is only set once the join succeeds, so
+        // empty-room + viewing-voice can only mean a join in flight.)
+        if (m_activeVoiceRoomId.isEmpty() && m_viewingVoiceRoom) {
+            m_viewingVoiceRoom = false;
+            emit viewingVoiceRoomChanged();
+        }
+        setVoiceError(msg);
+    });
+
     connect(m_client, &MatrixClient::turnConfigResult, this, [this](const QJsonObject& config) {
 #ifdef BSFCHAT_VOICE_ENABLED
-        if (!m_activeVoiceRoomId.isEmpty() && !m_voiceEngine) {
+        if (!m_activeVoiceRoomId.isEmpty()) {
+            // VoiceEngine::start() is one-shot per instance — a stale
+            // engine from a previous session must never be reused.
+            if (m_voiceEngine) {
+                m_voiceEngine->stop();
+                delete m_voiceEngine;
+                m_voiceEngine = nullptr;
+            }
             m_voiceEngine = new VoiceEngine(m_client, this);
+            m_voiceEngine->setLocalUserId(m_userId);
 
             // Fan incoming screen frames up to QML via a base64
             // data URL. Recomputed each frame (~5 fps) so cost is
@@ -314,6 +355,24 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             connect(m_voiceEngine, &VoiceEngine::peerStateChanged,
                     this, [this]() { emit voiceMembersChanged(); });
 
+            // Dead peer — drop their cached screen/camera frames so
+            // the UI doesn't keep rendering a frozen last frame.
+            connect(m_voiceEngine, &VoiceEngine::peerDisconnected,
+                    this, [this](const QString& userId) {
+                if (m_peerScreenData.remove(userId))
+                    emit peerScreenFrameChanged(userId);
+                if (m_peerCameraData.remove(userId))
+                    emit peerCameraFrameChanged(userId);
+                if (m_peerLevels.remove(userId))
+                    emit peerLevelChanged(userId);
+                emit voiceMembersChanged();
+            });
+
+            connect(m_voiceEngine, &VoiceEngine::error,
+                    this, [this](const QString& message) {
+                setVoiceError(message);
+            });
+
             m_voiceEngine->start(m_activeVoiceRoomId, m_voiceMembers, config);
             // Apply PTT mute immediately on join so an open-mic user
             // switching to PTT before a call starts silent rather
@@ -323,25 +382,38 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 #endif
     });
 
-    connect(m_client, &MatrixClient::voiceLeft, this, [this](const QString& /*roomId*/) {
-#ifdef BSFCHAT_VOICE_ENABLED
-        m_sounds->playLeave();
-#endif
-        m_activeVoiceRoomId.clear();
-        m_voiceMembers = QJsonArray();
-        m_voiceMuted = false;
-        m_voiceDeafened = false;
-        m_voicePollTimer->stop();
-        emit activeVoiceRoomIdChanged();
-        emit voiceMembersChanged();
-        emit voiceMutedChanged();
-        emit voiceDeafenedChanged();
+    connect(m_client, &MatrixClient::voiceLeft, this, [](const QString& roomId) {
+        // voiceLeft is only ever the HTTP reply to a leave WE initiated
+        // (there is no server-push path for it), and every initiator —
+        // leaveVoiceChannel() and the switch branch of joinVoiceChannel()
+        // — tears the session down synchronously before sending the
+        // request. Acting on the reply here would race a quick rejoin
+        // of the SAME room: the late reply's roomId matches the fresh
+        // session and would tear it down. Deliberately a no-op.
+        Q_UNUSED(roomId);
     });
 
     connect(m_client, &MatrixClient::voiceMembersResult, this, [this](const QString& roomId, const QJsonArray& members) {
         if (roomId == m_activeVoiceRoomId) {
             m_voiceMembers = members;
             emit voiceMembersChanged();
+#ifdef BSFCHAT_VOICE_ENABLED
+            // Mesh reconciliation: any polled member we hold no peer
+            // for (their invite got lost, or their peer was reaped by
+            // dead-peer cleanup) gets a fresh offer — but only from
+            // the deterministic side. Matching the glare tie-break
+            // (lesser user id's offer wins), we only offer to members
+            // whose id is greater than ours, so both sides can't
+            // re-offer into a fresh glare.
+            if (m_voiceEngine) {
+                for (const auto& memberVal : members) {
+                    QString uid = memberVal.toObject().value("user_id").toString();
+                    if (uid.isEmpty() || uid == m_userId) continue;
+                    if (uid > m_userId && !m_voiceEngine->hasPeer(uid))
+                        m_voiceEngine->ensurePeer(uid);
+                }
+            }
+#endif
         }
         // Update voice member count in room list
         m_roomListModel->updateVoiceMemberCount(roomId, members.size());
@@ -900,14 +972,12 @@ void ServerConnection::resetUnreadForRoom(const QString& roomId)
 
 void ServerConnection::joinVoiceChannel(const QString& roomId)
 {
-    // If already in a voice channel, leave it first.
+    // If already in a voice channel, leave it first — full local
+    // teardown (engine included), then tell the server.
     if (!m_activeVoiceRoomId.isEmpty() && m_activeVoiceRoomId != roomId) {
-        m_client->leaveVoice(m_activeVoiceRoomId);
-        m_activeVoiceRoomId.clear();
-        m_voiceMembers = QJsonArray();
-        m_voicePollTimer->stop();
-        emit activeVoiceRoomIdChanged();
-        emit voiceMembersChanged();
+        const QString oldRoomId = m_activeVoiceRoomId;
+        teardownVoiceSession();
+        m_client->leaveVoice(oldRoomId);
     }
     m_client->joinVoice(roomId);
     // Clicking a voice channel always flips the main area to the
@@ -991,31 +1061,67 @@ void ServerConnection::leaveVoiceChannel()
         m_viewingVoiceRoom = false;
         emit viewingVoiceRoomChanged();
     }
+    // Tear down locally first — the REST leave is fire-and-forget
+    // and its reply must not be load-bearing for engine cleanup.
+    const QString roomId = m_activeVoiceRoomId;
+    teardownVoiceSession();
+    m_client->leaveVoice(roomId);
+}
+
+void ServerConnection::teardownVoiceSession()
+{
 #ifdef BSFCHAT_VOICE_ENABLED
+    if (!m_activeVoiceRoomId.isEmpty()) m_sounds->playLeave();
     if (m_voiceEngine) {
         m_voiceEngine->stop();
         delete m_voiceEngine;
         m_voiceEngine = nullptr;
     }
-    // Forget cached screen frames from the call we just left.
+    // Forget cached screen/camera frames from the session — QML
+    // re-reads peerScreenDataUrl / peerCameraDataUrl per key off
+    // these signals.
     if (!m_peerScreenData.isEmpty()) {
-        auto keys = m_peerScreenData.keys();
+        const auto keys = m_peerScreenData.keys();
         m_peerScreenData.clear();
         for (const auto& uid : keys) emit peerScreenFrameChanged(uid);
     }
     if (!m_peerCameraData.isEmpty()) {
-        auto keys = m_peerCameraData.keys();
+        const auto keys = m_peerCameraData.keys();
         m_peerCameraData.clear();
         for (const auto& uid : keys) emit peerCameraFrameChanged(uid);
     }
 #endif
+    m_voicePollTimer->stop();
+    m_activeVoiceRoomId.clear();
+    m_voiceMembers = QJsonArray();
+    m_voiceMuted = false;
+    m_voiceDeafened = false;
+    emit activeVoiceRoomIdChanged();
+    emit voiceMembersChanged();
+    emit voiceMutedChanged();
+    emit voiceDeafenedChanged();
     // Ensure UI drops the transmit indicator immediately, bypassing the
     // jitter threshold in the micLevelChanged forwarder.
     if (m_micLevel != 0.0f) {
         m_micLevel = 0.0f;
         emit micLevelChanged();
     }
-    m_client->leaveVoice(m_activeVoiceRoomId);
+}
+
+void ServerConnection::setVoiceError(const QString& message)
+{
+    if (message.isEmpty()) return;
+    m_voiceError = message;
+    emit voiceErrorChanged();
+    m_voiceErrorTimer->start();
+}
+
+void ServerConnection::clearVoiceError()
+{
+    m_voiceErrorTimer->stop();
+    if (m_voiceError.isEmpty()) return;
+    m_voiceError.clear();
+    emit voiceErrorChanged();
 }
 
 void ServerConnection::setSettings(Settings* settings)

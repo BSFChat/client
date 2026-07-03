@@ -31,6 +31,10 @@ class Settings;
 class ScreenShareController : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool active READ active NOTIFY activeChanged)
+    // True only while frames are actually landing on ≥1 open peer
+    // data channel. `active && !transmitting` = capturing but nobody
+    // can see it — the UI shows a "Not visible to others" badge.
+    Q_PROPERTY(bool transmitting READ transmitting NOTIFY transmittingChanged)
     Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
     Q_PROPERTY(QVideoSink* previewSink READ previewSink CONSTANT)
     Q_PROPERTY(QVariantList availableScreens READ availableScreens NOTIFY screensChanged)
@@ -39,6 +43,7 @@ public:
     explicit ScreenShareController(QObject* parent = nullptr);
 
     bool active() const { return m_active; }
+    bool transmitting() const { return m_transmitting; }
     QString lastError() const { return m_lastError; }
     QVideoSink* previewSink() const { return m_sink; }
     QVariantList availableScreens() const;
@@ -85,6 +90,7 @@ public:
 
 signals:
     void activeChanged();
+    void transmittingChanged();
     void lastErrorChanged();
     void screensChanged();
 
@@ -99,15 +105,20 @@ private:
     QTimer* m_throttle = nullptr;
     ServerManager* m_servers = nullptr;
     Settings* m_settings = nullptr;
-    QMetaObject::Connection m_voiceRoomConn;  // active server's voice-room signal
+    // Per-connection voice-room subscriptions (one per server, not
+    // just the active one — voice can be live on a backgrounded
+    // server).
+    QList<QMetaObject::Connection> m_voiceRoomConns;
     QVideoFrame m_pendingFrame;
     bool m_active = false;
+    bool m_transmitting = false;
     QString m_lastError;
 
     void pushFrameToPeers();
-    // Rewires the per-server "voice room changed" subscription
-    // whenever the active server changes. Stops the screen share
-    // when the user leaves voice so share state can't outlive the
-    // call.
+    void setTransmitting(bool transmitting);
+    // Rewires the per-server "voice room changed" subscriptions
+    // whenever the server list or active server changes. Stops the
+    // screen share when no connection is in voice so share state
+    // can't outlive the call.
     void rewireVoiceLeaveWatch();
 };

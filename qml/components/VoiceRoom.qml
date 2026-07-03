@@ -414,6 +414,45 @@ Rectangle {
                         color: Theme.onAccent
                     }
                 }
+
+                // Capturing but no open peer channel is receiving the
+                // frames — warn that the share isn't reaching anyone.
+                // `=== false` keeps this hidden on builds whose share
+                // controller doesn't expose `transmitting`.
+                Rectangle {
+                    visible: screenShare && screenShare.active
+                             && screenShare.transmitting === false
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.margins: Theme.sp.s3
+                    width: notVisibleRow.implicitWidth + Theme.sp.s3 * 2
+                    height: 22
+                    radius: Theme.r1
+                    color: Theme.bg1
+                    border.color: Theme.warn
+                    border.width: 1
+                    Row {
+                        id: notVisibleRow
+                        anchors.centerIn: parent
+                        spacing: Theme.sp.s2
+                        Icon {
+                            anchors.verticalCenter: parent.verticalCenter
+                            name: "bolt"
+                            size: 10
+                            color: Theme.warn
+                        }
+                        Text {
+                            id: notVisibleLabel
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Not visible to others"
+                            font.family: Theme.fontSans
+                            font.pixelSize: 10
+                            font.weight: Theme.fontWeight.semibold
+                            font.letterSpacing: Theme.trackWide.sm
+                            color: Theme.warn
+                        }
+                    }
+                }
             }
 
             // Remote shares — stacked beneath the local hero. Since

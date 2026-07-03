@@ -33,11 +33,19 @@ public:
     int activeServerIndex() const { return m_activeServerIndex; }
     // Count / lookup helpers for the NotificationManager (which needs to
     // wire every existing + future connection for inbound-message signals).
+    // connectionAt is also invokable from QML so the server rail's
+    // context menu can show per-server connection status.
     int connectionCount() const { return m_connections.size(); }
-    ServerConnection* connectionAt(int index) const {
+    Q_INVOKABLE ServerConnection* connectionAt(int index) const {
         return (index >= 0 && index < m_connections.size()) ? m_connections[index] : nullptr;
     }
     int indexOfConnection(ServerConnection* conn) const { return m_connections.indexOf(conn); }
+    // The connection currently in a voice channel, or nullptr. Distinct
+    // from activeServer(): the user can be in voice on server A while
+    // browsing server B, and the screen/camera controllers must keep
+    // pushing frames to A's engine regardless of which server has
+    // sidebar focus.
+    ServerConnection* voiceServer() const;
 
     Q_INVOKABLE void addServer(const QString& url, const QString& username, const QString& password);
     Q_INVOKABLE void addServerWithOidc(const QString& url);
@@ -54,6 +62,16 @@ public:
                                                const QString& serverName);
     Q_INVOKABLE void removeServer(int index);
     Q_INVOKABLE void setActiveServer(int index);
+    // Repoint an already-added server at a new base URL (e.g. the
+    // machine's IP changed, or http vs https was wrong). Persists the
+    // new URL and rebuilds the connection with the saved credentials —
+    // no re-login needed as long as the same server is behind the new
+    // address.
+    Q_INVOKABLE void updateServerUrl(int index, const QString& newUrl);
+    // Tear down and rebuild the connection with its current URL +
+    // credentials — the "it's stuck, kick it" affordance for a server
+    // that won't reconnect on its own.
+    Q_INVOKABLE void reconnectServer(int index);
 
     bool viewingDms() const { return m_viewingDms; }
     Q_INVOKABLE void setViewingDms(bool v);
@@ -116,6 +134,12 @@ signals:
 private:
     void onLoginSuccess(ServerConnection* conn);
     void onLoginFailed(ServerConnection* conn, const QString& error);
+    // Replace m_connections[index] with a fresh ServerConnection to
+    // `url`, carrying over the old connection's credentials. Emits
+    // serverRemoved+serverAdded for the index so NotificationManager
+    // and the screen/camera controllers rewire their per-connection
+    // signal subscriptions.
+    void rebuildConnection(int index, const QString& url);
     // Hooks up a ServerConnection so per-server UI state (unread dot, etc.)
     // in the sidebar tracks the connection's state.
     void wireConnection(ServerConnection* conn);

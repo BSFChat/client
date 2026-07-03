@@ -171,23 +171,37 @@ void ScreenShareController::setServerManager(ServerManager* mgr)
     if (!mgr) return;
     connect(mgr, &ServerManager::activeServerChanged,
             this, &ScreenShareController::rewireVoiceLeaveWatch);
+    // Rewire on list changes too — a connection added after the share
+    // started must still be watched.
+    connect(mgr, &ServerManager::serverAdded,
+            this, &ScreenShareController::rewireVoiceLeaveWatch);
+    connect(mgr, &ServerManager::serverRemoved,
+            this, &ScreenShareController::rewireVoiceLeaveWatch);
     rewireVoiceLeaveWatch();
 }
 
 void ScreenShareController::rewireVoiceLeaveWatch()
 {
-    disconnect(m_voiceRoomConn);
-    auto* sc = m_servers ? m_servers->activeServer() : nullptr;
-    if (!sc) return;
-    m_voiceRoomConn = connect(sc, &ServerConnection::activeVoiceRoomIdChanged,
-                              this, [this, sc]() {
-        // Mirror CameraController: tear down the share the moment the
-        // server confirms the user left voice, so a follow-up join
-        // doesn't silently resume sharing the screen.
-        if (m_active && !sc->inVoiceChannel()) {
-            stop();
-        }
-    });
+    for (const auto& conn : m_voiceRoomConns) disconnect(conn);
+    m_voiceRoomConns.clear();
+    if (!m_servers) return;
+    // Watch EVERY connection, not just the active one — the user can
+    // be in voice on server A while browsing server B, and the share
+    // must stop when the voice session (wherever it lives) ends.
+    for (int i = 0; i < m_servers->connectionCount(); ++i) {
+        auto* sc = m_servers->connectionAt(i);
+        if (!sc) continue;
+        m_voiceRoomConns.append(
+            connect(sc, &ServerConnection::activeVoiceRoomIdChanged,
+                    this, [this]() {
+            // Mirror CameraController: tear down the share the moment
+            // no connection is in voice anymore, so a follow-up join
+            // doesn't silently resume sharing the screen.
+            if (m_active && !m_servers->voiceServer()) {
+                stop();
+            }
+        }));
+    }
 }
 
 void ScreenShareController::start() { startForScreen(-1); }
@@ -230,11 +244,15 @@ static void applyEffectiveQuality(Settings* settings, ServerManager* servers)
 
     int srvFps = -1, srvW = -1, srvJpegQ = -1;
     if (servers) {
-        auto* active = servers->activeServer();
-        if (active) {
-            srvFps    = active->maxScreenShareFps();
-            srvW      = active->maxScreenShareWidth();
-            srvJpegQ  = active->maxScreenShareJpeg();
+        // Caps come from the server hosting the voice session the
+        // frames go to; fall back to the focused server when the
+        // share starts before a voice join.
+        auto* host = servers->voiceServer();
+        if (!host) host = servers->activeServer();
+        if (host) {
+            srvFps    = host->maxScreenShareFps();
+            srvW      = host->maxScreenShareWidth();
+            srvJpegQ  = host->maxScreenShareJpeg();
         }
     }
 
@@ -303,6 +321,10 @@ void ScreenShareController::stop()
 {
     m_throttle->stop();
     m_pendingFrame = {};
+    setTransmitting(false);
+    // Push an empty frame so QML previews blank out instead of
+    // keeping the frozen last frame.
+    m_sink->setVideoFrame(QVideoFrame());
 #ifdef Q_OS_MACOS
     if (m_mac) m_mac->stop();
     if (m_active) {
@@ -312,6 +334,13 @@ void ScreenShareController::stop()
 #else
     if (m_active) m_capture->stop();
 #endif
+}
+
+void ScreenShareController::setTransmitting(bool transmitting)
+{
+    if (m_transmitting == transmitting) return;
+    m_transmitting = transmitting;
+    emit transmittingChanged();
 }
 
 void ScreenShareController::toggle()
@@ -357,17 +386,26 @@ void ScreenShareController::openSystemSettings()
 
 void ScreenShareController::pushFrameToPeers()
 {
-    if (!m_active) return;
+    if (!m_active) {
+        setTransmitting(false);
+        return;
+    }
+    // Resolve the connection that's actually in voice — NOT the
+    // active (sidebar-focused) server, which may be a different one
+    // the user is just browsing while sharing.
     VoiceEngine* voice = nullptr;
     if (m_servers) {
-        auto* active = m_servers->activeServer();
-        if (active) voice = active->voiceEngine();
+        if (auto* vs = m_servers->voiceServer()) voice = vs->voiceEngine();
     }
     static int s_tickCount = 0;
     if (++s_tickCount % 25 == 1) {
         qInfo("[screenshare] push tick #%d: voice=%p frameValid=%d",
               s_tickCount, (void*)voice, int(m_pendingFrame.isValid()));
     }
+    // Transmitting = a live engine with ≥1 open peer channel will
+    // receive this frame. Anything less means peers can't see us.
+    const bool canTransmit = voice && voice->hasOpenPeers();
+    if (!canTransmit) setTransmitting(false);
     if (!voice) return;
     if (!m_pendingFrame.isValid()) return;
 
@@ -390,6 +428,7 @@ void ScreenShareController::pushFrameToPeers()
     }
 
     voice->broadcastScreenFrame(jpeg);
+    setTransmitting(canTransmit);
     if (s_tickCount % 25 == 1)
         qInfo("[screenshare] broadcast %d-byte JPEG (tick #%d)",
               int(jpeg.size()), s_tickCount);

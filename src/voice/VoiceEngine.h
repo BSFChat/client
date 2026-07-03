@@ -26,6 +26,22 @@ public:
     void stop();
     bool isRunning() const { return m_running; }
 
+    // Local user id — required for the glare tie-break (deciding
+    // deterministically whose offer survives when both sides invite
+    // each other at once). Set before start().
+    void setLocalUserId(const QString& userId) { m_localUserId = userId; }
+
+    // Mesh-reconciliation accessors: the voice member poll compares
+    // the server's member list against the peers we actually hold and
+    // re-offers to anyone missing.
+    QStringList connectedPeerIds() const { return m_peers.keys(); }
+    bool hasPeer(const QString& userId) const { return m_peers.contains(userId); }
+    // Offer to `userId` if we don't already hold a peer for them.
+    void ensurePeer(const QString& userId);
+    // True when at least one peer's data channel is open — i.e.
+    // broadcast frames are actually reaching someone.
+    bool hasOpenPeers() const;
+
     void handleCallInvite(const QString& sender, const QString& callId, const std::string& sdp);
     void handleCallAnswer(const QString& sender, const QString& callId, const std::string& sdp);
     void handleCallCandidates(const QString& sender, const QString& callId,
@@ -64,6 +80,13 @@ signals:
 private:
     void addPeer(const QString& userId, bool isOfferer);
     void removePeer(const QString& userId);
+    // Common signal wiring shared by addPeer and handleCallInvite.
+    void wirePeer(PeerConnectionManager* peer, const QString& userId);
+    // Dead-peer cleanup: Disconnected gets a grace period (transient
+    // ICE blips recover on their own); Failed/Closed is torn down
+    // immediately.
+    void startDisconnectGrace(const QString& userId);
+    void cancelDisconnectGrace(const QString& userId);
     void onLocalDescription(const QString& peerId, const std::string& type, const std::string& sdp);
     void onLocalCandidate(const QString& peerId, const std::string& candidate, const std::string& mid);
     void flushCandidateBatch();
@@ -73,9 +96,12 @@ private:
 
     MatrixClient* m_client;
     QString m_roomId;
+    QString m_localUserId;
     AudioEngine* m_audioEngine = nullptr;
     QMap<QString, PeerConnectionManager*> m_peers;
     QMap<QString, QString> m_callIds;
+    // Per-peer single-shot grace timers for the Disconnected state.
+    QMap<QString, QTimer*> m_disconnectTimers;
     QJsonObject m_turnConfig;
     bool m_running = false;
     bool m_allowP2P = false;

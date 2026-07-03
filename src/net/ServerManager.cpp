@@ -194,6 +194,78 @@ void ServerManager::removeServer(int index)
     emit serverRemoved(index);
 }
 
+void ServerManager::updateServerUrl(int index, const QString& newUrl)
+{
+    if (index < 0 || index >= m_connections.size()) return;
+
+    QString url = newUrl.trimmed();
+    if (url.isEmpty()) return;
+    // Accept a bare host[:port] — default to https, matching the
+    // add-server flow. Trailing slashes break path concatenation in
+    // MatrixClient, so strip them.
+    if (!url.contains(QStringLiteral("://")))
+        url = QStringLiteral("https://") + url;
+    while (url.endsWith(QLatin1Char('/'))) url.chop(1);
+
+    if (url == m_connections[index]->serverUrl()) return;
+
+    // Persist first — the saved-servers array is index-aligned with
+    // m_connections, and rebuildConnection reads nothing from it, so
+    // order doesn't matter beyond crash-safety.
+    auto saved = m_settings->savedServers();
+    if (index < saved.size()) {
+        auto entry = saved[index];
+        entry.url = url;
+        m_settings->updateServer(index, entry);
+    }
+
+    // Sidebar tile: show the new host until the server-name state
+    // event comes back over sync and pushName overwrites it.
+    QUrl parsed(url);
+    QString name = parsed.host().isEmpty() ? url : parsed.host();
+    m_serverListModel->updateServer(index, name, url);
+
+    rebuildConnection(index, url);
+}
+
+void ServerManager::reconnectServer(int index)
+{
+    if (index < 0 || index >= m_connections.size()) return;
+    rebuildConnection(index, m_connections[index]->serverUrl());
+}
+
+void ServerManager::rebuildConnection(int index, const QString& url)
+{
+    auto* old = m_connections[index];
+
+    // A voice session can't survive its connection — leave cleanly so
+    // peers get hangups instead of waiting out the dead-peer grace.
+    if (old->inVoiceChannel()) old->leaveVoiceChannel();
+
+    // Credentials come off the live object rather than settings so a
+    // rebuild works even for a connection whose login predates this
+    // process (restored) or whose settings row is missing.
+    auto* conn = new ServerConnection(url, this);
+    conn->setCredentials(old->userId(), old->accessToken(),
+                         old->deviceId(), old->displayName());
+    m_connections[index] = conn;
+    wireConnection(conn);
+
+    if (m_activeServerIndex == index) {
+        m_activeServer = conn;
+        emit activeServerChanged();
+    }
+
+    old->disconnectFromServer();
+    old->deleteLater();
+
+    // NotificationManager and the screen/camera controllers subscribe
+    // per-connection; removed+added for the same index makes them drop
+    // the dead object and wire the replacement.
+    emit serverRemoved(index);
+    emit serverAdded(index);
+}
+
 void ServerManager::setActiveServer(int index)
 {
     if (index < -1 || index >= m_connections.size()) return;
@@ -203,6 +275,17 @@ void ServerManager::setActiveServer(int index)
     m_activeServer = (index >= 0) ? m_connections[index] : nullptr;
     m_settings->setActiveServerIndex(index);
     emit activeServerChanged();
+}
+
+ServerConnection* ServerManager::voiceServer() const
+{
+    // Normally at most one connection is in voice; if the user manages
+    // to be in voice on two servers, the first (oldest) wins — the
+    // controllers can only broadcast into one mesh anyway.
+    for (auto* conn : m_connections) {
+        if (conn && conn->inVoiceChannel()) return conn;
+    }
+    return nullptr;
 }
 
 void ServerManager::setViewingDms(bool v)

@@ -26,6 +26,9 @@ class Settings;
 class CameraController : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool active READ active NOTIFY activeChanged)
+    // True only while frames are actually landing on ≥1 open peer
+    // data channel — same semantics as ScreenShareController.
+    Q_PROPERTY(bool transmitting READ transmitting NOTIFY transmittingChanged)
     Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
     Q_PROPERTY(QVideoSink* previewSink READ previewSink CONSTANT)
     Q_PROPERTY(QVariantList availableCameras READ availableCameras NOTIFY camerasChanged)
@@ -35,6 +38,7 @@ public:
     explicit CameraController(QObject* parent = nullptr);
 
     bool active() const { return m_active; }
+    bool transmitting() const { return m_transmitting; }
     QString lastError() const { return m_lastError; }
     QVideoSink* previewSink() const { return m_sink; }
     QVariantList availableCameras() const;
@@ -54,16 +58,19 @@ public:
 
 signals:
     void activeChanged();
+    void transmittingChanged();
     void lastErrorChanged();
     void camerasChanged();
     void cameraDescriptionChanged();
 
 private:
     void pushFrameToPeers();
-    // Rewires the per-server "voice room changed" subscription
-    // whenever the active server changes (and at initial setup),
-    // so leaving a voice channel reliably stops the camera instead
-    // of letting it silently re-broadcast on the next join.
+    void setTransmitting(bool transmitting);
+    // Rewires the per-server "voice room changed" subscriptions
+    // whenever the server list or active server changes (and at
+    // initial setup), so leaving a voice channel reliably stops the
+    // camera instead of letting it silently re-broadcast on the
+    // next join.
     void rewireVoiceLeaveWatch();
 
 #ifdef Q_OS_MACOS
@@ -76,9 +83,13 @@ private:
     QTimer* m_throttle = nullptr;
     ServerManager* m_servers = nullptr;
     Settings* m_settings = nullptr;
-    QMetaObject::Connection m_voiceRoomConn;  // connection to active server's voice-room signal
+    // Per-connection voice-room subscriptions (one per server, not
+    // just the active one — voice can be live on a backgrounded
+    // server).
+    QList<QMetaObject::Connection> m_voiceRoomConns;
     QVideoFrame m_pendingFrame;
     bool m_active = false;
+    bool m_transmitting = false;
     QString m_lastError;
     QString m_cameraDescription;
 };

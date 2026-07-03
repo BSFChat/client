@@ -502,6 +502,13 @@ ApplicationWindow {
         function onMediaSendCompleted() {
             toastSuccess("Upload complete");
         }
+        function onVoiceErrorChanged() {
+            // Fires on set AND on the 8s auto-clear — only toast the
+            // non-empty transitions.
+            var s = serverManager.activeServer;
+            if (s && s.voiceError && s.voiceError.length > 0)
+                toastError("Voice: " + s.voiceError);
+        }
         function onStateWriteFailed(kind, status, error) {
             // ServerSettings has its own inline banner for the cases
             // where a setting dialog is open. Show a toast for the

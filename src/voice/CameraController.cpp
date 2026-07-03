@@ -109,32 +109,43 @@ void CameraController::setServerManager(ServerManager* mgr)
     if (m_servers == mgr) return;
     m_servers = mgr;
     if (!mgr) return;
-    // Re-evaluate the per-server signal binding whenever the active
-    // server changes, then prime it for the current active server.
+    // Re-evaluate the per-server signal bindings whenever the server
+    // list or active server changes, then prime them.
     connect(mgr, &ServerManager::activeServerChanged,
+            this, &CameraController::rewireVoiceLeaveWatch);
+    connect(mgr, &ServerManager::serverAdded,
+            this, &CameraController::rewireVoiceLeaveWatch);
+    connect(mgr, &ServerManager::serverRemoved,
             this, &CameraController::rewireVoiceLeaveWatch);
     rewireVoiceLeaveWatch();
 }
 
 void CameraController::rewireVoiceLeaveWatch()
 {
-    // Drop any prior subscription before adding a new one — the old
-    // server's signal would still fire harmlessly but the lambda
-    // captures the old server pointer, which can dangle on server
-    // removal. Tracking the QMetaObject::Connection avoids that.
-    disconnect(m_voiceRoomConn);
-    auto* sc = m_servers ? m_servers->activeServer() : nullptr;
-    if (!sc) return;
-    m_voiceRoomConn = connect(sc, &ServerConnection::activeVoiceRoomIdChanged,
-                              this, [this, sc]() {
-        // Voice room ID changed. If the user just LEFT (room is now
-        // empty) and the camera is running, stop it — otherwise it
-        // would silently re-broadcast to whatever voice channel they
-        // join next. Camera state shouldn't outlive the call.
-        if (m_active && !sc->inVoiceChannel()) {
-            stop();
-        }
-    });
+    // Drop prior subscriptions before adding new ones — a removed
+    // server's lambda would capture a dangling connection pointer.
+    // Tracking the QMetaObject::Connections avoids that.
+    for (const auto& conn : m_voiceRoomConns) disconnect(conn);
+    m_voiceRoomConns.clear();
+    if (!m_servers) return;
+    // Watch EVERY connection, not just the active one — the user can
+    // be in voice on server A while browsing server B, and the camera
+    // must stop when the voice session (wherever it lives) ends.
+    for (int i = 0; i < m_servers->connectionCount(); ++i) {
+        auto* sc = m_servers->connectionAt(i);
+        if (!sc) continue;
+        m_voiceRoomConns.append(
+            connect(sc, &ServerConnection::activeVoiceRoomIdChanged,
+                    this, [this]() {
+            // If no connection is in voice anymore and the camera is
+            // running, stop it — otherwise it would silently
+            // re-broadcast to whatever voice channel is joined next.
+            // Camera state shouldn't outlive the call.
+            if (m_active && !m_servers->voiceServer()) {
+                stop();
+            }
+        }));
+    }
 }
 
 void CameraController::start() { startForCamera(-1); }
@@ -193,6 +204,10 @@ void CameraController::stop()
 {
     m_throttle->stop();
     m_pendingFrame = {};
+    setTransmitting(false);
+    // Push an empty frame so QML previews blank out instead of
+    // keeping the frozen last frame.
+    m_sink->setVideoFrame(QVideoFrame());
 #ifdef Q_OS_MACOS
     if (m_mac) m_mac->stop();
     if (m_active) {
@@ -202,6 +217,13 @@ void CameraController::stop()
 #else
     if (m_camera && m_camera->isActive()) m_camera->stop();
 #endif
+}
+
+void CameraController::setTransmitting(bool transmitting)
+{
+    if (m_transmitting == transmitting) return;
+    m_transmitting = transmitting;
+    emit transmittingChanged();
 }
 
 void CameraController::toggle()
@@ -218,13 +240,21 @@ void CameraController::forwardTo(QVideoSink* sink)
 
 void CameraController::pushFrameToPeers()
 {
-    if (!m_active || !m_pendingFrame.isValid()) return;
+    if (!m_active) {
+        setTransmitting(false);
+        return;
+    }
+    // Resolve the connection that's actually in voice — NOT the
+    // active (sidebar-focused) server, which may be a different one
+    // the user is just browsing while broadcasting.
     VoiceEngine* voice = nullptr;
     if (m_servers) {
-        auto* active = m_servers->activeServer();
-        if (active) voice = active->voiceEngine();
+        if (auto* vs = m_servers->voiceServer()) voice = vs->voiceEngine();
     }
+    const bool canTransmit = voice && voice->hasOpenPeers();
+    if (!canTransmit) setTransmitting(false);
     if (!voice) return;
+    if (!m_pendingFrame.isValid()) return;
 
     QImage img = m_pendingFrame.toImage();
     if (img.isNull()) return;
@@ -238,5 +268,6 @@ void CameraController::pushFrameToPeers()
         if (!img.save(&buf, "JPEG", kJpegQuality)) return;
     }
     voice->broadcastCameraFrame(jpeg);
+    setTransmitting(canTransmit);
     m_pendingFrame = {};
 }

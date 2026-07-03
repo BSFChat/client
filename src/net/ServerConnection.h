@@ -52,6 +52,10 @@ class ServerConnection : public QObject {
     Q_PROPERTY(bool voiceMuted READ voiceMuted NOTIFY voiceMutedChanged)
     Q_PROPERTY(bool voiceDeafened READ voiceDeafened NOTIFY voiceDeafenedChanged)
     Q_PROPERTY(bool inVoiceChannel READ inVoiceChannel NOTIFY activeVoiceRoomIdChanged)
+    // Last voice-subsystem error (join/leave REST failures, engine
+    // init failures). Auto-clears after ~8 s or on the next successful
+    // join; QML routes non-empty values into the toast surface.
+    Q_PROPERTY(QString voiceError READ voiceError NOTIFY voiceErrorChanged)
     // Which view the main area should display. Independent of whether
     // the user is connected to a voice call — you can be in voice AND
     // reading a text channel. Flips true when the voice channel row is
@@ -112,6 +116,7 @@ public:
     bool hasUnread() const { return m_hasUnread; }
 
     QString activeVoiceRoomId() const { return m_activeVoiceRoomId; }
+    QString voiceError() const { return m_voiceError; }
     bool voiceMuted() const { return m_voiceMuted; }
     bool voiceDeafened() const { return m_voiceDeafened; }
     bool inVoiceChannel() const { return !m_activeVoiceRoomId.isEmpty(); }
@@ -453,6 +458,7 @@ signals:
     void mediaSendCompleted();
     void mediaSendFailed(const QString& error);
     void activeVoiceRoomIdChanged();
+    void voiceErrorChanged();
     void viewingVoiceRoomChanged();
     void voiceMutedChanged();
     void voiceDeafenedChanged();
@@ -577,6 +583,8 @@ public:
 
     // Voice state
     QString m_activeVoiceRoomId;
+    QString m_voiceError;
+    QTimer* m_voiceErrorTimer = nullptr;
     float m_micLevel = 0.0f;
     bool m_micSilent = false;
     int m_zeroLevelFrames = 0; // consecutive frames with near-zero level
@@ -584,6 +592,13 @@ public:
     bool m_pttPressed = false;
     Settings* m_settings = nullptr;
     void applyMicGate();  // recompute mute from voiceMuted + ptt mode
+    // Synchronous, idempotent teardown of the entire local voice
+    // session: engine, membership caches, timers, cached peer frames,
+    // mute/deafen/mic state. Every leave/switch/kick path funnels
+    // through here so no path can leak a running engine.
+    void teardownVoiceSession();
+    void setVoiceError(const QString& message);
+    void clearVoiceError();
 public:
     // Called once at startup by ServerManager so the mic gate can
     // consult voiceMode / PTT prefs without a global singleton.

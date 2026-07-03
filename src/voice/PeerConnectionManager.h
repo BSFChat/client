@@ -40,6 +40,14 @@ public:
     Q_ENUM(PeerState)
     PeerState peerState() const { return m_peerState; }
 
+    // True when this side created the offer (i.e. we initiated the
+    // connection). VoiceEngine's glare tie-break needs to know which
+    // side of a simultaneous-offer collision we're on.
+    bool isOfferer() const { return m_isOfferer; }
+    // True once the SCTP data channel is open — the only state in
+    // which frames actually reach the remote peer.
+    bool isChannelOpen() const { return m_dc && m_dc->isOpen(); }
+
     // Frame counters — useful for diagnostics.
     int framesSent() const { return m_framesSent; }
     int framesReceived() const { return m_framesReceived; }
@@ -65,6 +73,7 @@ private:
     std::shared_ptr<rtc::DataChannel> m_dc;
     std::vector<std::pair<std::string, std::string>> m_pendingCandidates;
     bool m_remoteDescriptionSet = false;
+    bool m_isOfferer = false;
     PeerState m_peerState = PeerState::New;
     int m_framesSent = 0;
     int m_framesReceived = 0;

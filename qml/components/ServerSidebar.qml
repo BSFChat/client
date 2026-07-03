@@ -225,7 +225,12 @@ Rectangle {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: {
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: (mouse) => {
+                        if (mouse.button === Qt.RightButton) {
+                            serverContextMenu.openFor(index);
+                            return;
+                        }
                         // Picking a server icon is the primary
                         // way to leave DM view — it's single-
                         // select across the rail.
@@ -280,6 +285,355 @@ Rectangle {
                 ToolTip.visible: addArea.containsMouse
                 ToolTip.text: "Add server"
                 ToolTip.delay: 400
+            }
+        }
+    }
+
+    // Right-click server-context menu. This is the only place the
+    // client surfaces a server's actual address + connection state
+    // after it's been added, and the only UI path to edit/remove one.
+    Menu {
+        id: serverContextMenu
+        property int serverIndex: -1
+        // connectionAt re-resolves per open; the returned connection
+        // object carries live connected/syncErrorMessage bindings.
+        readonly property var conn: serverManager.connectionAt(serverIndex)
+        readonly property string url: conn ? conn.serverUrl : ""
+
+        function openFor(index) {
+            serverIndex = index;
+            popup();
+        }
+
+        background: Rectangle {
+            color: Theme.bg1
+            radius: Theme.r2
+            border.color: Theme.line
+            border.width: 1
+            implicitWidth: 240
+        }
+
+        // Non-interactive header: address + live connection status.
+        MenuItem {
+            enabled: false
+            implicitHeight: headerCol.implicitHeight + Theme.sp.s3 * 2
+            contentItem: Column {
+                id: headerCol
+                spacing: 2
+                leftPadding: Theme.sp.s3
+                Text {
+                    text: serverContextMenu.url
+                    font.family: Theme.fontMono
+                    font.pixelSize: Theme.fontSize.sm
+                    color: Theme.fg1
+                    elide: Text.ElideMiddle
+                    width: 240 - Theme.sp.s3 * 2
+                }
+                Row {
+                    spacing: Theme.sp.s2
+                    // connectionStatus is the sync loop's live verdict
+                    // (0 disconnected / 1 healthy / 2 reconnecting) —
+                    // NOT `connected`, which flips true optimistically
+                    // when credentials are set, before any sync
+                    // succeeds. Must agree with MessageView's banner.
+                    readonly property int st: serverContextMenu.conn
+                        ? serverContextMenu.conn.connectionStatus : 0
+                    Rectangle {
+                        width: 8; height: 8; radius: 4
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: parent.st === 1 ? Theme.online
+                             : parent.st === 2 ? Theme.warn
+                             : Theme.danger
+                    }
+                    Text {
+                        text: {
+                            var c = serverContextMenu.conn;
+                            if (!c) return "Unknown";
+                            if (c.connectionStatus === 1) return "Connected";
+                            if (c.connectionStatus === 2) return "Reconnecting…";
+                            return c.syncErrorMessage && c.syncErrorMessage.length > 0
+                                   ? c.syncErrorMessage : "Disconnected";
+                        }
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        color: parent.st === 1 ? Theme.fg2
+                             : parent.st === 2 ? Theme.warn
+                             : Theme.danger
+                        elide: Text.ElideRight
+                        width: 240 - Theme.sp.s3 * 2 - 14
+                    }
+                }
+            }
+            background: null
+        }
+
+        MenuSeparator {
+            contentItem: Rectangle {
+                implicitHeight: 1
+                color: Theme.lineSoft
+            }
+        }
+
+        component ServerCtxItem: MenuItem {
+            id: mi
+            implicitHeight: visible ? 34 : 0
+            height: implicitHeight
+            property string iconName: ""
+            property color labelColor: Theme.fg0
+            contentItem: RowLayout {
+                spacing: Theme.sp.s3
+                Icon {
+                    name: mi.iconName; size: 14
+                    color: !mi.enabled ? Theme.fg3
+                         : mi.hovered ? mi.labelColor : Theme.fg2
+                    Layout.leftMargin: Theme.sp.s3
+                }
+                Text {
+                    text: mi.text
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    color: !mi.enabled ? Theme.fg3 : mi.labelColor
+                    Layout.fillWidth: true
+                    verticalAlignment: Text.AlignVCenter
+                }
+            }
+            background: Rectangle {
+                color: mi.hovered && mi.enabled ? Theme.bg2 : "transparent"
+                radius: Theme.r1
+                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+            }
+        }
+
+        ServerCtxItem {
+            text: "Copy address"
+            iconName: "copy"
+            onTriggered: serverManager.copyToClipboard(serverContextMenu.url)
+        }
+        ServerCtxItem {
+            text: "Edit address…"
+            iconName: "edit"
+            onTriggered: {
+                editServerDialog.serverIndex = serverContextMenu.serverIndex;
+                editServerDialog.originalUrl = serverContextMenu.url;
+                editServerDialog.open();
+            }
+        }
+        ServerCtxItem {
+            text: "Reconnect"
+            iconName: "signal"
+            onTriggered: serverManager.reconnectServer(serverContextMenu.serverIndex)
+        }
+
+        MenuSeparator {
+            contentItem: Rectangle {
+                implicitHeight: 1
+                color: Theme.lineSoft
+            }
+        }
+
+        ServerCtxItem {
+            text: "Remove server…"
+            iconName: "x"
+            labelColor: Theme.danger
+            onTriggered: {
+                removeServerDialog.serverIndex = serverContextMenu.serverIndex;
+                removeServerDialog.open();
+            }
+        }
+    }
+
+    // Edit-address dialog. Repoints the saved server entry and rebuilds
+    // the connection with the stored credentials — no re-login needed
+    // when the same server is reachable at the new address.
+    Dialog {
+        id: editServerDialog
+        property int serverIndex: -1
+        property string originalUrl: ""
+
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: 400
+        modal: true
+        title: ""
+
+        background: Rectangle {
+            color: Theme.bg1
+            radius: Theme.r2
+            border.color: Theme.line
+            border.width: 1
+        }
+
+        onOpened: {
+            editUrlField.text = originalUrl;
+            editUrlField.forceActiveFocus();
+            editUrlField.selectAll();
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Theme.sp.s4
+
+            Text {
+                text: "Server address"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.lg
+                font.weight: Theme.fontWeight.semibold
+                color: Theme.fg0
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "The connection is rebuilt with your existing login. "
+                      + "Use the full base URL, e.g. http://192.168.1.20:8448"
+                wrapMode: Text.WordWrap
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.fg2
+            }
+            TextField {
+                id: editUrlField
+                Layout.fillWidth: true
+                placeholderText: "http://localhost:8448"
+                placeholderTextColor: Theme.fg3
+                color: Theme.fg0
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.fontSize.sm
+                background: Rectangle {
+                    color: Theme.bg0
+                    radius: Theme.r2
+                    border.color: editUrlField.activeFocus ? Theme.accent : Theme.line
+                    border.width: 1
+                }
+                padding: Theme.sp.s3
+                onAccepted: editServerDialog.saveAndClose()
+            }
+
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                spacing: Theme.sp.s3
+
+                Button {
+                    text: "Cancel"
+                    flat: true
+                    contentItem: Text {
+                        text: parent.text
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        color: Theme.fg1
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        color: parent.hovered ? Theme.bg2 : "transparent"
+                        radius: Theme.r2
+                    }
+                    onClicked: editServerDialog.close()
+                }
+                Button {
+                    text: "Save"
+                    enabled: editUrlField.text.trim().length > 0
+                    contentItem: Text {
+                        text: parent.text
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.semibold
+                        color: parent.enabled ? Theme.onAccent : Theme.fg3
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        color: parent.enabled
+                               ? (parent.hovered ? Qt.lighter(Theme.accent, 1.1) : Theme.accent)
+                               : Theme.bg2
+                        radius: Theme.r2
+                    }
+                    onClicked: editServerDialog.saveAndClose()
+                }
+            }
+        }
+
+        function saveAndClose() {
+            var url = editUrlField.text.trim();
+            if (url.length === 0) return;
+            if (url !== originalUrl)
+                serverManager.updateServerUrl(serverIndex, url);
+            close();
+        }
+    }
+
+    // Remove-server confirm. Destructive: drops the saved login too.
+    Dialog {
+        id: removeServerDialog
+        property int serverIndex: -1
+
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: 360
+        modal: true
+        title: ""
+
+        background: Rectangle {
+            color: Theme.bg1
+            radius: Theme.r2
+            border.color: Theme.line
+            border.width: 1
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Theme.sp.s4
+
+            Text {
+                text: "Remove server?"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.lg
+                font.weight: Theme.fontWeight.semibold
+                color: Theme.fg0
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "This removes the server and its saved login from this "
+                      + "device. Your account on the server is untouched."
+                wrapMode: Text.WordWrap
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.fg2
+            }
+
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                spacing: Theme.sp.s3
+
+                Button {
+                    text: "Cancel"
+                    flat: true
+                    contentItem: Text {
+                        text: parent.text
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        color: Theme.fg1
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        color: parent.hovered ? Theme.bg2 : "transparent"
+                        radius: Theme.r2
+                    }
+                    onClicked: removeServerDialog.close()
+                }
+                Button {
+                    text: "Remove"
+                    contentItem: Text {
+                        text: parent.text
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.semibold
+                        color: Theme.onAccent
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        color: parent.hovered ? Qt.lighter(Theme.danger, 1.1) : Theme.danger
+                        radius: Theme.r2
+                    }
+                    onClicked: {
+                        serverManager.removeServer(removeServerDialog.serverIndex);
+                        removeServerDialog.close();
+                    }
+                }
             }
         }
     }
