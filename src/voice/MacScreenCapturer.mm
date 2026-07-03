@@ -266,6 +266,12 @@ void MacScreenCapturer::grabWithFilter()
                         QImage::Format_ARGB32_Premultiplied);
             QImage owned = qimg.copy();
             QMetaObject::invokeMethod(this, [this, owned]() {
+                // Captures are async — several can be in flight when
+                // stop() lands, and a straggler frame delivered after
+                // the stop would flip the controller back to "active"
+                // (the stop-only-works-if-you-spam-click bug). Drop
+                // anything that completes once we're no longer live.
+                if (!m_active) return;
                 m_consecutiveFails = 0;
                 emit frameReady(owned);
             }, Qt::QueuedConnection);
