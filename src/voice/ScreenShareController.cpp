@@ -95,23 +95,42 @@ ScreenShareController::ScreenShareController(QObject* parent)
         });
 #else
     m_capture = new QScreenCapture(this);
+    m_windowCapture = new QWindowCapture(this);
     m_session = new QMediaCaptureSession(this);
+    // Both capturers stay attached to the one session; only one is
+    // ever started at a time (startForScreen/startForWindow stop the
+    // other first), so the shared sink never sees interleaved frames.
     m_session->setScreenCapture(m_capture);
+    m_session->setWindowCapture(m_windowCapture);
     m_session->setVideoSink(m_sink);
 
-    connect(m_capture, &QScreenCapture::activeChanged, this, [this](bool a) {
+    // "Active" means either capturer is running.
+    auto updateActive = [this]() {
+        const bool a = m_capture->isActive() || m_windowCapture->isActive();
         if (m_active == a) return;
         m_active = a;
         qInfo("[screenshare] active=%d", int(a));
         emit activeChanged();
-    });
+    };
+    connect(m_capture, &QScreenCapture::activeChanged, this, updateActive);
+    connect(m_windowCapture, &QWindowCapture::activeChanged,
+            this, updateActive);
+
+    auto reportError = [this](const QString& description) {
+        if (description.isEmpty()) return;
+        m_lastError = description;
+        qWarning("[screenshare] error: %s", qUtf8Printable(description));
+        emit lastErrorChanged();
+    };
     connect(m_capture, &QScreenCapture::errorOccurred, this,
-        [this](QScreenCapture::Error err, const QString& description) {
-            Q_UNUSED(err);
-            if (description.isEmpty()) return;
-            m_lastError = description;
-            qWarning("[screenshare] error: %s", qUtf8Printable(description));
-            emit lastErrorChanged();
+        [reportError](QScreenCapture::Error, const QString& description) {
+            reportError(description);
+        });
+    // Window capture errors also fire when the shared window closes
+    // mid-share — the toast doubles as "your share just ended".
+    connect(m_windowCapture, &QWindowCapture::errorOccurred, this,
+        [reportError](QWindowCapture::Error, const QString& description) {
+            reportError(description);
         });
     connect(m_sink, &QVideoSink::videoFrameChanged, this,
         [this](const QVideoFrame& frame) { m_pendingFrame = frame; });
@@ -163,6 +182,69 @@ QVariantList ScreenShareController::availableScreens() const
         out.append(m);
     }
     return out;
+}
+
+void ScreenShareController::refreshWindows()
+{
+#ifdef Q_OS_MACOS
+    // macOS never populates this list — window selection goes through
+    // the native SCContentSharingPicker (showPicker()), which handles
+    // enumeration, thumbnails and TCC in one system surface.
+#else
+    m_qtWindows.clear();
+    QVariantList out;
+    const auto windows = QWindowCapture::capturableWindows();
+    for (const auto& w : windows) {
+        // Wayland compositors without the right portal return nothing;
+        // X11/Windows return everything including nameless utility
+        // windows — skip those, a user can't tell blank rows apart.
+        if (!w.isValid() || w.description().isEmpty()) continue;
+        QVariantMap m;
+        m[QStringLiteral("index")] = m_qtWindows.size();
+        m[QStringLiteral("name")] = w.description();
+        out.append(m);
+        m_qtWindows.append(w);
+    }
+    m_windowList = out;
+    emit windowsChanged();
+#endif
+}
+
+void ScreenShareController::startForWindow(int windowIndex)
+{
+    if (m_active) return;
+    qInfo("[screenshare] startForWindow(%d)", windowIndex);
+#ifdef Q_OS_MACOS
+    Q_UNUSED(windowIndex);
+    // Unreachable via the UI (the picker dialog never lists windows
+    // on macOS) — route to the native picker just in case.
+    showPicker();
+#else
+    applyEffectiveQuality(m_settings, m_servers);
+    if (windowIndex < 0 || windowIndex >= m_qtWindows.size()) {
+        m_lastError = QStringLiteral("That window is no longer available.");
+        emit lastErrorChanged();
+        refreshWindows();
+        return;
+    }
+    const QCapturableWindow win = m_qtWindows[windowIndex];
+    // The list is a snapshot from when the picker opened — the window
+    // may have closed while the user was choosing.
+    if (!win.isValid()) {
+        m_lastError = QStringLiteral(
+            "\"%1\" closed before sharing started.").arg(win.description());
+        emit lastErrorChanged();
+        refreshWindows();
+        return;
+    }
+    m_lastError.clear();
+    emit lastErrorChanged();
+    m_capture->stop();
+    m_windowCapture->setWindow(win);
+    m_windowCapture->start();
+    m_throttle->setInterval(g_frameIntervalMs);
+    m_throttle->start();
+#endif
 }
 
 void ScreenShareController::setServerManager(ServerManager* mgr)
@@ -312,8 +394,10 @@ void ScreenShareController::startForScreen(int screenIndex)
     }
     m_lastError.clear();
     emit lastErrorChanged();
+    m_windowCapture->stop();
     m_capture->setScreen(target);
     m_capture->start();
+    m_throttle->setInterval(g_frameIntervalMs);
     m_throttle->start();
 #endif
 }
@@ -333,7 +417,10 @@ void ScreenShareController::stop()
         emit activeChanged();
     }
 #else
-    if (m_active) m_capture->stop();
+    if (m_active) {
+        m_capture->stop();
+        m_windowCapture->stop();
+    }
 #endif
 }
 

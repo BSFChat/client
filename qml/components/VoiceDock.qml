@@ -258,18 +258,14 @@ Rectangle {
                     }
                     // macOS has a native window/app/display picker
                     // (SCContentSharingPicker) behind showPicker();
-                    // Windows/Linux fall back to our QML display
-                    // picker since Qt's QScreenCapture path can only
-                    // grab whole screens there. Single-monitor setups
-                    // skip the dialog — there is nothing to choose.
+                    // Windows/Linux get our QML picker, which lists
+                    // displays (QScreenCapture) and individual
+                    // windows (QWindowCapture). Always a dialog now —
+                    // even one monitor leaves windows to choose from.
                     if (Qt.platform.os === "osx") {
                         screenShare.showPicker();
                     } else {
-                        var screens = screenShare.availableScreens;
-                        if (screens.length === 1)
-                            screenShare.startForScreen(screens[0].index);
-                        else
-                            screenPickerDialog.open();
+                        screenPickerDialog.open();
                     }
                 }
                 ScreenPickerDialog { id: screenPickerDialog }

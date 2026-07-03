@@ -317,6 +317,7 @@ qt_add_qml_module(bsfchat-app
         qml/icons/headphones.svg
         qml/icons/headphones-off.svg
         qml/icons/screen-share.svg
+        qml/icons/app-window.svg
         qml/icons/video.svg
         qml/icons/phone-off.svg
         qml/icons/settings.svg
