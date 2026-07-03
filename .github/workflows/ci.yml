@@ -228,6 +228,15 @@ jobs:
             # Try finding it
             find /Users/runner -name "QtQuick" -type d -path "*/qml/*" 2>/dev/null | head -3
           fi
+          # Strip build intermediates that Qt 6.11's QML modules ship
+          # inside their deployed dirs (e.g. Qt.labs.assetdownloader
+          # carries objects-*/**.cpp.o and .qt/rcc artifacts). They have
+          # no runtime purpose, but they ARE Mach-O objects, so the
+          # notary rejects the bundle with "binary is not signed / no
+          # secure timestamp" for each one. Remove them before signing.
+          find "$APP_PATH/Contents/Resources/qml" \
+            \( -name '*.o' -o -name '*.a' -o -name 'objects-*' -o -name '.qt' \) \
+            -exec rm -rf {} + 2>/dev/null || true
           # Set qt.conf to tell Qt where QML modules are
           cat > "$APP_PATH/Contents/Resources/qt.conf" << 'QTCONF'
           [Paths]
