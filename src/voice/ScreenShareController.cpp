@@ -367,7 +367,7 @@ static void applyEffectiveQuality(Settings* settings, ServerManager* servers)
     int userMaxW  = settings ? settings->screenShareMaxWidth() : 1280;
     int userJpegQ = settings ? settings->screenShareJpegQuality() : 60;
     int userKbps  = settings ? settings->screenShareTargetKbps() : 4000;
-    int userGop   = settings ? settings->screenShareKeyframeSec() : 3;
+    int userGop   = settings ? settings->screenShareKeyframeSec() : 10;
 
     int srvFps = -1, srvW = -1, srvJpegQ = -1, srvKbps = -1;
     if (servers) {
@@ -645,8 +645,16 @@ void ScreenShareController::pushFrameToPeers()
 
     // Legacy JPEG path — only when someone still needs it (no open
     // video track): old clients, Android, or a capable peer whose
-    // renegotiation hasn't finished yet.
-    if (voice->hasLegacyOpenPeers(VideoStreamId::Screen)) {
+    // renegotiation hasn't finished yet. Subsampled to ~5 fps (the
+    // rate this path was designed for — the camera path has the same
+    // divisor): at the RTP-oriented 30-60 fps capture cadence, per-
+    // tick JPEG broadcast firehoses tens of Mbit/s at the data
+    // channel, whose backpressure then drops frames in bursts — the
+    // viewer sees clumpy, flickering playback instead of a slow but
+    // steady slideshow.
+    const int legacyDivisor = qMax(1, g_encoderConfig.fps / 5);
+    if (voice->hasLegacyOpenPeers(VideoStreamId::Screen)
+        && (s_tickCount % legacyDivisor) == 0) {
         QImage img = m_pendingFrame.toImage();
         if (img.isNull()) {
             if (s_tickCount % 25 == 1)
@@ -655,14 +663,23 @@ void ScreenShareController::pushFrameToPeers()
             return;
         }
 
-        if (img.width() > g_maxWidth)
-            img = img.scaledToWidth(g_maxWidth, Qt::SmoothTransformation);
+        // The user's resolution/quality settings size the RTP encoder;
+        // the legacy JPEG rides a data channel whose SCTP message cap
+        // is ~256 KB, and libdatachannel refuses (throws on) anything
+        // larger. Clamp this path to dimensions/quality that reliably
+        // fit — 1600 px Q75 tops out around 200 KB — instead of
+        // letting a 3840 px Q100 setting produce ~1.5 MB frames that
+        // can never be sent.
+        const int legacyMaxW = qMin(g_maxWidth, 1600);
+        const int legacyQ    = qMin(g_jpegQuality, 75);
+        if (img.width() > legacyMaxW)
+            img = img.scaledToWidth(legacyMaxW, Qt::SmoothTransformation);
 
         QByteArray jpeg;
         {
             QBuffer buf(&jpeg);
             buf.open(QIODevice::WriteOnly);
-            if (!img.save(&buf, "JPEG", g_jpegQuality)) return;
+            if (!img.save(&buf, "JPEG", legacyQ)) return;
         }
 
         voice->broadcastScreenFrame(jpeg);

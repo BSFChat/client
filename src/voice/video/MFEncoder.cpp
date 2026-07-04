@@ -126,6 +126,35 @@ bool MFEncoder::configureTypes(const EncoderConfig& config) {
         var.vt = VT_UI4;
         var.ulVal = 0;
         m_codecApi->SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &var);
+
+        // Explicit rate-control mode. Without one, several MFTs
+        // (vendor hardware ones especially) default to a quality mode
+        // and silently ignore both MF_MT_AVG_BITRATE and later
+        // AVEncCommonMeanBitRate updates — the adaptive controller
+        // then "cuts" bitrate with no effect, over-corrects, and
+        // ladders resolution down for nothing. LowDelayVBR suits
+        // realtime screen content; fall back to CBR (universally
+        // supported, incl. the MS software MFT).
+        var.vt = VT_UI4;
+        var.ulVal = eAVEncCommonRateControlMode_LowDelayVBR;
+        if (FAILED(m_codecApi->SetValue(&CODECAPI_AVEncCommonRateControlMode,
+                                        &var))) {
+            var.ulVal = eAVEncCommonRateControlMode_CBR;
+            if (FAILED(m_codecApi->SetValue(
+                    &CODECAPI_AVEncCommonRateControlMode, &var))) {
+                qCInfo(logMFEnc, "MFT accepts no rate-control mode; "
+                       "dynamic bitrate may be ignored");
+            }
+        }
+        // Seed the mean bitrate through ICodecAPI too — the path
+        // setBitrate() uses for live updates — so mode + rate are
+        // consistent from the first frame.
+        var.vt = VT_UI4;
+        var.ulVal = UINT32(config.targetBitrateKbps) * 1000;
+        m_codecApi->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var);
+        var.vt = VT_BOOL;
+        var.boolVal = VARIANT_TRUE;
+        m_codecApi->SetValue(&CODECAPI_AVEncCommonRealTime, &var);
     }
 
     m_mft->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);

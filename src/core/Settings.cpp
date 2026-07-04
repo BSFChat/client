@@ -538,8 +538,11 @@ void Settings::setScreenShareTargetKbps(int kbps)
 
 int Settings::screenShareKeyframeSec() const
 {
+    // 10 s background refresh: receivers explicitly request IDRs on
+    // loss/late-join, so a short periodic GOP only pulses quality and
+    // burns bitrate that P-frames could spend on sharp text.
     return std::clamp(m_settings.value(
-        QStringLiteral("screenShare/keyframeSec"), 3).toInt(), 1, 30);
+        QStringLiteral("screenShare/keyframeSec"), 10).toInt(), 1, 30);
 }
 
 void Settings::setScreenShareKeyframeSec(int sec)

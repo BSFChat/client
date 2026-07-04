@@ -92,17 +92,22 @@ void VideoRateController::tick() {
     const int before = m_bitrate;
     bool backedOff = false;
 
+    // Cut gently, recover briskly. The original −40 %/−15 % steps with
+    // a +8 %-per-2 s climb made the bitrate saw-tooth hard enough that
+    // the quality visibly pulsed on every WiFi loss blip; softer cuts
+    // hold quality steadier and the receiver-side loss handling (drop
+    // corrupt AUs, resync on IDR) now covers the actual artefacts.
     if (ratio < 0.90 || kf >= 3) {
-        m_bitrate = int(m_bitrate * 0.60);
+        m_bitrate = int(m_bitrate * 0.75);
         backedOff = true;
         m_stableTicks = 0;
         m_comfortTicks = 0;
     } else if (ratio < 0.97) {
-        m_bitrate = int(m_bitrate * 0.85);
+        m_bitrate = int(m_bitrate * 0.90);
         backedOff = true;
         m_stableTicks = 0;
         m_comfortTicks = 0;
-    } else if (++m_stableTicks >= 4) {
+    } else if (++m_stableTicks >= 2) {
         m_bitrate = int(m_bitrate * 1.08) + 50;
         m_stableTicks = 0;
     }
@@ -135,6 +140,13 @@ void VideoRateController::tick() {
         qCInfo(logVideoRate,
               "[%d] back-off: ratio=%.3f kf=%d bitrate %d→%d kbps edge=%d",
               int(m_streamId), ratio, kf, before, m_bitrate, longEdge());
-        emit forceKeyframe();
+        // Deliberately NO forceKeyframe here. An IDR is the largest
+        // frame the encoder can emit — blasting one at the exact
+        // moment the path is congested is how keyframe storms start
+        // (IDR burst → AP queue drops part of it → receiver requests
+        // another IDR → repeat). Receivers that actually lost data
+        // request their own keyframe via keyframeNeeded/PLI, and a
+        // resolution-ladder change rebuilds the encode session, which
+        // opens on an IDR anyway.
     }
 }

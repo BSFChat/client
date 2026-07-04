@@ -38,7 +38,13 @@ struct EncoderConfig {
     int fps = 30;
     int targetBitrateKbps = 4000;
     int maxBitrateKbps = 8000;
-    int keyframeIntervalSec = 3;
+    // Long GOP on purpose: an IDR costs 10-20× a P-frame, so frequent
+    // periodic keyframes pulse the quality and waste budget that
+    // could sharpen screen content. Recovery does not rely on this
+    // cadence — receivers explicitly request an IDR (PLI /
+    // keyframeNeeded) on loss or late join, and new encode sessions
+    // always open on one. This is only the background refresh.
+    int keyframeIntervalSec = 10;
     bool lossless = false;               // implies codec == Av1Lossless
     H264Profile profile = H264Profile::ConstrainedBaseline;
     // Screen content favors sharpness/text (encoders have dedicated

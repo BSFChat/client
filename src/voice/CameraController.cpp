@@ -331,7 +331,8 @@ void CameraController::pushFrameToPeers()
         cfg.targetBitrateKbps = m_rate->targetKbps();
         cfg.maxBitrateKbps = m_rate->maxKbps();
         cfg.width = cfg.height = qMin(maxEdge, m_rate->longEdge());
-        cfg.keyframeIntervalSec = 3;
+        cfg.keyframeIntervalSec = 10;   // background refresh only —
+                                        // receivers PLI when they need one
         m_pipeline->configure(cfg);
         m_pipeline->submitFrame(m_pendingFrame,
                                 QDateTime::currentMSecsSinceEpoch() * 1000);
