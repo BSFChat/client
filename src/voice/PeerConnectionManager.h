@@ -10,6 +10,7 @@
 #include <QTimer>
 
 #include <rtc/rtc.hpp>
+#include <atomic>
 #include <memory>
 #include <vector>
 #include <string>
@@ -141,7 +142,12 @@ signals:
     void losslessFrameReceived(int streamId, const QByteArray& temporalUnit,
                                bool keyframe);
     // Reassembled H.264 access unit from the remote's video track.
-    void videoFrameReceived(int streamId, const QByteArray& accessUnit);
+    // `lossSuspected` is set when RTP sequence gaps were observed since
+    // the previous AU — the unit is likely incomplete and decoding it
+    // would display error-concealment garbage; the consumer should drop
+    // it and wait for the next keyframe.
+    void videoFrameReceived(int streamId, const QByteArray& accessUnit,
+                            bool lossSuspected);
     // The send direction of a video track became usable.
     void videoTrackOpen(int streamId);
     // Remote sent RTCP PLI — it needs a keyframe on our send stream.
@@ -158,6 +164,10 @@ private:
     // added (offerer) or one delivered by onTrack (answerer).
     void attachVideoTrack(VideoStreamId stream, std::shared_ptr<rtc::Track> track);
     void setupLosslessChannel(std::shared_ptr<rtc::DataChannel> dc);
+    // Size-checked, exception-safe DataChannel send. Returns false if
+    // the frame was dropped (oversized or transport error). Callers
+    // must have verified m_dc is present and open.
+    bool sendOnDataChannel(rtc::binary&& data, const char* what);
 
     QString m_peerId;
     QString m_callId;
@@ -170,6 +180,7 @@ private:
     int m_framesSent = 0;
     int m_framesReceived = 0;
     int m_screenFramesDropped = 0;  // bumped when bufferedAmount() exceeded
+    qint64 m_lastOversizeWarnMs = 0; // rate-limits oversized-frame warnings
 
     // Renegotiation state. m_initialNegotiationDone flips after the
     // first offer/answer round-trip completes (offerer: answer
@@ -192,6 +203,10 @@ private:
         std::shared_ptr<rtc::RtcpSrReporter> srReporter;
         qint64 startTimeUs = -1;
         bool open = false;
+        // Set by the RtpGapDetector (libdatachannel network thread),
+        // consumed by onFrame on the same thread; atomic as cheap
+        // insurance against future callers.
+        std::atomic<bool> lossPending{false};
     };
     VideoTrackCtx m_video[kVideoStreamCount];
     QTimer* m_srTimer = nullptr;   // 1 s sender-report tick, lazily created

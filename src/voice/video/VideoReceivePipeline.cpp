@@ -2,6 +2,7 @@
 
 #include "voice/video/VideoDecoder.h"
 
+#include <QDateTime>
 #include <QLoggingCategory>
 
 Q_LOGGING_CATEGORY(logVideoRecv, "bsfchat.video.recv", QtWarningMsg)
@@ -49,7 +50,8 @@ VideoReceivePipeline::~VideoReceivePipeline() {
 }
 
 void VideoReceivePipeline::submitAccessUnit(const QByteArray& au,
-                                            bool keyframeHint) {
+                                            bool keyframeHint,
+                                            bool lossSuspected) {
     m_rxFrames.fetch_add(1);
     m_rxBytes.fetch_add(quint64(au.size()));
     bool overflowed = false;
@@ -61,7 +63,7 @@ void VideoReceivePipeline::submitAccessUnit(const QByteArray& au,
             m_queue.clear();
             overflowed = true;
         }
-        m_queue.append({au, keyframeHint});
+        m_queue.append({au, keyframeHint, lossSuspected});
     }
     if (overflowed) {
         qCWarning(logVideoRecv, "[%s/%d] decode backlog dropped",
@@ -69,12 +71,20 @@ void VideoReceivePipeline::submitAccessUnit(const QByteArray& au,
         QMetaObject::invokeMethod(&m_worker, [this]() {
             m_waitingForKeyframe = true;
         }, Qt::QueuedConnection);
-        emit keyframeNeeded(m_userId, int(m_streamId));
+        requestKeyframeThrottled();
     }
     if (!m_drainQueued.exchange(true)) {
         QMetaObject::invokeMethod(&m_worker, [this]() { drainQueue(); },
                                   Qt::QueuedConnection);
     }
+}
+
+void VideoReceivePipeline::requestKeyframeThrottled() {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    qint64 last = m_lastKfRequestMs.load(std::memory_order_relaxed);
+    if (now - last < kKfRequestMinIntervalMs) return;
+    if (!m_lastKfRequestMs.compare_exchange_strong(last, now)) return;
+    emit keyframeNeeded(m_userId, int(m_streamId));
 }
 
 void VideoReceivePipeline::drainQueue() {
@@ -87,6 +97,20 @@ void VideoReceivePipeline::drainQueue() {
             queued = m_queue.takeFirst();
         }
         const QByteArray& au = queued.data;
+
+        if (queued.loss) {
+            // RTP gap while this AU was reassembled — it's likely
+            // incomplete. Decoding it "works" (decoders conceal) but
+            // paints corruption that compounds until the next IDR.
+            // Freeze instead: drop it, resume at the next keyframe.
+            if (!m_waitingForKeyframe)
+                qCInfo(logVideoRecv, "[%s/%d] loss-suspect AU dropped, "
+                       "waiting for keyframe",
+                       qPrintable(m_userId), int(m_streamId));
+            m_waitingForKeyframe = true;
+            requestKeyframeThrottled();
+            continue;
+        }
 
         if (!m_decoder) {
             m_decoder = VideoDecoder::create(m_codec);
@@ -121,7 +145,7 @@ void VideoReceivePipeline::drainQueue() {
             // resume at the next keyframe, ask the sender for one.
             m_decoder->reset();
             m_waitingForKeyframe = true;
-            emit keyframeNeeded(m_userId, int(m_streamId));
+            requestKeyframeThrottled();
             break;
         }
     }

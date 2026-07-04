@@ -36,7 +36,13 @@ public:
     // Thread-safe. `keyframeHint` marks the AU as a keyframe when the
     // transport knows (lossless framing carries a flag; H.264 AUs are
     // scanned for IDR NALs instead and can pass false).
-    void submitAccessUnit(const QByteArray& au, bool keyframeHint = false);
+    // `lossSuspected` marks the AU as likely incomplete (RTP sequence
+    // gap observed while it was being reassembled) — it is dropped
+    // without decoding and the stream re-enters at the next keyframe,
+    // because decoders (MF especially) error-conceal broken references
+    // and report success, which paints smearing corruption on screen.
+    void submitAccessUnit(const QByteArray& au, bool keyframeHint = false,
+                          bool lossSuspected = false);
 
     // Cumulative receive counters, read by VoiceEngine's 500 ms
     // receiver-report tick and sent to the remote sender, which
@@ -52,6 +58,11 @@ signals:
 
 private:
     void drainQueue();   // worker thread
+    // Emit keyframeNeeded at most once per kKfRequestMinIntervalMs.
+    // Under sustained loss every gap would otherwise fire a request,
+    // and the sender counts request bursts as a congestion signal —
+    // spam would keep it in permanent hard back-off. Thread-safe.
+    void requestKeyframeThrottled();
 
     const QString m_userId;
     const VideoStreamId m_streamId;
@@ -61,15 +72,17 @@ private:
     QObject m_worker;
 
     QMutex m_mutex;
-    struct QueuedAu { QByteArray data; bool keyframe = false; };
+    struct QueuedAu { QByteArray data; bool keyframe = false; bool loss = false; };
     QList<QueuedAu> m_queue;
     std::atomic<bool> m_drainQueued{false};
     std::atomic<quint64> m_rxFrames{0};
     std::atomic<quint64> m_rxBytes{0};
+    std::atomic<qint64> m_lastKfRequestMs{0};
 
     // Worker-thread-only state.
     std::unique_ptr<VideoDecoder> m_decoder;
     bool m_waitingForKeyframe = true;   // never decode deltas cold
 
     static constexpr int kMaxQueuedAus = 16;
+    static constexpr qint64 kKfRequestMinIntervalMs = 700;
 };

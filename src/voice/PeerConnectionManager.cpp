@@ -1,4 +1,5 @@
 #include "voice/PeerConnectionManager.h"
+#include <QDateTime>
 #include <QDebug>
 #include <QLoggingCategory>
 #include <QRandomGenerator>
@@ -55,6 +56,55 @@ int streamIndexForMid(const std::string& mid) {
         if (mid == kVideoSpecs[i].mid) return i;
     return -1;
 }
+
+// Watches incoming RTP sequence numbers and reports gaps. The H264
+// depacketizer knowingly assembles incomplete access units when
+// packets are missing (per RFC 6184 it only drops the *rest of the
+// fragmented NAL*, not the frame) and provides no loss signal — and
+// hardware decoders (notably Media Foundation's) error-conceal such
+// input and return success, so without this hint the receive pipeline
+// would happily display progressively-corrupting frames until the
+// next periodic IDR. Sits between the RTCP session and the
+// depacketizer in the receive chain (incoming traverses tail→head),
+// so it sees clean RTP packets post-RTCP-strip, pre-reassembly.
+class RtpGapDetector final : public rtc::MediaHandler {
+public:
+    explicit RtpGapDetector(std::function<void()> onGap)
+        : m_onGap(std::move(onGap)) {}
+
+    void incoming(rtc::message_vector& messages,
+                  const rtc::message_callback&) override {
+        for (const auto& msg : messages) {
+            if (!msg || msg->size() < sizeof(rtc::RtpHeader)) continue;
+            const auto* h = reinterpret_cast<const rtc::RtpHeader*>(msg->data());
+            if (h->version() != 2) continue;
+            // RFC 5761 demux: byte 1 of an RTCP packet is its full
+            // 8-bit packet type (SR=200 … PSFB=206); in RTP the same
+            // byte is marker|PT and our PTs (96/97) land outside
+            // [192,223] with or without the marker bit. Don't let a
+            // stray RTCP packet masquerade as a sequence jump.
+            const uint8_t pt = std::to_integer<uint8_t>(msg->at(1));
+            if (pt >= 192 && pt <= 223) continue;
+            const uint16_t seq = h->seqNumber();
+            if (m_hasLast) {
+                // Serial-number arithmetic: ahead==0 is in-order;
+                // ahead in (0, 2^15) means packets went missing;
+                // ahead >= 2^15 is a late/reordered duplicate whose
+                // absence was already accounted — don't resync on it.
+                const uint16_t ahead = uint16_t(seq - uint16_t(m_lastSeq + 1));
+                if (ahead >= 0x8000) continue;
+                if (ahead != 0 && m_onGap) m_onGap();
+            }
+            m_lastSeq = seq;
+            m_hasLast = true;
+        }
+    }
+
+private:
+    std::function<void()> m_onGap;
+    uint16_t m_lastSeq = 0;
+    bool m_hasLast = false;
+};
 } // namespace
 
 PeerConnectionManager::PeerConnectionManager(const QString& peerId, const QString& callId,
@@ -353,7 +403,7 @@ void PeerConnectionManager::sendControl(const QByteArray& json) {
     data.push_back(std::byte{0x04});
     auto* raw = reinterpret_cast<const std::byte*>(json.constData());
     data.insert(data.end(), raw, raw + json.size());
-    m_dc->send(data);
+    sendOnDataChannel(std::move(data), "control");
 }
 
 void PeerConnectionManager::ensureVideoTracks() {
@@ -404,14 +454,26 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
         20'000'000.0, std::chrono::milliseconds(5)));
     packetizer->addToChain(std::make_shared<rtc::H264RtpDepacketizer>(
         rtc::NalUnit::Separator::LongStartSequence));
+    // Gap detector AFTER the depacketizer in build order = BEFORE it
+    // on the incoming (tail→head) traversal, so lossPending is set
+    // before the depacketizer assembles — and onFrame delivers — the
+    // access unit the gap corrupted.
+    packetizer->addToChain(std::make_shared<RtpGapDetector>([this, idx]() {
+        m_video[idx].lossPending.store(true, std::memory_order_relaxed);
+    }));
     packetizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
     track->setMediaHandler(packetizer);
 
     track->onFrame([this, idx](rtc::binary data, rtc::FrameInfo) {
         QByteArray au(reinterpret_cast<const char*>(data.data()),
                       int(data.size()));
-        QMetaObject::invokeMethod(this, [this, idx, au]() {
-            emit videoFrameReceived(idx, au);
+        // Same-thread as the gap detector (libdatachannel delivers
+        // frames during the incoming chain traversal), so this
+        // read-and-clear pairs exactly with the AU it corrupted.
+        const bool loss = m_video[idx].lossPending.exchange(
+            false, std::memory_order_relaxed);
+        QMetaObject::invokeMethod(this, [this, idx, au, loss]() {
+            emit videoFrameReceived(idx, au, loss);
         }, Qt::QueuedConnection);
     });
     track->onOpen([this, idx]() {
@@ -563,8 +625,43 @@ void PeerConnectionManager::sendAudioFrame(const QByteArray& frame) {
         data.push_back(std::byte{0x01});
         auto* raw = reinterpret_cast<const std::byte*>(frame.constData());
         data.insert(data.end(), raw, raw + frame.size());
-        m_dc->send(data);
-        m_framesSent++;
+        if (sendOnDataChannel(std::move(data), "audio"))
+            m_framesSent++;
+    }
+}
+
+bool PeerConnectionManager::sendOnDataChannel(rtc::binary&& data,
+                                              const char* what) {
+    // Every DataChannel::send() can throw: std::invalid_argument when
+    // the message exceeds the negotiated SCTP max message size
+    // (DEFAULT 256 KB — a 3840px Q100 JPEG is ~1.5 MB), and runtime
+    // errors on transport teardown races. These sends run inside Qt
+    // timer/slot handlers, so an escaped exception unwinds the event
+    // loop and aborts the whole app (0xc0000409 fail-fast) — which is
+    // precisely how "screen share at max quality instantly crashes
+    // with a legacy peer" manifested. Drop the frame instead; the
+    // stream self-heals on the next one.
+    if (data.size() > m_dc->maxMessageSize()) {
+        // Rate-limit: complain once per ~5 s per peer, not per frame.
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - m_lastOversizeWarnMs > 5000) {
+            m_lastOversizeWarnMs = now;
+            qCWarning(logVoicePc,
+                     " [%s] %s frame dropped: %zu bytes exceeds channel "
+                     "max %zu — lower screen-share resolution/quality "
+                     "for legacy peers",
+                     qPrintable(m_peerId), what, data.size(),
+                     m_dc->maxMessageSize());
+        }
+        return false;
+    }
+    try {
+        m_dc->send(std::move(data));
+        return true;
+    } catch (const std::exception& e) {
+        qCWarning(logVoicePc, " [%s] %s send failed: %s",
+                 qPrintable(m_peerId), what, e.what());
+        return false;
     }
 }
 
@@ -591,7 +688,8 @@ void PeerConnectionManager::sendScreenFrame(const QByteArray& jpegData) {
     data.push_back(std::byte{0x02});
     auto* raw = reinterpret_cast<const std::byte*>(jpegData.constData());
     data.insert(data.end(), raw, raw + jpegData.size());
-    m_dc->send(data);
+    if (!sendOnDataChannel(std::move(data), "screen"))
+        ++m_screenFramesDropped;
 }
 
 void PeerConnectionManager::sendCameraFrame(const QByteArray& jpegData) {
@@ -601,5 +699,5 @@ void PeerConnectionManager::sendCameraFrame(const QByteArray& jpegData) {
     data.push_back(std::byte{0x03});
     auto* raw = reinterpret_cast<const std::byte*>(jpegData.constData());
     data.insert(data.end(), raw, raw + jpegData.size());
-    m_dc->send(data);
+    sendOnDataChannel(std::move(data), "camera");
 }

@@ -193,9 +193,10 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
 
     // RTP video receive: reassembled access units → per-peer decoder.
     connect(peer, &PeerConnectionManager::videoFrameReceived,
-            this, [this, userId](int streamId, const QByteArray& au) {
-                recvPipeline(userId, streamId,
-                             VideoCodecKind::H264)->submitAccessUnit(au);
+            this, [this, userId](int streamId, const QByteArray& au, bool loss) {
+                recvPipeline(userId, streamId, VideoCodecKind::H264)
+                    ->submitAccessUnit(au, /*keyframeHint=*/false,
+                                       /*lossSuspected=*/loss);
             });
     // Lossless tier: AV1 temporal units off the reliable channel.
     connect(peer, &PeerConnectionManager::losslessFrameReceived,
