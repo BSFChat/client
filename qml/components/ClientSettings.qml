@@ -491,10 +491,30 @@ Popup {
             }
 
             // ---- Screen Share (index 2) ----
+            // The one page with more rows than the dialog's max height
+            // (640 px) can hold — it scrolls. Plain anchored
+            // ColumnLayouts on the other pages paint past the dialog
+            // bounds when they overflow (no clip), which is exactly
+            // what happened when the quality settings landed here.
             Item {
-                ColumnLayout {
+                Flickable {
+                    id: screenShareFlick
                     anchors.fill: parent
                     anchors.margins: Theme.sp.s7 * 2
+                    contentHeight: screenShareCol.implicitHeight
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ThemedScrollBar {}
+
+                    ColumnLayout {
+                    id: screenShareCol
+                    // Bind to the Flickable itself, NOT parent (the
+                    // contentItem) — contentItem width follows its
+                    // children when contentWidth is unset, so
+                    // `parent.width` is circular and the column blows
+                    // out to its implicit width, clipping the row
+                    // trailers off the right edge.
+                    width: screenShareFlick.width
                     spacing: Theme.sp.s7
 
                     SectionHeader { text: "Screen Share" }
@@ -702,8 +722,9 @@ Popup {
                             + "may cap individual axes; effective values clamp "
                             + "to min(your-pick, server-cap)."
                     }
-
-                    Item { Layout.fillHeight: true }
+                    // No fillHeight spacer: the Flickable sizes from
+                    // implicitHeight; a stretch item would inflate it.
+                    }
                 }
             }
 
