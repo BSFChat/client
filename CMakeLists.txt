@@ -50,6 +50,24 @@ endif()
 
 include(cmake/Dependencies.cmake)
 
+# libaom's build (build/cmake/aom_configure.cmake) assumes it is the
+# top-level project and appends -D_WIN32_WINNT=0x0601 to the *cached*
+# CMAKE_<LANG>_FLAGS_<CONFIG> variables. Pulled in via FetchContent that
+# Windows 7 targeting leaks into every target in this build — including
+# bsfchat-app, where it hides the Win8+ APIs the Media Foundation video
+# backend needs (e.g. MF_LOW_LATENCY, undeclared under _WIN32_WINNT <
+# 0x0602). Scrub it out in this (top-level) scope so our targets fall
+# back to the SDK default (Win10); libaom keeps 0x0601 via its own
+# subdirectory scope.
+if(WIN32)
+    foreach(_cfg DEBUG RELEASE MINSIZEREL RELWITHDEBINFO)
+        foreach(_lang C CXX)
+            string(REPLACE "-D_WIN32_WINNT=0x0601" ""
+                CMAKE_${_lang}_FLAGS_${_cfg} "${CMAKE_${_lang}_FLAGS_${_cfg}}")
+        endforeach()
+    endforeach()
+endif()
+
 # Find Qt6
 find_package(Qt6 REQUIRED COMPONENTS Core Network Qml Quick QuickControls2 QuickDialogs2 Sql Multimedia Svg Widgets)
 qt_standard_project_setup()
@@ -139,6 +157,13 @@ if(BSFCHAT_ENABLE_VOICE)
         )
         target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_AOM)
         target_link_libraries(bsfchat-app PRIVATE aom)
+        # libaom's CMake is old-style (same story as libyuv below): the
+        # `aom` target sets its header paths with directory-scoped
+        # include_directories() and exports no usage requirements, so the
+        # aom source root (public <aom/*.h> headers) and its build dir
+        # (generated aom_config.h) must be added to consumers explicitly.
+        target_include_directories(bsfchat-app PRIVATE
+            ${libaom_SOURCE_DIR} ${libaom_BINARY_DIR})
     endif()
     # Hardware codec backends: VideoToolbox on desktop macOS, Media
     # Foundation on Windows. Both preferred by the factory, with
@@ -408,6 +433,15 @@ qt_add_qml_module(bsfchat-app
 )
 
 target_include_directories(bsfchat-app PRIVATE src)
+
+# Always emit a PDB for the app, Release included — crash triage on
+# tester machines is impossible from bare module+offset, and the cost
+# is only link time + a .pdb artifact that ships nowhere.
+if(MSVC)
+    target_compile_options(bsfchat-app PRIVATE $<$<CONFIG:Release>:/Zi>)
+    target_link_options(bsfchat-app PRIVATE
+        $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>)
+endif()
 
 target_link_libraries(bsfchat-app PRIVATE
     bsfchat_protocol
