@@ -10,7 +10,11 @@ import BSFChat
 Popup {
     id: clientSettingsPopup
     anchors.centerIn: Overlay.overlay
-    width: Math.min(parent ? parent.width * 0.85 : 720, 760)
+    // 900: the Screen Share rows carry a slider + mono value + server-cap
+    // badge (~400 px) NEXT TO the title/description column — at the old
+    // 760 cap the controls clipped off the dialog's right edge on every
+    // row. 0.9 keeps it inside small windows.
+    width: Math.min(parent ? parent.width * 0.9 : 720, 900)
     height: Math.min(parent ? parent.height * 0.85 : 600, 640)
     modal: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -79,11 +83,17 @@ Popup {
             Layout.fillWidth: true
             spacing: 2
             Text {
+                // fillWidth + wrap: a long title must wrap inside its
+                // column, never widen the row past the viewport (rows
+                // with wide right-hand controls leave the title column
+                // narrow).
+                Layout.fillWidth: true
                 text: title
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.md
                 font.weight: Theme.fontWeight.semibold
                 color: Theme.fg0
+                wrapMode: Text.WordWrap
             }
             Text {
                 visible: description.length > 0
@@ -527,8 +537,11 @@ Popup {
                     component CapBadge: Text {
                         property int cap: -1
                         property string suffix: ""
-                        text: cap < 0 ? " · server: uncapped"
-                                      : " · server cap: " + cap + suffix
+                        // Compact on purpose — it sits at the end of
+                        // rows that already carry a slider + value and
+                        // was the first casualty of tight width.
+                        text: cap < 0 ? " · uncapped"
+                                      : " · cap " + cap + suffix
                         color: cap < 0 ? Theme.fg3 : Theme.warning
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
@@ -545,7 +558,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: fpsSlider
-                                implicitWidth: 240
+                                implicitWidth: 200
                                 from: 1; to: 60; stepSize: 1
                                 value: appSettings.screenShareFps
                                 onMoved: appSettings.screenShareFps = Math.round(value)
@@ -576,7 +589,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: widthSlider
-                                implicitWidth: 240
+                                implicitWidth: 200
                                 from: 480; to: 3840; stepSize: 80
                                 value: appSettings.screenShareMaxWidth
                                 onMoved: appSettings.screenShareMaxWidth = Math.round(value)
@@ -609,7 +622,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: bitrateSlider
-                                implicitWidth: 240
+                                implicitWidth: 200
                                 from: 250; to: 50000; stepSize: 250
                                 value: appSettings.screenShareTargetKbps
                                 onMoved: appSettings.screenShareTargetKbps = Math.round(value)
@@ -641,7 +654,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: gopSlider
-                                implicitWidth: 240
+                                implicitWidth: 200
                                 from: 1; to: 30; stepSize: 1
                                 value: appSettings.screenShareKeyframeSec
                                 onMoved: appSettings.screenShareKeyframeSec = Math.round(value)
@@ -694,7 +707,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: qSlider
-                                implicitWidth: 240
+                                implicitWidth: 200
                                 from: 1; to: 100; stepSize: 1
                                 value: appSettings.screenShareJpegQuality
                                 onMoved: appSettings.screenShareJpegQuality = Math.round(value)
