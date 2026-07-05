@@ -16,6 +16,15 @@ FetchContent_MakeAvailable(bsfchat_protocol)
 
 # Voice chat dependencies (libdatachannel + opus)
 if(BSFCHAT_ENABLE_VOICE)
+    # Codec/media deps link static. Something in the dependency graph
+    # force-caches BUILD_SHARED_LIBS=ON, which turned aom/opus into
+    # DLLs on Windows — windeployqt only gathers Qt DLLs, so every
+    # non-Qt runtime DLL needs a hand-written packaging step, and
+    # aom.dll shipped missing in v0.0.42's installer. Static removes
+    # the entire class. (libdatachannel declares its shared target
+    # explicitly, so datachannel.dll is unaffected and its existing
+    # copy step still applies.)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         libdatachannel
         GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
