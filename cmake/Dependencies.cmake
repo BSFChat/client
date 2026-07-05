@@ -35,6 +35,11 @@ if(BSFCHAT_ENABLE_VOICE)
     set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)
     set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
     set(NO_TESTS ON CACHE BOOL "" FORCE)
+    # Vendored libsrtp defaults BUILD_WITH_WARNINGS ON, which injects
+    # -Werror (/WX on MSVC). Third-party code must never fail our
+    # builds over compiler-version warning drift — it broke the
+    # v0.0.42 release CI on warnings local clang doesn't even emit.
+    set(BUILD_WITH_WARNINGS OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(libdatachannel)
 
     # libyuv — pixel-format conversion + scaling for the video encode/
