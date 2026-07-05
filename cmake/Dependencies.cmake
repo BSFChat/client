@@ -35,6 +35,16 @@ if(BSFCHAT_ENABLE_VOICE)
     set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)
     set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
     set(NO_TESTS ON CACHE BOOL "" FORCE)
+    # Vendored libsrtp turns warnings-as-errors ON by default, under
+    # different option names depending on the version the libdatachannel
+    # pin carries. Third-party code must never fail our builds over
+    # compiler-version warning drift — it broke all three v0.0.42
+    # release builds on warnings local clang doesn't even emit.
+    set(BUILD_WITH_WARNINGS OFF CACHE BOOL "" FORCE)        # libsrtp ≤2.5
+    set(ENABLE_WARNINGS OFF CACHE BOOL "" FORCE)            # libsrtp ≥2.6
+    set(ENABLE_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)  # libsrtp ≥2.6
+    # Its test apps build (and run flag probes) by default — dead weight.
+    set(LIBSRTP_TEST_APPS OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(libdatachannel)
 
     # libyuv — pixel-format conversion + scaling for the video encode/
