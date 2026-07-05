@@ -57,3 +57,13 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
     endif()
     add_test(NAME test_video_codec COMMAND test_video_codec)
 endif()
+
+# Media-path loopback: proves H.264 AUs survive packetize → DTLS-SRTP →
+# depacketize between two in-process peer connections using the exact
+# handler chain production builds. No Qt, no codecs, no network.
+if(BSFCHAT_ENABLE_VOICE)
+    add_executable(test_media_loopback test_media_loopback.cpp)
+    target_link_libraries(test_media_loopback PRIVATE LibDataChannel::LibDataChannel)
+    add_test(NAME test_media_loopback COMMAND test_media_loopback)
+    set_tests_properties(test_media_loopback PROPERTIES TIMEOUT 60)
+endif()

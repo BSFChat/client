@@ -1,5 +1,6 @@
 #include "voice/PeerConnectionManager.h"
 #include <QDateTime>
+#include <mutex>
 #include <QDebug>
 #include <QLoggingCategory>
 #include <QRandomGenerator>
@@ -107,6 +108,23 @@ private:
 };
 } // namespace
 
+// Surface libdatachannel's own error/warning log through ours. Its
+// default sink is invisible in production — which is how "connection
+// has no media transport" (every RTP frame silently dropped) went
+// undiagnosed while both sides logged healthy-looking track opens.
+static void initRtcLogging() {
+    static std::once_flag once;
+    std::call_once(once, []() {
+        rtc::InitLogger(rtc::LogLevel::Warning,
+            [](rtc::LogLevel level, rtc::string message) {
+                if (level <= rtc::LogLevel::Error)
+                    qCWarning(logVoicePc, "[libdatachannel] %s", message.c_str());
+                else
+                    qCInfo(logVoicePc, "[libdatachannel] %s", message.c_str());
+            });
+    });
+}
+
 PeerConnectionManager::PeerConnectionManager(const QString& peerId, const QString& callId,
                                              const rtc::Configuration& config, QObject* parent)
     : QObject(parent)
@@ -115,6 +133,7 @@ PeerConnectionManager::PeerConnectionManager(const QString& peerId, const QStrin
 {
     qCInfo(logVoicePc, " Creating peer connection → %s (call %s)",
           qPrintable(peerId), qPrintable(callId));
+    initRtcLogging();
     m_pc = std::make_shared<rtc::PeerConnection>(config);
     setupCallbacks();
 }
@@ -313,6 +332,23 @@ void PeerConnectionManager::createOffer() {
 
     auto dc = m_pc->createDataChannel("audio", dcInit);
     setupDataChannel(dc);
+
+    // Video m-lines MUST be in the initial offer. libdatachannel
+    // instantiates the transport from the first negotiation: a data-
+    // channel-only offer gets plain DTLS with NO SRTP, and m-lines
+    // added by later renegotiation "open" at the SDP level while
+    // openTracks() fails with "connection has no media transport" —
+    // every RTP packet silently dies. (Reproduced in
+    // test_media_loopback: initial-offer case passes, renegotiated
+    // case fails.) Announcing the m-lines costs nothing when unused —
+    // whether video actually flows is gated on peer caps at send time.
+    for (int i = 0; i < kVideoStreamCount; ++i) {
+        rtc::Description::Video media(kVideoSpecs[i].mid,
+                                      rtc::Description::Direction::SendRecv);
+        media.addH264Codec(kVideoSpecs[i].payloadType);
+        auto track = m_pc->addTrack(std::move(media));
+        attachVideoTrack(VideoStreamId(i), track);
+    }
 
     m_pc->setLocalDescription(rtc::Description::Type::Offer);
 }
