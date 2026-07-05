@@ -209,5 +209,10 @@ int main() {
                     "(workaround in createOffer remains necessary)\n");
     }
 
+    // Join libdatachannel's global worker threads before static
+    // destruction — otherwise the process can segfault at exit (seen
+    // under ctest, where the harness reaps fast).
+    rtc::Cleanup().wait();
+
     return simple;
 }
