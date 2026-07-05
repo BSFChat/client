@@ -122,6 +122,9 @@ signals:
     // per-peer preview surface in VoiceRoom.
     void peerScreenFrameReceived(const QString& userId, const QByteArray& jpegData);
     void peerCameraFrameReceived(const QString& userId, const QByteArray& jpegData);
+    // Some peer's lossless channel is rejecting sends — the share
+    // controller falls back to H.264 for the rest of the share.
+    void losslessSendUnavailable();
     // Decoded RTP video frame from a remote peer — ServerConnection
     // routes these into the VideoStreamRegistry.
     void peerVideoFrameDecoded(const QString& userId, int streamId,
@@ -145,6 +148,11 @@ private:
     // immediately.
     void startDisconnectGrace(const QString& userId);
     void cancelDisconnectGrace(const QString& userId);
+    // Setup watchdog: a peer that never reaches Connected (lost answer,
+    // wedged DTLS, offer to a user with no live client) would otherwise
+    // sit in New/Connecting forever — nothing else times that out.
+    void startConnectWatchdog(const QString& userId);
+    void cancelConnectWatchdog(const QString& userId);
     void onLocalDescription(const QString& peerId, const std::string& type, const std::string& sdp);
     void onLocalCandidate(const QString& peerId, const std::string& candidate, const std::string& mid);
     void flushCandidateBatch();
@@ -176,6 +184,8 @@ private:
     QMap<QString, QString> m_callIds;
     // Per-peer single-shot grace timers for the Disconnected state.
     QMap<QString, QTimer*> m_disconnectTimers;
+    // Per-peer single-shot watchdogs for the initial setup phase.
+    QMap<QString, QTimer*> m_connectWatchdogs;
     QJsonObject m_turnConfig;
     bool m_running = false;
     bool m_allowP2P = false;

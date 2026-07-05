@@ -132,6 +132,10 @@ private:
     QVariantList m_windowList;
     QVideoSink* m_sink = nullptr;   // internal sink we listen on for frames
     QTimer* m_throttle = nullptr;
+    // Settles slider drags into a single quality reapply (encoder
+    // sessions rebuild on fps/size changes — once per drag, not per
+    // detent).
+    QTimer* m_reapplyDebounce = nullptr;
     ServerManager* m_servers = nullptr;
     Settings* m_settings = nullptr;
     // H.264-over-RTP encode worker (screen stream). Capture frames go

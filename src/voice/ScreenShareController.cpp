@@ -53,6 +53,11 @@ static EncoderConfig g_encoderConfig;
 // peers churn.
 static bool g_losslessWanted = false;
 static bool g_losslessAllowed = true;
+// Latched when the transport reports lossless frames can't be
+// delivered (e.g. oversized for the peer's channel) — forces the
+// H.264 path for the rest of the share instead of silently sending
+// nothing. Cleared whenever quality settings are (re)applied.
+static bool g_losslessBroken = false;
 // Admission budget for the reliable lossless channel: with more than
 // this queued toward any peer, capture frames are DROPPED (never
 // delayed) until the channel drains.
@@ -192,16 +197,25 @@ void ScreenShareController::setSettings(Settings* settings)
     m_settings = settings;
     if (!settings) return;
     // Live-reapply when any of the user-facing knobs change so a
-    // slider tweak takes effect immediately mid-share.
-    auto reapply = [this]() {
-        applyEffectiveQuality(m_settings, m_servers);
-        if (m_active) {
-            m_throttle->setInterval(g_frameIntervalMs);
+    // slider tweak takes effect mid-share — but debounced: fps and
+    // resolution changes rebuild the encoder session (an IDR each
+    // time), and a slider DRAG emits one change per detent. Apply
+    // once, after the knob settles.
+    if (!m_reapplyDebounce) {
+        m_reapplyDebounce = new QTimer(this);
+        m_reapplyDebounce->setSingleShot(true);
+        m_reapplyDebounce->setInterval(300);
+        connect(m_reapplyDebounce, &QTimer::timeout, this, [this]() {
+            applyEffectiveQuality(m_settings, m_servers);
+            if (m_active) {
+                m_throttle->setInterval(g_frameIntervalMs);
 #ifdef Q_OS_MACOS
-            if (m_mac) m_mac->setFps(1000 / g_frameIntervalMs);
+                if (m_mac) m_mac->setFps(1000 / g_frameIntervalMs);
 #endif
-        }
-    };
+            }
+        });
+    }
+    auto reapply = [this]() { m_reapplyDebounce->start(); };
     connect(settings, &Settings::screenShareFpsChanged, this, reapply);
     connect(settings, &Settings::screenShareMaxWidthChanged, this, reapply);
     connect(settings, &Settings::screenShareJpegQualityChanged, this, reapply);
@@ -392,7 +406,17 @@ static void applyEffectiveQuality(Settings* settings, ServerManager* servers)
     fps   = std::clamp(fps,   1,  60);
     maxW  = std::clamp(maxW,  480, 3840);
     jpegQ = std::clamp(jpegQ, 1,  100);
-    kbps  = std::clamp(kbps,  250, 100000);
+    // No arbitrary bitrate ceiling. The only bound is content-derived:
+    // past the rate that codes EVERY frame as a high-quality keyframe
+    // at this resolution/fps (~0.5 bits per pixel per frame), extra
+    // bits are provably wasted — the encoder cannot spend them. Actual
+    // path safety is the rate controller's job: it climbs only while
+    // peers' delivery reports prove the path carries it, and holds at
+    // a conservative rate when it's flying blind.
+    const double ceilPixels = double(maxW) * (double(maxW) * 9.0 / 16.0);
+    const int allKeyframeKbps =
+        int(ceilPixels * double(fps) * 0.5 / 1000.0);
+    kbps  = std::clamp(kbps,  250, std::max(allKeyframeKbps, 1000));
 
     g_frameIntervalMs = 1000 / fps;
     g_jpegQuality = jpegQ;
@@ -408,11 +432,14 @@ static void applyEffectiveQuality(Settings* settings, ServerManager* servers)
     g_encoderConfig.height = maxW;
     g_encoderConfig.fps = fps;
     g_encoderConfig.targetBitrateKbps = kbps;
-    g_encoderConfig.maxBitrateKbps = std::min(kbps + kbps / 2, 100000);
+    g_encoderConfig.maxBitrateKbps = kbps + kbps / 2;
     g_encoderConfig.keyframeIntervalSec = std::clamp(userGop, 1, 30);
     g_encoderConfig.screenContent = true;
 
     g_losslessWanted = settings && settings->screenShareLossless();
+    // Settings (re)applied — give lossless another chance; the stall
+    // signal re-latches if the transport still can't carry it.
+    g_losslessBroken = false;
     g_losslessAllowed = true;
     if (servers) {
         auto* host = servers->voiceServer();
@@ -593,6 +620,19 @@ void ScreenShareController::pushFrameToPeers()
                 if (streamId == int(VideoStreamId::Screen))
                     m_rate->reportKeyframeRequest();
             });
+        // Transport can't deliver lossless frames (e.g. oversized for
+        // the peer's channel cap) — force H.264 for the rest of the
+        // share and tell the user, instead of streaming nothing.
+        connect(voice, &VoiceEngine::losslessSendUnavailable, this,
+            [this]() {
+                if (g_losslessBroken) return;
+                g_losslessBroken = true;
+                qWarning("[screenshare] lossless undeliverable — "
+                         "falling back to H.264");
+                m_lastError = tr("Lossless mode isn't deliverable to a "
+                                 "viewer — switched to H.264 for this share.");
+                emit lastErrorChanged();
+            });
         m_wiredEngine = voice;
     }
 
@@ -607,7 +647,7 @@ void ScreenShareController::pushFrameToPeers()
         // advertising av1-dc. Mixed fleets fall back to H.264 for
         // everyone rather than running two encoders.
         const bool lossless = g_losslessWanted && g_losslessAllowed
-            && voice->allPeersSupportLossless();
+            && !g_losslessBroken && voice->allPeersSupportLossless();
         if (lossless) {
             m_rate->setActive(false);   // bitrate is content-determined
             // Admission control: never queue latency — drop this

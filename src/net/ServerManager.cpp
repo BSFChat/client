@@ -394,6 +394,21 @@ void ServerManager::wireConnection(ServerConnection* conn)
     connect(conn, &ServerConnection::hasUnreadChanged, this, pushUnread);
     pushUnread();
 
+    // whoami reconciliation found a stale/corrupt persisted user id and
+    // fixed it in memory — rewrite the stored entry so the correction
+    // sticks across restarts. Only the identity fields change; tokens
+    // stay as persisted.
+    connect(conn, &ServerConnection::identityCorrected, this, [this, conn]() {
+        int idx = m_connections.indexOf(conn);
+        if (idx < 0) return;
+        auto servers = m_settings->savedServers();
+        if (idx >= servers.size()) return;
+        auto entry = servers[idx];
+        entry.userId = conn->userId();
+        entry.displayName = conn->displayName();
+        m_settings->updateServer(idx, entry);
+    });
+
     // Keep the sidebar's label and tooltip in sync with the server-wide
     // name. serverName() falls back to hostname when no name is set.
     auto pushName = [this, conn]() {

@@ -101,6 +101,7 @@ qt_add_executable(bsfchat-app
     src/model/MessageModel.cpp
     src/model/MemberListModel.cpp
     src/store/LocalCache.cpp
+    src/util/FileLogger.cpp
     src/util/MarkdownParser.cpp
     # NotificationSounds is used by NotificationManager for chat
     # chimes — always needed, not voice-gated. SoundGenerator is

@@ -511,6 +511,31 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
     m_connected = true;
     m_connectionStatus = 1;
     startSync();
+
+    // Persisted ids can be stale or corrupt (a doubled "@" once shipped
+    // via a registration bug), and every self-identity comparison —
+    // sync self-event filtering, voice mesh reconciliation, the member
+    // list's "that's me" row — is a strict string match on m_userId. A
+    // wrong id makes the client stop recognizing itself, up to offering
+    // WebRTC connections to its own user. Reconcile against the
+    // server's canonical answer; old servers without the endpoint just
+    // never reply.
+    connect(m_client, &MatrixClient::whoamiResult, this,
+        [this](const QString& canonicalId) {
+            if (canonicalId == m_userId) return;
+            qWarning() << "stored user id" << m_userId
+                       << "differs from server canonical" << canonicalId
+                       << "— correcting";
+            const bool displayNameWasId = (m_displayName == m_userId);
+            m_userId = canonicalId;
+            if (displayNameWasId) {
+                m_displayName = canonicalId;
+                emit displayNameChanged();
+            }
+            emit userIdChanged();
+            emit identityCorrected();
+        }, Qt::SingleShotConnection);
+    m_client->whoami();
 }
 
 void ServerConnection::login(const QString& username, const QString& password)

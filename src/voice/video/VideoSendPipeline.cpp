@@ -104,12 +104,23 @@ void VideoSendPipeline::processPending() {
         if (configDirty && m_encoder)
             m_encoder->setBitrate(want.targetBitrateKbps, want.maxBitrateKbps);
     } else {
+        // Codec switch (AV1 lossless ↔ H.264) or a previously failed
+        // session: recreate the backend so the platform (hardware)
+        // encoder gets first refusal. Reusing the old instance here
+        // meant reconfigure() failed and the fallback silently landed
+        // on the software encoder for the rest of the share.
+        if (m_encoder && (!m_sessionValid || m_sessionConfig.codec != want.codec))
+            m_encoder.reset();
         if (!m_encoder) m_encoder = VideoEncoder::create(want.codec);
         if (!m_encoder) return; // no backend on this platform
         const bool ok = m_sessionValid ? m_encoder->reconfigure(want)
                                        : m_encoder->init(want);
         if (!ok) {
             // Hardware backend refused — retry software once.
+            qCWarning(logVideoSend,
+                     "stream %d: %s encoder rejected %dx%d@%d — retrying software",
+                     int(m_streamId), m_sessionValid ? "reconfigure on" : "init of",
+                     want.width, want.height, want.fps);
             m_encoder = VideoEncoder::create(want.codec, /*preferHardware=*/false);
             if (!m_encoder || !m_encoder->init(want)) {
                 qCWarning(logVideoSend, "no usable encoder for stream %d",

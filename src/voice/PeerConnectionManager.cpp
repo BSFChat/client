@@ -543,7 +543,49 @@ void PeerConnectionManager::setupLosslessChannel(std::shared_ptr<rtc::DataChanne
         if (data.size() < 10) return;  // [stream][flags][seq][tsMs]
         const int stream = int(std::to_integer<uint8_t>(data[0]));
         if (stream < 0 || stream >= kVideoStreamCount) return;
-        const bool keyframe = (std::to_integer<uint8_t>(data[1]) & 0x1) != 0;
+        const uint8_t flags = std::to_integer<uint8_t>(data[1]);
+        const bool keyframe = (flags & 0x1) != 0;
+
+        // Chunked frame (flags 0x2): header grows by
+        // [chunkIdx:u16][chunkTotal:u16]; payload chunks of one frame
+        // arrive contiguously on this reliable+ordered channel and are
+        // reassembled here before the normal emit.
+        if (flags & 0x2) {
+            if (data.size() < 14) return;
+            quint32 seq = 0;
+            for (int i = 2; i < 6; ++i)
+                seq = (seq << 8) | std::to_integer<uint8_t>(data[i]);
+            const quint16 idx = quint16((std::to_integer<uint8_t>(data[10]) << 8)
+                                        | std::to_integer<uint8_t>(data[11]));
+            const quint16 total = quint16((std::to_integer<uint8_t>(data[12]) << 8)
+                                          | std::to_integer<uint8_t>(data[13]));
+            if (total == 0 || idx >= total) return;
+            if (idx == 0) {
+                m_losslessAsm[stream].clear();
+                m_losslessAsmSeq[stream] = seq;
+                m_losslessAsmNext[stream] = 0;
+            } else if (seq != m_losslessAsmSeq[stream]
+                       || idx != m_losslessAsmNext[stream]) {
+                // Gap or interleaving that shouldn't happen — drop the
+                // partial frame; the next chunk 0 restarts cleanly.
+                m_losslessAsm[stream].clear();
+                m_losslessAsmNext[stream] = 0;
+                return;
+            }
+            m_losslessAsm[stream].append(
+                reinterpret_cast<const char*>(data.data() + 14),
+                int(data.size() - 14));
+            m_losslessAsmNext[stream] = quint16(idx + 1);
+            if (idx + 1 < total) return;   // more chunks coming
+
+            QByteArray tu = std::move(m_losslessAsm[stream]);
+            m_losslessAsm[stream] = QByteArray();
+            QMetaObject::invokeMethod(this, [this, stream, tu, keyframe]() {
+                emit losslessFrameReceived(stream, tu, keyframe);
+            }, Qt::QueuedConnection);
+            return;
+        }
+
         QByteArray tu(reinterpret_cast<const char*>(data.data() + 10),
                       int(data.size() - 10));
         QMetaObject::invokeMethod(this, [this, stream, tu, keyframe]() {
@@ -572,24 +614,65 @@ void PeerConnectionManager::sendLosslessFrame(VideoStreamId stream,
 
     quint32& seq = m_losslessSeq[int(stream)];
     const quint32 tsMs = quint32(frame.captureTimeUs / 1000);
-    rtc::binary data;
-    data.reserve(size_t(frame.data.size()) + 10);
-    data.push_back(std::byte(quint8(stream)));
-    data.push_back(std::byte(quint8(frame.keyframe ? 0x1 : 0x0)));
-    for (int shift = 24; shift >= 0; shift -= 8)
-        data.push_back(std::byte(quint8(seq >> shift)));
-    for (int shift = 24; shift >= 0; shift -= 8)
-        data.push_back(std::byte(quint8(tsMs >> shift)));
-    ++seq;
+
+    // Header writer shared by the single-message and chunked paths.
+    // flags: 0x1 keyframe, 0x2 chunked ([idx:u16][total:u16] appended).
+    auto putHeader = [&](rtc::binary& out, quint8 flags) {
+        out.push_back(std::byte(quint8(stream)));
+        out.push_back(std::byte(flags));
+        for (int shift = 24; shift >= 0; shift -= 8)
+            out.push_back(std::byte(quint8(seq >> shift)));
+        for (int shift = 24; shift >= 0; shift -= 8)
+            out.push_back(std::byte(quint8(tsMs >> shift)));
+    };
+    const quint8 kfFlag = frame.keyframe ? 0x1 : 0x0;
     auto* raw = reinterpret_cast<const std::byte*>(frame.data.constData());
-    data.insert(data.end(), raw, raw + frame.data.size());
+    const size_t totalBytes = size_t(frame.data.size());
+    // Stay comfortably under the negotiated cap — SCTP refuses (throws
+    // on) anything larger, which once silently blackholed every frame
+    // of a share (identity-I444 1080p far exceeds the default 256 KB).
+    const size_t maxMsg = size_t(m_losslessDc->maxMessageSize());
+    const size_t chunkBudget = maxMsg > 4096 ? maxMsg - 1024 : 65536;
+
     try {
-        m_losslessDc->send(data);
+        if (totalBytes + 10 <= maxMsg) {
+            rtc::binary data;
+            data.reserve(totalBytes + 10);
+            putHeader(data, kfFlag);
+            data.insert(data.end(), raw, raw + totalBytes);
+            m_losslessDc->send(data);
+        } else {
+            const size_t nChunks = (totalBytes + chunkBudget - 1) / chunkBudget;
+            if (nChunks > 0xFFFF) return;   // absurd; drop
+            for (size_t i = 0; i < nChunks; ++i) {
+                const size_t off = i * chunkBudget;
+                const size_t len = std::min(chunkBudget, totalBytes - off);
+                rtc::binary data;
+                data.reserve(len + 14);
+                putHeader(data, quint8(kfFlag | 0x2));
+                data.push_back(std::byte(quint8(i >> 8)));
+                data.push_back(std::byte(quint8(i)));
+                data.push_back(std::byte(quint8(nChunks >> 8)));
+                data.push_back(std::byte(quint8(nChunks)));
+                data.insert(data.end(), raw + off, raw + off + len);
+                m_losslessDc->send(data);
+            }
+        }
+        ++seq;
         m_txFrames[int(stream)] += 1;
         m_txBytes[int(stream)] += quint64(frame.data.size());
     } catch (const std::exception& e) {
-        qCDebug(logVoicePc, " [%s] lossless send failed: %s",
-               qPrintable(m_peerId), e.what());
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - m_losslessStallEmitMs > 5000) {
+            m_losslessStallEmitMs = now;
+            qCWarning(logVoicePc, " [%s] lossless send failed: %s "
+                     "(frame %d bytes, channel cap %d) — signalling fallback",
+                     qPrintable(m_peerId), e.what(), int(totalBytes),
+                     int(maxMsg));
+            QMetaObject::invokeMethod(this, [this]() {
+                emit losslessSendStalled();
+            }, Qt::QueuedConnection);
+        }
     }
 }
 

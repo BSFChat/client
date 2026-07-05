@@ -30,11 +30,15 @@ void VideoRateController::setActive(bool active) {
     if (active == m_timer.isActive()) return;
     if (active) {
         // Fresh share: start mid-envelope rather than inheriting the
-        // previous session's end state.
-        m_bitrate = qBound(m_minKbps, m_maxKbps / 2, m_maxKbps);
+        // previous session's end state — but never above the blind
+        // ceiling, since no delivery reports exist yet by definition.
+        m_bitrate = qBound(m_minKbps,
+                           qMin(m_maxKbps / 2, kBlindCeilingKbps), m_maxKbps);
         m_scaleIdx = 0;
         m_stableTicks = m_comfortTicks = m_kfRequests = 0;
         m_peerRatios.clear();
+        m_activeSinceMs = QDateTime::currentMSecsSinceEpoch();
+        m_wasBlind = false;
         m_timer.start();
     } else {
         m_timer.stop();
@@ -77,6 +81,13 @@ double VideoRateController::worstRecentRatio() const {
     return worst;
 }
 
+bool VideoRateController::hasFreshSamples(qint64 nowMs) const {
+    for (const auto& s : m_peerRatios) {
+        if (nowMs - s.atMs <= kPeerSampleTtlMs) return true;
+    }
+    return false;
+}
+
 double VideoRateController::bppAt(int longEdge, int kbps) const {
     // Assume 16:9-ish area for the pixel estimate; exactness doesn't
     // matter, the bands are heuristic.
@@ -85,6 +96,32 @@ double VideoRateController::bppAt(int longEdge, int kbps) const {
 }
 
 void VideoRateController::tick() {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+    // Blind mode: nobody is telling us whether frames arrive (worst-
+    // ratio would read a meaningless 1.0). Hold — never probe upward
+    // on faith — and cap at a rate any plausible path carries. The
+    // startup grace keeps the first reports from racing the clamp.
+    if (!hasFreshSamples(now) && now - m_activeSinceMs > kBlindGraceMs) {
+        if (!m_wasBlind) {
+            m_wasBlind = true;
+            qCWarning(logVideoRate,
+                     "[%d] no delivery reports from any peer — holding ≤%d kbps",
+                     int(m_streamId), kBlindCeilingKbps);
+        }
+        m_kfRequests = 0;
+        m_stableTicks = 0;
+        if (m_bitrate > kBlindCeilingKbps) {
+            m_bitrate = qMax(m_minKbps, kBlindCeilingKbps);
+            emit forceKeyframe();   // resync receivers at the new rate
+        }
+        return;
+    }
+    if (m_wasBlind) {
+        m_wasBlind = false;
+        qCInfo(logVideoRate, "[%d] delivery reports resumed", int(m_streamId));
+    }
+
     const double ratio = worstRecentRatio();
     const int kf = m_kfRequests;
     m_kfRequests = 0;

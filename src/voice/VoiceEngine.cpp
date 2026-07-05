@@ -108,6 +108,8 @@ void VoiceEngine::stop() {
     m_pendingCandidates.clear();
     qDeleteAll(m_disconnectTimers);
     m_disconnectTimers.clear();
+    qDeleteAll(m_connectWatchdogs);
+    m_connectWatchdogs.clear();
     // Decode pipelines block on their worker threads in their dtors,
     // so tear them down synchronously with the call.
     qDeleteAll(m_recvPipelines);
@@ -225,6 +227,9 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
     connect(peer, &PeerConnectionManager::connected,
             this, [this, userId]() { emit peerConnected(userId); });
 
+    connect(peer, &PeerConnectionManager::losslessSendStalled,
+            this, &VoiceEngine::losslessSendUnavailable);
+
     connect(peer, &PeerConnectionManager::peerStateChanged,
             this, [this, userId](PeerConnectionManager::PeerState s) {
         static const char* names[] = {"new","connecting","connected","disconnected","failed"};
@@ -240,8 +245,11 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
             startDisconnectGrace(userId);
         } else if (s == PeerConnectionManager::PeerState::Connected) {
             cancelDisconnectGrace(userId);
+            cancelConnectWatchdog(userId);
         }
     });
+
+    startConnectWatchdog(userId);
 }
 
 void VoiceEngine::startDisconnectGrace(const QString& userId) {
@@ -270,6 +278,36 @@ void VoiceEngine::cancelDisconnectGrace(const QString& userId) {
     }
 }
 
+void VoiceEngine::startConnectWatchdog(const QString& userId) {
+    cancelConnectWatchdog(userId);
+    auto* timer = new QTimer(this);
+    timer->setSingleShot(true);
+    // Generous: covers TURN allocation plus an answer arriving via
+    // long-poll sync. Anything slower is effectively dead, and the
+    // mesh reconciler re-offers after teardown if the member is still
+    // listed.
+    timer->setInterval(30000);
+    connect(timer, &QTimer::timeout, this, [this, userId]() {
+        cancelConnectWatchdog(userId);
+        auto* peer = m_peers.value(userId);
+        if (!peer) return;
+        if (peer->peerState() == PeerConnectionManager::PeerState::Connected) return;
+        qCWarning(logVoice, "peer %s never reached connected — tearing down",
+                 qPrintable(userId));
+        removePeer(userId);
+        emit peerDisconnected(userId);
+    });
+    m_connectWatchdogs[userId] = timer;
+    timer->start();
+}
+
+void VoiceEngine::cancelConnectWatchdog(const QString& userId) {
+    if (auto* timer = m_connectWatchdogs.take(userId)) {
+        timer->stop();
+        timer->deleteLater();
+    }
+}
+
 QMap<QString, QString> VoiceEngine::peerStates() const {
     QMap<QString, QString> out;
     static const char* names[] = {"new","connecting","connected","disconnected","failed"};
@@ -281,6 +319,7 @@ QMap<QString, QString> VoiceEngine::peerStates() const {
 
 void VoiceEngine::removePeer(const QString& userId) {
     cancelDisconnectGrace(userId);
+    cancelConnectWatchdog(userId);
     if (auto* peer = m_peers.take(userId)) {
         if (m_audioEngine) m_audioEngine->removePeer(userId);
         peer->deleteLater();

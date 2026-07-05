@@ -98,6 +98,12 @@ public:
     void uploadMedia(const QByteArray& data, const QString& contentType, const QString& filename);
     QString mediaDownloadUrl(const QString& mxcUri) const;
 
+    // GET /account/whoami — the server's canonical identity for our
+    // access token. Used to reconcile a persisted (possibly stale or
+    // corrupt) user id on session restore. Silent on failure so old
+    // servers without the endpoint keep working.
+    void whoami();
+
     // Profile
     void getProfile(const QString& userId);
     void setDisplayName(const QString& userId, const QString& displayName);
@@ -202,6 +208,10 @@ signals:
     void voiceChannelCreated(const QString& roomId);
 
     void turnConfigResult(const QJsonObject& config);
+
+    // Canonical user id for our token, from GET /account/whoami.
+    // Never fired on error (older servers 404 the endpoint).
+    void whoamiResult(const QString& userId);
 
     void profileResult(const QString& userId, const QString& displayName, const QString& avatarUrl);
 

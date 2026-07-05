@@ -141,6 +141,10 @@ signals:
     // (framing already stripped).
     void losslessFrameReceived(int streamId, const QByteArray& temporalUnit,
                                bool keyframe);
+    // The lossless channel rejected sends (throttled to one emission
+    // per few seconds) — the share should fall back to H.264 rather
+    // than keep pushing frames that never arrive.
+    void losslessSendStalled();
     // Reassembled H.264 access unit from the remote's video track.
     // `lossSuspected` is set when RTP sequence gaps were observed since
     // the previous AU — the unit is likely incomplete and decoding it
@@ -217,4 +221,13 @@ private:
     // via onDataChannel label match on the receiving side).
     std::shared_ptr<rtc::DataChannel> m_losslessDc;
     quint32 m_losslessSeq[kVideoStreamCount] = {};
+    // Receive-side reassembly for chunked lossless frames (flags bit
+    // 0x2). The channel is reliable+ordered, so chunks of one frame
+    // arrive contiguously; state is touched only on the channel's
+    // callback thread.
+    QByteArray m_losslessAsm[kVideoStreamCount];
+    quint32 m_losslessAsmSeq[kVideoStreamCount] = {};
+    quint16 m_losslessAsmNext[kVideoStreamCount] = {};
+    // Throttle for losslessSendStalled (ms epoch of last emission).
+    qint64 m_losslessStallEmitMs = 0;
 };

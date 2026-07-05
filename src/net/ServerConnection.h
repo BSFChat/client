@@ -472,6 +472,10 @@ signals:
     void hasUnreadChanged();
     void loginSucceeded();
     void loginFailed(const QString& error);
+    // Fired when whoami reveals the persisted user id differs from the
+    // server's canonical one (stale/corrupt settings). ServerManager
+    // listens and rewrites the stored entry.
+    void identityCorrected();
     void registerSucceeded();
     void registerFailed(const QString& error);
     void mediaSendCompleted();

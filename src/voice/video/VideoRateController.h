@@ -75,9 +75,21 @@ private:
 
     struct PeerSample { double ratio = 1.0; qint64 atMs = 0; };
     QHash<QString, PeerSample> m_peerRatios;
+    // True while at least one peer has a fresh delivery report.
+    bool hasFreshSamples(qint64 nowMs) const;
+    qint64 m_activeSinceMs = 0;
+    bool m_wasBlind = false;       // edge-detect for the blind-mode log
 
     static constexpr double kScaleLadder[5] = {1.0, 0.75, 0.5, 0.375, 0.25};
     static constexpr qint64 kPeerSampleTtlMs = 2500;
+    // Blind mode: no peer has reported delivery for kPeerSampleTtlMs
+    // (old client, control channel down, or reports lost). Without
+    // evidence the controller must not climb on faith — a maxed
+    // envelope once sent 37 Mbps into a WiFi path with zero feedback
+    // and the viewer displayed nothing. Hold at a rate any plausible
+    // path carries until reports (re)appear.
+    static constexpr int kBlindCeilingKbps = 8000;
+    static constexpr qint64 kBlindGraceMs = 3000;
     // Bits-per-pixel-per-frame bands (screen content codes cheaply,
     // so these sit lower than camera-content heuristics would).
     static constexpr double kBppFloor = 0.025;
