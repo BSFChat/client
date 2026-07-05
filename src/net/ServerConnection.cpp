@@ -1987,9 +1987,19 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     // on room-switch (setActiveRoom) and below when
                     // sync sees new events for the currently-active
                     // room, so the live-message path stays unaffected.
+                    //
+                    // The lastReadTs check alone is NOT enough: it only
+                    // advances for rooms the user has opened, so every
+                    // never-visited channel sits at readTs=0 and the
+                    // whole catch-up batch toasts on every launch — a
+                    // notification per historical message per channel.
+                    // Gate on m_firstSyncProcessed too: the first sync
+                    // of a session is catch-up by definition, and what
+                    // the user missed is already conveyed by unread
+                    // badges. Toasts are for messages that arrive live.
                     const qint64 eventTs = static_cast<qint64>(event.origin_server_ts);
                     const qint64 readTs = m_settings ? m_settings->lastReadTs(roomId) : 0;
-                    if (eventTs > readTs) {
+                    if (m_firstSyncProcessed && eventTs > readTs) {
                         emit messageReceived(roomId, displayName, body, eventId,
                                              mentionsMe);
                     }
