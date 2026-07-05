@@ -20,6 +20,7 @@ class MemberListModel;
 #ifdef BSFCHAT_VOICE_ENABLED
 class VoiceEngine;
 class NotificationSounds;
+class VideoStreamRegistry;
 #endif
 class IdentityClient;
 
@@ -63,6 +64,10 @@ class ServerConnection : public QObject {
     // whenever a text channel becomes active or voice is left.
     Q_PROPERTY(bool viewingVoiceRoom READ viewingVoiceRoom NOTIFY viewingVoiceRoomChanged)
     Q_PROPERTY(QJsonArray voiceMembers READ voiceMembers NOTIFY voiceMembersChanged)
+    // Remote-video surface registry (VideoStreamRegistry; null when
+    // voice is compiled out). QML attaches VideoOutput sinks via its
+    // invokables — see VoiceRoom / ParticipantTile.
+    Q_PROPERTY(QObject* videoRegistry READ videoRegistryObject CONSTANT)
     // Mic transmit level, 0..1. Non-zero when the mic is open AND capturing
     // audio above the silence floor; zero when muted, disconnected, or idle.
     Q_PROPERTY(float micLevel READ micLevel NOTIFY micLevelChanged)
@@ -131,39 +136,24 @@ public:
     // Receive side for screen share: the latest JPEG frame from each
     // remote peer, exposed as an encoded data URL the QML Image
     // element can consume directly. Empty map when nobody is sharing.
-    Q_INVOKABLE QString peerScreenDataUrl(const QString& userId) const {
-        auto it = m_peerScreenData.constFind(userId);
-        if (it == m_peerScreenData.constEnd()) return {};
-        return *it;
-    }
+    // Remote video render path: every incoming stream (decoded RTP
+    // video AND legacy JPEG stills) lands on a per-peer QVideoSink in
+    // the VideoStreamRegistry; QML tiles attach VideoOutputs to it.
+    // Returned as QObject* so non-voice builds don't need the type —
+    // null when voice is compiled out.
+    QObject* videoRegistryObject() const;
+#ifdef BSFCHAT_VOICE_ENABLED
+    VideoStreamRegistry* videoRegistry() const { return m_videoRegistry; }
+#endif
     // Union of peers whose polled voice-member row announces
-    // screen_sharing=true and anyone we hold cached frame data for.
+    // screen_sharing=true and anyone with live frames in the registry.
     // The announcement is the fast/authoritative path (tiles appear
-    // before the first JPEG lands); the frame-data fallback keeps a
-    // live share visible even if a flag update got lost or the
-    // server predates the media flags.
-    Q_INVOKABLE QStringList peersCurrentlySharing() const {
-        QSet<QString> uids = m_announcedScreenSharers;
-        for (auto it = m_peerScreenData.constBegin();
-             it != m_peerScreenData.constEnd(); ++it)
-            uids.insert(it.key());
-        QStringList out(uids.constBegin(), uids.constEnd());
-        out.sort(); // stable tile order across re-evaluations
-        return out;
-    }
-    // Same pattern for webcam — data URL per peer, keys = peers with
-    // an active camera stream.
-    Q_INVOKABLE QString peerCameraDataUrl(const QString& userId) const {
-        auto it = m_peerCameraData.constFind(userId);
-        if (it == m_peerCameraData.constEnd()) return {};
-        return *it;
-    }
-    // Announced camera flag OR cached frame data — same union
+    // before the first frame lands); the live-frame fallback keeps a
+    // share visible even if a flag update got lost.
+    Q_INVOKABLE QStringList peersCurrentlySharing() const;
+    // Announced camera flag OR live camera frames — same union
     // semantics as peersCurrentlySharing().
-    Q_INVOKABLE bool peerHasCamera(const QString& userId) const {
-        return m_announcedCameraUsers.contains(userId)
-            || m_peerCameraData.contains(userId);
-    }
+    Q_INVOKABLE bool peerHasCamera(const QString& userId) const;
 
     // 0..1 smoothed audio level for a remote peer, updated on every
     // decoded Opus frame. ParticipantTile binds its speaking ring to
@@ -171,6 +161,12 @@ public:
     Q_INVOKABLE float peerLevel(const QString& userId) const {
         return m_peerLevels.value(userId, 0.0f);
     }
+    // Cumulative receive stats for a peer's video stream (0 = screen,
+    // 1 = camera); the diagnostics overlay polls this once a second
+    // and diffs snapshots into fps / bitrate. Empty map when the
+    // stream has no receive pipeline (nothing received yet).
+    Q_INVOKABLE QVariantMap videoReceiveStats(const QString& userId,
+                                              int streamId) const;
     // Returns the voice-member list with each member augmented by a
     // "peerState" key ("connected"/"connecting"/"failed"/etc.) so the
     // VoicePanel can show per-peer indicators.
@@ -434,11 +430,18 @@ public:
     Q_PROPERTY(int maxScreenShareFps READ maxScreenShareFps NOTIFY maxScreenSharePolicyChanged)
     Q_PROPERTY(int maxScreenShareWidth READ maxScreenShareWidth NOTIFY maxScreenSharePolicyChanged)
     Q_PROPERTY(int maxScreenShareJpeg READ maxScreenShareJpeg NOTIFY maxScreenSharePolicyChanged)
+    // Video-era policy axes: bitrate cap (kbps, -1 = uncapped) and
+    // whether the AV1 lossless tier may be used on this server.
+    Q_PROPERTY(int maxScreenShareBitrate READ maxScreenShareBitrate NOTIFY maxScreenSharePolicyChanged)
+    Q_PROPERTY(bool allowLossless READ allowLossless NOTIFY maxScreenSharePolicyChanged)
     int maxScreenShareFps() const { return m_maxScreenShareFps; }
     int maxScreenShareWidth() const { return m_maxScreenShareWidth; }
     int maxScreenShareJpeg() const { return m_maxScreenShareJpeg; }
+    int maxScreenShareBitrate() const { return m_maxScreenShareBitrate; }
+    bool allowLossless() const { return m_allowLossless; }
     Q_INVOKABLE void setScreenSharePolicy(int maxFps, int maxWidth,
-                                          int maxJpeg);
+                                          int maxJpeg, int maxBitrateKbps,
+                                          bool allowLossless);
     Q_INVOKABLE void setMaxScreenShareQuality(int level);
     Q_INVOKABLE void uploadAvatar(const QString& fileUrl);
     Q_INVOKABLE void fetchProfile(const QString& userId);
@@ -453,8 +456,9 @@ signals:
     // hook since presenceFor() is a lookup on a regular QMap.
     void presenceChanged();
     void directRoomsChanged();
-    // Emitted whenever a remote peer's screen-share frame has been
-    // updated. QML rebinds peerScreenDataUrl(userId) off this.
+    // Emitted when a peer's screen stream goes live or dark (NOT per
+    // frame — frames flow through the VideoStreamRegistry sinks). QML
+    // re-evaluates peersCurrentlySharing() off this.
     void peerScreenFrameChanged(const QString& userId);
     void peerCameraFrameChanged(const QString& userId);
     void peerLevelChanged(const QString& userId);
@@ -474,6 +478,10 @@ signals:
     void hasUnreadChanged();
     void loginSucceeded();
     void loginFailed(const QString& error);
+    // Fired when whoami reveals the persisted user id differs from the
+    // server's canonical one (stale/corrupt settings). ServerManager
+    // listens and rewrites the stored entry.
+    void identityCorrected();
     void registerSucceeded();
     void registerFailed(const QString& error);
     void mediaSendCompleted();
@@ -574,8 +582,11 @@ public:
     // DM store: roomId -> peer user id. Persisted via Settings under
     // "dm/<serverUrl>/<roomId>". Loaded once on setup.
     QMap<QString, QString> m_directRoomPeers;
-    QMap<QString, QString> m_peerScreenData; // userId -> data URL
-    QMap<QString, QString> m_peerCameraData; // userId -> data URL
+#ifdef BSFCHAT_VOICE_ENABLED
+    // Per-peer video surfaces (RTP + legacy JPEG unified) — replaces
+    // the old per-frame base64 data-URL maps.
+    VideoStreamRegistry* m_videoRegistry = nullptr;
+#endif
     // Peers whose polled voice-member row carries screen_sharing /
     // camera_on = true. Rebuilt on every voice/members result (and
     // the join response) by reconcileAnnouncedMedia(); self excluded.
@@ -587,6 +598,8 @@ public:
     int m_maxScreenShareFps   = -1;
     int m_maxScreenShareWidth = -1;
     int m_maxScreenShareJpeg  = -1;
+    int m_maxScreenShareBitrate = -1;
+    bool m_allowLossless = true;
     // Global userId → display name, populated from all m.room.member events
     // across every room. MessageModel reads from this pointer.
     QMap<QString, QString> m_userDisplayNames;

@@ -50,6 +50,24 @@ endif()
 
 include(cmake/Dependencies.cmake)
 
+# libaom's build (build/cmake/aom_configure.cmake) assumes it is the
+# top-level project and appends -D_WIN32_WINNT=0x0601 to the *cached*
+# CMAKE_<LANG>_FLAGS_<CONFIG> variables. Pulled in via FetchContent that
+# Windows 7 targeting leaks into every target in this build — including
+# bsfchat-app, where it hides the Win8+ APIs the Media Foundation video
+# backend needs (e.g. MF_LOW_LATENCY, undeclared under _WIN32_WINNT <
+# 0x0602). Scrub it out in this (top-level) scope so our targets fall
+# back to the SDK default (Win10); libaom keeps 0x0601 via its own
+# subdirectory scope.
+if(WIN32)
+    foreach(_cfg DEBUG RELEASE MINSIZEREL RELWITHDEBINFO)
+        foreach(_lang C CXX)
+            string(REPLACE "-D_WIN32_WINNT=0x0601" ""
+                CMAKE_${_lang}_FLAGS_${_cfg} "${CMAKE_${_lang}_FLAGS_${_cfg}}")
+        endforeach()
+    endforeach()
+endif()
+
 # Find Qt6
 find_package(Qt6 REQUIRED COMPONENTS Core Network Qml Quick QuickControls2 QuickDialogs2 Sql Multimedia Svg Widgets)
 qt_standard_project_setup()
@@ -83,6 +101,7 @@ qt_add_executable(bsfchat-app
     src/model/MessageModel.cpp
     src/model/MemberListModel.cpp
     src/store/LocalCache.cpp
+    src/util/FileLogger.cpp
     src/util/MarkdownParser.cpp
     # NotificationSounds is used by NotificationManager for chat
     # chimes — always needed, not voice-gated. SoundGenerator is
@@ -106,6 +125,15 @@ if(BSFCHAT_ENABLE_VOICE)
         src/voice/AndroidScreenShareController.cpp
         src/voice/ScreenShareController.cpp
         src/voice/CameraController.cpp
+        # Real-video pipeline: RTP H.264 tracks (+ AV1 lossless tier).
+        # Codec backends are per-platform; the factory (#ifdef matrix)
+        # lives in VideoCodecFactory.cpp.
+        src/voice/video/VideoCodecFactory.cpp
+        src/voice/video/FrameConverter.cpp
+        src/voice/video/VideoSendPipeline.cpp
+        src/voice/video/VideoReceivePipeline.cpp
+        src/voice/video/VideoStreamRegistry.cpp
+        src/voice/video/VideoRateController.cpp
         # macOS-only (not iOS): ScreenCaptureKit / AVCaptureDevice
         # device paths are desktop-shape and rely on Qt Multimedia
         # features (QVideoSink pipelines) that need rework for iOS.
@@ -114,6 +142,50 @@ if(BSFCHAT_ENABLE_VOICE)
         $<$<AND:$<PLATFORM_ID:Darwin>,$<NOT:$<BOOL:${IOS}>>>:src/voice/MacCameraCapturer.mm>
     )
     target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_VOICE_ENABLED)
+    if(BSFCHAT_HAVE_OPENH264)
+        target_sources(bsfchat-app PRIVATE
+            src/voice/video/OpenH264Encoder.cpp
+            src/voice/video/OpenH264Decoder.cpp
+        )
+        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_OPENH264)
+        target_link_libraries(bsfchat-app PRIVATE openh264::openh264)
+    endif()
+    # AV1 lossless tier (libaom) — desktop platforms.
+    if(BSFCHAT_HAVE_AOM)
+        target_sources(bsfchat-app PRIVATE
+            src/voice/video/AomLosslessEncoder.cpp
+            src/voice/video/AomLosslessDecoder.cpp
+        )
+        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_AOM)
+        target_link_libraries(bsfchat-app PRIVATE aom)
+        # libaom's CMake is old-style (same story as libyuv below): the
+        # `aom` target sets its header paths with directory-scoped
+        # include_directories() and exports no usage requirements, so the
+        # aom source root (public <aom/*.h> headers) and its build dir
+        # (generated aom_config.h) must be added to consumers explicitly.
+        target_include_directories(bsfchat-app PRIVATE
+            ${libaom_SOURCE_DIR} ${libaom_BINARY_DIR})
+    endif()
+    # Hardware codec backends: VideoToolbox on desktop macOS, Media
+    # Foundation on Windows. Both preferred by the factory, with
+    # openh264 / the MS software MFT as the automatic fallbacks.
+    if(APPLE AND NOT IOS)
+        target_sources(bsfchat-app PRIVATE
+            src/voice/video/MacVTEncoder.mm
+            src/voice/video/MacVTDecoder.mm
+        )
+        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_VIDEOTOOLBOX)
+        target_link_libraries(bsfchat-app PRIVATE
+            "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo")
+    elseif(WIN32)
+        target_sources(bsfchat-app PRIVATE
+            src/voice/video/MFEncoder.cpp
+            src/voice/video/MFDecoder.cpp
+        )
+        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_MEDIAFOUNDATION)
+        target_link_libraries(bsfchat-app PRIVATE
+            mfplat mfuuid mf mfreadwrite wmcodecdspuuid ole32 oleaut32)
+    endif()
 endif()
 
 # Android: point Qt at our custom package source dir which carries a
@@ -317,6 +389,7 @@ qt_add_qml_module(bsfchat-app
         qml/icons/headphones.svg
         qml/icons/headphones-off.svg
         qml/icons/screen-share.svg
+        qml/icons/app-window.svg
         qml/icons/video.svg
         qml/icons/phone-off.svg
         qml/icons/settings.svg
@@ -362,13 +435,25 @@ qt_add_qml_module(bsfchat-app
 
 target_include_directories(bsfchat-app PRIVATE src)
 
+# Always emit a PDB for the app, Release included — crash triage on
+# tester machines is impossible from bare module+offset, and the cost
+# is only link time + a .pdb artifact that ships nowhere.
+if(MSVC)
+    target_compile_options(bsfchat-app PRIVATE $<$<CONFIG:Release>:/Zi>)
+    target_link_options(bsfchat-app PRIVATE
+        $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>)
+endif()
+
 target_link_libraries(bsfchat-app PRIVATE
     bsfchat_protocol
     Qt6::Core Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::QuickDialogs2 Qt6::Sql Qt6::Multimedia Qt6::Svg Qt6::Widgets
 )
 
 if(BSFCHAT_ENABLE_VOICE)
-    target_link_libraries(bsfchat-app PRIVATE datachannel-static opus)
+    target_link_libraries(bsfchat-app PRIVATE datachannel-static opus yuv)
+    # libyuv's CMake is old-style — the `yuv` target carries no usage
+    # requirements, so its headers must be added explicitly.
+    target_include_directories(bsfchat-app PRIVATE ${libyuv_SOURCE_DIR}/include)
 endif()
 
 # CoreGraphics gives us CGRequestScreenCaptureAccess to trigger the

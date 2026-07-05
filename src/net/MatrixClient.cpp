@@ -1002,6 +1002,18 @@ void MatrixClient::getRoomMessages(const QString& roomId, const QString& from,
     });
 }
 
+void MatrixClient::whoami()
+{
+    auto* reply = makeRequest("GET", "/_matrix/client/v3/account/whoami");
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) return;
+        auto doc = QJsonDocument::fromJson(reply->readAll());
+        const QString userId = doc.object().value("user_id").toString();
+        if (!userId.isEmpty()) emit whoamiResult(userId);
+    });
+}
+
 void MatrixClient::getTurnConfig()
 {
     auto* reply = makeRequest("GET", "/_matrix/client/v3/voip/turnServer");

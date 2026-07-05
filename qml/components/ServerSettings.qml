@@ -624,7 +624,9 @@ Popup {
                         s.setScreenSharePolicy(
                             fpsPolicyRow.value,
                             widthPolicyRow.value,
-                            jpegPolicyRow.value);
+                            jpegPolicyRow.value,
+                            bitratePolicyRow.value,
+                            losslessSwitch.checked);
                     }
 
                     PolicyRow {
@@ -654,6 +656,39 @@ Popup {
                             ? serverManager.activeServer.maxScreenShareJpeg : -1
                         onCommit: (v) => { value = v; _commitPolicy(); }
                     }
+                    PolicyRow {
+                        id: bitratePolicyRow
+                        editable: overviewPane.policyEditorEnabled
+                        label: "Max video bitrate"
+                        minVal: 250; maxVal: 50000; stepVal: 250; suffix: " kbps"
+                        value: serverManager.activeServer
+                            ? serverManager.activeServer.maxScreenShareBitrate : -1
+                        onCommit: (v) => { value = v; _commitPolicy(); }
+                    }
+                    RowLayout {
+                        spacing: Theme.sp.s3
+                        Text {
+                            Layout.preferredWidth: 130
+                            text: "Allow lossless"
+                            color: Theme.fg1
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.sm
+                        }
+                        ThemedSwitch {
+                            id: losslessSwitch
+                            enabled: overviewPane.policyEditorEnabled
+                            checked: serverManager.activeServer
+                                ? serverManager.activeServer.allowLossless : true
+                            onToggled: _commitPolicy()
+                        }
+                        Text {
+                            text: "AV1 mathematically-lossless mode (very high "
+                                + "bandwidth — LAN-class links)"
+                            color: Theme.fg3
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.xs
+                        }
+                    }
                     // Live-refresh the rows when an admin on another
                     // device changes the policy.
                     Connections {
@@ -665,6 +700,8 @@ Popup {
                             fpsPolicyRow.value   = s.maxScreenShareFps;
                             widthPolicyRow.value = s.maxScreenShareWidth;
                             jpegPolicyRow.value  = s.maxScreenShareJpeg;
+                            bitratePolicyRow.value = s.maxScreenShareBitrate;
+                            losslessSwitch.checked = s.allowLossless;
                         }
                     }
 

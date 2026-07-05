@@ -10,7 +10,11 @@ import BSFChat
 Popup {
     id: clientSettingsPopup
     anchors.centerIn: Overlay.overlay
-    width: Math.min(parent ? parent.width * 0.85 : 720, 760)
+    // 900: the Screen Share rows carry a slider + mono value + server-cap
+    // badge (~400 px) NEXT TO the title/description column — at the old
+    // 760 cap the controls clipped off the dialog's right edge on every
+    // row. 0.9 keeps it inside small windows.
+    width: Math.min(parent ? parent.width * 0.9 : 720, 900)
     height: Math.min(parent ? parent.height * 0.85 : 600, 640)
     modal: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -79,11 +83,17 @@ Popup {
             Layout.fillWidth: true
             spacing: 2
             Text {
+                // fillWidth + wrap: a long title must wrap inside its
+                // column, never widen the row past the viewport (rows
+                // with wide right-hand controls leave the title column
+                // narrow).
+                Layout.fillWidth: true
                 text: title
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.md
                 font.weight: Theme.fontWeight.semibold
                 color: Theme.fg0
+                wrapMode: Text.WordWrap
             }
             Text {
                 visible: description.length > 0
@@ -138,7 +148,7 @@ Popup {
 
                 Repeater {
                     model: ["Appearance", "Audio", "Screen Share",
-                            "Notifications", "Updates"]
+                            "Notifications", "Updates", "Advanced"]
                     delegate: Rectangle {
                         Layout.fillWidth: true
                         height: 36
@@ -491,10 +501,30 @@ Popup {
             }
 
             // ---- Screen Share (index 2) ----
+            // The one page with more rows than the dialog's max height
+            // (640 px) can hold — it scrolls. Plain anchored
+            // ColumnLayouts on the other pages paint past the dialog
+            // bounds when they overflow (no clip), which is exactly
+            // what happened when the quality settings landed here.
             Item {
-                ColumnLayout {
+                Flickable {
+                    id: screenShareFlick
                     anchors.fill: parent
                     anchors.margins: Theme.sp.s7 * 2
+                    contentHeight: screenShareCol.implicitHeight
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ThemedScrollBar {}
+
+                    ColumnLayout {
+                    id: screenShareCol
+                    // Bind to the Flickable itself, NOT parent (the
+                    // contentItem) — contentItem width follows its
+                    // children when contentWidth is unset, so
+                    // `parent.width` is circular and the column blows
+                    // out to its implicit width, clipping the row
+                    // trailers off the right edge.
+                    width: screenShareFlick.width
                     spacing: Theme.sp.s7
 
                     SectionHeader { text: "Screen Share" }
@@ -507,8 +537,11 @@ Popup {
                     component CapBadge: Text {
                         property int cap: -1
                         property string suffix: ""
-                        text: cap < 0 ? " · server: uncapped"
-                                      : " · server cap: " + cap + suffix
+                        // Compact on purpose — it sits at the end of
+                        // rows that already carry a slider + value and
+                        // was the first casualty of tight width.
+                        text: cap < 0 ? " · uncapped"
+                                      : " · cap " + cap + suffix
                         color: cap < 0 ? Theme.fg3 : Theme.warning
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
@@ -525,7 +558,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: fpsSlider
-                                implicitWidth: 240
+                                implicitWidth: 200
                                 from: 1; to: 60; stepSize: 1
                                 value: appSettings.screenShareFps
                                 onMoved: appSettings.screenShareFps = Math.round(value)
@@ -556,7 +589,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: widthSlider
-                                implicitWidth: 240
+                                implicitWidth: 200
                                 from: 480; to: 3840; stepSize: 80
                                 value: appSettings.screenShareMaxWidth
                                 onMoved: appSettings.screenShareMaxWidth = Math.round(value)
@@ -578,17 +611,103 @@ Popup {
                     }
 
                     SettingRow {
-                        title: "JPEG quality"
-                        description: "1 is postage-stamp lossy, 100 is "
-                                   + "near-lossless. The default 60 hits a "
-                                   + "good readability/bandwidth balance for "
-                                   + "code + text. For video content, 75–85 "
-                                   + "looks notably better."
+                        title: "Target bitrate"
+                        description: "The steady-state budget for the H.264 "
+                                   + "stream. The adaptive controller climbs "
+                                   + "toward it on a clean link and backs off "
+                                   + "under loss — smoothness always wins over "
+                                   + "quality. 4 Mbps suits 1080p desktops; go "
+                                   + "big on a LAN."
+                        RowLayout {
+                            spacing: Theme.sp.s3
+                            ThemedSlider {
+                                id: bitrateSlider
+                                implicitWidth: 200
+                                from: 250; to: 50000; stepSize: 250
+                                value: appSettings.screenShareTargetKbps
+                                onMoved: appSettings.screenShareTargetKbps = Math.round(value)
+                            }
+                            Text {
+                                Layout.preferredWidth: 80
+                                text: appSettings.screenShareTargetKbps >= 1000
+                                    ? (appSettings.screenShareTargetKbps / 1000).toFixed(1) + " Mbps"
+                                    : appSettings.screenShareTargetKbps + " kbps"
+                                font.family: Theme.fontMono
+                                font.pixelSize: Theme.fontSize.sm
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignRight
+                            }
+                            CapBadge {
+                                cap: serverManager.activeServer
+                                    ? serverManager.activeServer.maxScreenShareBitrate : -1
+                                suffix: " kbps"
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        title: "Keyframe interval"
+                        description: "Seconds between full frames. Shorter "
+                                   + "recovers from packet loss faster; longer "
+                                   + "compresses better on stable links."
+                        RowLayout {
+                            spacing: Theme.sp.s3
+                            ThemedSlider {
+                                id: gopSlider
+                                implicitWidth: 200
+                                from: 1; to: 30; stepSize: 1
+                                value: appSettings.screenShareKeyframeSec
+                                onMoved: appSettings.screenShareKeyframeSec = Math.round(value)
+                            }
+                            Text {
+                                Layout.preferredWidth: 48
+                                text: appSettings.screenShareKeyframeSec + " s"
+                                font.family: Theme.fontMono
+                                font.pixelSize: Theme.fontSize.sm
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        title: "Lossless mode"
+                        description: "Mathematically lossless AV1 — every "
+                                   + "pixel arrives exactly as captured. "
+                                   + "Bandwidth is whatever the content "
+                                   + "costs (LAN-class links); frames drop "
+                                   + "rather than delay when it can't keep "
+                                   + "up. Used only when everyone in the "
+                                   + "call supports it."
+                        RowLayout {
+                            spacing: Theme.sp.s3
+                            ThemedSwitch {
+                                enabled: !serverManager.activeServer
+                                      || serverManager.activeServer.allowLossless
+                                checked: appSettings.screenShareLossless
+                                onToggled: appSettings.screenShareLossless = checked
+                            }
+                            Text {
+                                visible: serverManager.activeServer
+                                      && !serverManager.activeServer.allowLossless
+                                text: "disabled by server policy"
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.xs
+                                color: Theme.warning
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        title: "JPEG quality (legacy peers)"
+                        description: "Only used toward older clients that "
+                                   + "don't speak the H.264 video path. 1 is "
+                                   + "postage-stamp lossy, 100 near-lossless."
                         RowLayout {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: qSlider
-                                implicitWidth: 240
+                                implicitWidth: 200
                                 from: 1; to: 100; stepSize: 1
                                 value: appSettings.screenShareJpegQuality
                                 onMoved: appSettings.screenShareJpegQuality = Math.round(value)
@@ -616,8 +735,9 @@ Popup {
                             + "may cap individual axes; effective values clamp "
                             + "to min(your-pick, server-cap)."
                     }
-
-                    Item { Layout.fillHeight: true }
+                    // No fillHeight spacer: the Flickable sizes from
+                    // implicitHeight; a stretch item would inflate it.
+                    }
                 }
             }
 
@@ -803,6 +923,77 @@ Popup {
                             + "redirected to the release page to use their "
                             + "distro's package manager rather than an "
                             + "in-place upgrade."
+                    }
+
+                    Item { Layout.fillHeight: true }
+                }
+            }
+
+            // ── Advanced ────────────────────────────────────────
+            Item {
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: Theme.sp.s7 * 2
+                    spacing: Theme.sp.s7
+
+                    SectionHeader { text: "Advanced" }
+
+                    SettingRow {
+                        title: "Video diagnostics overlay"
+                        description: "Shows live receive statistics on "
+                                   + "incoming video streams: resolution, "
+                                   + "decoded fps, bitrate, compression "
+                                   + "ratio, and dropped frames. Handy "
+                                   + "when reporting quality issues."
+                        ThemedSwitch {
+                            checked: appSettings.showVideoDiagnostics
+                            onToggled: appSettings.showVideoDiagnostics = checked
+                        }
+                    }
+
+                    SettingRow {
+                        title: "Verbose voice logging"
+                        description: "Writes detailed voice/video events "
+                                   + "(peer setup, tracks, encoder, rate "
+                                   + "control) to the log file. Applies "
+                                   + "immediately; leave off unless "
+                                   + "you're chasing a problem — the log "
+                                   + "grows quickly."
+                        ThemedSwitch {
+                            checked: appSettings.verboseVoiceLogging
+                            onToggled: appSettings.verboseVoiceLogging = checked
+                        }
+                    }
+
+                    SettingRow {
+                        title: "Log files"
+                        description: "Rotating client log (5 MB × 4 "
+                                   + "generations). Attach these when "
+                                   + "reporting bugs."
+                        Button {
+                            text: "Open log folder"
+                            onClicked: Qt.openUrlExternally(
+                                appSettings.logDirectory().startsWith("/")
+                                    ? "file://" + appSettings.logDirectory()
+                                    : "file:///" + appSettings.logDirectory())
+                            contentItem: Text {
+                                text: parent.text
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                font.weight: Theme.fontWeight.medium
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                color: parent.hovered ? Theme.bg3 : Theme.bg2
+                                border.color: Theme.line
+                                border.width: 1
+                                radius: Theme.r2
+                                implicitWidth: 140
+                                implicitHeight: 36
+                            }
+                        }
                     }
 
                     Item { Layout.fillHeight: true }

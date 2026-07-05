@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QPointer>
 #include <QVideoSink>
 #include <QVideoFrame>
 #include <QTimer>
@@ -15,6 +16,8 @@ class MacCameraCapturer;
 class VoiceEngine;
 class ServerManager;
 class Settings;
+class VideoSendPipeline;
+class VideoRateController;
 
 // Webcam broadcaster — companion to ScreenShareController. Captures
 // from QCamera, feeds a local preview sink, and (every ~200 ms)
@@ -83,6 +86,15 @@ private:
     QTimer* m_throttle = nullptr;
     ServerManager* m_servers = nullptr;
     Settings* m_settings = nullptr;
+    // H.264-over-RTP encode worker + adaptive governor (vcamera
+    // track), mirroring ScreenShareController's screen pair. The JPEG
+    // branch survives for legacy peers / the renegotiation gap.
+    VideoSendPipeline* m_pipeline = nullptr;
+    VideoRateController* m_rate = nullptr;
+    QPointer<QObject> m_wiredEngine;
+    // Capture ticks at RTP rate; the legacy JPEG branch subsamples
+    // via this counter to keep old peers at their accustomed ~5 fps.
+    int m_tick = 0;
     // Per-connection voice-room subscriptions (one per server, not
     // just the active one — voice can be live on a backgrounded
     // server).

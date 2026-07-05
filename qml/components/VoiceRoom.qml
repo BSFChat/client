@@ -496,23 +496,109 @@ Rectangle {
                         border.width: 1
                         clip: true
 
-                        // Empty until the peer's first JPEG frame
-                        // lands — the tile itself can already exist
-                        // off the announced screen_sharing flag.
-                        readonly property string frameUrl: {
+                        // Live once frames actually arrive — the tile
+                        // itself can already exist off the announced
+                        // screen_sharing flag.
+                        readonly property bool live: {
                             room._shareTick;
                             var s = serverManager.activeServer;
-                            return s ? s.peerScreenDataUrl(modelData) : "";
+                            return s && s.videoRegistry
+                                ? s.videoRegistry.hasLiveVideo(modelData, 0)
+                                : false;
                         }
 
-                        Image {
+                        // Fed by the per-peer sink in the registry —
+                        // decoded RTP video and legacy JPEG frames
+                        // both land there. (The old data-URL Image
+                        // reloaded asynchronously per frame and
+                        // blanked in between — the flicker bug.)
+                        VideoOutput {
                             anchors.fill: parent
                             anchors.margins: 1
-                            fillMode: Image.PreserveAspectFit
-                            smooth: true
-                            source: remoteShareTile.frameUrl
-                            asynchronous: false
-                            cache: false
+                            fillMode: VideoOutput.PreserveAspectFit
+                            Component.onCompleted: {
+                                var s = serverManager.activeServer;
+                                if (s && s.videoRegistry && videoSink)
+                                    s.videoRegistry.attachOutput(
+                                        remoteShareTile.modelData, 0, videoSink);
+                            }
+                        }
+
+                        // Video diagnostics overlay (Settings →
+                        // Advanced). Polls cumulative receive counters
+                        // once a second and diffs successive snapshots
+                        // into rates — fps here is DECODED fps, i.e.
+                        // what the viewer actually gets to see.
+                        Rectangle {
+                            id: diagOverlay
+                            visible: appSettings.showVideoDiagnostics
+                                     && remoteShareTile.live
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.margins: Theme.sp.s3
+                            color: "#c0000000"
+                            radius: Theme.r1
+                            width: diagText.implicitWidth + Theme.sp.s3 * 2
+                            height: diagText.implicitHeight + Theme.sp.s2 * 2
+
+                            property var _prev: null
+                            property string statsLine: "measuring…"
+
+                            Timer {
+                                running: diagOverlay.visible
+                                interval: 1000
+                                repeat: true
+                                triggeredOnStart: true
+                                onTriggered: {
+                                    var s = serverManager.activeServer;
+                                    if (!s) return;
+                                    var st = s.videoReceiveStats(
+                                        remoteShareTile.modelData, 0);
+                                    if (!st || st.rxFrames === undefined) {
+                                        diagOverlay.statsLine = "no stream data";
+                                        diagOverlay._prev = null;
+                                        return;
+                                    }
+                                    var now = Date.now();
+                                    var p = diagOverlay._prev;
+                                    diagOverlay._prev = {
+                                        t: now,
+                                        decoded: st.decodedFrames,
+                                        bytes: st.rxBytes,
+                                    };
+                                    if (!p) return;
+                                    var dt = (now - p.t) / 1000;
+                                    if (dt <= 0) return;
+                                    var fps = Math.max(0,
+                                        (st.decodedFrames - p.decoded) / dt);
+                                    var kbps = Math.max(0,
+                                        (st.rxBytes - p.bytes) * 8 / dt / 1000);
+                                    // Uncompressed I420 at this res/fps
+                                    // vs received bits = compression ratio.
+                                    var rawKbps = fps * st.width * st.height
+                                                  * 1.5 * 8 / 1000;
+                                    var ratio = kbps > 0 ? rawKbps / kbps : 0;
+                                    diagOverlay.statsLine =
+                                        st.width + "x" + st.height
+                                        + " @ " + fps.toFixed(0) + " fps"
+                                        + " · " + (kbps >= 1000
+                                            ? (kbps / 1000).toFixed(1) + " Mbps"
+                                            : kbps.toFixed(0) + " kbps")
+                                        + " · " + (ratio > 0
+                                            ? ratio.toFixed(0) + ":1" : "–")
+                                        + " · drops " + st.droppedAus
+                                        + " · " + st.codec;
+                                }
+                            }
+
+                            Text {
+                                id: diagText
+                                anchors.centerIn: parent
+                                text: diagOverlay.statsLine
+                                color: "#e0ffffff"
+                                font.family: Theme.fontMono
+                                font.pixelSize: Theme.fontSize.xs
+                            }
                         }
 
                         // Announced-but-not-yet-streaming placeholder:
@@ -522,7 +608,7 @@ Rectangle {
                         Column {
                             anchors.centerIn: parent
                             spacing: Theme.sp.s3
-                            visible: remoteShareTile.frameUrl === ""
+                            visible: !remoteShareTile.live
 
                             Rectangle {
                                 anchors.horizontalCenter: parent.horizontalCenter

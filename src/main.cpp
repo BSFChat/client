@@ -17,6 +17,7 @@
 #include "core/Haptics.h"
 #include "core/Updater.h"
 #include "core/AndroidPermissions.h"
+#include "util/FileLogger.h"
 // Mirror the platform gate below where these get instantiated.
 // Keep the includes paired with the use sites so a platform-gate
 // edit only has to be made in one place to widen support.
@@ -72,6 +73,12 @@ int main(int argc, char *argv[])
     app.setApplicationName("BSFChat");
     app.setOrganizationName("BSFChat");
     QQuickStyle::setStyle("Basic");
+
+    // Mirror all logging to a rotating file. A Finder-launched app has
+    // no stderr, so without this the client leaves no trace to debug
+    // from. Installed after setApplicationName so the log dir resolves.
+    bsfchat::installFileLogger();
+    qInfo() << "BSFChat starting, logging to" << bsfchat::logDirectory();
 
     App application;
 

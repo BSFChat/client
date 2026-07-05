@@ -1,5 +1,7 @@
 #include "voice/CameraController.h"
 #include "voice/VoiceEngine.h"
+#include "voice/video/VideoRateController.h"
+#include "voice/video/VideoSendPipeline.h"
 #include "net/ServerManager.h"
 #include "net/ServerConnection.h"
 #include "core/Settings.h"
@@ -12,6 +14,7 @@
 #include <QCameraDevice>
 #endif
 
+#include <QDateTime>
 #include <QVariantMap>
 #include <QBuffer>
 #include <QImage>
@@ -20,9 +23,16 @@
 #include <algorithm>
 #include <cstring>
 
-static constexpr int kFrameIntervalMs = 200;
+// Capture ticks at RTP rate (interval re-resolved from Settings on
+// every start); the JPEG numbers only apply to the legacy branch,
+// which subsamples the ticks back down to ~5 fps.
+static constexpr int kFrameIntervalMs = 33;
 static constexpr int kJpegQuality = 60;
 static constexpr int kMaxWidth = 640;
+// RTP camera fallbacks when Settings isn't wired.
+static constexpr int kRtpMaxLongEdge = 1280;
+static constexpr int kRtpFps = 30;
+static constexpr int kRtpTargetKbps = 1500;
 
 CameraController::CameraController(QObject* parent)
     : QObject(parent)
@@ -83,6 +93,21 @@ CameraController::CameraController(QObject* parent)
     m_throttle->setInterval(kFrameIntervalMs);
     connect(m_throttle, &QTimer::timeout, this,
             &CameraController::pushFrameToPeers);
+
+    // RTP encode worker + adaptive governor for the vcamera track —
+    // the same pair ScreenShareController runs for vscreen.
+    m_pipeline = new VideoSendPipeline(VideoStreamId::Camera, this);
+    connect(m_pipeline, &VideoSendPipeline::encodedFrameReady, this,
+        [this](int, const EncodedFrame& frame) {
+            if (!m_servers) return;
+            if (auto* vs = m_servers->voiceServer()) {
+                if (auto* voice = vs->voiceEngine())
+                    voice->broadcastEncodedVideo(VideoStreamId::Camera, frame);
+            }
+        });
+    m_rate = new VideoRateController(VideoStreamId::Camera, this);
+    connect(m_rate, &VideoRateController::forceKeyframe,
+            m_pipeline, &VideoSendPipeline::forceKeyframe);
 }
 
 QVariantList CameraController::availableCameras() const
@@ -153,6 +178,10 @@ void CameraController::start() { startForCamera(-1); }
 void CameraController::startForCamera(int index)
 {
     if (m_active) return;
+    // Capture cadence follows the user's camera fps (legacy JPEG
+    // subsamples from it); re-resolved on every start.
+    m_throttle->setInterval(1000 / (m_settings ? m_settings->cameraFps()
+                                               : kRtpFps));
 
 #ifdef Q_OS_MACOS
     auto s = mac_camera_permission::status();
@@ -205,6 +234,7 @@ void CameraController::stop()
     m_throttle->stop();
     m_pendingFrame = {};
     setTransmitting(false);
+    if (m_rate) m_rate->setActive(false);
     // Push an empty frame so QML previews blank out instead of
     // keeping the frozen last frame.
     m_sink->setVideoFrame(QVideoFrame());
@@ -255,19 +285,79 @@ void CameraController::pushFrameToPeers()
     if (!canTransmit) setTransmitting(false);
     if (!voice) return;
     if (!m_pendingFrame.isValid()) return;
+    ++m_tick;
 
-    QImage img = m_pendingFrame.toImage();
-    if (img.isNull()) return;
-    if (img.width() > kMaxWidth)
-        img = img.scaledToWidth(kMaxWidth, Qt::SmoothTransformation);
-
-    QByteArray jpeg;
-    {
-        QBuffer buf(&jpeg);
-        buf.open(QIODevice::WriteOnly);
-        if (!img.save(&buf, "JPEG", kJpegQuality)) return;
+    // (Re)wire this session's engine: keyframe demands and delivery
+    // reports for the camera stream feed the pipeline/governor.
+    if (m_wiredEngine != voice) {
+        if (m_wiredEngine) {
+            disconnect(m_wiredEngine, nullptr, m_pipeline, nullptr);
+            disconnect(m_wiredEngine, nullptr, m_rate, nullptr);
+        }
+        connect(voice, &VoiceEngine::videoKeyframeRequested, m_pipeline,
+            [this](int streamId) {
+                if (streamId == int(VideoStreamId::Camera))
+                    m_pipeline->forceKeyframe();
+            });
+        connect(voice, &VoiceEngine::videoDeliveryRatio, m_rate,
+            [this](const QString& userId, int streamId, double ratio) {
+                if (streamId == int(VideoStreamId::Camera))
+                    m_rate->reportDeliveryRatio(userId, ratio);
+            });
+        connect(voice, &VoiceEngine::videoKeyframeRequested, m_rate,
+            [this](int streamId) {
+                if (streamId == int(VideoStreamId::Camera))
+                    m_rate->reportKeyframeRequest();
+            });
+        m_wiredEngine = voice;
     }
-    voice->broadcastCameraFrame(jpeg);
+
+    // RTP path (capable peers). User knobs with hardcoded fallbacks
+    // when Settings isn't wired (tests).
+    if (voice->hasVideoCapablePeers()) {
+        voice->prepareVideoSend();
+        const int fps = m_settings ? m_settings->cameraFps() : kRtpFps;
+        const int maxEdge = m_settings ? m_settings->cameraMaxWidth()
+                                       : kRtpMaxLongEdge;
+        const int targetKbps = m_settings ? m_settings->cameraTargetKbps()
+                                          : kRtpTargetKbps;
+        m_rate->setEnvelope(150, targetKbps, fps, maxEdge);
+        m_rate->setActive(true);
+        EncoderConfig cfg;
+        cfg.codec = VideoCodecKind::H264;
+        cfg.fps = fps;
+        cfg.screenContent = false;   // camera tuning: motion over text
+        cfg.profile = voice->negotiatedH264Profile();
+        cfg.targetBitrateKbps = m_rate->targetKbps();
+        cfg.maxBitrateKbps = m_rate->maxKbps();
+        cfg.width = cfg.height = qMin(maxEdge, m_rate->longEdge());
+        cfg.keyframeIntervalSec = 10;   // background refresh only —
+                                        // receivers PLI when they need one
+        m_pipeline->configure(cfg);
+        m_pipeline->submitFrame(m_pendingFrame,
+                                QDateTime::currentMSecsSinceEpoch() * 1000);
+    }
+
+    // Legacy JPEG path, subsampled from the capture cadence back
+    // down to ~5 fps.
+    const int legacyDivisor = qMax(1,
+        (m_settings ? m_settings->cameraFps() : kRtpFps) / 5);
+    if (voice->hasLegacyOpenPeers(VideoStreamId::Camera)
+        && (m_tick % legacyDivisor) == 0) {
+        QImage img = m_pendingFrame.toImage();
+        if (img.isNull()) return;
+        if (img.width() > kMaxWidth)
+            img = img.scaledToWidth(kMaxWidth, Qt::SmoothTransformation);
+
+        QByteArray jpeg;
+        {
+            QBuffer buf(&jpeg);
+            buf.open(QIODevice::WriteOnly);
+            if (!img.save(&buf, "JPEG", kJpegQuality)) return;
+        }
+        voice->broadcastCameraFrame(jpeg);
+    }
+
     setTransmitting(canTransmit);
     m_pendingFrame = {};
 }

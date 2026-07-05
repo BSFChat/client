@@ -22,6 +22,8 @@ class Settings : public QObject {
     // server sidebar / channel list / message view / member list so panel
     // boundaries are obvious to low-vision users.
     Q_PROPERTY(bool accessibilityMode READ accessibilityMode WRITE setAccessibilityMode NOTIFY accessibilityModeChanged)
+    Q_PROPERTY(bool verboseVoiceLogging READ verboseVoiceLogging WRITE setVerboseVoiceLogging NOTIFY verboseVoiceLoggingChanged)
+    Q_PROPERTY(bool showVideoDiagnostics READ showVideoDiagnostics WRITE setShowVideoDiagnostics NOTIFY showVideoDiagnosticsChanged)
     // Layout density — one of "standard" / "compact" / "focus". Matches the
     // three branches in Theme.layout (see qml/theme/Theme.qml). Compact
     // narrows sidebars & shrinks participant tiles; focus hides chat +
@@ -93,6 +95,16 @@ public:
 
     bool accessibilityMode() const;
     void setAccessibilityMode(bool v);
+
+    // Advanced: runtime toggle for the bsfchat.* debug/info logging
+    // categories (applies immediately, persists across launches).
+    bool verboseVoiceLogging() const;
+    void setVerboseVoiceLogging(bool v);
+    // Advanced: per-stream receive stats overlay on video tiles.
+    bool showVideoDiagnostics() const;
+    void setShowVideoDiagnostics(bool v);
+    // Folder the rotating file log writes into (FileLogger).
+    Q_INVOKABLE QString logDirectory() const;
 
     QString layoutVariant() const;
     void setLayoutVariant(const QString& variant);
@@ -186,6 +198,33 @@ public:
     int screenShareJpegQuality() const;
     void setScreenShareJpegQuality(int q);
 
+    // RTP-video quality knobs. Target bitrate is the steady-state
+    // budget the adaptive controller converges toward on a clean
+    // link; the controller may exceed it briefly (probe) or ride far
+    // below it under loss. jpegQuality above only governs the legacy
+    // fallback path now. Lossless flips the AV1 mathematically-
+    // lossless tier (LAN-class bandwidth; server policy can veto it).
+    Q_PROPERTY(int screenShareTargetKbps READ screenShareTargetKbps WRITE setScreenShareTargetKbps NOTIFY screenShareTargetKbpsChanged)
+    Q_PROPERTY(int screenShareKeyframeSec READ screenShareKeyframeSec WRITE setScreenShareKeyframeSec NOTIFY screenShareKeyframeSecChanged)
+    Q_PROPERTY(bool screenShareLossless READ screenShareLossless WRITE setScreenShareLossless NOTIFY screenShareLosslessChanged)
+    int screenShareTargetKbps() const;
+    void setScreenShareTargetKbps(int kbps);
+    int screenShareKeyframeSec() const;
+    void setScreenShareKeyframeSec(int sec);
+    bool screenShareLossless() const;
+    void setScreenShareLossless(bool on);
+
+    // Camera knobs (previously hardcoded 640 px / 5 fps JPEG).
+    Q_PROPERTY(int cameraFps READ cameraFps WRITE setCameraFps NOTIFY cameraFpsChanged)
+    Q_PROPERTY(int cameraMaxWidth READ cameraMaxWidth WRITE setCameraMaxWidth NOTIFY cameraMaxWidthChanged)
+    Q_PROPERTY(int cameraTargetKbps READ cameraTargetKbps WRITE setCameraTargetKbps NOTIFY cameraTargetKbpsChanged)
+    int cameraFps() const;
+    void setCameraFps(int fps);
+    int cameraMaxWidth() const;
+    void setCameraMaxWidth(int px);
+    int cameraTargetKbps() const;
+    void setCameraTargetKbps(int kbps);
+
     // Voice mode: "open" ⇒ open mic (current behaviour), "ptt" ⇒
     // push-to-talk. In PTT the mic only transmits while the user is
     // holding down `pttKeySequence`.
@@ -210,6 +249,12 @@ signals:
     void screenShareFpsChanged();
     void screenShareMaxWidthChanged();
     void screenShareJpegQualityChanged();
+    void screenShareTargetKbpsChanged();
+    void screenShareKeyframeSecChanged();
+    void screenShareLosslessChanged();
+    void cameraFpsChanged();
+    void cameraMaxWidthChanged();
+    void cameraTargetKbpsChanged();
     void voiceModeChanged();
     void pttKeySequenceChanged();
     void autoUpdateCheckChanged();
@@ -221,6 +266,8 @@ signals:
     void accentChanged();
     void accentHueChanged();
     void accessibilityModeChanged();
+    void verboseVoiceLoggingChanged();
+    void showVideoDiagnosticsChanged();
     void layoutVariantChanged();
     void audioInputDeviceChanged();
     void audioOutputDeviceChanged();

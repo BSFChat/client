@@ -1,4 +1,7 @@
 #include "core/Settings.h"
+#include "util/FileLogger.h"
+
+#include <QLoggingCategory>
 
 #include <algorithm>
 #include <QCryptographicHash>
@@ -6,10 +9,53 @@
 #include <QAudioDevice>
 #include <QVariantMap>
 
+namespace {
+// Enables the bsfchat.* info/debug categories (they default to
+// warnings-only so ordinary users' logs stay lean). Code-set rules
+// stack on top of any qtlogging.ini, so this works everywhere.
+void applyVerboseVoiceLogging(bool on)
+{
+    QLoggingCategory::setFilterRules(
+        on ? QStringLiteral("bsfchat.*=true") : QString());
+}
+} // namespace
+
 Settings::Settings(QObject* parent)
     : QObject(parent)
     , m_settings("BSFChat", "BSFChat")
 {
+    if (verboseVoiceLogging())
+        applyVerboseVoiceLogging(true);
+}
+
+bool Settings::verboseVoiceLogging() const
+{
+    return m_settings.value("advanced/verboseVoiceLogging", false).toBool();
+}
+
+void Settings::setVerboseVoiceLogging(bool v)
+{
+    if (verboseVoiceLogging() == v) return;
+    m_settings.setValue("advanced/verboseVoiceLogging", v);
+    applyVerboseVoiceLogging(v);
+    emit verboseVoiceLoggingChanged();
+}
+
+bool Settings::showVideoDiagnostics() const
+{
+    return m_settings.value("advanced/showVideoDiagnostics", false).toBool();
+}
+
+void Settings::setShowVideoDiagnostics(bool v)
+{
+    if (showVideoDiagnostics() == v) return;
+    m_settings.setValue("advanced/showVideoDiagnostics", v);
+    emit showVideoDiagnosticsChanged();
+}
+
+QString Settings::logDirectory() const
+{
+    return bsfchat::logDirectory();
 }
 
 QList<Settings::ServerEntry> Settings::savedServers() const
@@ -515,6 +561,96 @@ void Settings::setScreenShareJpegQuality(int q)
     if (q == screenShareJpegQuality()) return;
     m_settings.setValue(QStringLiteral("screenShare/jpegQuality"), q);
     emit screenShareJpegQualityChanged();
+}
+
+// ── RTP-video knobs ───────────────────────────────────────────────
+// Envelopes:
+//   targetKbps  250 .. 100000  (metered link .. LAN near-lossless)
+//   keyframe    1 .. 30 s      (shorter = faster loss recovery,
+//                               longer = better compression)
+int Settings::screenShareTargetKbps() const
+{
+    return std::clamp(m_settings.value(
+        QStringLiteral("screenShare/targetKbps"), 4000).toInt(), 250, 100000);
+}
+
+void Settings::setScreenShareTargetKbps(int kbps)
+{
+    kbps = std::clamp(kbps, 250, 100000);
+    if (kbps == screenShareTargetKbps()) return;
+    m_settings.setValue(QStringLiteral("screenShare/targetKbps"), kbps);
+    emit screenShareTargetKbpsChanged();
+}
+
+int Settings::screenShareKeyframeSec() const
+{
+    // 10 s background refresh: receivers explicitly request IDRs on
+    // loss/late-join, so a short periodic GOP only pulses quality and
+    // burns bitrate that P-frames could spend on sharp text.
+    return std::clamp(m_settings.value(
+        QStringLiteral("screenShare/keyframeSec"), 10).toInt(), 1, 30);
+}
+
+void Settings::setScreenShareKeyframeSec(int sec)
+{
+    sec = std::clamp(sec, 1, 30);
+    if (sec == screenShareKeyframeSec()) return;
+    m_settings.setValue(QStringLiteral("screenShare/keyframeSec"), sec);
+    emit screenShareKeyframeSecChanged();
+}
+
+bool Settings::screenShareLossless() const
+{
+    return m_settings.value(QStringLiteral("screenShare/lossless"), false).toBool();
+}
+
+void Settings::setScreenShareLossless(bool on)
+{
+    if (on == screenShareLossless()) return;
+    m_settings.setValue(QStringLiteral("screenShare/lossless"), on);
+    emit screenShareLosslessChanged();
+}
+
+int Settings::cameraFps() const
+{
+    return std::clamp(m_settings.value(
+        QStringLiteral("camera/fps"), 30).toInt(), 5, 60);
+}
+
+void Settings::setCameraFps(int fps)
+{
+    fps = std::clamp(fps, 5, 60);
+    if (fps == cameraFps()) return;
+    m_settings.setValue(QStringLiteral("camera/fps"), fps);
+    emit cameraFpsChanged();
+}
+
+int Settings::cameraMaxWidth() const
+{
+    return std::clamp(m_settings.value(
+        QStringLiteral("camera/maxWidth"), 1280).toInt(), 320, 1920);
+}
+
+void Settings::setCameraMaxWidth(int px)
+{
+    px = std::clamp(px, 320, 1920);
+    if (px == cameraMaxWidth()) return;
+    m_settings.setValue(QStringLiteral("camera/maxWidth"), px);
+    emit cameraMaxWidthChanged();
+}
+
+int Settings::cameraTargetKbps() const
+{
+    return std::clamp(m_settings.value(
+        QStringLiteral("camera/targetKbps"), 1500).toInt(), 150, 20000);
+}
+
+void Settings::setCameraTargetKbps(int kbps)
+{
+    kbps = std::clamp(kbps, 150, 20000);
+    if (kbps == cameraTargetKbps()) return;
+    m_settings.setValue(QStringLiteral("camera/targetKbps"), kbps);
+    emit cameraTargetKbpsChanged();
 }
 
 bool Settings::autoUpdateCheck() const

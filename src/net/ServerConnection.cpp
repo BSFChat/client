@@ -9,6 +9,7 @@
 #ifdef BSFCHAT_VOICE_ENABLED
 #include "voice/VoiceEngine.h"
 #include "voice/NotificationSounds.h"
+#include "voice/video/VideoStreamRegistry.h"
 #endif
 
 #include <QFile>
@@ -38,6 +39,19 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     , m_memberListModel(new MemberListModel(this))
     , m_serverUrl(serverUrl)
 {
+#ifdef BSFCHAT_VOICE_ENABLED
+    // Outlives individual voice sessions so QML attachments survive
+    // rejoining a call. Live-state flips re-use the existing
+    // peer*FrameChanged notify graph.
+    m_videoRegistry = new VideoStreamRegistry(this);
+    connect(m_videoRegistry, &VideoStreamRegistry::liveVideoChanged,
+            this, [this](const QString& userId, int streamId) {
+        if (streamId == int(VideoStreamId::Screen))
+            emit peerScreenFrameChanged(userId);
+        else
+            emit peerCameraFrameChanged(userId);
+    });
+#endif
     m_client->setHomeserver(serverUrl);
     m_messageModel->setHomeserver(serverUrl);
     // Bubble message-send errors up to QML as a friendly toast.
@@ -307,22 +321,27 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             m_voiceEngine = new VoiceEngine(m_client, this);
             m_voiceEngine->setLocalUserId(m_userId);
 
-            // Fan incoming screen frames up to QML via a base64
-            // data URL. Recomputed each frame (~5 fps) so cost is
-            // negligible and the binding stays trivial.
+            // All remote video — decoded RTP frames and legacy JPEG
+            // stills — lands on the registry's per-peer sinks; QML
+            // VideoOutputs attach to those. (The old path re-bound an
+            // Image to a fresh base64 data URL per frame, which loads
+            // asynchronously and blanked the tile between frames —
+            // the screen-share flicker bug.)
+            connect(m_voiceEngine, &VoiceEngine::peerVideoFrameDecoded,
+                    m_videoRegistry, &VideoStreamRegistry::deliverFrame);
             connect(m_voiceEngine, &VoiceEngine::peerScreenFrameReceived,
                 this, [this](const QString& userId, const QByteArray& jpeg) {
-                    QString url = QStringLiteral("data:image/jpeg;base64,")
-                        + QString::fromLatin1(jpeg.toBase64());
-                    m_peerScreenData[userId] = url;
-                    emit peerScreenFrameChanged(userId);
+                    QImage img;
+                    if (img.loadFromData(jpeg, "JPEG"))
+                        m_videoRegistry->deliverImage(
+                            userId, int(VideoStreamId::Screen), img);
                 });
             connect(m_voiceEngine, &VoiceEngine::peerCameraFrameReceived,
                 this, [this](const QString& userId, const QByteArray& jpeg) {
-                    QString url = QStringLiteral("data:image/jpeg;base64,")
-                        + QString::fromLatin1(jpeg.toBase64());
-                    m_peerCameraData[userId] = url;
-                    emit peerCameraFrameChanged(userId);
+                    QImage img;
+                    if (img.loadFromData(jpeg, "JPEG"))
+                        m_videoRegistry->deliverImage(
+                            userId, int(VideoStreamId::Camera), img);
                 });
             connect(m_voiceEngine, &VoiceEngine::peerLevelChanged, this,
                 [this](const QString& userId, float level) {
@@ -359,14 +378,11 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             connect(m_voiceEngine, &VoiceEngine::peerStateChanged,
                     this, [this]() { emit voiceMembersChanged(); });
 
-            // Dead peer — drop their cached screen/camera frames so
-            // the UI doesn't keep rendering a frozen last frame.
+            // Dead peer — blank their video surfaces so the UI doesn't
+            // keep rendering a frozen last frame.
             connect(m_voiceEngine, &VoiceEngine::peerDisconnected,
                     this, [this](const QString& userId) {
-                if (m_peerScreenData.remove(userId))
-                    emit peerScreenFrameChanged(userId);
-                if (m_peerCameraData.remove(userId))
-                    emit peerCameraFrameChanged(userId);
+                m_videoRegistry->dropUser(userId);
                 if (m_peerLevels.remove(userId))
                     emit peerLevelChanged(userId);
                 emit voiceMembersChanged();
@@ -495,6 +511,31 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
     m_connected = true;
     m_connectionStatus = 1;
     startSync();
+
+    // Persisted ids can be stale or corrupt (a doubled "@" once shipped
+    // via a registration bug), and every self-identity comparison —
+    // sync self-event filtering, voice mesh reconciliation, the member
+    // list's "that's me" row — is a strict string match on m_userId. A
+    // wrong id makes the client stop recognizing itself, up to offering
+    // WebRTC connections to its own user. Reconcile against the
+    // server's canonical answer; old servers without the endpoint just
+    // never reply.
+    connect(m_client, &MatrixClient::whoamiResult, this,
+        [this](const QString& canonicalId) {
+            if (canonicalId == m_userId) return;
+            qWarning() << "stored user id" << m_userId
+                       << "differs from server canonical" << canonicalId
+                       << "— correcting";
+            const bool displayNameWasId = (m_displayName == m_userId);
+            m_userId = canonicalId;
+            if (displayNameWasId) {
+                m_displayName = canonicalId;
+                emit displayNameChanged();
+            }
+            emit userIdChanged();
+            emit identityCorrected();
+        }, Qt::SingleShotConnection);
+    m_client->whoami();
 }
 
 void ServerConnection::login(const QString& username, const QString& password)
@@ -1068,6 +1109,19 @@ QJsonArray ServerConnection::voiceMembers() const
     return augment(m_voiceMembers);
 }
 
+QVariantMap ServerConnection::videoReceiveStats(const QString& userId,
+                                                int streamId) const
+{
+#ifdef BSFCHAT_VOICE_ENABLED
+    if (m_voiceEngine)
+        return m_voiceEngine->videoReceiveStats(userId, streamId);
+#else
+    Q_UNUSED(userId);
+    Q_UNUSED(streamId);
+#endif
+    return {};
+}
+
 void ServerConnection::leaveVoiceChannel()
 {
     if (m_activeVoiceRoomId.isEmpty()) return;
@@ -1093,19 +1147,9 @@ void ServerConnection::teardownVoiceSession()
         delete m_voiceEngine;
         m_voiceEngine = nullptr;
     }
-    // Forget cached screen/camera frames from the session — QML
-    // re-reads peerScreenDataUrl / peerCameraDataUrl per key off
-    // these signals.
-    if (!m_peerScreenData.isEmpty()) {
-        const auto keys = m_peerScreenData.keys();
-        m_peerScreenData.clear();
-        for (const auto& uid : keys) emit peerScreenFrameChanged(uid);
-    }
-    if (!m_peerCameraData.isEmpty()) {
-        const auto keys = m_peerCameraData.keys();
-        m_peerCameraData.clear();
-        for (const auto& uid : keys) emit peerCameraFrameChanged(uid);
-    }
+    // Blank every remote video surface from the session (fires
+    // liveVideoChanged → peerScreen/CameraFrameChanged for QML).
+    if (m_videoRegistry) m_videoRegistry->clear();
 #endif
     // Announced share/camera flags die with the session too (the
     // server resets them on leave) — otherwise peersCurrentlySharing()
@@ -1137,6 +1181,40 @@ void ServerConnection::teardownVoiceSession()
     }
 }
 
+QObject* ServerConnection::videoRegistryObject() const
+{
+#ifdef BSFCHAT_VOICE_ENABLED
+    return m_videoRegistry;
+#else
+    return nullptr;
+#endif
+}
+
+QStringList ServerConnection::peersCurrentlySharing() const
+{
+    QSet<QString> uids = m_announcedScreenSharers;
+#ifdef BSFCHAT_VOICE_ENABLED
+    if (m_videoRegistry) {
+        const auto live = m_videoRegistry->liveUsers(int(VideoStreamId::Screen));
+        for (const auto& uid : live) uids.insert(uid);
+    }
+#endif
+    QStringList out(uids.constBegin(), uids.constEnd());
+    out.sort(); // stable tile order across re-evaluations
+    return out;
+}
+
+bool ServerConnection::peerHasCamera(const QString& userId) const
+{
+    if (m_announcedCameraUsers.contains(userId)) return true;
+#ifdef BSFCHAT_VOICE_ENABLED
+    return m_videoRegistry
+        && m_videoRegistry->hasLiveVideo(userId, int(VideoStreamId::Camera));
+#else
+    return false;
+#endif
+}
+
 void ServerConnection::reconcileAnnouncedMedia()
 {
     // Rebuild the announced-sharer sets from the current member rows.
@@ -1162,10 +1240,13 @@ void ServerConnection::reconcileAnnouncedMedia()
 
     for (const QString& uid : oldScreen) {
         if (screen.contains(uid)) continue;
-        // Flag dropped (or the member left/went inactive) — erase the
-        // cached last frame so the UI can't keep a frozen share alive
-        // via the frame-data fallback.
-        m_peerScreenData.remove(uid);
+        // Flag dropped (or the member left/went inactive) — blank the
+        // surface so the UI can't keep a frozen share alive via the
+        // live-frame fallback.
+#ifdef BSFCHAT_VOICE_ENABLED
+        if (m_videoRegistry)
+            m_videoRegistry->dropStream(uid, int(VideoStreamId::Screen));
+#endif
         emit peerScreenFrameChanged(uid);
     }
     for (const QString& uid : screen) {
@@ -1175,7 +1256,10 @@ void ServerConnection::reconcileAnnouncedMedia()
     }
     for (const QString& uid : oldCam) {
         if (cam.contains(uid)) continue;
-        m_peerCameraData.remove(uid);
+#ifdef BSFCHAT_VOICE_ENABLED
+        if (m_videoRegistry)
+            m_videoRegistry->dropStream(uid, int(VideoStreamId::Camera));
+#endif
         emit peerCameraFrameChanged(uid);
     }
     for (const QString& uid : cam) {
@@ -1427,12 +1511,15 @@ void ServerConnection::setMaxScreenShareQuality(int level)
     // axis the server understands.
     setScreenSharePolicy(m_maxScreenShareFps,
                          m_maxScreenShareWidth,
-                         m_maxScreenShareJpeg);
+                         m_maxScreenShareJpeg,
+                         m_maxScreenShareBitrate,
+                         m_allowLossless);
     Q_UNUSED(level);
 }
 
 void ServerConnection::setScreenSharePolicy(int maxFps, int maxWidth,
-                                             int maxJpeg)
+                                             int maxJpeg, int maxBitrateKbps,
+                                             bool allowLossless)
 {
     QString targetRoom = m_activeRoomId;
     if (targetRoom.isEmpty() && m_roomListModel->rowCount() > 0) {
@@ -1448,6 +1535,8 @@ void ServerConnection::setScreenSharePolicy(int maxFps, int maxWidth,
     if (maxFps != m_maxScreenShareFps)     { m_maxScreenShareFps = maxFps; changed = true; }
     if (maxWidth != m_maxScreenShareWidth) { m_maxScreenShareWidth = maxWidth; changed = true; }
     if (maxJpeg != m_maxScreenShareJpeg)   { m_maxScreenShareJpeg = maxJpeg; changed = true; }
+    if (maxBitrateKbps != m_maxScreenShareBitrate) { m_maxScreenShareBitrate = maxBitrateKbps; changed = true; }
+    if (allowLossless != m_allowLossless)  { m_allowLossless = allowLossless; changed = true; }
     if (changed) emit maxScreenSharePolicyChanged();
 
     // Build the wire event. -1 sentinels are dropped from the
@@ -1456,6 +1545,8 @@ void ServerConnection::setScreenSharePolicy(int maxFps, int maxWidth,
     if (maxFps >= 0)   content["max_fps"] = maxFps;
     if (maxWidth >= 0) content["max_width"] = maxWidth;
     if (maxJpeg >= 0)  content["max_jpeg_quality"] = maxJpeg;
+    if (maxBitrateKbps >= 0) content["max_bitrate_kbps"] = maxBitrateKbps;
+    if (!allowLossless) content["allow_lossless"] = false;
     // Keep the legacy preset field aligned so old clients see a
     // sensible cap (largest preset that fits inside the new caps).
     int legacyPreset = 3;  // assume Ultra unless an axis caps lower
@@ -1638,12 +1729,18 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 int maxFps = event.content.data.value("max_fps", -1);
                 int maxWidth = event.content.data.value("max_width", -1);
                 int maxJpeg = event.content.data.value("max_jpeg_quality", -1);
+                int maxKbps = event.content.data.value("max_bitrate_kbps", -1);
+                bool allowLossless = event.content.data.value("allow_lossless", true);
                 if (maxFps != m_maxScreenShareFps
                     || maxWidth != m_maxScreenShareWidth
-                    || maxJpeg != m_maxScreenShareJpeg) {
+                    || maxJpeg != m_maxScreenShareJpeg
+                    || maxKbps != m_maxScreenShareBitrate
+                    || allowLossless != m_allowLossless) {
                     m_maxScreenShareFps = maxFps;
                     m_maxScreenShareWidth = maxWidth;
                     m_maxScreenShareJpeg = maxJpeg;
+                    m_maxScreenShareBitrate = maxKbps;
+                    m_allowLossless = allowLossless;
                     emit maxScreenSharePolicyChanged();
                 }
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomPinnedEvents)) {
@@ -1908,11 +2005,18 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     if (type == QString::fromUtf8(bsfchat::event_type::kCallInvite)) {
                         m_voiceEngine->handleCallInvite(sender,
                             QString::fromStdString(c.value("call_id", "")),
-                            c.value("offer", nlohmann::json::object()).value("sdp", ""));
+                            c.value("offer", nlohmann::json::object()).value("sdp", ""),
+                            c.value("bsfchat_caps", nlohmann::json::object()));
                     } else if (type == QString::fromUtf8(bsfchat::event_type::kCallAnswer)) {
                         m_voiceEngine->handleCallAnswer(sender,
                             QString::fromStdString(c.value("call_id", "")),
-                            c.value("answer", nlohmann::json::object()).value("sdp", ""));
+                            c.value("answer", nlohmann::json::object()).value("sdp", ""),
+                            c.value("bsfchat_caps", nlohmann::json::object()));
+                    } else if (type == QString::fromUtf8(bsfchat::event_type::kCallNegotiate)) {
+                        const auto desc = c.value("description", nlohmann::json::object());
+                        m_voiceEngine->handleCallNegotiate(sender,
+                            QString::fromStdString(c.value("call_id", "")),
+                            desc.value("type", ""), desc.value("sdp", ""));
                     } else if (type == QString::fromUtf8(bsfchat::event_type::kCallCandidates)) {
                         std::vector<std::pair<std::string, std::string>> cands;
                         for (const auto& ic : c.value("candidates", nlohmann::json::array())) {
