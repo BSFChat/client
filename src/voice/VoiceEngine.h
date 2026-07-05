@@ -8,6 +8,7 @@
 #include <QString>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QVariantMap>
 #include <QVideoFrame>
 
 #include <rtc/rtc.hpp>
@@ -71,6 +72,11 @@ public:
     // "failed", "new", "disconnected". VoicePanel reads this to show colored
     // indicators per member.
     QMap<QString, QString> peerStates() const;
+
+    // Cumulative receive-side stats for the diagnostics overlay:
+    // rxFrames/rxBytes/decoded/dropped/width/height/codec. Empty map
+    // when no receive pipeline exists for (userId, streamId).
+    QVariantMap videoReceiveStats(const QString& userId, int streamId) const;
 
     // Fan out a JPEG-encoded screen frame to every connected LEGACY
     // peer (no video_rtp capability). RTP-capable peers get real video

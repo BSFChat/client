@@ -1109,6 +1109,19 @@ QJsonArray ServerConnection::voiceMembers() const
     return augment(m_voiceMembers);
 }
 
+QVariantMap ServerConnection::videoReceiveStats(const QString& userId,
+                                                int streamId) const
+{
+#ifdef BSFCHAT_VOICE_ENABLED
+    if (m_voiceEngine)
+        return m_voiceEngine->videoReceiveStats(userId, streamId);
+#else
+    Q_UNUSED(userId);
+    Q_UNUSED(streamId);
+#endif
+    return {};
+}
+
 void ServerConnection::leaveVoiceChannel()
 {
     if (m_activeVoiceRoomId.isEmpty()) return;

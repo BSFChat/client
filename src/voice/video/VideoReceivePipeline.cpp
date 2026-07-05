@@ -60,6 +60,7 @@ void VideoReceivePipeline::submitAccessUnit(const QByteArray& au,
         if (m_queue.size() >= kMaxQueuedAus) {
             // Decode can't keep up — drop the whole backlog rather than
             // fall progressively behind. Re-entry at the next keyframe.
+            m_droppedAus.fetch_add(quint64(m_queue.size()));
             m_queue.clear();
             overflowed = true;
         }
@@ -108,6 +109,7 @@ void VideoReceivePipeline::drainQueue() {
                        "waiting for keyframe",
                        qPrintable(m_userId), int(m_streamId));
             m_waitingForKeyframe = true;
+            m_droppedAus.fetch_add(1);
             requestKeyframeThrottled();
             continue;
         }
@@ -129,13 +131,16 @@ void VideoReceivePipeline::drainQueue() {
             // on the transport-provided keyframe flag.
             const bool isKey = m_codec == VideoCodecKind::H264
                 ? containsIdr(au) : queued.keyframe;
-            if (!isKey) continue;
+            if (!isKey) { m_droppedAus.fetch_add(1); continue; }
             m_waitingForKeyframe = false;
         }
 
         QVideoFrame frame;
         switch (m_decoder->decode(au, frame)) {
         case VideoDecoder::Result::Ok:
+            m_decodedFrames.fetch_add(1);
+            m_lastWidth.store(frame.width());
+            m_lastHeight.store(frame.height());
             emit frameDecoded(m_userId, int(m_streamId), frame);
             break;
         case VideoDecoder::Result::NeedMore:

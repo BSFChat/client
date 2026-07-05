@@ -22,6 +22,8 @@ class Settings : public QObject {
     // server sidebar / channel list / message view / member list so panel
     // boundaries are obvious to low-vision users.
     Q_PROPERTY(bool accessibilityMode READ accessibilityMode WRITE setAccessibilityMode NOTIFY accessibilityModeChanged)
+    Q_PROPERTY(bool verboseVoiceLogging READ verboseVoiceLogging WRITE setVerboseVoiceLogging NOTIFY verboseVoiceLoggingChanged)
+    Q_PROPERTY(bool showVideoDiagnostics READ showVideoDiagnostics WRITE setShowVideoDiagnostics NOTIFY showVideoDiagnosticsChanged)
     // Layout density — one of "standard" / "compact" / "focus". Matches the
     // three branches in Theme.layout (see qml/theme/Theme.qml). Compact
     // narrows sidebars & shrinks participant tiles; focus hides chat +
@@ -93,6 +95,16 @@ public:
 
     bool accessibilityMode() const;
     void setAccessibilityMode(bool v);
+
+    // Advanced: runtime toggle for the bsfchat.* debug/info logging
+    // categories (applies immediately, persists across launches).
+    bool verboseVoiceLogging() const;
+    void setVerboseVoiceLogging(bool v);
+    // Advanced: per-stream receive stats overlay on video tiles.
+    bool showVideoDiagnostics() const;
+    void setShowVideoDiagnostics(bool v);
+    // Folder the rotating file log writes into (FileLogger).
+    Q_INVOKABLE QString logDirectory() const;
 
     QString layoutVariant() const;
     void setLayoutVariant(const QString& variant);
@@ -254,6 +266,8 @@ signals:
     void accentChanged();
     void accentHueChanged();
     void accessibilityModeChanged();
+    void verboseVoiceLoggingChanged();
+    void showVideoDiagnosticsChanged();
     void layoutVariantChanged();
     void audioInputDeviceChanged();
     void audioOutputDeviceChanged();

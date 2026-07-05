@@ -161,6 +161,12 @@ public:
     Q_INVOKABLE float peerLevel(const QString& userId) const {
         return m_peerLevels.value(userId, 0.0f);
     }
+    // Cumulative receive stats for a peer's video stream (0 = screen,
+    // 1 = camera); the diagnostics overlay polls this once a second
+    // and diffs snapshots into fps / bitrate. Empty map when the
+    // stream has no receive pipeline (nothing received yet).
+    Q_INVOKABLE QVariantMap videoReceiveStats(const QString& userId,
+                                              int streamId) const;
     // Returns the voice-member list with each member augmented by a
     // "peerState" key ("connected"/"connecting"/"failed"/etc.) so the
     // VoicePanel can show per-peer indicators.

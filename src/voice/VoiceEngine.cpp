@@ -308,6 +308,22 @@ void VoiceEngine::cancelConnectWatchdog(const QString& userId) {
     }
 }
 
+QVariantMap VoiceEngine::videoReceiveStats(const QString& userId,
+                                           int streamId) const {
+    auto* pipeline = m_recvPipelines.value({userId, streamId});
+    if (!pipeline) return {};
+    QVariantMap out;
+    out["rxFrames"] = quint64(pipeline->rxFrames());
+    out["rxBytes"] = quint64(pipeline->rxBytes());
+    out["decodedFrames"] = quint64(pipeline->decodedFrames());
+    out["droppedAus"] = quint64(pipeline->droppedAus());
+    out["width"] = pipeline->frameWidth();
+    out["height"] = pipeline->frameHeight();
+    out["codec"] = pipeline->codec() == VideoCodecKind::Av1Lossless
+        ? QStringLiteral("av1-lossless") : QStringLiteral("h264");
+    return out;
+}
+
 QMap<QString, QString> VoiceEngine::peerStates() const {
     QMap<QString, QString> out;
     static const char* names[] = {"new","connecting","connected","disconnected","failed"};

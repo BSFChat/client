@@ -50,6 +50,13 @@ public:
     quint64 rxFrames() const { return m_rxFrames.load(); }
     quint64 rxBytes() const { return m_rxBytes.load(); }
 
+    // Diagnostics counters for the video stats overlay. Cumulative;
+    // the UI polls and diffs successive snapshots for rates.
+    quint64 decodedFrames() const { return m_decodedFrames.load(); }
+    quint64 droppedAus() const { return m_droppedAus.load(); }
+    int frameWidth() const { return m_lastWidth.load(); }
+    int frameHeight() const { return m_lastHeight.load(); }
+
 signals:
     // Both emitted from the worker thread (queued to receivers).
     void frameDecoded(const QString& userId, int streamId,
@@ -77,6 +84,13 @@ private:
     std::atomic<bool> m_drainQueued{false};
     std::atomic<quint64> m_rxFrames{0};
     std::atomic<quint64> m_rxBytes{0};
+    std::atomic<quint64> m_decodedFrames{0};
+    // Everything received but never displayed: loss-suspect AUs,
+    // backlog overflow victims, and deltas skipped while waiting for
+    // a keyframe.
+    std::atomic<quint64> m_droppedAus{0};
+    std::atomic<int> m_lastWidth{0};
+    std::atomic<int> m_lastHeight{0};
     std::atomic<qint64> m_lastKfRequestMs{0};
 
     // Worker-thread-only state.

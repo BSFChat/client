@@ -148,7 +148,7 @@ Popup {
 
                 Repeater {
                     model: ["Appearance", "Audio", "Screen Share",
-                            "Notifications", "Updates"]
+                            "Notifications", "Updates", "Advanced"]
                     delegate: Rectangle {
                         Layout.fillWidth: true
                         height: 36
@@ -923,6 +923,77 @@ Popup {
                             + "redirected to the release page to use their "
                             + "distro's package manager rather than an "
                             + "in-place upgrade."
+                    }
+
+                    Item { Layout.fillHeight: true }
+                }
+            }
+
+            // ── Advanced ────────────────────────────────────────
+            Item {
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: Theme.sp.s7 * 2
+                    spacing: Theme.sp.s7
+
+                    SectionHeader { text: "Advanced" }
+
+                    SettingRow {
+                        title: "Video diagnostics overlay"
+                        description: "Shows live receive statistics on "
+                                   + "incoming video streams: resolution, "
+                                   + "decoded fps, bitrate, compression "
+                                   + "ratio, and dropped frames. Handy "
+                                   + "when reporting quality issues."
+                        ThemedSwitch {
+                            checked: appSettings.showVideoDiagnostics
+                            onToggled: appSettings.showVideoDiagnostics = checked
+                        }
+                    }
+
+                    SettingRow {
+                        title: "Verbose voice logging"
+                        description: "Writes detailed voice/video events "
+                                   + "(peer setup, tracks, encoder, rate "
+                                   + "control) to the log file. Applies "
+                                   + "immediately; leave off unless "
+                                   + "you're chasing a problem — the log "
+                                   + "grows quickly."
+                        ThemedSwitch {
+                            checked: appSettings.verboseVoiceLogging
+                            onToggled: appSettings.verboseVoiceLogging = checked
+                        }
+                    }
+
+                    SettingRow {
+                        title: "Log files"
+                        description: "Rotating client log (5 MB × 4 "
+                                   + "generations). Attach these when "
+                                   + "reporting bugs."
+                        Button {
+                            text: "Open log folder"
+                            onClicked: Qt.openUrlExternally(
+                                appSettings.logDirectory().startsWith("/")
+                                    ? "file://" + appSettings.logDirectory()
+                                    : "file:///" + appSettings.logDirectory())
+                            contentItem: Text {
+                                text: parent.text
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                font.weight: Theme.fontWeight.medium
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                color: parent.hovered ? Theme.bg3 : Theme.bg2
+                                border.color: Theme.line
+                                border.width: 1
+                                radius: Theme.r2
+                                implicitWidth: 140
+                                implicitHeight: 36
+                            }
+                        }
                     }
 
                     Item { Layout.fillHeight: true }

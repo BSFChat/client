@@ -1,4 +1,7 @@
 #include "core/Settings.h"
+#include "util/FileLogger.h"
+
+#include <QLoggingCategory>
 
 #include <algorithm>
 #include <QCryptographicHash>
@@ -6,10 +9,53 @@
 #include <QAudioDevice>
 #include <QVariantMap>
 
+namespace {
+// Enables the bsfchat.* info/debug categories (they default to
+// warnings-only so ordinary users' logs stay lean). Code-set rules
+// stack on top of any qtlogging.ini, so this works everywhere.
+void applyVerboseVoiceLogging(bool on)
+{
+    QLoggingCategory::setFilterRules(
+        on ? QStringLiteral("bsfchat.*=true") : QString());
+}
+} // namespace
+
 Settings::Settings(QObject* parent)
     : QObject(parent)
     , m_settings("BSFChat", "BSFChat")
 {
+    if (verboseVoiceLogging())
+        applyVerboseVoiceLogging(true);
+}
+
+bool Settings::verboseVoiceLogging() const
+{
+    return m_settings.value("advanced/verboseVoiceLogging", false).toBool();
+}
+
+void Settings::setVerboseVoiceLogging(bool v)
+{
+    if (verboseVoiceLogging() == v) return;
+    m_settings.setValue("advanced/verboseVoiceLogging", v);
+    applyVerboseVoiceLogging(v);
+    emit verboseVoiceLoggingChanged();
+}
+
+bool Settings::showVideoDiagnostics() const
+{
+    return m_settings.value("advanced/showVideoDiagnostics", false).toBool();
+}
+
+void Settings::setShowVideoDiagnostics(bool v)
+{
+    if (showVideoDiagnostics() == v) return;
+    m_settings.setValue("advanced/showVideoDiagnostics", v);
+    emit showVideoDiagnosticsChanged();
+}
+
+QString Settings::logDirectory() const
+{
+    return bsfchat::logDirectory();
 }
 
 QList<Settings::ServerEntry> Settings::savedServers() const
