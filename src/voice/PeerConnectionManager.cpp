@@ -325,14 +325,6 @@ void PeerConnectionManager::createOffer() {
     qCInfo(logVoicePc, " [%s] Creating offer (we are offerer)",
           qPrintable(m_peerId));
     m_isOfferer = true;
-    // Create unreliable DataChannel for audio
-    rtc::DataChannelInit dcInit;
-    dcInit.reliability.unordered = true;
-    dcInit.reliability.maxRetransmits = 0;
-
-    auto dc = m_pc->createDataChannel("audio", dcInit);
-    setupDataChannel(dc);
-
     // Video m-lines MUST be in the initial offer. libdatachannel
     // instantiates the transport from the first negotiation: a data-
     // channel-only offer gets plain DTLS with NO SRTP, and m-lines
@@ -342,6 +334,11 @@ void PeerConnectionManager::createOffer() {
     // test_media_loopback: initial-offer case passes, renegotiated
     // case fails.) Announcing the m-lines costs nothing when unused —
     // whether video actually flows is gated on peer caps at send time.
+    //
+    // Tracks are added BEFORE the data channel: createDataChannel can
+    // auto-trigger negotiation immediately, and if that offer races
+    // ahead of addTrack it carries no media section — same trap via a
+    // different door (caught by the loopback test flaking on CI).
     for (int i = 0; i < kVideoStreamCount; ++i) {
         rtc::Description::Video media(kVideoSpecs[i].mid,
                                       rtc::Description::Direction::SendRecv);
@@ -349,6 +346,14 @@ void PeerConnectionManager::createOffer() {
         auto track = m_pc->addTrack(std::move(media));
         attachVideoTrack(VideoStreamId(i), track);
     }
+
+    // Create unreliable DataChannel for audio
+    rtc::DataChannelInit dcInit;
+    dcInit.reliability.unordered = true;
+    dcInit.reliability.maxRetransmits = 0;
+
+    auto dc = m_pc->createDataChannel("audio", dcInit);
+    setupDataChannel(dc);
 
     m_pc->setLocalDescription(rtc::Description::Type::Offer);
 }

@@ -112,26 +112,32 @@ int runCase(bool initialOffer) {
 
     std::shared_ptr<rtc::Track> sendTrack;
     std::shared_ptr<rtc::RtpPacketizationConfig> sendConfig;
+    std::shared_ptr<rtc::DataChannel> dc;
 
     Latch dcOpen;
-    auto dc = pcA->createDataChannel("kick");
-    dc->onOpen([&]() { dcOpen.set({}); });
-
     Latch sendOpen;
     if (initialOffer) {
+        // Track BEFORE the data channel: createDataChannel can auto-
+        // trigger negotiation immediately, and an offer that races
+        // ahead of addTrack carries no media section — the answerer
+        // then builds a DTLS transport without SRTP. Mirrors the
+        // production ordering in PeerConnectionManager::createOffer.
         std::tie(sendTrack, sendConfig) = addSendTrack();
         sendTrack->onOpen([&]() { sendOpen.set({}); });
+        dc = pcA->createDataChannel("kick");
+        dc->onOpen([&]() { dcOpen.set({}); });
         pcA->setLocalDescription();
     } else {
-        // Phase 1: data-channel-only connection (production's initial
-        // audio negotiation).
+        // Phase 1: data-channel-only connection (the legacy shape).
+        dc = pcA->createDataChannel("kick");
+        dc->onOpen([&]() { dcOpen.set({}); });
         pcA->setLocalDescription();
         if (!dcOpen.wait(std::chrono::seconds(10))) {
             std::fprintf(stderr, "FAIL: data channel never opened\n");
             return 2;
         }
         // Phase 2: live renegotiation adds the video m-line — mirrors
-        // ensureVideoTracks + triggerRenegotiation.
+        // the pre-fix ensureVideoTracks + triggerRenegotiation flow.
         std::tie(sendTrack, sendConfig) = addSendTrack();
         sendTrack->onOpen([&]() { sendOpen.set({}); });
         pcA->setLocalDescription();
