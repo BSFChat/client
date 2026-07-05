@@ -467,6 +467,10 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
     track->onFrame([this, idx](rtc::binary data, rtc::FrameInfo) {
         QByteArray au(reinterpret_cast<const char*>(data.data()),
                       int(data.size()));
+        if (!m_video[idx].rxLogged.exchange(true)) {
+            qCInfo(logVoicePc, " [%s] first video AU received on %s (%d bytes)",
+                  qPrintable(m_peerId), kVideoSpecs[idx].mid, int(au.size()));
+        }
         // Same-thread as the gap detector (libdatachannel delivers
         // frames during the incoming chain traversal), so this
         // read-and-clear pairs exactly with the AU it corrupted.
@@ -511,7 +515,19 @@ bool PeerConnectionManager::hasVideoTrackOpen(VideoStreamId stream) const {
 void PeerConnectionManager::sendVideoFrame(VideoStreamId stream,
                                            const EncodedFrame& frame) {
     auto& ctx = m_video[int(stream)];
-    if (!ctx.open || !ctx.track || !ctx.track->isOpen()) return;
+    if (!ctx.open || !ctx.track || !ctx.track->isOpen()) {
+        // Encoder is producing but this track can't carry it — say so
+        // (throttled), a silent return here once hid a dead share.
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - ctx.txSkipLogMs > 5000) {
+            ctx.txSkipLogMs = now;
+            qCInfo(logVoicePc, " [%s] video tx skipped for %s: track %s",
+                  qPrintable(m_peerId), kVideoSpecs[int(stream)].mid,
+                  !ctx.track ? "missing" : (ctx.open ? "closed at rtc layer"
+                                                     : "not open yet"));
+        }
+        return;
+    }
     if (ctx.startTimeUs < 0) ctx.startTimeUs = frame.captureTimeUs;
     const double elapsed = double(frame.captureTimeUs - ctx.startTimeUs) / 1e6;
     ctx.rtpConfig->timestamp = ctx.rtpConfig->startTimestamp
@@ -522,6 +538,12 @@ void PeerConnectionManager::sendVideoFrame(VideoStreamId stream,
             size_t(frame.data.size()));
         m_txFrames[int(stream)] += 1;
         m_txBytes[int(stream)] += quint64(frame.data.size());
+        if (!ctx.txLogged) {
+            ctx.txLogged = true;
+            qCInfo(logVoicePc, " [%s] first video AU sent on %s (%d bytes%s)",
+                  qPrintable(m_peerId), kVideoSpecs[int(stream)].mid,
+                  int(frame.data.size()), frame.keyframe ? ", IDR" : "");
+        }
     } catch (const std::exception& e) {
         // Transient (track closing mid-send) — the open flag will
         // catch up via onClosed; don't spam.

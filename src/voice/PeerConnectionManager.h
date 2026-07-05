@@ -211,6 +211,12 @@ private:
         // consumed by onFrame on the same thread; atomic as cheap
         // insurance against future callers.
         std::atomic<bool> lossPending{false};
+        // First-traffic markers so logs positively show media moving
+        // (or not) in each direction — "tracks open, then silence"
+        // debugging without these cost a whole evening.
+        bool txLogged = false;
+        std::atomic<bool> rxLogged{false};
+        qint64 txSkipLogMs = 0;
     };
     VideoTrackCtx m_video[kVideoStreamCount];
     QTimer* m_srTimer = nullptr;   // 1 s sender-report tick, lazily created
