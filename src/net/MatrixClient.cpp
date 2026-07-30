@@ -818,6 +818,72 @@ void MatrixClient::setDisplayName(const QString& userId, const QString& displayN
     });
 }
 
+void MatrixClient::getNickname(const QString& userId)
+{
+    QString path = QString::fromUtf8(bsfchat::api_path::kProfile)
+                   + QUrl::toPercentEncoding(userId) + "/nickname";
+
+    auto* reply = makeRequest("GET", path);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, userId]() {
+        reply->deleteLater();
+        auto data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) return;
+        try {
+            auto j = json::parse(data.toStdString());
+            // The key is absent when no nickname is set, which maps to an empty
+            // QString — the same value the editor uses to mean "cleared".
+            //
+            // is_object() is checked rather than going straight to value(): that
+            // throws on a non-object body, and a server returning bare `null` for
+            // "no nickname" would then be swallowed by the catch below, leaving
+            // the signal unemitted and an editor unable to tell "loaded, none"
+            // from "never answered".
+            QString nick;
+            if (j.is_object()) nick = QString::fromStdString(j.value("nickname", ""));
+            emit nicknameResult(userId, nick);
+        } catch (...) {}
+    });
+}
+
+void MatrixClient::setNickname(const QString& userId, const QString& nickname)
+{
+    QString path = QString::fromUtf8(bsfchat::api_path::kProfile)
+                   + QUrl::toPercentEncoding(userId) + "/nickname";
+
+    json body;
+    // Explicit null rather than "" for a clear. The server accepts both, but null
+    // is the documented spelling and keeps the intent readable on the wire; an
+    // empty string is never a storable nickname.
+    if (nickname.isEmpty()) body["nickname"] = nullptr;
+    else body["nickname"] = nickname.toStdString();
+    QByteArray reqBody = QByteArray::fromStdString(body.dump());
+
+    auto* reply = makeRequest("PUT", path, reqBody);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, userId, nickname]() {
+        reply->deleteLater();
+        if (reply->error() == QNetworkReply::NoError) {
+            emit nicknameUpdated(userId, nickname);
+            return;
+        }
+
+        // Decode status + Matrix error body, same as setRoomState: this endpoint
+        // is permission-gated, so a silent failure would render as a rename that
+        // appeared to work until the next sync overwrote it.
+        int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QByteArray respBody = reply->readAll();
+        QString msg;
+        auto doc = QJsonDocument::fromJson(respBody);
+        if (doc.isObject()) {
+            auto o = doc.object();
+            msg = o.value("error").toString();
+            if (msg.isEmpty()) msg = o.value("errcode").toString();
+        }
+        if (msg.isEmpty()) msg = reply->errorString();
+        qWarning().noquote() << "[setNickname] FAIL" << status << userId << "-" << msg;
+        emit nicknameError(userId, status, msg);
+    });
+}
+
 void MatrixClient::putPresence(const QString& userId,
                                 const QString& presence,
                                 const QString& statusMessage)

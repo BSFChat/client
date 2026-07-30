@@ -137,6 +137,16 @@ public:
     void setDisplayName(const QString& userId, const QString& displayName);
     void setAvatarUrl(const QString& userId, const QString& avatarUrl);
 
+    // Per-server nickname (BSFChat extension — Matrix has no nickname concept).
+    // Unlike the calls above, `userId` is not necessarily us: the server gates
+    // self-renames on CHANGE_NICKNAME and renames of others on MANAGE_NICKNAMES,
+    // so this can legitimately fail with a 403 and the failure must be surfaced.
+    void getNickname(const QString& userId);
+    // An EMPTY `nickname` clears it, sent as JSON null. The server treats absent,
+    // null and all-whitespace alike as "clear", so an emptied text field in the UI
+    // is how a nickname is removed — there is no separate delete call.
+    void setNickname(const QString& userId, const QString& nickname);
+
     // PUT /presence/{userId}/status — pushes presence + an optional
     // free-form status message. Matrix delivers this to other clients
     // in their next /sync's `presence` block.
@@ -289,6 +299,20 @@ signals:
     void whoamiResult(const QString& userId);
 
     void profileResult(const QString& userId, const QString& displayName, const QString& avatarUrl);
+
+    // Per-server nickname read-back. `nickname` is empty when the user has none —
+    // the endpoint omits the key entirely rather than returning "", so empty here
+    // unambiguously means "no nickname set".
+    void nicknameResult(const QString& userId, const QString& nickname);
+    // A nickname write succeeded. `nickname` is empty when it was cleared. The
+    // resulting member events arrive via /sync like any other profile change, so
+    // listeners use this only to refresh an open editor, not to update caches.
+    void nicknameUpdated(const QString& userId, const QString& nickname);
+    // A nickname write was rejected. Carries the decoded status + message so the
+    // UI can distinguish "your role may not do this" (403) from a rejected value
+    // (400) instead of failing silently, which is how the permission-gated write
+    // would otherwise look identical to success.
+    void nicknameError(const QString& userId, int status, const QString& error);
 
     // Fired whenever PUT /rooms/{id}/state/{type}/{key} fails. The UI uses
     // this to (a) surface a toast and (b) roll back any optimistic local

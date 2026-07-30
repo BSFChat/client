@@ -1,4 +1,5 @@
 #include "voice/ScreenShareController.h"
+#include "voice/IVoiceTransport.h"
 #include "voice/VoiceEngine.h"
 #include "voice/video/VideoRateController.h"
 #include "voice/video/VideoSendPipeline.h"
@@ -579,7 +580,10 @@ void ScreenShareController::pushFrameToPeers()
     // Resolve the connection that's actually in voice — NOT the
     // active (sidebar-focused) server, which may be a different one
     // the user is just browsing while sharing.
-    VoiceEngine* voice = nullptr;
+    // Interface, not VoiceEngine: capture + encode are transport-agnostic,
+    // so this controller only needs the send-side sink. It never touches
+    // mesh signalling.
+    IVoiceTransport* voice = nullptr;
     if (m_servers) {
         if (auto* vs = m_servers->voiceServer()) voice = vs->voiceEngine();
     }
@@ -603,19 +607,19 @@ void ScreenShareController::pushFrameToPeers()
             disconnect(m_wiredEngine, nullptr, m_pipeline, nullptr);
             disconnect(m_wiredEngine, nullptr, m_rate, nullptr);
         }
-        connect(voice, &VoiceEngine::videoKeyframeRequested, m_pipeline,
+        connect(voice, &IVoiceTransport::videoKeyframeRequested, m_pipeline,
             [this](int streamId) {
                 if (streamId == int(VideoStreamId::Screen))
                     m_pipeline->forceKeyframe();
             });
         // Feed the rate controller: per-peer delivery ratios and
         // keyframe-request pressure for our screen stream.
-        connect(voice, &VoiceEngine::videoDeliveryRatio, m_rate,
+        connect(voice, &IVoiceTransport::videoDeliveryRatio, m_rate,
             [this](const QString& userId, int streamId, double ratio) {
                 if (streamId == int(VideoStreamId::Screen))
                     m_rate->reportDeliveryRatio(userId, ratio);
             });
-        connect(voice, &VoiceEngine::videoKeyframeRequested, m_rate,
+        connect(voice, &IVoiceTransport::videoKeyframeRequested, m_rate,
             [this](int streamId) {
                 if (streamId == int(VideoStreamId::Screen))
                     m_rate->reportKeyframeRequest();
@@ -623,7 +627,7 @@ void ScreenShareController::pushFrameToPeers()
         // Transport can't deliver lossless frames (e.g. oversized for
         // the peer's channel cap) — force H.264 for the rest of the
         // share and tell the user, instead of streaming nothing.
-        connect(voice, &VoiceEngine::losslessSendUnavailable, this,
+        connect(voice, &IVoiceTransport::losslessSendUnavailable, this,
             [this]() {
                 if (g_losslessBroken) return;
                 g_losslessBroken = true;

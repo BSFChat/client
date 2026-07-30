@@ -12,6 +12,7 @@
 #include "util/MediaUrl.h"
 #include "util/MentionBadge.h"
 #include "util/MentionRenderer.h"
+#include "util/PermissionMath.h"
 #include "util/SearchParser.h"
 
 #include <bsfchat/MatrixTypes.h>
@@ -35,6 +36,30 @@ private:
             {"msgtype", "m.text"},
             {"body", body}
         };
+        return event;
+    }
+
+    // A member event as the SERVER writes one once a nickname is set: `displayname`
+    // already holds the EFFECTIVE name (the nickname), and `bsfchat.nickname`
+    // carries the nickname separately so the UI can tell why the name is what it
+    // is. Passing an empty nickname omits the key entirely, which is how "no
+    // nickname" is represented on the wire.
+    bsfchat::RoomEvent makeMemberEventWithNickname(const std::string& userId,
+                                                   const std::string& effectiveName,
+                                                   const std::string& nickname,
+                                                   const std::string& membership = "join")
+    {
+        bsfchat::RoomEvent event;
+        event.event_id = "$member_" + userId;
+        event.sender = userId;
+        event.type = std::string(bsfchat::event_type::kRoomMember);
+        event.state_key = userId;
+        event.origin_server_ts = 1000;
+        event.content.data = {
+            {"membership", membership},
+            {"displayname", effectiveName}
+        };
+        if (!nickname.empty()) event.content.data["bsfchat.nickname"] = nickname;
         return event;
     }
 
@@ -338,6 +363,72 @@ private slots:
 
         model.processEvent(makeMemberEvent("@alice:server", "Alice", "leave"));
         QCOMPARE(model.rowCount(), 0);
+    }
+
+    // ── per-server nicknames ────────────────────────────────────────────
+    //
+    // The rendered name is DisplayNameRole and nothing else: the server resolves
+    // nickname-over-global-name and writes the winner into the member event's
+    // `displayname`, so no client code has to choose. NicknameRole exists only so
+    // admin UI can distinguish "this IS a nickname" from "this is their real name",
+    // which is what makes a "Remove nickname" affordance possible.
+    void testMemberListNicknamePreferredOverGlobalName()
+    {
+        MemberListModel model;
+        QMap<QString, QString> cache;
+        // The global display name is in the cache, as a profile fetch would leave it.
+        cache["@alice:server"] = "Alice Anderson";
+        model.setDisplayNameCache(&cache);
+
+        model.processEvent(makeMemberEventWithNickname("@alice:server", "Ali", "Ali"));
+
+        auto idx = model.index(0);
+        // The nickname wins over the cached global name — and it wins because the
+        // event carries it, not because the client re-ranked anything.
+        QCOMPARE(model.data(idx, MemberListModel::DisplayNameRole).toString(), "Ali");
+        QCOMPARE(model.data(idx, MemberListModel::NicknameRole).toString(), "Ali");
+    }
+
+    void testMemberListNicknameAbsentWhenNoneSet()
+    {
+        MemberListModel model;
+        model.processEvent(makeMemberEvent("@bob:server", "Bob", "join"));
+
+        auto idx = model.index(0);
+        QCOMPARE(model.data(idx, MemberListModel::DisplayNameRole).toString(), "Bob");
+        // Empty, not "Bob": a UI must be able to tell that Bob has NO nickname, or
+        // it would offer to remove one that does not exist.
+        QCOMPARE(model.data(idx, MemberListModel::NicknameRole).toString(), QString());
+    }
+
+    void testMemberListNicknameIsClearedByAnEventWithoutIt()
+    {
+        MemberListModel model;
+        model.processEvent(makeMemberEventWithNickname("@alice:server", "Ali", "Ali"));
+        QCOMPARE(model.data(model.index(0), MemberListModel::NicknameRole).toString(), "Ali");
+
+        // Clearing a nickname re-emits the member event with the key ABSENT and the
+        // global name restored. A stale nickname surviving that would leave the UI
+        // offering "Remove nickname" forever.
+        model.processEvent(makeMemberEvent("@alice:server", "Alice Anderson", "join"));
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.data(model.index(0), MemberListModel::DisplayNameRole).toString(),
+                 "Alice Anderson");
+        QCOMPARE(model.data(model.index(0), MemberListModel::NicknameRole).toString(), QString());
+    }
+
+    void testMemberListNicknameLookupByUserId()
+    {
+        MemberListModel model;
+        model.processEvent(makeMemberEventWithNickname("@alice:server", "Ali", "Ali"));
+        model.processEvent(makeMemberEvent("@bob:server", "Bob", "join"));
+
+        QCOMPARE(model.nicknameForUser("@alice:server"), "Ali");
+        QCOMPARE(model.nicknameForUser("@bob:server"), QString());
+        QCOMPARE(model.nicknameForUser("@nobody:server"), QString());
+        // displayNameForUser is Q_INVOKABLE so QML can actually call it; it was a
+        // plain member function while MessageBubble.qml already called it.
+        QCOMPARE(model.displayNameForUser("@alice:server"), "Ali");
     }
 
     // MarkdownParser tests
@@ -1502,6 +1593,159 @@ private slots:
         QCOMPARE(model.data(idx, RoomListModel::VoiceMemberCountRole).toInt(), 0);
         QCOMPARE(model.data(idx, RoomListModel::SortOrderRole).toInt(), 0);
         QVERIFY(model.data(idx, RoomListModel::TopicRole).toString().isEmpty());
+    }
+
+    // ── Permission mirror (util/PermissionMath) ─────────────────────────────
+    // These guard the client's copy of the server's permission algorithm. When
+    // the two disagree the UI either offers actions the server refuses or, worse
+    // for the owner, hides actions a role is genuinely entitled to.
+
+    void testPermissionsRoleGrantConfersServerScopeCapability()
+    {
+        using namespace bsfchat::permmath;
+        QVector<Role> roles{
+            {QStringLiteral("everyone"), 0, kEveryoneDefault},
+            {QStringLiteral("builder"),  5, kEveryoneDefault | kManageChannels},
+        };
+        const QStringList mine{QStringLiteral("everyone"), QStringLiteral("builder")};
+
+        // Server scope (no overrides): the create-channel question.
+        const Flags server = effectivePermissions(roles, mine, QStringLiteral("@bob:t"), nullptr);
+        QVERIFY((server & kManageChannels) != 0);
+        QVERIFY((server & kAdministrator) == 0);
+        QVERIFY((server & kBanMembers) == 0);
+    }
+
+    void testPermissionsWithoutTheRoleHaveNoChannelManagement()
+    {
+        using namespace bsfchat::permmath;
+        QVector<Role> roles{{QStringLiteral("everyone"), 0, kEveryoneDefault}};
+        const Flags server = effectivePermissions(
+            roles, {QStringLiteral("everyone")}, QStringLiteral("@mallory:t"), nullptr);
+        QVERIFY((server & kSendMessages) != 0);
+        QVERIFY((server & kManageChannels) == 0);
+    }
+
+    void testPermissionsChannelOverrideDoesNotLeakToServerScope()
+    {
+        using namespace bsfchat::permmath;
+        QVector<Role> roles{{QStringLiteral("everyone"), 0, kEveryoneDefault}};
+        const QStringList mine{QStringLiteral("everyone")};
+        QVector<Override> overrides{
+            {QStringLiteral("user:@mallory:t"), kManageChannels, 0}
+        };
+
+        // In that channel the override applies...
+        const Flags inChannel = effectivePermissions(
+            roles, mine, QStringLiteral("@mallory:t"), &overrides);
+        QVERIFY((inChannel & kManageChannels) != 0);
+
+        // ...but the server-scope answer must ignore it, or the client lights up
+        // a "create channel" affordance that handle_create_room then 403s.
+        const Flags serverScope = effectivePermissions(
+            roles, mine, QStringLiteral("@mallory:t"), nullptr);
+        QVERIFY((serverScope & kManageChannels) == 0);
+    }
+
+    // The client must agree with the server about the SCOPE of the moderation and
+    // nickname flags, or it renders affordances the server then refuses. Kick, ban
+    // and both nickname flags are server-wide only: a per-channel override that
+    // allows them confers nothing.
+    void testPermissionsModerationAndNicknameFlagsAreServerScopeOnly()
+    {
+        using namespace bsfchat::permmath;
+        QVector<Role> roles{{QStringLiteral("everyone"), 0, kEveryoneDefault}};
+        const QStringList mine{QStringLiteral("everyone")};
+        const Flags serverOnly =
+            kKickMembers | kBanMembers | kManageNicknames;
+        QVector<Override> overrides{
+            {QStringLiteral("user:@mallory:t"), serverOnly, 0}
+        };
+
+        const Flags inChannel = effectivePermissions(
+            roles, mine, QStringLiteral("@mallory:t"), &overrides);
+        QVERIFY((inChannel & serverOnly) == serverOnly);
+
+        // The scope the UI must actually ask about for these four capabilities.
+        const Flags serverScope = effectivePermissions(
+            roles, mine, QStringLiteral("@mallory:t"), nullptr);
+        QVERIFY((serverScope & kKickMembers) == 0);
+        QVERIFY((serverScope & kBanMembers) == 0);
+        QVERIFY((serverScope & kManageNicknames) == 0);
+        // CHANGE_NICKNAME is in the @everyone default, so it IS present at server
+        // scope — and that is the point: it is granted by the role, never by a
+        // channel override.
+        QVERIFY((serverScope & kChangeNickname) != 0);
+    }
+
+    void testPermissionsAdministratorShortCircuitsAndIgnoresDenies()
+    {
+        using namespace bsfchat::permmath;
+        QVector<Role> roles{
+            {QStringLiteral("everyone"), 0, kEveryoneDefault},
+            {QStringLiteral("admin"), 100, kAllFlags},
+        };
+        QVector<Override> overrides{
+            {QStringLiteral("role:everyone"), 0, kViewChannel | kManageChannels}
+        };
+        const Flags p = effectivePermissions(
+            roles, {QStringLiteral("everyone"), QStringLiteral("admin")},
+            QStringLiteral("@owner:t"), &overrides);
+        QCOMPARE(p, kAllFlags);
+        QVERIFY((p & kManageChannels) != 0);
+    }
+
+    void testPermissionsOverridePrecedenceIsPositionThenUser()
+    {
+        using namespace bsfchat::permmath;
+        QVector<Role> roles{
+            {QStringLiteral("everyone"), 0, kEveryoneDefault},
+            {QStringLiteral("low"),      1, kEveryoneDefault},
+            {QStringLiteral("high"),     9, kEveryoneDefault},
+        };
+        const QStringList mine{QStringLiteral("everyone"), QStringLiteral("high"),
+                               QStringLiteral("low")};
+
+        // Deliberately listed out of position order to prove the sort happens:
+        // the lower-positioned role denies, the higher one allows, so allow wins.
+        QVector<Override> overrides{
+            {QStringLiteral("role:high"), kManageChannels, 0},
+            {QStringLiteral("role:low"),  0, kManageChannels},
+        };
+        Flags p = effectivePermissions(roles, mine, QStringLiteral("@bob:t"), &overrides);
+        QVERIFY((p & kManageChannels) != 0);
+
+        // A user-specific override is applied last and beats every role.
+        overrides.append({QStringLiteral("user:@bob:t"), 0, kManageChannels});
+        p = effectivePermissions(roles, mine, QStringLiteral("@bob:t"), &overrides);
+        QVERIFY((p & kManageChannels) == 0);
+    }
+
+    void testPermissionsUnsyncedClientFallsBackToEveryoneDefaults()
+    {
+        using namespace bsfchat::permmath;
+        // Roles arrive over /sync, so there is a window where the client knows
+        // none. The server answers this case with the @everyone defaults; if the
+        // client answered 0 instead it would grey out the composer and claim the
+        // user has no permission to speak.
+        const Flags p = effectivePermissions({}, {}, QStringLiteral("@bob:t"), nullptr);
+        QCOMPARE(p, kEveryoneDefault);
+        QVERIFY((p & kSendMessages) != 0);
+        QVERIFY((p & kManageChannels) == 0);
+    }
+
+    void testPermissionsEveryoneAppliesEvenWhenNotListed()
+    {
+        using namespace bsfchat::permmath;
+        QVector<Role> roles{
+            {QStringLiteral("everyone"), 0, kEveryoneDefault},
+            {QStringLiteral("builder"),  5, kManageChannels},
+        };
+        // Assignment lists only "builder" — @everyone is implicit server-side.
+        const Flags p = effectivePermissions(
+            roles, {QStringLiteral("builder")}, QStringLiteral("@bob:t"), nullptr);
+        QVERIFY((p & kManageChannels) != 0);
+        QVERIFY((p & kSendMessages) != 0);
     }
 };
 

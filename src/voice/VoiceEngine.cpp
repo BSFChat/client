@@ -15,7 +15,7 @@
 #include <QDebug>
 
 VoiceEngine::VoiceEngine(MatrixClient* client, QObject* parent)
-    : QObject(parent)
+    : IVoiceTransport(parent)
     , m_client(client)
 {
     m_candidateBatchTimer.setInterval(500);

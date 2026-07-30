@@ -13,7 +13,7 @@ class MacCameraCapturer;
 #include <QMediaCaptureSession>
 #endif
 
-class VoiceEngine;
+class IVoiceTransport;
 class ServerManager;
 class Settings;
 class VideoSendPipeline;

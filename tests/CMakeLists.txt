@@ -8,6 +8,7 @@ qt_add_executable(test_models
     ${CMAKE_SOURCE_DIR}/src/model/ServerListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/util/MarkdownParser.cpp
     ${CMAKE_SOURCE_DIR}/src/util/MentionRenderer.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/PermissionMath.cpp
     ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
 )
 
@@ -111,6 +112,50 @@ if(BSFCHAT_ENABLE_VOICE)
     target_link_libraries(test_audio_handoff PRIVATE Qt6::Core Qt6::Test opus)
     add_test(NAME test_audio_handoff COMMAND test_audio_handoff)
     set_tests_properties(test_audio_handoff PROPERTIES TIMEOUT 120)
+endif()
+
+# Mesh-vs-SFU transport selection. Pure logic — no transport instances,
+# no libdatachannel, no LiveKit SDK, no audio device, no network — so it
+# runs everywhere including builds configured without BSFCHAT_ENABLE_VOICE.
+qt_add_executable(test_voice_transport
+    test_voice_transport.cpp
+    ${CMAKE_SOURCE_DIR}/src/voice/VoiceTransportSelector.cpp
+)
+target_include_directories(test_voice_transport PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_voice_transport PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_voice_transport COMMAND test_voice_transport)
+
+# LiveKit vendoring gate. Not a transport test — there is no transport
+# yet. It proves the vendored SDK compiles against our flags, links, and
+# (the part that matters) that BOTH shared libraries are loadable from
+# where the bundling step put them. liblivekit resolves liblivekit_ffi
+# lazily at load time, so a missing ffi library otherwise links, packages
+# and ships silently, exactly like aom.dll did in v0.0.42. Because this
+# executable calls an exported symbol, it cannot even start unless both
+# libraries are present — so that failure becomes a red test.
+if(BSFCHAT_HAVE_LIVEKIT)
+    qt_add_executable(test_livekit_sdk
+        test_livekit_sdk.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/LiveKitSdkProbe.cpp
+    )
+    target_include_directories(test_livekit_sdk PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    # Runtime library basenames, so the test asserts co-location against
+    # the same names cmake/LiveKit.cmake copies rather than a second
+    # hardcoded per-platform list that could drift.
+    cmake_path(GET BSFCHAT_LIVEKIT_RUNTIME FILENAME _lk_rt_name)
+    cmake_path(GET BSFCHAT_LIVEKIT_FFI_RUNTIME FILENAME _lk_ffi_rt_name)
+    target_compile_definitions(test_livekit_sdk PRIVATE
+        BSFCHAT_HAVE_LIVEKIT
+        BSFCHAT_LIVEKIT_PINNED_VERSION="${BSFCHAT_LIVEKIT_VERSION}"
+        # Two macros, not one semicolon-separated string: CMake treats
+        # ';' as a list separator inside target_compile_definitions and
+        # would split it into two malformed -D flags.
+        BSFCHAT_LIVEKIT_RUNTIME_NAME="${_lk_rt_name}"
+        BSFCHAT_LIVEKIT_FFI_RUNTIME_NAME="${_lk_ffi_rt_name}")
+    target_link_libraries(test_livekit_sdk PRIVATE
+        Qt6::Core Qt6::Test livekit::livekit)
+    bsfchat_livekit_bundle_runtime(test_livekit_sdk)
+    add_test(NAME test_livekit_sdk COMMAND test_livekit_sdk)
 endif()
 
 # Media-path loopback: proves H.264 AUs survive packetize → DTLS-SRTP →

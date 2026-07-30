@@ -358,9 +358,24 @@ public:
     Q_INVOKABLE bool canEmbed(const QString& roomId) const;
     Q_INVOKABLE bool canManageChannel(const QString& roomId) const;
     Q_INVOKABLE bool canManageRoles(const QString& roomId) const;
-    Q_INVOKABLE bool canKick(const QString& roomId) const;
-    Q_INVOKABLE bool canBan(const QString& roomId) const;
+    // Server-wide, as on the server: the room id is accepted for call-site
+    // uniformity but ignored. See the definitions.
+    Q_INVOKABLE bool canKick(const QString& roomId = QString()) const;
+    Q_INVOKABLE bool canBan(const QString& roomId = QString()) const;
     Q_INVOKABLE bool canManageMessages(const QString& roomId) const;
+    // Creating a channel or category is server structure, not a per-channel
+    // action, so it takes no room id — see the definition for why that matters.
+    Q_INVOKABLE bool canCreateChannels() const;
+    // Nicknames are one value for the whole server, so both of these are
+    // SERVER-SCOPE questions and take no room id: the server evaluates them with
+    // no channel, and passing one here would let a per-channel override light up
+    // an affordance the server then refuses.
+    //
+    // These are deliberately two independent questions rather than a hierarchy,
+    // matching the server: MANAGE_NICKNAMES permits renaming OTHER people and
+    // does not imply the right to rename yourself.
+    Q_INVOKABLE bool canChangeNickname() const;
+    Q_INVOKABLE bool canManageNicknames() const;
     Q_INVOKABLE int channelSlowmode(const QString& roomId) const;
 
     // Assign/unassign roles for a user (absolute list). Server-side requires MANAGE_ROLES.
@@ -414,6 +429,20 @@ public:
     // Update the server-wide name (bsfchat.server.info). Requires MANAGE_SERVER.
     Q_INVOKABLE void updateServerName(const QString& name);
     Q_INVOKABLE void updateAvatarUrl(const QString& url);
+
+    // Per-server nickname. `userId` may be ourselves or another member; the
+    // server requires CHANGE_NICKNAME for the former and MANAGE_NICKNAMES plus a
+    // rank check for the latter. An EMPTY `nickname` clears it.
+    //
+    // Unlike updateDisplayName, which edits the global profile, this changes only
+    // how the user is named on THIS server. Rejections arrive as sendFeedback, so
+    // callers do not need their own error handling.
+    Q_INVOKABLE void setNickname(const QString& userId, const QString& nickname);
+    // Reads the current nickname so an editor can prefill it and offer "clear".
+    // Answers via nicknameFetched. Needed because member events carry the
+    // EFFECTIVE name: without this a UI cannot tell a nickname apart from a
+    // global display name, and so cannot know whether there is one to remove.
+    Q_INVOKABLE void fetchNickname(const QString& userId);
 
     // Upload a local image file as the server icon. Uploads to Matrix
     // media then writes the mxc:// URI into bsfchat.server.info's
@@ -553,6 +582,12 @@ signals:
     void roomTypingChanged();
     void roomPinnedEventsChanged(const QString& roomId);
     void profileFetched(const QString& userId, const QString& displayName, const QString& avatarUrl);
+    // Answer to fetchNickname. `nickname` is empty when the user has none, which
+    // is how an editor decides whether to offer "Remove nickname".
+    void nicknameFetched(const QString& userId, const QString& nickname);
+    // A nickname write landed. Emitted after the local caches are refreshed so a
+    // listener re-reading them sees the new name.
+    void nicknameChanged(const QString& userId, const QString& nickname);
     void myPowerLevelChanged();
     void serverRolesChanged();
     void permissionsChanged();

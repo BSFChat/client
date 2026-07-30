@@ -17,7 +17,7 @@ class MacScreenCapturer;
 #include <QMediaCaptureSession>
 #endif
 
-class VoiceEngine;
+class IVoiceTransport;
 class ServerManager;
 class Settings;
 class VideoSendPipeline;
@@ -73,7 +73,7 @@ public:
     static QualityPreset presetFor(int level);
 
     // Hand the controller a pointer to ServerManager so it can
-    // look up the active server's VoiceEngine on each frame push.
+    // look up the active server's voice transport on each frame push.
     // (Voice engines come and go — holding a pointer would race.)
     // Also wires up the auto-stop-on-voice-leave subscription so
     // share state can't outlive the call.

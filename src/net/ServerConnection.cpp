@@ -5,6 +5,7 @@
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
 #include "util/MentionBadge.h"
+#include "util/PermissionMath.h"
 #include "identity/IdentityClient.h"
 #include "core/Settings.h"
 #include "store/LocalCache.h"
@@ -601,6 +602,42 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             emit voiceMembersChanged();
         }
         emit profileFetched(userId, displayName, avatarUrl);
+    });
+
+    connect(m_client, &MatrixClient::nicknameResult, this,
+            [this](const QString& userId, const QString& nickname) {
+        emit nicknameFetched(userId, nickname);
+    });
+
+    connect(m_client, &MatrixClient::nicknameUpdated, this,
+            [this](const QString& userId, const QString& nickname) {
+        // Push a SET nickname straight into the display-name cache so the member
+        // list and message authors rename immediately rather than at the next
+        // sync. A CLEAR is deliberately not applied optimistically: the name to
+        // fall back to is the user's global display name, which this client may
+        // never have fetched, so guessing would blank the name until sync
+        // corrected it. The server's member-event broadcast is the authority in
+        // both cases; this only shortens the visible lag in the common one.
+        if (!nickname.isEmpty() && m_userDisplayNames.value(userId) != nickname) {
+            m_userDisplayNames[userId] = nickname;
+            m_messageModel->refreshDisplayNames();
+            m_memberListModel->refreshDisplayNames();
+            emit voiceMembersChanged();
+        }
+        emit nicknameChanged(userId, nickname);
+    });
+
+    connect(m_client, &MatrixClient::nicknameError, this,
+            [this](const QString& userId, int status, const QString& error) {
+        // Route to the shared toast surface. A 403 here is the expected outcome
+        // for a role without the flag, so it has to say something a human can act
+        // on rather than being logged and dropped.
+        Q_UNUSED(userId);
+        QString text = error.isEmpty()
+            ? tr("Could not change nickname.")
+            : error;
+        if (status == 403) text = tr("Not allowed: %1").arg(text);
+        emit sendFeedback(text, QStringLiteral("error"));
     });
 
     // Handle leave room success
@@ -1737,6 +1774,18 @@ void ServerConnection::updateDisplayName(const QString& name)
     m_client->setDisplayName(m_userId, name);
 }
 
+void ServerConnection::setNickname(const QString& userId, const QString& nickname)
+{
+    if (userId.isEmpty()) return;
+    m_client->setNickname(userId, nickname);
+}
+
+void ServerConnection::fetchNickname(const QString& userId)
+{
+    if (userId.isEmpty()) return;
+    m_client->getNickname(userId);
+}
+
 QString ServerConnection::serverName() const {
     if (!m_serverName.isEmpty()) return m_serverName;
     // Fall back to the server's hostname so the UI has something to show
@@ -2688,53 +2737,44 @@ void ServerConnection::applyChannelSettingsEvent(const QString& roomId, const QJ
     emit permissionsChanged();
 }
 
+namespace permmath = bsfchat::permmath;
+
 quint64 ServerConnection::myPermissions(const QString& roomId) const
 {
-    // Mirror the server's algorithm. See server/src/auth/Permissions.cpp.
-    const QStringList& ids = m_memberRoles.value(m_userId);
-
-    // Gather this user's roles, always including @everyone.
-    QVector<RoleInfo> userRoles;
-    auto findRole = [&](const QString& id) -> const RoleInfo* {
-        for (const auto& r : m_roles) if (r.id == id) return &r;
-        return nullptr;
-    };
-    if (auto* e = findRole(QStringLiteral("everyone"))) userRoles.append(*e);
-    for (const auto& id : ids) {
-        if (id == QStringLiteral("everyone")) continue;
-        if (auto* r = findRole(id)) userRoles.append(*r);
+    // The algorithm itself lives in util/PermissionMath so it can be unit
+    // tested; this function only adapts our stored shapes to it. See
+    // server/src/auth/Permissions.cpp for the authority it mirrors.
+    QVector<permmath::Role> roles;
+    roles.reserve(m_roles.size());
+    for (const auto& r : m_roles) {
+        roles.append(permmath::Role{r.id, r.position, r.permissions});
     }
-    std::sort(userRoles.begin(), userRoles.end(),
-              [](const RoleInfo& a, const RoleInfo& b) { return a.position < b.position; });
 
-    constexpr quint64 kAdmin = 0x8000;
-    constexpr quint64 kAll = 0xffff;
-
-    quint64 base = 0;
-    for (const auto& r : userRoles) base |= r.permissions;
-    if (base & kAdmin) return kAll;
-
-    if (roomId.isEmpty()) return base;
-
+    QVector<permmath::Override> overrides;
     auto it = m_channelOverrides.find(roomId);
-    if (it == m_channelOverrides.end()) return base;
-    const auto& overrides = it.value();
-
-    auto apply = [&](const QString& key) {
-        for (const auto& ov : overrides) {
-            if (ov.targetKey == key) {
-                base = (base & ~ov.deny) | ov.allow;
-                return;
-            }
+    if (it != m_channelOverrides.end()) {
+        overrides.reserve(it.value().size());
+        for (const auto& ov : it.value()) {
+            overrides.append(permmath::Override{ov.targetKey, ov.allow, ov.deny});
         }
-    };
-    apply(QStringLiteral("role:everyone"));
-    for (const auto& r : userRoles) {
-        if (r.id == QStringLiteral("everyone")) continue;
-        apply(QStringLiteral("role:") + r.id);
     }
-    apply(QStringLiteral("user:") + m_userId);
-    return base;
+
+    // An empty roomId is a SERVER-SCOPE question — "may I create a channel?" —
+    // and must be answered without channel overrides, matching the server.
+    const QVector<permmath::Override>* scope =
+        roomId.isEmpty() ? nullptr : &overrides;
+
+    return permmath::effectivePermissions(roles, m_memberRoles.value(m_userId),
+                                          m_userId, scope);
+}
+
+// Whether this user may create channels and categories. The server evaluates
+// MANAGE_CHANNELS at SERVER scope for creation (RoomHandler::handle_create_room)
+// precisely so a per-channel grant cannot be used to add channels, so the
+// affordance has to ask the same question — passing a room id here would light
+// up "+ Add channel" for someone the server then refuses.
+bool ServerConnection::canCreateChannels() const {
+    return (myPermissions(QString()) & permmath::kManageChannels) != 0;
 }
 
 bool ServerConnection::canSend(const QString& roomId) const {
@@ -2752,14 +2792,31 @@ bool ServerConnection::canManageChannel(const QString& roomId) const {
 bool ServerConnection::canManageRoles(const QString& roomId) const {
     return (myPermissions(roomId) & 0x40ULL) != 0; // MANAGE_ROLES
 }
-bool ServerConnection::canKick(const QString& roomId) const {
-    return (myPermissions(roomId) & 0x80ULL) != 0; // KICK_MEMBERS
+// Kicking and banning are SERVER-wide capabilities, like channel creation: the
+// server evaluates both at server scope (RoomHandler::handle_kick / handle_ban /
+// handle_unban) so a per-channel override cannot hand out or take away
+// moderation power. The `roomId` parameter is therefore deliberately ignored —
+// it is kept so the QML call sites and the other can* predicates stay uniform.
+// Honouring it would let a stray channel override disagree with the server in
+// both directions: hiding the moderation UI in a channel where the kick would
+// have succeeded, or offering it where the server will answer 403.
+bool ServerConnection::canKick(const QString&) const {
+    return (myPermissions(QString()) & 0x80ULL) != 0; // KICK_MEMBERS
 }
-bool ServerConnection::canBan(const QString& roomId) const {
-    return (myPermissions(roomId) & 0x100ULL) != 0; // BAN_MEMBERS
+bool ServerConnection::canBan(const QString&) const {
+    return (myPermissions(QString()) & 0x100ULL) != 0; // BAN_MEMBERS
 }
 bool ServerConnection::canManageMessages(const QString& roomId) const {
     return (myPermissions(roomId) & 0x10ULL) != 0; // MANAGE_MESSAGES
+}
+// Both nickname questions are asked at SERVER scope (empty room id) because a
+// nickname is one value for the whole server — see ProfileHandler, which
+// evaluates them with no room for the same reason.
+bool ServerConnection::canChangeNickname() const {
+    return (myPermissions(QString()) & permmath::kChangeNickname) != 0;
+}
+bool ServerConnection::canManageNicknames() const {
+    return (myPermissions(QString()) & permmath::kManageNicknames) != 0;
 }
 int ServerConnection::channelSlowmode(const QString& roomId) const {
     return m_channelSlowmode.value(roomId, 0);

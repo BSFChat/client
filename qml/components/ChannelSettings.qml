@@ -19,7 +19,23 @@ Popup {
 
     // Flags that actually make sense per-channel. Members / role-admin flags
     // (MANAGE_ROLES, MANAGE_SERVER, ADMINISTRATOR) are intentionally omitted —
-    // those are server-wide concepts.
+    // those are server-wide concepts, and gating them on a per-channel override
+    // was a privilege-escalation hole.
+    //
+    // Everything listed here IS evaluated by the server at channel scope, so an
+    // override actually changes the outcome. MANAGE_CHANNELS and
+    // MENTION_EVERYONE were missing even though the server checks both against
+    // this channel's overrides — an admin could see a role deleting messages or
+    // pinging @everyone in one channel with no switch to stop it.
+    //
+    // DO NOT ADD, and the reason is the inverse of the one above: KICK_MEMBERS
+    // (0x0080), BAN_MEMBERS (0x0100), CHANGE_NICKNAME (0x0800) and
+    // MANAGE_NICKNAMES (0x1000) are evaluated by the server at SERVER scope only,
+    // so a toggle for any of them here would render, save, and then do nothing —
+    // an operator would believe they had granted a moderator kick rights in one
+    // channel while the server ignored the override entirely. Kicks, bans and
+    // nicknames belong to the whole server (as in Discord); grant them with a role
+    // in Server Settings → Roles.
     readonly property var channelFlags: [
         {key: "view",    label: "View channel",    flag: 0x0001,
          hint: "Whether members with this role can see this channel at all."},
@@ -27,7 +43,12 @@ Popup {
         {key: "attach",  label: "Attach files",    flag: 0x0004, hint: ""},
         {key: "embed",   label: "Embed links",     flag: 0x0008, hint: ""},
         {key: "manmsg",  label: "Manage messages", flag: 0x0010,
-         hint: "Delete anyone's message. Also bypasses slowmode."}
+         hint: "Delete anyone's message. Also bypasses slowmode."},
+        {key: "mentall", label: "Mention @everyone", flag: 0x0200,
+         hint: "Use @everyone and @here in this channel."},
+        {key: "manchan", label: "Manage this channel", flag: 0x0020,
+         hint: "Rename, move, or delete this channel and invite people to it. "
+             + "Does not allow creating new channels — that is a server-wide permission."}
     ]
 
     // Depend on permissionsGeneration so override state updates immediately
