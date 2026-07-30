@@ -50,20 +50,56 @@ Popup {
     }
 
     // Permission bit definitions mirrored from protocol/include/bsfchat/Permissions.h.
-    // Each entry has {key, label, flag} where flag is the bit value.
+    // Each entry has {key, label, flag, hint} where flag is the bit value and
+    // hint is the hover explanation.
+    //
+    // Every flag the SERVER actually enforces must appear here. A permission the
+    // server checks but this list omits is invisible to an admin: they can see
+    // people being refused and have no control that grants them access. The
+    // converse is equally a bug — a switch for something nothing enforces is a
+    // control that silently does nothing — so an entry is added here only once
+    // there is a server-side check behind it.
+    //
+    // CHANGE_NICKNAME (0x0800) and MANAGE_NICKNAMES (0x1000) were absent for
+    // exactly that reason until per-server nicknames existed. Both are now
+    // enforced by ProfileHandler's nickname endpoint (self-rename and renaming
+    // others respectively, evaluated at server scope), so both are listed.
     readonly property var permissionFlags: [
-        {key: "view",     label: "View channels",      flag: 0x0001},
-        {key: "send",     label: "Send messages",      flag: 0x0002},
-        {key: "attach",   label: "Attach files",       flag: 0x0004},
-        {key: "embed",    label: "Embed links",        flag: 0x0008},
-        {key: "manmsg",   label: "Manage messages",    flag: 0x0010},
-        {key: "manchan",  label: "Manage channels",    flag: 0x0020},
-        {key: "manrole",  label: "Manage roles",       flag: 0x0040},
-        {key: "kick",     label: "Kick members",       flag: 0x0080},
-        {key: "ban",      label: "Ban members",        flag: 0x0100},
-        {key: "mentall",  label: "Mention @everyone",  flag: 0x0200},
-        {key: "manserv",  label: "Manage server",      flag: 0x0400},
-        {key: "admin",    label: "Administrator",      flag: 0x8000}
+        {key: "view",     label: "View channels",      flag: 0x0001,
+         hint: "See channels and read their history."},
+        {key: "send",     label: "Send messages",      flag: 0x0002,
+         hint: ""},
+        {key: "attach",   label: "Attach files",       flag: 0x0004,
+         hint: ""},
+        {key: "embed",    label: "Embed links",        flag: 0x0008,
+         hint: ""},
+        {key: "manmsg",   label: "Manage messages",    flag: 0x0010,
+         hint: "Delete anyone's message. Also bypasses slowmode."},
+        // MANAGE_CHANNELS is the flag that lets a non-admin CREATE channels and
+        // categories, which is not something "Manage channels" says out loud —
+        // an owner looking for a "create channels" switch could not find one.
+        {key: "manchan",  label: "Create & manage channels", flag: 0x0020,
+         hint: "Create, rename, move, and delete channels and categories, and invite people to them."},
+        {key: "manrole",  label: "Manage roles",       flag: 0x0040,
+         hint: "Create and edit roles, assign them to members, and set per-channel overrides. Server-wide."},
+        {key: "kick",     label: "Kick members",       flag: 0x0080,
+         hint: ""},
+        {key: "ban",      label: "Ban members",        flag: 0x0100,
+         hint: ""},
+        {key: "mentall",  label: "Mention @everyone",  flag: 0x0200,
+         hint: "Use @everyone and @here to notify the whole channel."},
+        {key: "manserv",  label: "Manage server",      flag: 0x0400,
+         hint: "Change the server name and icon, and read the audit log."},
+        // The two nickname flags are independent, not a hierarchy — the same as
+        // Discord and as the server's checks. "Manage nicknames" lets you rename
+        // other people and does NOT let you rename yourself, so a moderator role
+        // that should be able to do both needs both switches on.
+        {key: "changenick", label: "Change nickname",  flag: 0x0800,
+         hint: "Set your own nickname on this server, without changing your account's name elsewhere."},
+        {key: "mannick",  label: "Manage nicknames",   flag: 0x1000,
+         hint: "Set and clear other members' nicknames. Cannot rename anyone whose role is equal or higher."},
+        {key: "admin",    label: "Administrator",      flag: 0x8000,
+         hint: "Grants every permission and bypasses all channel overrides. Give sparingly."}
     ]
 
     property string editingRoleId: ""
@@ -1054,11 +1090,23 @@ Popup {
                                                     onToggled: roleEditCard.togglePerm(modelData.flag)
                                                 }
                                                 Text {
+                                                    id: permLabel
                                                     text: modelData.label
                                                     color: Theme.fg0
                                                     font.family: Theme.fontSans
                                                     font.pixelSize: Theme.fontSize.sm
                                                     anchors.verticalCenter: cb.verticalCenter
+
+                                                    // Hover explanation. The grid is two narrow
+                                                    // columns, so a second line of body text per row
+                                                    // would double its height; a tooltip keeps the
+                                                    // list scannable while still saying what the
+                                                    // permission actually does.
+                                                    HoverHandler { id: permHover }
+                                                    ToolTip.visible: permHover.hovered
+                                                                  && modelData.hint.length > 0
+                                                    ToolTip.text: modelData.hint
+                                                    ToolTip.delay: 400
                                                 }
                                             }
                                         }
@@ -1213,7 +1261,10 @@ Popup {
                                 // visual continuity with our accent.)
                                 color: "#36d6c7",
                                 position: maxPos + 1,
-                                permissions: "0x080f", // everyone defaults
+                                // Same as kEveryoneDefault in Permissions.h:
+                                // view + send + attach + embed (0x000f) plus
+                                // CHANGE_NICKNAME (0x0800).
+                                permissions: "0x080f",
                                 mentionable: false,
                                 hoist: false
                             });

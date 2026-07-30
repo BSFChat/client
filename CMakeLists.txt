@@ -48,7 +48,16 @@ if(ANDROID AND BSFCHAT_ENABLE_VOICE)
         "${OPENSSL_ROOT_DIR}/lib/libcrypto_3.so" CACHE FILEPATH "" FORCE)
 endif()
 
+# LiveKit SFU transport. OFF by default and deliberately so: it needs a
+# vendored prebuilt SDK in deps/ (scripts/fetch-livekit-sdk.sh), it is
+# desktop-only, and the transport itself is not implemented yet. With
+# this OFF the build is unchanged in every respect.
+option(BSFCHAT_ENABLE_LIVEKIT
+    "Build against the vendored LiveKit C++ client SDK (desktop only, \
+requires scripts/fetch-livekit-sdk.sh)" OFF)
+
 include(cmake/Dependencies.cmake)
+include(cmake/LiveKit.cmake)
 
 # libaom's build (build/cmake/aom_configure.cmake) assumes it is the
 # top-level project and appends -D_WIN32_WINNT=0x0601 to the *cached*
@@ -93,6 +102,7 @@ qt_add_executable(bsfchat-app
     src/identity/IdentityClient.cpp
     src/identity/IdentityApiClient.cpp
     src/net/MatrixClient.cpp
+    src/net/SyncBackoff.cpp
     src/net/SyncLoop.cpp
     src/net/ServerConnection.cpp
     src/net/ServerManager.cpp
@@ -103,6 +113,9 @@ qt_add_executable(bsfchat-app
     src/store/LocalCache.cpp
     src/util/FileLogger.cpp
     src/util/MarkdownParser.cpp
+    src/util/MentionRenderer.cpp
+    src/util/PermissionMath.cpp
+    src/util/SearchParser.cpp
     # NotificationSounds is used by NotificationManager for chat
     # chimes — always needed, not voice-gated. SoundGenerator is
     # its only dep (a tiny pure-DSP helper).
@@ -112,10 +125,33 @@ qt_add_executable(bsfchat-app
 
 if(BSFCHAT_ENABLE_VOICE)
     target_sources(bsfchat-app PRIVATE
+        # The transport seam. IVoiceTransport.cpp is empty apart from
+        # its include — it exists so AUTOMOC generates the moc for the
+        # interface's Q_OBJECT/signals. See the comment in the file.
+        src/voice/IVoiceTransport.cpp
+        # VoiceEngine is the MESH implementation of IVoiceTransport.
+        # Mesh is permanent, not transitional: it is the only transport
+        # on Android and the only one that can carry the AV1 lossless
+        # screen-share tier.
         src/voice/VoiceEngine.cpp
         src/voice/PeerConnectionManager.cpp
+        # Mesh-vs-SFU choice per join. Pure logic, no transport
+        # instances — see the header for why a channel must be
+        # all-mesh or all-SFU and what the server has to enforce.
+        src/voice/VoiceTransportSelector.cpp
+        # Media-key parsing and the ONE home for security labelling.
+        # Read the header before writing any string about voice security.
+        src/voice/VoiceEncryption.cpp
+        # AudioEngine is the GUI-thread facade; AudioWorker is the
+        # real-time pipeline that runs on the dedicated audio thread,
+        # and AudioPacketQueue is the handoff between them.
         src/voice/AudioEngine.cpp
+        src/voice/AudioWorker.cpp
+        src/voice/AudioPacketQueue.cpp
         src/voice/AudioMixer.cpp
+        # Per-peer receive jitter buffer: reordering, Opus PLC and
+        # playout scheduling for the unreliable/unordered audio channel.
+        src/voice/JitterBuffer.cpp
         # SoundGenerator + NotificationSounds moved out of this
         # block — they're needed for chat chimes on mobile too.
         # Android: toggle MODE_IN_COMMUNICATION + speakerphone on
@@ -371,6 +407,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/ShortcutsDialog.qml
         qml/components/SearchPopup.qml
         qml/components/UpdateDialog.qml
+        qml/components/UpdateChannelSettings.qml
         qml/components/StatusPicker.qml
         qml/components/ThreadPanel.qml
         qml/components/RoleAssignPopup.qml
@@ -454,6 +491,26 @@ if(BSFCHAT_ENABLE_VOICE)
     # libyuv's CMake is old-style — the `yuv` target carries no usage
     # requirements, so its headers must be added explicitly.
     target_include_directories(bsfchat-app PRIVATE ${libyuv_SOURCE_DIR}/include)
+endif()
+
+# LiveKit SDK link + runtime bundling. Placed here, BEFORE the macOS
+# codesign POST_BUILD step further down, so the dylibs are copied into
+# Contents/Frameworks in time to be signed with the rest of the bundle —
+# they arrive linker-signed (adhoc) and an unsigned Mach-O inside a
+# signed bundle fails both Gatekeeper and notarisation.
+if(BSFCHAT_HAVE_LIVEKIT)
+    # LiveKitSdkProbe is the only TU that includes an SDK header today.
+    # Keeping SDK types in one translation unit is deliberate: the SDK is
+    # eight weeks past its first stable release and its README records
+    # breaking API changes at v1.0.0, so the blast radius of a version
+    # bump must stay small. The eventual LiveKitVoiceTransport.cpp joins
+    # it as the second and last such TU.
+    target_sources(bsfchat-app PRIVATE src/voice/LiveKitSdkProbe.cpp)
+    target_compile_definitions(bsfchat-app PRIVATE
+        BSFCHAT_HAVE_LIVEKIT
+        BSFCHAT_LIVEKIT_PINNED_VERSION="${BSFCHAT_LIVEKIT_VERSION}")
+    target_link_libraries(bsfchat-app PRIVATE livekit::livekit)
+    bsfchat_livekit_bundle_runtime(bsfchat-app)
 endif()
 
 # CoreGraphics gives us CGRequestScreenCaptureAccess to trigger the

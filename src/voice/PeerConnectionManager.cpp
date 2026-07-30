@@ -141,8 +141,29 @@ PeerConnectionManager::PeerConnectionManager(const QString& peerId, const QStrin
 PeerConnectionManager::~PeerConnectionManager() {
     qCInfo(logVoicePc, " Destroying peer connection → %s (sent=%d recv=%d)",
           qPrintable(m_peerId), m_framesSent, m_framesReceived);
-    if (m_dc) m_dc->close();
-    if (m_pc) m_pc->close();
+    // A throwing destructor is an immediate std::terminate — close()
+    // touches the transport and can raise on a teardown race.
+    try {
+        if (m_dc) m_dc->close();
+        if (m_pc) m_pc->close();
+    } catch (const std::exception& e) {
+        qCWarning(logVoicePc, " [%s] close failed during teardown: %s",
+                 qPrintable(m_peerId), e.what());
+    } catch (...) {
+        qCWarning(logVoicePc, " [%s] close failed during teardown",
+                 qPrintable(m_peerId));
+    }
+}
+
+void PeerConnectionManager::failPeer(const char* where,
+                                     const std::exception& e) {
+    qCWarning(logVoicePc, " [%s] %s failed: %s — marking peer failed",
+             qPrintable(m_peerId), where, e.what());
+    if (m_peerState == PeerState::Failed) return;
+    m_peerState = PeerState::Failed;
+    // Synchronous: VoiceEngine tears this peer down (deleteLater) and
+    // the mesh reconciler re-offers on its next poll.
+    emit peerStateChanged(PeerState::Failed);
 }
 
 void PeerConnectionManager::setupCallbacks() {
@@ -152,6 +173,10 @@ void PeerConnectionManager::setupCallbacks() {
         QMetaObject::invokeMethod(this, [this, type, sdp]() {
             qCInfo(logVoicePc, " [%s] Local SDP %s ready",
                   qPrintable(m_peerId), type.c_str());
+            // Snapshot BEFORE the emit: VoiceEngine::onLocalDescription
+            // routes on exactly this value (invite/answer vs negotiate),
+            // and the flag flips below.
+            const bool isRenegotiation = m_initialNegotiationDone;
             emit localDescriptionReady(type, sdp);
             // The emit above ran VoiceEngine's routing synchronously,
             // so the FIRST answer went out as m.call.answer while the
@@ -160,6 +185,18 @@ void PeerConnectionManager::setupCallbacks() {
             // offerer side flips in applyAnswer instead.)
             if (type == "answer" && !m_initialNegotiationDone)
                 m_initialNegotiationDone = true;
+            // Any post-initial local OFFER is a re-offer, however it was
+            // produced. triggerRenegotiation() is NOT the only producer:
+            // libdatachannel auto-negotiation re-offers on its own when
+            // the PC changes shape (e.g. sendLosslessFrame's lazy
+            // createDataChannel("video-lossless")). Tracking only the
+            // explicit trigger left m_localReofferPending false for
+            // those, applyNegotiateAnswer discarded the peer's answer,
+            // and the PC wedged in HaveLocalOffer forever — after which
+            // every inbound negotiate offer threw. Latch on the offer we
+            // actually emitted instead of on intent.
+            if (isRenegotiation && type == "offer")
+                m_localReofferPending = true;
         }, Qt::QueuedConnection);
     });
 
@@ -339,42 +376,65 @@ void PeerConnectionManager::createOffer() {
     // auto-trigger negotiation immediately, and if that offer races
     // ahead of addTrack it carries no media section — same trap via a
     // different door (caught by the loopback test flaking on CI).
-    for (int i = 0; i < kVideoStreamCount; ++i) {
-        rtc::Description::Video media(kVideoSpecs[i].mid,
-                                      rtc::Description::Direction::SendRecv);
-        media.addH264Codec(kVideoSpecs[i].payloadType);
-        auto track = m_pc->addTrack(std::move(media));
-        attachVideoTrack(VideoStreamId(i), track);
+    try {
+        for (int i = 0; i < kVideoStreamCount; ++i) {
+            rtc::Description::Video media(kVideoSpecs[i].mid,
+                                          rtc::Description::Direction::SendRecv);
+            media.addH264Codec(kVideoSpecs[i].payloadType);
+            auto track = m_pc->addTrack(std::move(media));
+            attachVideoTrack(VideoStreamId(i), track);
+        }
+
+        // Create unreliable DataChannel for audio
+        rtc::DataChannelInit dcInit;
+        dcInit.reliability.unordered = true;
+        dcInit.reliability.maxRetransmits = 0;
+
+        auto dc = m_pc->createDataChannel("audio", dcInit);
+        setupDataChannel(dc);
+
+        m_pc->setLocalDescription(rtc::Description::Type::Offer);
+    } catch (const std::exception& e) {
+        failPeer("createOffer", e);
     }
-
-    // Create unreliable DataChannel for audio
-    rtc::DataChannelInit dcInit;
-    dcInit.reliability.unordered = true;
-    dcInit.reliability.maxRetransmits = 0;
-
-    auto dc = m_pc->createDataChannel("audio", dcInit);
-    setupDataChannel(dc);
-
-    m_pc->setLocalDescription(rtc::Description::Type::Offer);
 }
 
 void PeerConnectionManager::applyOffer(const std::string& sdp) {
+    if (!m_pc) return;
     qCInfo(logVoicePc, " [%s] Applying remote offer", qPrintable(m_peerId));
-    rtc::Description desc(sdp, rtc::Description::Type::Offer);
-    m_pc->setRemoteDescription(desc);
-    m_remoteDescriptionSet = true;
-    flushPendingCandidates();
+    try {
+        rtc::Description desc(sdp, rtc::Description::Type::Offer);
+        m_pc->setRemoteDescription(desc);
+        m_remoteDescriptionSet = true;
+        flushPendingCandidates();
 
-    m_pc->setLocalDescription(rtc::Description::Type::Answer);
+        m_pc->setLocalDescription(rtc::Description::Type::Answer);
+    } catch (const std::exception& e) {
+        failPeer("applyOffer", e);
+    }
 }
 
 void PeerConnectionManager::applyAnswer(const std::string& sdp) {
+    if (!m_pc) return;
     qCInfo(logVoicePc, " [%s] Applying remote answer", qPrintable(m_peerId));
-    rtc::Description desc(sdp, rtc::Description::Type::Answer);
-    m_pc->setRemoteDescription(desc);
-    m_remoteDescriptionSet = true;
-    m_initialNegotiationDone = true;
-    flushPendingCandidates();
+    // A duplicated m.call.answer (the timeline is persisted and replays
+    // on re-sync) arrives in Stable and throws std::logic_error out of
+    // setRemoteDescription. Cheap pre-check keeps the common case out of
+    // the catch block; the catch still covers malformed SDP.
+    if (m_initialNegotiationDone) {
+        qCInfo(logVoicePc, " [%s] Ignoring duplicate answer — initial "
+              "negotiation already complete", qPrintable(m_peerId));
+        return;
+    }
+    try {
+        rtc::Description desc(sdp, rtc::Description::Type::Answer);
+        m_pc->setRemoteDescription(desc);
+        m_remoteDescriptionSet = true;
+        m_initialNegotiationDone = true;
+        flushPendingCandidates();
+    } catch (const std::exception& e) {
+        failPeer("applyAnswer", e);
+    }
 }
 
 void PeerConnectionManager::triggerRenegotiation() {
@@ -391,43 +451,74 @@ void PeerConnectionManager::triggerRenegotiation() {
     // Unspec in stable state ⇒ a fresh offer reflecting current
     // tracks/channels, delivered through onLocalDescription and routed
     // to bsfchat.call.negotiate by VoiceEngine.
-    m_pc->setLocalDescription();
+    try {
+        m_pc->setLocalDescription();
+    } catch (const std::exception& e) {
+        m_localReofferPending = false;
+        failPeer("triggerRenegotiation", e);
+    }
 }
 
 void PeerConnectionManager::applyNegotiateOffer(const std::string& sdp) {
+    if (!m_pc) return;
     qCInfo(logVoicePc, " [%s] Applying renegotiation offer", qPrintable(m_peerId));
-    rtc::Description desc(sdp, rtc::Description::Type::Offer);
-    m_pc->setRemoteDescription(desc);
-    m_pc->setLocalDescription(rtc::Description::Type::Answer);
+    try {
+        rtc::Description desc(sdp, rtc::Description::Type::Offer);
+        m_pc->setRemoteDescription(desc);
+        m_pc->setLocalDescription(rtc::Description::Type::Answer);
+    } catch (const std::exception& e) {
+        failPeer("applyNegotiateOffer", e);
+        return;
+    }
     maybeRenegotiateAgain();
 }
 
 void PeerConnectionManager::applyNegotiateAnswer(const std::string& sdp) {
-    if (!m_localReofferPending) {
+    if (!m_pc) return;
+    // m_localReofferPending is now latched on every local offer we
+    // actually emit (see setupCallbacks), so it covers auto-negotiated
+    // re-offers too. Keep signalingState as a belt-and-braces second
+    // opinion: if the PC really is sitting in HaveLocalOffer, this
+    // answer is the only thing that can unwedge it.
+    const bool haveLocalOffer =
+        m_pc->signalingState()
+        == rtc::PeerConnection::SignalingState::HaveLocalOffer;
+    if (!m_localReofferPending && !haveLocalOffer) {
         qCInfo(logVoicePc, " [%s] Ignoring unexpected negotiate answer",
               qPrintable(m_peerId));
         return;
     }
     qCInfo(logVoicePc, " [%s] Applying renegotiation answer", qPrintable(m_peerId));
-    rtc::Description desc(sdp, rtc::Description::Type::Answer);
-    m_pc->setRemoteDescription(desc);
+    try {
+        rtc::Description desc(sdp, rtc::Description::Type::Answer);
+        m_pc->setRemoteDescription(desc);
+    } catch (const std::exception& e) {
+        m_localReofferPending = false;
+        failPeer("applyNegotiateAnswer", e);
+        return;
+    }
     m_localReofferPending = false;
     maybeRenegotiateAgain();
 }
 
 void PeerConnectionManager::rollbackLocalReoffer() {
-    if (!m_localReofferPending) return;
+    if (!m_pc || !m_localReofferPending) return;
     qCInfo(logVoicePc, " [%s] Rolling back local re-offer (glare, polite side)",
           qPrintable(m_peerId));
-    m_pc->setLocalDescription(rtc::Description::Type::Rollback);
     m_localReofferPending = false;
     // Whatever we wanted to negotiate (added tracks) is still attached
     // to the PC — re-offer once the winning exchange completes.
     m_renegotiateAgain = true;
+    try {
+        m_pc->setLocalDescription(rtc::Description::Type::Rollback);
+    } catch (const std::exception& e) {
+        failPeer("rollbackLocalReoffer", e);
+    }
 }
 
 void PeerConnectionManager::maybeRenegotiateAgain() {
     if (!m_renegotiateAgain) return;
+    if (!m_pc) return;
     if (m_pc->signalingState() != rtc::PeerConnection::SignalingState::Stable) return;
     m_renegotiateAgain = false;
     triggerRenegotiation();
@@ -447,17 +538,54 @@ void PeerConnectionManager::sendControl(const QByteArray& json) {
     sendOnDataChannel(std::move(data), "control");
 }
 
+bool PeerConnectionManager::videoMidsAlreadyDeclared() const {
+    if (!m_pc) return true;   // nothing we could safely add anyway
+    const auto declares = [](const auto& desc) {
+        if (!desc) return false;
+        for (const auto& spec : kVideoSpecs)
+            if (desc->hasMid(spec.mid)) return true;
+        return false;
+    };
+    return declares(m_pc->localDescription())
+        || declares(m_pc->remoteDescription());
+}
+
 void PeerConnectionManager::ensureVideoTracks() {
     if (!m_pc || m_video[0].track) return;
     if (!remoteSupportsVideoRtp()) return;
+    // INVARIANT: between two BSFChat clients the video m-lines are
+    // always present from the INITIAL exchange — the offerer puts them
+    // in createOffer() (they MUST be there or libdatachannel builds a
+    // transport with no SRTP), and the answerer adopts them via
+    // onTrack(). So the body below is normally unreachable and this
+    // whole path is a fallback for a peer that negotiated without them.
+    //
+    // It is NOT dead, though, and the guard above is not sufficient:
+    // onTrack is delivered through a QUEUED invocation, so on the
+    // answerer side m_video[0].track is still null for one event-loop
+    // turn after applyOffer() — and VoiceEngine::handleCallInvite calls
+    // maybeSetupVideoFor() synchronously inside exactly that window.
+    // Adding tracks there would emit a second m-line for a mid the SDP
+    // already carries. Consult the negotiated descriptions rather than
+    // our own (lagging) bookkeeping.
+    if (videoMidsAlreadyDeclared()) {
+        qCDebug(logVoicePc, " [%s] video m-lines already negotiated — "
+               "tracks arrive via onTrack, not adding", qPrintable(m_peerId));
+        return;
+    }
     qCInfo(logVoicePc, " [%s] Adding video tracks + renegotiating",
           qPrintable(m_peerId));
-    for (int i = 0; i < kVideoStreamCount; ++i) {
-        rtc::Description::Video media(kVideoSpecs[i].mid,
-                                      rtc::Description::Direction::SendRecv);
-        media.addH264Codec(kVideoSpecs[i].payloadType);
-        auto track = m_pc->addTrack(std::move(media));
-        attachVideoTrack(VideoStreamId(i), track);
+    try {
+        for (int i = 0; i < kVideoStreamCount; ++i) {
+            rtc::Description::Video media(kVideoSpecs[i].mid,
+                                          rtc::Description::Direction::SendRecv);
+            media.addH264Codec(kVideoSpecs[i].payloadType);
+            auto track = m_pc->addTrack(std::move(media));
+            attachVideoTrack(VideoStreamId(i), track);
+        }
+    } catch (const std::exception& e) {
+        failPeer("ensureVideoTracks", e);
+        return;
     }
     triggerRenegotiation();
 }
@@ -744,22 +872,38 @@ qint64 PeerConnectionManager::losslessBufferedAmount() const {
 }
 
 void PeerConnectionManager::addRemoteCandidate(const std::string& candidate, const std::string& mid) {
-    if (m_remoteDescriptionSet) {
-        m_pc->addRemoteCandidate(rtc::Candidate(candidate, mid));
-    } else {
+    if (!m_pc) return;
+    if (!m_remoteDescriptionSet) {
         m_pendingCandidates.emplace_back(candidate, mid);
+        return;
+    }
+    // A single malformed/unparseable candidate is not worth killing an
+    // otherwise healthy connection over — ICE simply proceeds without
+    // it. Log and carry on rather than calling failPeer().
+    try {
+        m_pc->addRemoteCandidate(rtc::Candidate(candidate, mid));
+    } catch (const std::exception& e) {
+        qCWarning(logVoicePc, " [%s] rejected remote candidate (mid=%s): %s",
+                 qPrintable(m_peerId), mid.c_str(), e.what());
     }
 }
 
 void PeerConnectionManager::flushPendingCandidates() {
-    if (!m_pendingCandidates.empty()) {
-        qCInfo(logVoicePc, " [%s] Flushing %d buffered ICE candidates",
-              qPrintable(m_peerId), int(m_pendingCandidates.size()));
-    }
-    for (const auto& [cand, mid] : m_pendingCandidates) {
-        m_pc->addRemoteCandidate(rtc::Candidate(cand, mid));
-    }
+    if (m_pendingCandidates.empty()) return;
+    qCInfo(logVoicePc, " [%s] Flushing %d buffered ICE candidates",
+          qPrintable(m_peerId), int(m_pendingCandidates.size()));
+    // Take a copy first: addRemoteCandidate() below is the guarded form
+    // and re-entering this function must not iterate a mutating vector.
+    const auto pending = std::move(m_pendingCandidates);
     m_pendingCandidates.clear();
+    for (const auto& [cand, mid] : pending) {
+        try {
+            m_pc->addRemoteCandidate(rtc::Candidate(cand, mid));
+        } catch (const std::exception& e) {
+            qCWarning(logVoicePc, " [%s] rejected buffered candidate: %s",
+                     qPrintable(m_peerId), e.what());
+        }
+    }
 }
 
 void PeerConnectionManager::sendAudioFrame(const QByteArray& frame) {

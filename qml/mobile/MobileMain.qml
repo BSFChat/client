@@ -500,9 +500,11 @@ ApplicationWindow {
     SearchPopup {
         id: searchPopupGlobal
         parent: Overlay.overlay
-        onResultClicked: (eventId) => {
+        onResultActivated: (roomId, eventId) => {
+            // Switches channel first — a server-side hit is usually not in the
+            // room currently on screen.
             if (serverManager.activeServer)
-                serverManager.activeServer.scrollToEventRequested(eventId);
+                serverManager.activeServer.jumpToRoomEvent(roomId, eventId);
         }
     }
     StatusPicker {

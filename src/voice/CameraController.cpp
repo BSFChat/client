@@ -1,4 +1,5 @@
 #include "voice/CameraController.h"
+#include "voice/IVoiceTransport.h"
 #include "voice/VoiceEngine.h"
 #include "voice/video/VideoRateController.h"
 #include "voice/video/VideoSendPipeline.h"
@@ -277,7 +278,9 @@ void CameraController::pushFrameToPeers()
     // Resolve the connection that's actually in voice — NOT the
     // active (sidebar-focused) server, which may be a different one
     // the user is just browsing while broadcasting.
-    VoiceEngine* voice = nullptr;
+    // See the note in ScreenShareController::pushFrameToPeers — the
+    // send-side interface is all this needs.
+    IVoiceTransport* voice = nullptr;
     if (m_servers) {
         if (auto* vs = m_servers->voiceServer()) voice = vs->voiceEngine();
     }
@@ -294,17 +297,17 @@ void CameraController::pushFrameToPeers()
             disconnect(m_wiredEngine, nullptr, m_pipeline, nullptr);
             disconnect(m_wiredEngine, nullptr, m_rate, nullptr);
         }
-        connect(voice, &VoiceEngine::videoKeyframeRequested, m_pipeline,
+        connect(voice, &IVoiceTransport::videoKeyframeRequested, m_pipeline,
             [this](int streamId) {
                 if (streamId == int(VideoStreamId::Camera))
                     m_pipeline->forceKeyframe();
             });
-        connect(voice, &VoiceEngine::videoDeliveryRatio, m_rate,
+        connect(voice, &IVoiceTransport::videoDeliveryRatio, m_rate,
             [this](const QString& userId, int streamId, double ratio) {
                 if (streamId == int(VideoStreamId::Camera))
                     m_rate->reportDeliveryRatio(userId, ratio);
             });
-        connect(voice, &VoiceEngine::videoKeyframeRequested, m_rate,
+        connect(voice, &IVoiceTransport::videoKeyframeRequested, m_rate,
             [this](int streamId) {
                 if (streamId == int(VideoStreamId::Camera))
                     m_rate->reportKeyframeRequest();

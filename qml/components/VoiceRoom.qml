@@ -176,12 +176,25 @@ Rectangle {
                 ToolTip.delay: 400
             }
 
-            // Transport badge. We're not running SRTP — audio Opus frames
-            // ride an SCTP data channel over libdatachannel's DTLS 1.2
-            // handshake. So the truthful label is DTLS · SCTP (encryption
-            // terminates at the peer, not end-to-end). Upgrade to SRTP /
-            // MLS etc. later means changing the text here too.
+            // Transport badge. The label is NOT written here and must
+            // never be. It used to be a hard-coded literal naming the
+            // mesh transport, which had no C++ backing at all — so a
+            // call carried by the SFU would have gone on displaying the
+            // mesh protocol.
+            //
+            // It now mirrors ServerConnection.voiceProtectionBadge,
+            // which returns voice::protectionBadge() for whichever
+            // transport actually started. src/voice/VoiceEncryption.h is
+            // the single home for every word this app says about voice
+            // security; read it before changing anything here. A test
+            // (test_voice_encryption, qmlHoldsNoHardCodedSecurityLabel)
+            // fails if such a string reappears as a literal under qml/.
+            //
+            // Empty until a transport has started, so the badge is
+            // absent while connecting rather than asserting protection
+            // the call does not have yet.
             Rectangle {
+                visible: cryptoText.text.length > 0
                 implicitWidth: cryptoText.implicitWidth + Theme.sp.s4
                 implicitHeight: 22
                 radius: Theme.r1
@@ -191,12 +204,38 @@ Rectangle {
                 Text {
                     id: cryptoText
                     anchors.centerIn: parent
-                    text: "DTLS \u00B7 SCTP"
+                    text: serverManager.activeServer
+                        ? serverManager.activeServer.voiceProtectionBadge : ""
                     font.family: Theme.fontMono
                     font.pixelSize: 11
                     font.weight: Theme.fontWeight.semibold
                     font.letterSpacing: Theme.trackWide.sm
                     color: Theme.accent
+                }
+
+                // The badge on its own is jargon. The tooltip is where
+                // the limitation gets stated — also straight from
+                // VoiceEncryption, never composed here, never trimmed
+                // to fit. `contentWidth` is what makes the Basic
+                // style's already-Text.Wrap content actually wrap; the
+                // detail strings are two paragraphs and would otherwise
+                // lay out as one screen-wide line.
+                MouseArea {
+                    id: cryptoHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                }
+                ToolTip {
+                    visible: cryptoHover.containsMouse && text.length > 0
+                    text: serverManager.activeServer
+                        ? serverManager.activeServer.voiceProtectionDetail : ""
+                    delay: 400
+                    contentWidth: 320
+                    // Right-aligned to the badge instead of the default
+                    // centre: the badge sits at the right edge of the
+                    // header, and a 320-wide tooltip centred on it would
+                    // hang off the window.
+                    x: parent.width - width
                 }
             }
         }

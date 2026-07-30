@@ -24,6 +24,7 @@ QVariant MemberListModel::data(const QModelIndex& index, int role) const
     case DisplayNameRole: return resolveName(member.userId, member.displayName);
     case AvatarUrlRole: return member.avatarUrl;
     case MembershipRole: return member.membership;
+    case NicknameRole: return member.nickname;
     default: return {};
     }
 }
@@ -56,7 +57,8 @@ QHash<int, QByteArray> MemberListModel::roleNames() const
         {UserIdRole, "userId"},
         {DisplayNameRole, "displayName"},
         {AvatarUrlRole, "avatarUrl"},
-        {MembershipRole, "membership"}
+        {MembershipRole, "membership"},
+        {NicknameRole, "nickname"}
     };
 }
 
@@ -80,6 +82,11 @@ void MemberListModel::processEvent(const bsfchat::RoomEvent& event)
     QString membership = QString::fromStdString(event.content.data.value("membership", ""));
     QString displayName = QString::fromStdString(event.content.data.value("displayname", ""));
     QString avatarUrl = QString::fromStdString(event.content.data.value("avatar_url", ""));
+    // The server writes the EFFECTIVE name into `displayname` and the nickname
+    // separately, so `displayName` above is already the string to render and this
+    // is only for telling the two apart in admin UI.
+    QString nickname = QString::fromStdString(
+        event.content.data.value(std::string("bsfchat.nickname"), std::string()));
 
     int idx = findMember(userId);
 
@@ -89,11 +96,12 @@ void MemberListModel::processEvent(const bsfchat::RoomEvent& event)
             m_members[idx].displayName = displayName;
             m_members[idx].avatarUrl = avatarUrl;
             m_members[idx].membership = membership;
+            m_members[idx].nickname = nickname;
             emit dataChanged(index(idx), index(idx));
         } else {
             // Add new member
             beginInsertRows(QModelIndex(), m_members.size(), m_members.size());
-            m_members.append({userId, displayName, avatarUrl, membership});
+            m_members.append({userId, displayName, avatarUrl, membership, nickname});
             endInsertRows();
         }
     } else if (membership == "leave" || membership == "ban") {
@@ -111,6 +119,13 @@ QString MemberListModel::displayNameForUser(const QString& userId) const
     if (idx >= 0) {
         return resolveName(userId, m_members[idx].displayName);
     }
+    return {};
+}
+
+QString MemberListModel::nicknameForUser(const QString& userId) const
+{
+    int idx = findMember(userId);
+    if (idx >= 0) return m_members[idx].nickname;
     return {};
 }
 

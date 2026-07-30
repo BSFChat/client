@@ -3,7 +3,9 @@
 #include <QAbstractListModel>
 #include <QHash>
 #include <QPair>
+#include <QSet>
 #include <QString>
+#include <QStringList>
 #include <QVariantList>
 #include <QVariantMap>
 #include <QVector>
@@ -45,7 +47,9 @@ public:
         ReplyPreviewRole,   // Short excerpt (<=80 chars) of the replied-to message body
         ReactionsRole,      // Aggregated reactions: list of {emoji, count, reacted, eventIds}
         ThreadRootIdRole,   // If non-empty, this message is part of that thread
-        ThreadReplyCountRole // Count of m.thread replies anchored on this message
+        ThreadReplyCountRole, // Count of m.thread replies anchored on this message
+        MentionsMeRole,     // m.mentions.user_ids contains the local user
+        MentionsRoomRole    // m.mentions.room — an @room broadcast
     };
 
     // Thread helpers. `threadReplies` returns the messages whose
@@ -79,6 +83,49 @@ public:
     // if the event isn't loaded or has no edits.
     Q_INVOKABLE QVariantList editHistory(const QString& eventId) const;
 
+    // The mention set recorded for a loaded event, as it arrived in
+    // `m.mentions`: the user ids, plus MatrixClient::kRoomMentionSentinel
+    // appended when `m.mentions.room` was true — i.e. exactly the shape the
+    // send/edit paths take. Empty if the event isn't loaded or named nobody.
+    //
+    // Exists so an EDIT can carry the original's mentions forward. The server
+    // folds an edit's m.new_content in as the event's content, so an edit that
+    // omitted m.mentions blanked the message's highlight for anyone loading the
+    // room fresh. The server also refuses to narrow a mention set on edit, so
+    // preserving-and-unioning here is the behaviour that matches it.
+    QStringList mentionSetFor(const QString& eventId) const;
+
+    // THE MENTION SET THAT ACTUALLY NOTIFIED SOMEBODY, for `event`.
+    //
+    // Returns the `m.mentions` object to trust, or an empty object when the
+    // event names nobody. Read this instead of `event.content.data["m.mentions"]`
+    // anywhere the answer drives a highlight, a badge or a toast.
+    //
+    // Why it is not simply the event's content: the server DELIBERATELY records
+    // no mention rows and fires no push for an m.replace
+    // (server/src/api/EventHandler.cpp, at the record_mentions call), because a
+    // replacement lands at a brand-new stream position — past everybody's read
+    // marker — so honouring its mentions would let anyone edit an old,
+    // long-since-read message into a ping with no new message to explain it.
+    // That is the right call, but it splits "what the message says" from "what
+    // was notified": the server folds an edit's m.new_content in as the event's
+    // content, so `content["m.mentions"]` on a reloaded message is the EDIT's
+    // mention set. Rendering a highlight from it shows a pill to somebody who
+    // was never told, which is worse than showing nothing — it looks like a
+    // message they missed.
+    //
+    // The bundle the server sends makes the two distinguishable: an edited
+    // event carries unsigned.m.relations.m.replace plus
+    // unsigned.bsfchat.original_content, and original_content is the ORIGINAL
+    // event's full content — mentions included (see read_event_row in
+    // server/src/store/SqliteStore.cpp). So for an edited event the answer is
+    // the original's block; for everything else it is the event's own.
+    //
+    // Mentions the edit REMOVED stay in the set, deliberately: the server does
+    // not narrow a mention set on edit either (the mention row survives), so
+    // dropping them here would show less than what was notified.
+    static const nlohmann::json& notifiedMentions(const bsfchat::RoomEvent& event);
+
     // Unread-divider helpers. `firstEventIdAfterTs` returns the oldest
     // loaded event whose ts is strictly greater than `tsMs` (empty if
     // none). `newestTimestampMs` returns the newest loaded event's ts
@@ -95,6 +142,14 @@ public:
 
     void setHomeserver(const QString& homeserver) { m_homeserver = homeserver; }
     QString homeserver() const { return m_homeserver; }
+
+    // Access token used to authenticate media downloads — pointer to
+    // ServerConnection's copy, not owned. It's a pointer rather than a
+    // value because the token is assigned on four separate paths (restored
+    // credentials, password login, registration, OIDC) that all run after
+    // this model is constructed; reading through the owner means none of
+    // them can forget to push an update here.
+    void setAccessTokenSource(const QString* token) { m_accessToken = token; }
 
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
@@ -145,10 +200,28 @@ private:
         bool edited = false;    // True if ≥1 m.replace has been applied
         qint64 editedAt = 0;    // Timestamp of the latest edit
         // Previous bodies (oldest → newest before the current one).
-        // Each pair is {body, editAt}. Kept in-memory only for now —
-        // new clients joining late won't see older edits unless the
-        // server supplies them via /room/.../relations.
+        // Each pair is {body, editAt}. Seeded from the server's
+        // unsigned.bsfchat.original_content when a timeline event arrives
+        // already-reconciled, and extended in place by live edits.
         QVector<QPair<QString, qint64>> history;
+        // Event ids of the m.replace events whose result is ALREADY in
+        // `body`. Two sources feed it: the server's bundled
+        // unsigned.m.relations.m.replace (the edit that produced the body we
+        // were handed), and every live edit we apply ourselves.
+        //
+        // This is what stops the double-render: the replacement is *also* an
+        // ordinary timeline event, so the same edit reaches us twice — once
+        // folded into the original's content, once as its own sibling. It
+        // also makes a replayed sibling idempotent, which the old code was
+        // not (it appended to `history` every time).
+        QSet<QString> appliedEdits;
+        // m.mentions (MSC3952) as sent by the author. `mentionsMe` is
+        // resolved against the local user at ingest time; `mentionedUserIds`
+        // is kept so the renderer can locate each mention's token in the
+        // body without re-parsing the event.
+        bool mentionsMe = false;
+        bool mentionsRoom = false;
+        QStringList mentionedUserIds;
         // Reply metadata — populated when content.m.relates_to.m.in_reply_to
         // is present. replyToSender/replyPreview are best-effort snapshots
         // resolved from the local timeline when this message was ingested;
@@ -178,6 +251,17 @@ private:
     };
 
     QVector<MessageEntry> m_messages;
+    // event id -> row index. Every "find the message this event refers to"
+    // path — edits, reactions, redactions, reply-preview resolution, append
+    // dedupe — used to be its own linear scan over m_messages, so a sync
+    // batch of N reactions against a room with M loaded rows cost N*M
+    // comparisons. Kept in step with m_messages by append/prepend/clear
+    // (nothing else mutates the row set).
+    QHash<QString, int> m_indexByEventId;
+    // thread root event id -> count of loaded m.thread replies. data() reads
+    // this for ThreadReplyCountRole on *every* row, which made a full-model
+    // repaint quadratic while it was a scan.
+    QHash<QString, int> m_threadReplyCounts;
     QHash<QString, QVector<PendingReaction>> m_pendingReactions;
     // Map reaction event id -> (target event id, emoji, userId) so when a
     // redaction arrives we can find which message's aggregate to update.
@@ -192,8 +276,25 @@ private:
     QString m_prevBatchToken;
     bool m_loadingHistory = false;
     const QMap<QString, QString>* m_dnCache = nullptr;
+    const QString* m_accessToken = nullptr;
 
     MessageEntry eventToEntry(const bsfchat::RoomEvent& event, const QString& ownUserId) const;
+    // True when `event` is an edit *sibling* — content.m.relates_to with
+    // rel_type "m.replace". Such an event must never become a row of its own:
+    // its body is the "* new text" fallback for clients that can't apply
+    // edits. appendEvent folds it into its target; prependEvents drops it.
+    static bool isReplacementEvent(const bsfchat::RoomEvent& event);
+    // Rewrite `entry.formattedBody` so the mentions recorded on the entry are
+    // rendered as highlighted anchors. Reads m_dnCache for display names and
+    // m_ownUserId to pick the self-mention style.
+    void applyMentionMarkup(MessageEntry& entry) const;
+    // Row for an event id, or -1. The single accessor for m_indexByEventId so
+    // callers can't accidentally reintroduce a scan.
+    int rowForEventId(const QString& eventId) const;
+    // Rebuild m_indexByEventId / m_threadReplyCounts from m_messages. Needed
+    // after a prepend, where every existing row shifts; O(n) against an
+    // operation that already inserted n rows.
+    void rebuildIndices();
 public:
     // Resolves an mxc:// URI to an authenticated HTTP URL against the
     // homeserver. Exposed (was private) because ServerConnection needs

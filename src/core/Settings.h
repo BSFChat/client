@@ -243,7 +243,18 @@ public:
     Q_PROPERTY(bool autoUpdateCheck READ autoUpdateCheck WRITE setAutoUpdateCheck NOTIFY autoUpdateCheckChanged)
     bool autoUpdateCheck() const;
     void setAutoUpdateCheck(bool v);
+
+    // Which release channel the Updater offers builds from:
+    //   "stable" — published releases only (default)
+    //   "beta"   — stable releases AND prereleases (RCs), newest wins
+    // Anything else read back from disk normalises to "stable". Opting
+    // out never downgrades a running prerelease build; see
+    // core/ReleaseSelection.h (Outcome::AheadOfChannel).
+    Q_PROPERTY(QString updateChannel READ updateChannel WRITE setUpdateChannel NOTIFY updateChannelChanged)
+    QString updateChannel() const;
+    void setUpdateChannel(const QString& channel);
 signals:
+    void updateChannelChanged();
     void mutedRoomsChanged();
     void screenShareQualityChanged();
     void screenShareFpsChanged();

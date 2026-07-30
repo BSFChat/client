@@ -17,7 +17,7 @@ class MacScreenCapturer;
 #include <QMediaCaptureSession>
 #endif
 
-class VoiceEngine;
+class IVoiceTransport;
 class ServerManager;
 class Settings;
 class VideoSendPipeline;
@@ -33,7 +33,9 @@ class VideoRateController;
 // Real WebRTC video tracks (H.264/VP8 over RTP) would be preferable,
 // but adding a codec pipeline + RTP packetization to libdatachannel
 // is a much larger change. JPEG-over-data-channel is scrappy but
-// gets end-to-end screen sharing working today at ~5 fps.
+// gets the whole screen-share pipeline working today at ~5 fps.
+// (Reworded from "end-to-end": that meant feature-complete, not
+// encrypted, and it trips every grep for encryption claims.)
 class ScreenShareController : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool active READ active NOTIFY activeChanged)
@@ -73,7 +75,7 @@ public:
     static QualityPreset presetFor(int level);
 
     // Hand the controller a pointer to ServerManager so it can
-    // look up the active server's VoiceEngine on each frame push.
+    // look up the active server's voice transport on each frame push.
     // (Voice engines come and go — holding a pointer would race.)
     // Also wires up the auto-stop-on-voice-leave subscription so
     // share state can't outlive the call.

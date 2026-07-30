@@ -7,6 +7,7 @@
 #include "core/Settings.h"
 #include "net/ServerConnection.h"
 #include "net/ServerManager.h"
+#include "voice/IVoiceTransport.h"
 #include "voice/VoiceEngine.h"
 
 #include <algorithm>
@@ -239,7 +240,9 @@ void AndroidScreenShareController::broadcast(const QByteArray& jpeg)
     if (!m_serverManager) return;
     ServerConnection* conn = m_serverManager->activeServer();
     if (!conn) return;
-    VoiceEngine* eng = conn->voiceEngine();
+    // Android is mesh-only (no LiveKit SDK for mobile) but this only
+    // uses the transport-neutral JPEG sink, so it takes the interface.
+    IVoiceTransport* eng = conn->voiceEngine();
     if (!eng) return;
     eng->broadcastScreenFrame(jpeg);
 }

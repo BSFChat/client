@@ -15,7 +15,7 @@
 #include <QDebug>
 
 VoiceEngine::VoiceEngine(MatrixClient* client, QObject* parent)
-    : QObject(parent)
+    : IVoiceTransport(parent)
     , m_client(client)
 {
     m_candidateBatchTimer.setInterval(500);
@@ -38,7 +38,7 @@ VoiceEngine::~VoiceEngine() {
 Q_LOGGING_CATEGORY(logVoice, "bsfchat.voice",
                    QtWarningMsg)  // warnings on, info/debug off
 
-void VoiceEngine::start(const QString& roomId, const QJsonArray& members, const QJsonObject& turnConfig) {
+bool VoiceEngine::start(const QString& roomId, const QJsonArray& members, const QJsonObject& turnConfig) {
     if (m_running) stop();
 
     qCInfo(logVoice, "start room=%s members=%lld turn=%s p2p=%s",
@@ -50,6 +50,35 @@ void VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
     m_roomId = roomId;
     m_turnConfig = turnConfig;
     m_allowP2P = turnConfig.value("allow_p2p").toBool(false);
+
+    // Relay-only with no relay to use is a guaranteed, silent, total
+    // failure: iceTransportPolicy = Relay makes libdatachannel discard
+    // host and srflx candidates, so with an empty (or STUN-only) server
+    // list it gathers NOTHING, every peer sits in Connecting until the
+    // 30 s watchdog reaps it, and the user is told nothing. Refuse the
+    // join up front and say why. Checked against the built configuration
+    // rather than the raw JSON so it reflects what libdatachannel would
+    // actually receive (bad URI schemes are filtered out there).
+    if (!m_allowP2P) {
+        const auto probe = buildRtcConfig();
+        bool hasRelay = false;
+        for (const auto& server : probe.iceServers) {
+            if (server.type == rtc::IceServer::Type::Turn) { hasRelay = true; break; }
+        }
+        if (!hasRelay) {
+            qCWarning(logVoice, "refusing join: relay-only policy but no TURN "
+                     "server in the config (%lld ICE servers)",
+                     static_cast<long long>(probe.iceServers.size()));
+            emit error(QStringLiteral(
+                "Voice is unavailable: this server requires relayed connections "
+                "but has no TURN server configured. Ask the server administrator "
+                "to configure TURN, or to allow peer-to-peer voice."));
+            m_roomId.clear();
+            m_turnConfig = QJsonObject();
+            return false;
+        }
+    }
+
     m_running = true;
 
     // Start audio engine
@@ -71,18 +100,47 @@ void VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
     m_candidateBatchTimer.start();
     m_rrTimer.start();
 
-    // Initiate connections to existing members
+    // Initiate connections to existing members.
+    //
+    // OFFER DIRECTION — one rule, used here AND by the 5 s mesh
+    // reconciler in ServerConnection: we offer to `uid` only when
+    // `uid > m_localUserId`; otherwise we wait for THEM to offer to us.
+    // User ids are unique and totally ordered, so for any pair exactly
+    // one side offers — no glare, ever, in any join ordering:
+    //
+    //   * joiner N, sitting member E, E > N  → N offers immediately at
+    //     start(); E's reconciler never offers to N (N < E).
+    //   * joiner N, sitting member E, E < N  → N stays quiet; E's next
+    //     member poll sees N, N > E, and E offers (≤ 5 s).
+    //   * simultaneous join of A and B → each evaluates the same
+    //     comparison, so only the lesser id ends up offering.
+    //
+    // The previous code offered to EVERY member here while the
+    // reconciler used the `uid > m_userId` rule, so half of all pairs
+    // manufactured glare on the very first exchange. (It also offered to
+    // ourselves whenever the member list included us — the comparison
+    // rules that out for free.)
+    int offered = 0;
     for (const auto& memberVal : members) {
         auto member = memberVal.toObject();
         QString userId = member.value("user_id").toString();
-        if (!userId.isEmpty()) {
-            qCInfo(logVoice, "offering to peer %s", qPrintable(userId));
-            addPeer(userId, true); // We are the offerer (we just joined)
+        if (userId.isEmpty() || userId == m_localUserId) continue;
+        if (userId <= m_localUserId) {
+            qCInfo(logVoice, "not offering to %s — lower id, they offer to us",
+                  qPrintable(userId));
+            continue;
         }
+        qCInfo(logVoice, "offering to peer %s", qPrintable(userId));
+        addPeer(userId, true); // We are the offerer (we just joined)
+        ++offered;
     }
     if (members.isEmpty()) {
         qCInfo(logVoice, "no existing members — waiting for invites");
+    } else if (offered == 0) {
+        qCInfo(logVoice, "all %lld existing members outrank us — awaiting "
+              "their invites", static_cast<long long>(members.size()));
     }
+    return true;
 }
 
 void VoiceEngine::stop() {
@@ -95,6 +153,7 @@ void VoiceEngine::stop() {
     for (auto it = m_peers.begin(); it != m_peers.end(); ++it) {
         nlohmann::json content = {
             {"call_id", m_callIds.value(it.key()).toStdString()},
+            {"to", it.key().toStdString()},
             {"reason", "user_hangup"},
             {"version", 1}
         };
@@ -106,6 +165,7 @@ void VoiceEngine::stop() {
     m_peers.clear();
     m_callIds.clear();
     m_pendingCandidates.clear();
+    m_inboundCandidates.clear();
     qDeleteAll(m_disconnectTimers);
     m_disconnectTimers.clear();
     qDeleteAll(m_connectWatchdogs);
@@ -143,6 +203,10 @@ void VoiceEngine::addPeer(const QString& userId, bool isOfferer) {
     auto* peer = new PeerConnectionManager(userId, callId, config, this);
     m_peers[userId] = peer;
     wirePeer(peer, userId);
+
+    // Anything already parked for this exact call id (a rapid re-invite
+    // whose candidates outran the peer object) belongs to this peer.
+    replayInboundCandidates(userId, callId);
 
     if (isOfferer) {
         peer->createOffer();
@@ -340,6 +404,12 @@ void VoiceEngine::removePeer(const QString& userId) {
         if (m_audioEngine) m_audioEngine->removePeer(userId);
         peer->deleteLater();
     }
+    // Only the buffer for the call we're actually dropping. The replace
+    // paths (glare loss / dead peer / new call id) call removePeer and
+    // then immediately build a peer for a DIFFERENT call id, whose
+    // candidates may already be parked — those must survive.
+    const QString goneCallId = m_callIds.value(userId);
+    if (!goneCallId.isEmpty()) dropInboundCandidates(userId, goneCallId);
     m_callIds.remove(userId);
     m_pendingCandidates.remove(userId);
     dropRecvPipelines(userId);
@@ -591,6 +661,10 @@ void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId,
     peer->setRemoteCaps(PeerCaps::fromJson(caps));
 
     peer->applyOffer(sdp);
+    // Their candidates are sent ONCE and commonly beat (or race) this
+    // invite through the timeline — replay whatever we parked for this
+    // call id now that a peer exists to take them.
+    replayInboundCandidates(sender, callId);
     // If we're mid-share, upgrade this newcomer to video right after
     // the initial exchange (ensureVideoTracks queues the renegotiation
     // until signaling is stable again).
@@ -609,6 +683,9 @@ void VoiceEngine::handleCallAnswer(const QString& sender, const QString& callId,
     if (auto* peer = m_peers.value(sender)) {
         peer->setRemoteCaps(PeerCaps::fromJson(caps));
         peer->applyAnswer(sdp);
+        // The remote description is set now, so anything parked for
+        // this call can finally be handed to libdatachannel.
+        replayInboundCandidates(sender, callId);
         maybeSetupVideoFor(sender);
     } else {
         qCWarning(logVoice, "answer from unknown peer %s",
@@ -662,10 +739,79 @@ void VoiceEngine::handleCallNegotiate(const QString& sender, const QString& call
 
 void VoiceEngine::handleCallCandidates(const QString& sender, const QString& callId,
                                         const std::vector<std::pair<std::string, std::string>>& candidates) {
-    if (callId != m_callIds.value(sender)) return;
-    if (auto* peer = m_peers.value(sender)) {
+    if (candidates.empty()) return;
+    auto* peer = m_peers.value(sender);
+    if (peer && callId == m_callIds.value(sender)) {
         for (const auto& [cand, mid] : candidates) {
             peer->addRemoteCandidate(cand, mid);
+        }
+        return;
+    }
+    // No peer yet, or the peer we hold belongs to an older call id and
+    // the matching invite is still in flight. Candidates are sent
+    // exactly once, so dropping them here (the old behaviour) meant
+    // permanently losing the remote's transport addresses — ICE then
+    // never completed and the connect watchdog reaped the peer 30 s
+    // later. Park them instead.
+    bufferInboundCandidates(sender, callId, candidates);
+}
+
+void VoiceEngine::bufferInboundCandidates(
+    const QString& sender, const QString& callId,
+    const std::vector<std::pair<std::string, std::string>>& candidates) {
+    if (sender.isEmpty() || callId.isEmpty()) return;
+    pruneInboundCandidates();
+    const QPair<QString, QString> key{sender, callId};
+    if (!m_inboundCandidates.contains(key)
+        && m_inboundCandidates.size() >= kMaxInboundCandidateCalls) {
+        qCWarning(logVoice, "inbound candidate buffer full (%d calls) — "
+                 "dropping candidates for %s/%s",
+                 int(m_inboundCandidates.size()), qPrintable(sender),
+                 qPrintable(callId));
+        return;
+    }
+    auto& bucket = m_inboundCandidates[key];
+    if (bucket.firstSeenMs == 0)
+        bucket.firstSeenMs = QDateTime::currentMSecsSinceEpoch();
+    for (const auto& c : candidates) {
+        if (int(bucket.items.size()) >= kMaxInboundCandidatesPerCall) break;
+        bucket.items.push_back(c);
+    }
+    qCInfo(logVoice, "parked %d ICE candidate(s) from %s for call %s "
+          "(%d held)", int(candidates.size()), qPrintable(sender),
+          qPrintable(callId), int(bucket.items.size()));
+}
+
+void VoiceEngine::replayInboundCandidates(const QString& sender,
+                                          const QString& callId) {
+    // Check the peer BEFORE taking: a mismatched call id must leave the
+    // bucket parked for whichever peer eventually claims it.
+    auto* peer = m_peers.value(sender);
+    if (!peer || peer->callId() != callId) return;
+    const auto bucket = m_inboundCandidates.take({sender, callId});
+    if (bucket.items.empty()) return;
+    qCInfo(logVoice, "replaying %d parked ICE candidate(s) for %s/%s",
+          int(bucket.items.size()), qPrintable(sender), qPrintable(callId));
+    for (const auto& [cand, mid] : bucket.items) {
+        peer->addRemoteCandidate(cand, mid);
+    }
+}
+
+void VoiceEngine::dropInboundCandidates(const QString& sender,
+                                        const QString& callId) {
+    m_inboundCandidates.remove({sender, callId});
+}
+
+void VoiceEngine::pruneInboundCandidates() {
+    if (m_inboundCandidates.isEmpty()) return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (auto it = m_inboundCandidates.begin(); it != m_inboundCandidates.end(); ) {
+        if (now - it.value().firstSeenMs > kInboundCandidateTtlMs) {
+            qCInfo(logVoice, "expiring parked ICE candidates for %s/%s",
+                  qPrintable(it.key().first), qPrintable(it.key().second));
+            it = m_inboundCandidates.erase(it);
+        } else {
+            ++it;
         }
     }
 }
@@ -675,8 +821,13 @@ void VoiceEngine::handleCallHangup(const QString& sender, const QString& callId)
     // hangup from a session the peer already replaced must not kill
     // the live connection. Empty stored id = no peer = no-op.
     const QString stored = m_callIds.value(sender);
-    if (stored.isEmpty() || callId != stored) return;
-    removePeer(sender);
+    if (stored.isEmpty() || callId != stored) {
+        // Still drop anything parked for the call being hung up: that
+        // peer is never going to materialise.
+        dropInboundCandidates(sender, callId);
+        return;
+    }
+    removePeer(sender);   // drops this call's parked candidates too
     emit peerDisconnected(sender);
 }
 
@@ -696,10 +847,24 @@ void VoiceEngine::onLocalDescription(const QString& peerId, const std::string& t
     // bsfchat.call.negotiate path — legacy clients never receive them
     // because renegotiation is only ever triggered toward peers whose
     // caps advertise video_rtp.
+    // "to" is the RECIPIENT of this event. Call signaling rides the
+    // shared room timeline, so in a mesh of 3+ everyone sees everyone
+    // else's invites/answers/candidates. Without an addressee the
+    // receiver could only dispatch on `sender`, so C would apply an
+    // offer A meant for B — and because addPeer() mints a distinct call
+    // id per peer, the call-id mismatch branch in handleCallInvite read
+    // that as "peer restarted" and tore down a working connection. That
+    // is why voice worked 1:1 and collapsed at 3+.
+    //
+    // Receivers that don't understand "to" (older clients) still fall
+    // back to sender-only dispatch, so this is additive on the wire.
+    const std::string to = peerId.toStdString();
+
     auto* peer = m_peers.value(peerId);
     if (peer && peer->initialNegotiationDone()) {
         nlohmann::json content = {
             {"call_id", callId.toStdString()},
+            {"to", to},
             {"description", {{"type", type}, {"sdp", sdp}}},
             {"version", 1}
         };
@@ -710,6 +875,7 @@ void VoiceEngine::onLocalDescription(const QString& peerId, const std::string& t
     if (type == "offer") {
         nlohmann::json content = {
             {"call_id", callId.toStdString()},
+            {"to", to},
             {"lifetime", 60000},
             {"offer", {{"type", "offer"}, {"sdp", sdp}}},
             {"bsfchat_caps", localCapsJson()},
@@ -719,6 +885,7 @@ void VoiceEngine::onLocalDescription(const QString& peerId, const std::string& t
     } else if (type == "answer") {
         nlohmann::json content = {
             {"call_id", callId.toStdString()},
+            {"to", to},
             {"answer", {{"type", "answer"}, {"sdp", sdp}}},
             {"bsfchat_caps", localCapsJson()},
             {"version", 1}
@@ -732,6 +899,10 @@ void VoiceEngine::onLocalCandidate(const QString& peerId, const std::string& can
 }
 
 void VoiceEngine::flushCandidateBatch() {
+    // Cheap piggy-back: this ticks every 500 ms for the whole call, so
+    // it is the natural place to age out parked inbound candidates.
+    pruneInboundCandidates();
+
     for (auto it = m_pendingCandidates.begin(); it != m_pendingCandidates.end(); ) {
         if (it.value().empty()) {
             it = m_pendingCandidates.erase(it);
@@ -750,6 +921,7 @@ void VoiceEngine::flushCandidateBatch() {
 
         nlohmann::json content = {
             {"call_id", callId.toStdString()},
+            {"to", it.key().toStdString()},   // see onLocalDescription
             {"candidates", candidates},
             {"version", 1}
         };

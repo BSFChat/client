@@ -22,7 +22,8 @@ public:
         VoiceMemberCountRole,
         ParentIdRole,
         RoomTypeRole,
-        SortOrderRole
+        SortOrderRole,
+        MentionCountRole
     };
 
     explicit RoomListModel(QObject* parent = nullptr);
@@ -37,6 +38,28 @@ public:
     void updateLastMessage(const QString& roomId, const QString& message, qint64 timestamp);
     void incrementUnreadCount(const QString& roomId, int count);
     void resetUnreadCount(const QString& roomId);
+
+    // Mentions are tracked separately from unread because they survive
+    // muting: a muted channel hides its unread dot, but a message that names
+    // you still has to be visible in the channel list. Cleared by
+    // resetUnreadCount (i.e. whenever the room is opened or its read marker
+    // is advanced), never by setUnreadCount — a server-reported unread total
+    // says nothing about whether the mention has been seen.
+    //
+    // The increment form is the LEGACY path, kept only for servers that don't
+    // report unread_notifications.highlight_count: it can only ever count
+    // mentions the client actually witnessed arriving, so a session that
+    // resumed from a persisted sync token under-reports every mention older
+    // than its resume token. Prefer setMentionCount().
+    void incrementMentionCount(const QString& roomId, int count);
+    // Absolute set — the server's unread_notifications.highlight_count, which
+    // is computed against the server-side read marker and therefore counts
+    // mentions this client never saw arrive. Idempotent by construction, so
+    // unlike the increment form it is safe to apply on every sync (including a
+    // cache-hydration replay) without double-counting.
+    void setMentionCount(const QString& roomId, int count);
+    Q_INVOKABLE int mentionCountFor(const QString& roomId) const;
+    int totalMentionCount() const;
     // Absolute set — used when the server provides authoritative unread count.
     void setUnreadCount(const QString& roomId, int count);
     int totalUnreadCount() const;
@@ -85,6 +108,7 @@ private:
         QString topic;
         QString avatarUrl;
         int unreadCount = 0;
+        int mentionCount = 0;
         QString lastMessage;
         qint64 lastMessageTime = 0;
         bool isVoice = false;

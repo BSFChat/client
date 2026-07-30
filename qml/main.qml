@@ -398,12 +398,13 @@ ApplicationWindow {
     SearchPopup {
         id: searchPopupGlobal
         parent: Overlay.overlay
-        onResultClicked: (eventId) => {
-            // MessageView subscribes to scrollToEventRequested on the
-            // active ServerConnection — reuse the same channel the
-            // cross-server jump path uses.
+        onResultActivated: (roomId, eventId) => {
+            // Server-side search spans every visible channel, so the hit is
+            // often not in the room on screen — jumpToRoomEvent switches
+            // channel first and then emits scrollToEventRequested, which is
+            // the same channel the cross-server message-link path uses.
             var s = serverManager.activeServer;
-            if (s) s.scrollToEventRequested(eventId);
+            if (s) s.jumpToRoomEvent(roomId, eventId);
         }
     }
     // Global role-assignment popup — reachable from any component via

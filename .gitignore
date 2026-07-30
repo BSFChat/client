@@ -14,6 +14,9 @@ deps/
 # macOS metadata
 .DS_Store
 
+# Tooling logs — aqtinstall.log from the Qt installer, CMake/ninja output etc.
+*.log
+
 # Editor noise
 *.swp
 *~

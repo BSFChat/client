@@ -67,6 +67,14 @@ Rectangle {
         editingEventId = eventId;
         editingOriginalBody = currentBody;
         inputArea.text = currentBody;
+        // Drop tokens tracked against the draft we just overwrote — they name
+        // nothing in the text now in the composer, and a stale "@room" whose
+        // word-boundary test happened to match the edited body would attach a
+        // room-wide ping (which the server gates on MENTION_EVERYONE, so it
+        // would fail the edit outright). The original message's own mentions are
+        // preserved on the C++ side, not re-derived here: see
+        // ServerConnection::editMessage.
+        inputRoot._clearMentionState();
         inputArea.forceActiveFocus();
         inputArea.cursorPosition = currentBody.length;
     }
@@ -130,6 +138,14 @@ Rectangle {
         if (!mm) return [];
         var q = mentionQuery.toLowerCase();
         var out = [];
+        // @room broadcasts to everyone in the channel. Offered first so it is
+        // reachable in one keystroke, and marked isRoom so the send path emits
+        // m.mentions.room instead of putting "@room" in user_ids.
+        if ("room".indexOf(q) === 0) {
+            out.push({ userId: "@room", displayName: "@room",
+                       tokenName: "room", isRoom: true,
+                       subtitle: "Notify everyone in this channel" });
+        }
         // Rely on memberListModel.roleNames() mapping to `userId`/`displayName`.
         for (var i = 0; i < mm.rowCount(); i++) {
             var idx = mm.index(i, 0);
@@ -165,7 +181,8 @@ Rectangle {
             mentionTokens = mentionTokens.concat([{
                 token: inserted.trim(),      // "@tokenName"
                 userId: member.userId,
-                displayName: member.displayName
+                displayName: member.displayName,
+                isRoom: member.isRoom === true
             }]);
         }
         mentionQuery = "";
@@ -820,7 +837,10 @@ Rectangle {
                             elide: Text.ElideRight
                         }
                         Text {
-                            text: "@" + modelData.tokenName
+                            // @room has no mxid to show, so it explains
+                            // itself here instead.
+                            text: modelData.subtitle
+                                  || ("@" + modelData.tokenName)
                             color: index === inputRoot.mentionSelected
                                    ? Qt.rgba(0, 0, 0, 0.5) : Theme.fg3
                             font.family: Theme.fontMono
@@ -1271,6 +1291,8 @@ Rectangle {
             }
         }
 
+        var rich = _buildRichPayload(text);
+
         if (inputRoot.editingEventId !== "") {
             // Edit path — server still gates on sender match. Don't apply
             // slowmode / canSend checks to edits; they're intentionally
@@ -1279,8 +1301,17 @@ Rectangle {
                 inputRoot.cancelEditing();
                 return;
             }
-            serverManager.activeServer.editMessage(inputRoot.editingEventId, text);
+            // The mention set rides along so the edit doesn't strip the
+            // message's highlight (the server folds m.new_content in as the
+            // event's content, so an m.mentions-less edit blanks it for anyone
+            // loading the room fresh). Note it cannot ADD a mention: the server
+            // deliberately records no mention rows for an m.replace, so
+            // editing "hi" into "hi @alice" will render as a mention for
+            // everyone but will never badge or notify Alice.
+            serverManager.activeServer.editMessage(
+                inputRoot.editingEventId, text, rich.html, rich.uids);
             inputRoot.cancelEditing();
+            inputRoot._clearMentionState();
             return;
         }
 
@@ -1288,54 +1319,91 @@ Rectangle {
 
         if (inputRoot.replyToEventId !== "") {
             // Reply path — send as a m.in_reply_to-bearing message, then
-            // clear both the composer and the reply banner.
-            serverManager.activeServer.replyToMessage(inputRoot.replyToEventId, text);
+            // clear both the composer and the reply banner. Mentions in a
+            // reply are honoured in full server-side (badge + push), which is
+            // why they are passed through here rather than dropped.
+            serverManager.activeServer.replyToMessage(
+                inputRoot.replyToEventId, text, rich.html, rich.uids);
             inputArea.text = "";
             inputRoot.cancelReplying();
+            inputRoot._clearMentionState();
             inputRoot.lastSentAt = Date.now();
             return;
         }
 
+        if (rich.html !== "") {
+            serverManager.activeServer.sendRichMessage(text, rich.html, rich.uids);
+        } else {
+            serverManager.activeServer.sendMessage(text);
+        }
+        inputArea.text = "";
+        inputRoot._clearMentionState();
+        inputRoot.lastSentAt = Date.now();
+    }
+
+    function _clearMentionState() {
+        inputRoot.mentionTokens = [];
+        inputRoot.mentionQuery = "";
+        inputRoot.mentionAnchor = -1;
+    }
+
+    // Build the { html, uids } pair for `text` from the tracked mention tokens
+    // plus markdown. `html` is "" when the message needs no formatted_body at
+    // all, which is the caller's signal to use the plain-text send path.
+    //
+    // Extracted from sendCurrentMessage so the reply and edit paths get the
+    // same treatment: both used to return before this ran, so a mention typed
+    // into a reply reached the server with no m.mentions and produced no badge
+    // for the person named, and an edit stripped the mention set outright.
+    function _buildRichPayload(text) {
         // Scan the tracked mention tokens against the composer text; the
         // ones still present (user didn't delete them mid-typing) get
         // rewritten into HTML anchors + added to m.mentions.user_ids.
         var activeMentions = [];
         for (var i = 0; i < mentionTokens.length; i++) {
             var t = mentionTokens[i];
+            if (t.isRoom) {
+                // @room pings everybody, so it gets a word-boundary check
+                // rather than a bare substring test — deleting the tail of
+                // "@roommate" must not be what fires a channel-wide alert.
+                if (/(^|\s)@room(?![A-Za-z0-9_])/.test(text)) activeMentions.push(t);
+                continue;
+            }
             if (text.indexOf(t.token) >= 0) activeMentions.push(t);
         }
 
         var hasMarkdown = _hasMarkdown(text);
-        if (activeMentions.length > 0 || hasMarkdown) {
-            // Escape HTML first so no user-typed `<` creates a spurious tag,
-            // then swap each tracked token for a proper anchor + expand
-            // markdown. Order matters: mentions replace EXACT tokens, which
-            // are plain text with no markdown characters, so markdown
-            // expansion after mention-swap is safe.
-            var html = text.replace(/&/g, "&amp;")
-                           .replace(/</g, "&lt;")
-                           .replace(/>/g, "&gt;");
-            if (hasMarkdown) html = _markdownToHtml(html);
-            html = html.replace(/\n/g, "<br>");
-            var uids = [];
-            for (var j = 0; j < activeMentions.length; j++) {
-                var m = activeMentions[j];
-                var encId = encodeURIComponent(m.userId);
-                var anchor = '<a href="bsfchat://user/' + encId
-                             + '" style="color:' + Theme.accent
-                             + '; text-decoration:none; font-weight:bold;">'
-                             + m.token + '</a>';
-                html = html.split(m.token).join(anchor);
-                if (uids.indexOf(m.userId) < 0) uids.push(m.userId);
+        if (activeMentions.length === 0 && !hasMarkdown) return { html: "", uids: [] };
+
+        // Escape HTML first so no user-typed `<` creates a spurious tag,
+        // then swap each tracked token for a proper anchor + expand
+        // markdown. Order matters: mentions replace EXACT tokens, which
+        // are plain text with no markdown characters, so markdown
+        // expansion after mention-swap is safe.
+        var html = text.replace(/&/g, "&amp;")
+                       .replace(/</g, "&lt;")
+                       .replace(/>/g, "&gt;");
+        if (hasMarkdown) html = _markdownToHtml(html);
+        html = html.replace(/\n/g, "<br>");
+        var uids = [];
+        for (var j = 0; j < activeMentions.length; j++) {
+            var m = activeMentions[j];
+            if (m.isRoom) {
+                // "@room" is a boolean in m.mentions, not a user id, and
+                // it is nobody's profile — so no anchor. MatrixClient
+                // lifts this sentinel out of the list; the receiving
+                // client's MentionRenderer styles the bare token.
+                if (uids.indexOf("@room") < 0) uids.push("@room");
+                continue;
             }
-            serverManager.activeServer.sendRichMessage(text, html, uids);
-        } else {
-            serverManager.activeServer.sendMessage(text);
+            var encId = encodeURIComponent(m.userId);
+            var anchor = '<a href="bsfchat://user/' + encId
+                         + '" style="color:' + Theme.accent
+                         + '; text-decoration:none; font-weight:bold;">'
+                         + m.token + '</a>';
+            html = html.split(m.token).join(anchor);
+            if (uids.indexOf(m.userId) < 0) uids.push(m.userId);
         }
-        inputArea.text = "";
-        inputRoot.mentionTokens = [];
-        inputRoot.mentionQuery = "";
-        inputRoot.mentionAnchor = -1;
-        inputRoot.lastSentAt = Date.now();
+        return { html: html, uids: uids };
     }
 }

@@ -37,6 +37,18 @@ Rectangle {
         onTriggered: channelListRoot.unreadGeneration++
     }
 
+    // The server is the authority on per-room notify level now, so its answer
+    // can disagree with the local cache (level set from another device) or undo
+    // a write it refused. Either way the cached QSettings value has already been
+    // updated on the C++ side; this just makes the bindings notice.
+    Connections {
+        target: serverManager.activeServer
+        ignoreUnknownSignals: true
+        function onNotifyLevelChanged(roomId, level) {
+            channelListRoot.muteGeneration++;
+        }
+    }
+
     function isCategoryCollapsed(catId) {
         return collapsedCategories[catId] === true;
     }
@@ -1113,6 +1125,13 @@ Rectangle {
                                         channelListRoot.muteGeneration;
                                         return appSettings.isRoomMuted(modelData.roomId);
                                     }
+                                    // Mentions of the local user in this room
+                                    // since it was last opened. Comes from the
+                                    // room model (not QSettings), so it needs
+                                    // no generation counter — categorizedRooms
+                                    // is rebuilt after every sync.
+                                    readonly property int mentionCount:
+                                        modelData.mentionCount || 0
                                     readonly property bool hasUnread: {
                                         channelListRoot.unreadGeneration;
                                         channelListRoot.muteGeneration;
@@ -1226,6 +1245,9 @@ Rectangle {
                                                 Accessible.name: (modelData.isVoice
                                                     ? "Voice channel " : "Channel ")
                                                     + modelData.displayName
+                                                    + (channelDelegate.mentionCount > 0
+                                                       ? ", " + channelDelegate.mentionCount
+                                                         + " mentions you" : "")
                                                     + (modelData.unreadCount > 0
                                                        ? ", " + modelData.unreadCount
                                                          + " unread" : "")
@@ -1306,11 +1328,41 @@ Rectangle {
                                                     Layout.alignment: Qt.AlignVCenter
                                                 }
 
+                                                // Mention badge — a counted pill, not the plain
+                                                // unread dot, because "someone named you" is a
+                                                // different class of signal from "there is new
+                                                // traffic". Deliberately NOT suppressed for
+                                                // muted channels: muting means "stop shouting
+                                                // at me about this room", not "hide messages
+                                                // addressed to me".
+                                                Rectangle {
+                                                    visible: channelDelegate.mentionCount > 0
+                                                    Layout.preferredWidth: Math.max(
+                                                        16, mentionBadgeText.implicitWidth + 8)
+                                                    Layout.preferredHeight: 16
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    radius: 8
+                                                    color: Theme.danger
+                                                    Text {
+                                                        id: mentionBadgeText
+                                                        anchors.centerIn: parent
+                                                        text: channelDelegate.mentionCount > 99
+                                                              ? "99+" : channelDelegate.mentionCount
+                                                        color: Theme.onAccent
+                                                        font.family: Theme.fontSans
+                                                        font.pixelSize: 10
+                                                        font.weight: Theme.fontWeight.semibold
+                                                    }
+                                                }
+
                                                 // Unread dot — 8px accent circle, shown when
                                                 // the room has messages newer than the stored
-                                                // lastReadTs. Hidden for muted channels.
+                                                // lastReadTs. Hidden for muted channels, and
+                                                // superseded by the mention badge (which
+                                                // already says "unread", more loudly).
                                                 Rectangle {
                                                     visible: channelDelegate.hasUnread
+                                                             && channelDelegate.mentionCount === 0
                                                     Layout.preferredWidth: 8
                                                     Layout.preferredHeight: 8
                                                     Layout.alignment: Qt.AlignVCenter
@@ -2243,6 +2295,18 @@ Rectangle {
         property string roomId: ""
         property string roomName: ""
 
+        // Pull the server's notify level as the menu opens. The local QSettings
+        // copy is only a cache now (it's what NotificationManager reads
+        // synchronously per message), so this is what makes a level set on
+        // another device show up here. The answer arrives asynchronously and
+        // bumps muteGeneration, which re-evaluates the checkmarks below.
+        onAboutToShow: {
+            if (serverManager.activeServer
+                && serverManager.activeServer.refreshRoomNotifyLevel) {
+                serverManager.activeServer.refreshRoomNotifyLevel(roomContextMenu.roomId);
+            }
+        }
+
         background: Rectangle {
             color: Theme.bg1
             radius: Theme.r2
@@ -2326,9 +2390,13 @@ Rectangle {
         // Three-state notification mode selector via stacked menu
         // items (Menu doesn't support submenus that feel native on
         // mobile, so we list the choices inline with a check on the
-        // currently-selected mode). Changes are persisted
-        // immediately and consumed by NotificationManager at the
-        // next inbound message.
+        // currently-selected mode).
+        //
+        // Changes go through ServerConnection.setRoomNotifyLevel, which writes
+        // the local cache (consumed by NotificationManager at the next inbound
+        // message) AND PUTs to the server — the server needs it to decide what
+        // to push, and it is what makes the choice follow you to another
+        // device. A rejected PUT rolls the local value back.
         MenuSeparator {
             contentItem: Rectangle {
                 implicitWidth: 180
@@ -2336,40 +2404,45 @@ Rectangle {
                 color: Theme.line
             }
         }
+        // Effective level for the row the menu was opened on. Gated on
+        // muteGeneration so it re-reads when the value changes — QSettings is
+        // not a reactive source, and the server's answer to the GET above
+        // arrives after the menu is already on screen.
+        readonly property string notifyLevel: {
+            channelListRoot.muteGeneration;
+            return appSettings.roomNotificationMode(roomContextMenu.roomId);
+        }
+        function _setNotifyLevel(level) {
+            var s = serverManager.activeServer;
+            if (s && s.setRoomNotifyLevel) {
+                s.setRoomNotifyLevel(roomContextMenu.roomId, level);
+            } else {
+                // No connection (or an older build): keep the local-only
+                // behaviour rather than silently dropping the user's choice.
+                appSettings.setRoomNotificationMode(roomContextMenu.roomId, level);
+            }
+            channelListRoot.muteGeneration++;
+        }
+
         ThemedRoomItem {
-            text: appSettings.roomNotificationMode(roomContextMenu.roomId)
-                  === "all"
+            text: roomContextMenu.notifyLevel === "all"
                   ? "Notifications: All ✓" : "Notifications: All"
             iconName: "inbox"
-            onTriggered: {
-                appSettings.setRoomNotificationMode(
-                    roomContextMenu.roomId, "all");
-                channelListRoot.muteGeneration++;
-            }
+            onTriggered: roomContextMenu._setNotifyLevel("all")
         }
         ThemedRoomItem {
-            text: appSettings.roomNotificationMode(roomContextMenu.roomId)
-                  === "mentions"
+            text: roomContextMenu.notifyLevel === "mentions"
                   ? "Notifications: @Mentions only ✓"
                   : "Notifications: @Mentions only"
             iconName: "at"
-            onTriggered: {
-                appSettings.setRoomNotificationMode(
-                    roomContextMenu.roomId, "mentions");
-                channelListRoot.muteGeneration++;
-            }
+            onTriggered: roomContextMenu._setNotifyLevel("mentions")
         }
         ThemedRoomItem {
-            text: appSettings.roomNotificationMode(roomContextMenu.roomId)
-                  === "none"
+            text: roomContextMenu.notifyLevel === "none"
                   ? "Notifications: None ✓"
                   : "Notifications: None"
             iconName: "minus"
-            onTriggered: {
-                appSettings.setRoomNotificationMode(
-                    roomContextMenu.roomId, "none");
-                channelListRoot.muteGeneration++;
-            }
+            onTriggered: roomContextMenu._setNotifyLevel("none")
         }
 
         ThemedRoomItem {

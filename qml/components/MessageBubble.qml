@@ -31,6 +31,11 @@ Item {
     // navigation. MessageView sets it for ~1.5s so the user gets a visible
     // "here it is" pulse after the ListView centers on this row.
     property bool highlighted: false
+    // True when this message names the local user (m.mentions.user_ids) or
+    // broadcasts to the channel (m.mentions.room). Drives a persistent row
+    // tint + left bar — distinct from `highlighted`, which is a transient
+    // navigation pulse.
+    property bool mentionsMe: false
     // Reply metadata — populated from the MessageModel when this message
     // carries an m.in_reply_to relation. Empty replyToEventId means not a reply.
     property string replyToEventId: ""
@@ -455,6 +460,29 @@ Item {
         anchors.rightMargin: -Theme.sp.s3
         color: bubble.bubbleHovered ? Qt.rgba(0, 0, 0, 0.06) : "transparent"
         radius: Theme.r1
+    }
+
+    // Mention tint — a persistent warm wash plus a left bar on any message
+    // that names the local user, so it is findable at a glance while
+    // scrolling. Sits below the navigation pulse so both can show at once.
+    Rectangle {
+        visible: bubble.mentionsMe
+        anchors.fill: parent
+        anchors.leftMargin: -Theme.sp.s3
+        anchors.rightMargin: -Theme.sp.s3
+        radius: Theme.r1
+        color: Theme.warn
+        opacity: 0.10
+        z: -1
+
+        Rectangle {
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: 2
+            color: Theme.warn
+            opacity: 1.0
+        }
     }
 
     // Pulse overlay — fires when MessageView.highlightedEventId matches

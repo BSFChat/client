@@ -9,6 +9,8 @@ This document is the bridge between `BSFChat.html` (the design mock) and your Qt
 
 When the mock and this doc disagree, **the mock wins.** Update this doc.
 
+**One exception, and it is absolute: the mock never wins on a security claim.** The mock was drawn before the transport existed and shows properties BSFChat does not have — an `MLS · 256` badge, a "Verified cross-server" shield, key fingerprints. BSFChat has already shipped one of those (`MLS · 256`, against a DTLS+SCTP reality) and had to correct it. Anything the UI says about encryption, verification or keys comes from `src/voice/VoiceEncryption.{h,cpp}` and nowhere else — not from the mock, not from a QML literal, not from this doc. Read that header before writing such a string; `tests/test_voice_encryption.cpp` fails the build's test suite if one appears in QML.
+
 ---
 
 ## 0 · Ground rules
@@ -129,8 +131,8 @@ Roles: `id`, `name`, `handle` (`"user@server"`), `hue`, `presence` (`"online"|"i
 ### `FriendRequestModel`, `ServerMemberModel` — similar shape.
 
 ### Controllers (not list models)
-- `CallController` — `Q_PROPERTY`: `muted`, `deafened`, `inCall`, `pttActive`, `latencyMs`, `cryptoLabel`, `sharingScreen`, `annotateMode`. Slots: `toggleMute()`, `toggleDeafen()`, `startShare()`, `stopShare()`, `leave()`, `pushToTalk(bool)`.
-- `AppSettings` — persisted via `QSettings`. Properties: `accentHue`, `layout`, `chatPanel`, `dmSubScreen`, `dmDensity`, `dmFingerprint`, `dmGameActivity`, `screen`. Bound two-way.
+- `CallController` — `Q_PROPERTY`: `muted`, `deafened`, `inCall`, `pttActive`, `latencyMs`, `sharingScreen`, `annotateMode`. Slots: `toggleMute()`, `toggleDeafen()`, `startShare()`, `stopShare()`, `leave()`, `pushToTalk(bool)`. (The mock's `cryptoLabel` is **not** on this list. The protection label already exists as `ServerConnection.voiceProtectionBadge` / `voiceProtectionDetail`, fed by `voice::protectionBadge()`. A second property producing the same label is a second place for it to be wrong — bind to the existing one.)
+- `AppSettings` — persisted via `QSettings`. Properties: `accentHue`, `layout`, `chatPanel`, `dmSubScreen`, `dmDensity`, `dmGameActivity`, `screen`. Bound two-way. (`dmFingerprint` deleted — it gated a banner claiming a verification BSFChat does not perform; see §3.8.)
 - `NetworkClient` — WebSocket + signalling. Emits `connected`, `disconnected`, `latencyChanged`, exposes `probeServer(host)` for onboarding.
 
 ---
@@ -215,7 +217,7 @@ Always shown. Avatar + handle + mute/deafen/settings icon buttons. Mute/deafen a
 - `Behavior on border.width` with `NumberAnimation { duration: 80 }` — don't over-animate
 
 **Scene chrome (top-right):**
-- Transport badge: currently `DTLS · SCTP` (mono, 11px, `accent` fg, `accentGlow` bg, r1). **NOTE**: the original mock said `MLS · 256`, but BSFChat's voice actually rides Opus-over-SCTP-over-DTLS via libdatachannel — *not* end-to-end. Leave the label at `DTLS · SCTP` until real MLS group keying ships.
+- Transport badge: bound to `ServerConnection.voiceProtectionBadge` (mono, 11px, `accent` fg, `accentGlow` bg, r1). Hidden while that string is empty — i.e. until a transport has actually started, so the badge never describes a call that has not connected. Hover shows `voiceProtectionDetail`, which states the limitation next to the guarantee. **Do not write the label in QML.** It depends on which transport carried the call: the mesh transport yields `DTLS · SCTP` (peer to peer, one DTLS 1.2 handshake per peer pair; Opus audio rides an SCTP data channel with no SRTP, video RTP rides SRTP keyed by that same handshake — and none of it is end-to-end in the sense users mean), a LiveKit SFU call yields `Encrypted · shared key` (a key the BSFChat server generates and holds — the relay cannot read the media, but the server can, so it is **not** end-to-end). The mock's `MLS · 256` is fiction: we do not implement MLS.
 - Connection quality bars (5 mini rects)
 
 ---
@@ -299,10 +301,11 @@ Always shown. Avatar + handle + mute/deafen/settings icon buttons. Mute/deafen a
 
 **Header (56h):** avatar + name + handle + HeaderBtns (call, video, squad-up, more).
 
-**Cross-server fingerprint banner** (if `settings.dmFingerprint && friend.serverDomain !== myServer`):
-- r3 bg `Theme.accent18` (accent at 18% alpha), 1px border `Theme.accent55`
-- Left: shield icon (accent), "Verified cross-server" + short fingerprint (mono fg2)
-- Expandable (`fpExpanded` state) → reveals two `FpCard`s side by side with full fingerprints and "Verify in person" CTA
+**Cross-server fingerprint banner — DELETED, do not implement.** The mock has one; it describes a product BSFChat is not. There is no key material anywhere in this client: no device keys, no cross-signing, no Olm/Megolm, no SAS or QR verification, and therefore no fingerprint to show and nothing a "Verify in person" flow could compare. A shield reading "Verified cross-server" would be asserting a property that does not exist and cannot be computed — the worst class of security claim, because the user changes their behaviour on the strength of it.
+
+What is actually true of a cross-server DM: the message travels over HTTPS between the two homeservers and is stored in plaintext on both. If a banner is ever wanted here, that is the sentence it gets to say. Adding a verification UI means first building verification.
+
+(The `settings.dmFingerprint` toggle that gated this banner is deleted with it — see §2.)
 
 **Messages:** `ChatMessageModel` with density from `settings.dmDensity`:
 - `dense` — 13px, 2px message gap, avatar only on run boundary
@@ -325,7 +328,9 @@ Always shown. Avatar + handle + mute/deafen/settings icon buttons. Mute/deafen a
 **Source:** `components/DMVoiceCall.jsx`
 **Purpose:** 1:1 call, shown when `settings.dmSubScreen === 'call'`.
 
-Two giant avatars (132px) side by side on `Theme.bg0`, name labels, speaking rings driven by level. Bottom row of CallBtns: mute, deafen, share, video, end-call (danger, larger). Top-right readout: `DTLS · SCTP · <ms>` in mono, fg2 (the mock said `MLS · 256 · 14ms · EU-West`, but BSFChat's voice is DTLS-encrypted SCTP data channels, not MLS / SRTP — be truthful). Timer centered above avatars in mono, 20px fg1.
+Two giant avatars (132px) side by side on `Theme.bg0`, name labels, speaking rings driven by level. Bottom row of CallBtns: mute, deafen, share, video, end-call (danger, larger). Timer centered above avatars in mono, 20px fg1.
+
+Top-right readout: `ServerConnection.voiceProtectionBadge` + ` · <ms>` in mono, fg2 — the *same* binding as the VoiceRoom badge (§3.3), hidden while the badge string is empty. **Do not hard-code the transport half of that readout**, and note that a 1:1 DM call is protected exactly like a channel call — being a two-person call confers no extra guarantee, so this readout must not say anything the group one does not. The mock's `MLS · 256 · 14ms · EU-West` is fiction on three counts: no MLS, no 256-bit group key, and no region routing.
 
 ---
 
@@ -334,7 +339,11 @@ Two giant avatars (132px) side by side on `Theme.bg0`, name labels, speaking rin
 **Purpose:** cover the main region when `settings.screen === 'settings'`.
 
 **Two-column:**
-- Left (240w): nav — Audio, Voice & Activation, Video & Screen, Keybinds, Notifications, Appearance, Security & Keys, Network, Servers, Identity, Account, About
+- Left (240w): nav — Audio, Voice & Activation, Video & Screen, Keybinds, Notifications, Appearance, Network, Servers, Identity, Account, About
+
+**"Security & Keys" is deleted from that nav — do not implement it.** There are no keys to manage. BSFChat has no device keys, no cross-signing, no key backup, no per-user key material of any kind; the voice shared key (LiveKit path only) is minted and held by the server and never surfaced to or controllable by the client. A pane under that name would have to invent content, and invented content in a security pane is read as a guarantee.
+
+If a security surface is ever wanted, the *only* thing this client can honestly show is the live call's protection state — `ServerConnection.voiceProtectionDetail`, verbatim, which already says both what it protects against and what it does not. That is a row in **Voice & Activation**, not a pane called "Keys".
 - Right: scrollable pane
 
 **Panes are listed in `SettingsPanes.jsx`.** Each pane follows the same structure:
@@ -364,8 +373,8 @@ Two giant avatars (132px) side by side on `Theme.bg0`, name labels, speaking rin
 1. **Welcome** — explains self-hosted model
 2. **Auth mode** — Identity server vs Direct server (big radio cards)
 3. **Credentials** — identity path shows `user@server.tld`; direct path shows `user:host:port` + "Remember this server"
-4. **Connecting** — terminal-style log (`Theme.fontMono`, fg2) with animated lines: DNS → TLS 1.3 → auth → sync (the mock included an "MLS key exchange" line; remove it — we don't do MLS, and faking the step in the log is worse than leaving it out)
-5. **Complete** — summary card: handle, transport label (`DTLS · SCTP`), latency; "Enter app" button
+4. **Connecting** — terminal-style log (`Theme.fontMono`, fg2) with animated lines: DNS → TLS → auth → sync. Every line must correspond to a step that actually ran; a log is read as a record, not as decoration. The mock's "MLS key exchange" line is removed — we don't do MLS, and faking the step is worse than omitting it. Likewise print `TLS` and only name a version if you read it back from `QSslConfiguration::sessionProtocol()`; hard-coding `TLS 1.3` states a fact about a handshake nobody inspected.
+5. **Complete** — summary card: handle, latency; "Enter app" button. **No transport label here.** Onboarding finishes before any call exists, so a protection badge on this card describes nothing — `voiceProtectionBadge` is empty by design at this point, and hard-coding one would be a claim about a voice transport that has not run. The badge belongs in the call views (§3.3, §3.9) and only while a call is up.
 
 All panels: max 520w, centered, `Theme.bg1` card on `Theme.bg0` backdrop. Title 32px semibold fg0, subtitle 14px fg2.
 

@@ -15,7 +15,16 @@ public:
         UserIdRole = Qt::UserRole + 1,
         DisplayNameRole,
         AvatarUrlRole,
-        MembershipRole
+        MembershipRole,
+        // The per-server nickname, empty when the member has none.
+        //
+        // DisplayNameRole is already the name to RENDER — the server puts the
+        // effective name (nickname if set, else global) in the member event's
+        // `displayname`, so nothing has to choose between them at paint time. This
+        // role exists so the UI can tell WHY a name is what it is: an admin needs
+        // "clear nickname" to be distinguishable from "reset to nothing", and a
+        // profile card wants to show the global name underneath.
+        NicknameRole
     };
 
     explicit MemberListModel(QObject* parent = nullptr);
@@ -27,7 +36,12 @@ public:
     void processEvent(const bsfchat::RoomEvent& event);
     void clear();
 
-    QString displayNameForUser(const QString& userId) const;
+    // Invokable because QML calls it (MessageBubble's reaction tooltip did, and
+    // silently got "not a function" because it was a plain member).
+    Q_INVOKABLE QString displayNameForUser(const QString& userId) const;
+
+    // The member's per-server nickname, or an empty string when they have none.
+    Q_INVOKABLE QString nicknameForUser(const QString& userId) const;
 
     // Global user display-name cache (owned by ServerConnection). Used as a
     // fallback when the member event didn't carry a displayname (older
@@ -44,6 +58,7 @@ private:
         QString displayName;
         QString avatarUrl;
         QString membership;
+        QString nickname;
     };
 
     QVector<MemberEntry> m_members;
