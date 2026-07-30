@@ -139,6 +139,9 @@ if(BSFCHAT_ENABLE_VOICE)
         # instances — see the header for why a channel must be
         # all-mesh or all-SFU and what the server has to enforce.
         src/voice/VoiceTransportSelector.cpp
+        # Media-key parsing and the ONE home for security labelling.
+        # Read the header before writing any string about voice security.
+        src/voice/VoiceEncryption.cpp
         # AudioEngine is the GUI-thread facade; AudioWorker is the
         # real-time pipeline that runs on the dedicated audio thread,
         # and AudioPacketQueue is the handoff between them.

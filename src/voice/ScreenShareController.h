@@ -33,7 +33,9 @@ class VideoRateController;
 // Real WebRTC video tracks (H.264/VP8 over RTP) would be preferable,
 // but adding a codec pipeline + RTP packetization to libdatachannel
 // is a much larger change. JPEG-over-data-channel is scrappy but
-// gets end-to-end screen sharing working today at ~5 fps.
+// gets the whole screen-share pipeline working today at ~5 fps.
+// (Reworded from "end-to-end": that meant feature-complete, not
+// encrypted, and it trips every grep for encryption claims.)
 class ScreenShareController : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool active READ active NOTIFY activeChanged)

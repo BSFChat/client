@@ -125,6 +125,17 @@ target_include_directories(test_voice_transport PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_voice_transport PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_voice_transport COMMAND test_voice_transport)
 
+# Media-key parsing and the security labelling. Pure logic — no SDK, no
+# network. The labelling tests assert the ABSENCE of an end-to-end claim,
+# which is the specific mistake this project has already made once.
+qt_add_executable(test_voice_encryption
+    test_voice_encryption.cpp
+    ${CMAKE_SOURCE_DIR}/src/voice/VoiceEncryption.cpp
+)
+target_include_directories(test_voice_encryption PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_voice_encryption PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_voice_encryption COMMAND test_voice_encryption)
+
 # LiveKit vendoring gate. Not a transport test — there is no transport
 # yet. It proves the vendored SDK compiles against our flags, links, and
 # (the part that matters) that BOTH shared libraries are loadable from
@@ -156,6 +167,21 @@ if(BSFCHAT_HAVE_LIVEKIT)
         Qt6::Core Qt6::Test livekit::livekit)
     bsfchat_livekit_bundle_runtime(test_livekit_sdk)
     add_test(NAME test_livekit_sdk COMMAND test_livekit_sdk)
+
+    # PlatformAudio device-enumeration prototype. Built but NOT registered
+    # as a ctest: it constructs WebRTC's Audio Device Module and reports what
+    # the host actually has, so its output is machine-specific and it is a
+    # diagnostic to run by hand, not a pass/fail assertion. It never calls
+    # createAudioSource(), so it does not start capture or trigger a
+    # microphone permission prompt.
+    qt_add_executable(platform_audio_probe
+        platform_audio_probe_main.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/PlatformAudioProbe.cpp
+    )
+    target_include_directories(platform_audio_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(platform_audio_probe PRIVATE
+        Qt6::Core Qt6::Multimedia livekit::livekit)
+    bsfchat_livekit_bundle_runtime(platform_audio_probe)
 endif()
 
 # Media-path loopback: proves H.264 AUs survive packetize → DTLS-SRTP →
