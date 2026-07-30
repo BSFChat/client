@@ -4,10 +4,13 @@ include(FetchContent)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/CMakeLists.txt)
     FetchContent_Declare(bsfchat_protocol SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../protocol)
 else()
-    # NOTE: pinned to the video-rtp branch (bsfchat.call.negotiate
-    # constant) while the RTP video migration is in review — flip back
-    # to main when both branches merge.
-    FetchContent_Declare(bsfchat_protocol GIT_REPOSITORY https://github.com/BSFChat/protocol.git GIT_TAG video-rtp GIT_SHALLOW TRUE)
+    # Pinned to main, matching server/ and identity/. This was stuck on
+    # the video-rtp branch long after that work merged, which broke every
+    # CI platform while local builds stayed green — the branch above uses
+    # the sibling ../protocol checkout, so a stale remote pin is invisible
+    # until CI runs. If this ever needs pinning again, pin to a TAG and
+    # say when it goes back to main.
+    FetchContent_Declare(bsfchat_protocol GIT_REPOSITORY https://github.com/BSFChat/protocol.git GIT_TAG main GIT_SHALLOW TRUE)
 endif()
 
 set(GAMECHAT_PROTOCOL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
