@@ -26,6 +26,7 @@ QVariant RoomListModel::data(const QModelIndex& index, int role) const
     case TopicRole: return room.topic;
     case AvatarUrlRole: return room.avatarUrl;
     case UnreadCountRole: return room.unreadCount;
+    case MentionCountRole: return room.mentionCount;
     case LastMessageRole: return room.lastMessage;
     case LastMessageTimeRole: return room.lastMessageTime;
     case IsVoiceRole: return room.isVoice;
@@ -45,6 +46,7 @@ QHash<int, QByteArray> RoomListModel::roleNames() const
         {TopicRole, "topic"},
         {AvatarUrlRole, "avatarUrl"},
         {UnreadCountRole, "unreadCount"},
+        {MentionCountRole, "mentionCount"},
         {LastMessageRole, "lastMessage"},
         {LastMessageTimeRole, "lastMessageTime"},
         {IsVoiceRole, "isVoice"},
@@ -67,7 +69,12 @@ void RoomListModel::ensureRoom(const QString& roomId)
 {
     if (findRoom(roomId) >= 0) return;
     beginInsertRows(QModelIndex(), m_rooms.size(), m_rooms.size());
-    m_rooms.append({roomId, {}, {}, {}, 0, {}, 0, false, 0, {}, {}, 0});
+    // Only the id is known at this point; everything else keeps its in-class
+    // default. (Was a positional brace-init, which silently shifted every
+    // field the first time one was inserted into the middle of RoomEntry.)
+    RoomEntry entry;
+    entry.roomId = roomId;
+    m_rooms.append(std::move(entry));
     endInsertRows();
 }
 
@@ -109,7 +116,52 @@ void RoomListModel::incrementUnreadCount(const QString& roomId, int count)
 
 void RoomListModel::resetUnreadCount(const QString& roomId)
 {
+    // Opening a room (or advancing its read marker) clears its mention badge
+    // too — you have now seen the mention. Done here rather than at the call
+    // sites so both of them get it without touching ServerConnection.
+    int idx = findRoom(roomId);
+    if (idx >= 0 && m_rooms[idx].mentionCount != 0) {
+        m_rooms[idx].mentionCount = 0;
+        emit dataChanged(index(idx), index(idx), {MentionCountRole});
+    }
     setUnreadCount(roomId, 0);
+}
+
+void RoomListModel::incrementMentionCount(const QString& roomId, int count)
+{
+    if (count <= 0) return;
+    int idx = findRoom(roomId);
+    if (idx < 0) return;
+    m_rooms[idx].mentionCount += count;
+    emit dataChanged(index(idx), index(idx), {MentionCountRole});
+}
+
+void RoomListModel::setMentionCount(const QString& roomId, int count)
+{
+    if (count < 0) count = 0;
+    int idx = findRoom(roomId);
+    if (idx < 0) return;
+    // Silent when unchanged — the server re-reports the same highlight_count on
+    // every poll for as long as the mention stays unread, and repainting the
+    // row each time would make the sidebar's dataChanged traffic proportional
+    // to the sync rate rather than to actual changes.
+    if (m_rooms[idx].mentionCount == count) return;
+    m_rooms[idx].mentionCount = count;
+    emit dataChanged(index(idx), index(idx), {MentionCountRole});
+}
+
+int RoomListModel::mentionCountFor(const QString& roomId) const
+{
+    int idx = findRoom(roomId);
+    if (idx < 0) return 0;
+    return m_rooms[idx].mentionCount;
+}
+
+int RoomListModel::totalMentionCount() const
+{
+    int total = 0;
+    for (const auto& room : m_rooms) total += room.mentionCount;
+    return total;
 }
 
 void RoomListModel::setUnreadCount(const QString& roomId, int count)
@@ -334,6 +386,7 @@ QVariantList RoomListModel::getCategoriesWithChannels() const
         ch[QStringLiteral("roomType")] = room.roomType;
         ch[QStringLiteral("isVoice")] = room.isVoice;
         ch[QStringLiteral("unreadCount")] = room.unreadCount;
+        ch[QStringLiteral("mentionCount")] = room.mentionCount;
         ch[QStringLiteral("voiceMemberCount")] = room.voiceMemberCount;
         ch[QStringLiteral("topic")] = room.topic;
         ch[QStringLiteral("sortOrder")] = room.sortOrder;

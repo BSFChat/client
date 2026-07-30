@@ -172,6 +172,26 @@ private:
     // the frame was dropped (oversized or transport error). Callers
     // must have verified m_dc is present and open.
     bool sendOnDataChannel(rtc::binary&& data, const char* what);
+    // Uniform degradation for a libdatachannel entry point that threw.
+    // EVERY rtc:: signaling call in this class runs synchronously inside
+    // a Qt slot (ServerConnection::processSyncResponse → VoiceEngine →
+    // here), so an escaped exception unwinds the event loop and
+    // fail-fasts the whole app — the same trap sendOnDataChannel()
+    // already guards on the media path. setRemoteDescription throws
+    // std::logic_error for a type/signaling-state mismatch (a duplicated
+    // m.call.answer is enough) and std::invalid_argument for malformed
+    // SDP, and both are attacker- or bug-reachable from the timeline.
+    // Log, mark the peer Failed, and let VoiceEngine's dead-peer cleanup
+    // plus the 5 s mesh reconciler rebuild the connection.
+    //
+    // MUST be the last statement in its catch block: the state change is
+    // emitted synchronously and VoiceEngine reacts by removing (and
+    // deleteLater-ing) this peer.
+    void failPeer(const char* where, const std::exception& e);
+    // True when the vscreen/vcamera m-lines already exist in either
+    // negotiated description. Guards ensureVideoTracks() against adding
+    // a duplicate m-line — see the comment there.
+    bool videoMidsAlreadyDeclared() const;
 
     QString m_peerId;
     QString m_callId;

@@ -10,6 +10,8 @@
 
 #include <bsfchat/MatrixTypes.h>
 
+#include "util/SearchParser.h"
+
 class MatrixClient : public QObject {
     Q_OBJECT
 
@@ -52,6 +54,13 @@ public:
     // (sender-generated — the composer adds <a> anchors for @Name and
     // #channel tokens). `mentionedUserIds` populates `m.mentions.user_ids`
     // so the server can elevate notifications for targeted users.
+    //
+    // An `@room` broadcast rides in as the literal entry kRoomMentionSentinel
+    // in `mentionedUserIds`; it is lifted out into `m.mentions.room` (which is
+    // a boolean, not a user id) rather than widening the signature, because
+    // the composer reaches this through ServerConnection::sendRichMessage and
+    // that file is being edited concurrently.
+    static constexpr QLatin1StringView kRoomMentionSentinel{"@room"};
     void sendRichMessage(const QString& roomId, const QString& body,
                           const QString& formattedBody,
                           const QStringList& mentionedUserIds);
@@ -60,12 +69,31 @@ public:
     // Edit a previously-sent m.room.message by the current user. Sends a
     // new m.room.message with m.relates_to {rel_type: m.replace,
     // event_id: targetEventId}; the server accepts it only if sender matches.
-    void editMessage(const QString& roomId, const QString& targetEventId, const QString& newBody);
+    //
+    // `formattedBody` / `mentionedUserIds` go into `m.new_content` and NOT the
+    // top-level fallback, which is the "* edited text" plain-text stand-in.
+    // They are carried for RENDERING, not for badging: the server refuses to
+    // create or move mention rows on an m.replace (see
+    // server/src/api/EventHandler.cpp — record_mentions is skipped for edits),
+    // so adding an @name while editing will never fire a badge. What this does
+    // fix is the reverse: the server folds an edit's m.new_content in as the
+    // event's current content, so a payload that dropped m.mentions made the
+    // original's highlight vanish for anyone loading the room fresh.
+    void editMessage(const QString& roomId, const QString& targetEventId,
+                      const QString& newBody,
+                      const QString& formattedBody = QString(),
+                      const QStringList& mentionedUserIds = {});
     // Send a new m.room.message with m.relates_to.m.in_reply_to.event_id
     // pointing at targetEventId. Server needs no special support — it's
     // just content metadata.
+    //
+    // A reply is an ordinary new message as far as mentions go, so
+    // `m.mentions` here is fully honoured server-side: mention rows, badge and
+    // push all fire exactly as they do for a plain send.
     void replyToMessage(const QString& roomId, const QString& body,
-                         const QString& targetEventId);
+                         const QString& targetEventId,
+                         const QString& formattedBody = QString(),
+                         const QStringList& mentionedUserIds = {});
     // Send an m.thread relation — identical payload to a reply, but
     // with rel_type="m.thread" and event_id pointing at the thread
     // root. Clients that don't understand threads see it as a
@@ -121,6 +149,32 @@ public:
     // Read marker (server-tracked unread counts).
     // Server marks everything currently in the room as read for this user.
     void sendReadMarker(const QString& roomId);
+
+    // Full-text message search — POST /_matrix/client/v3/search.
+    //
+    // The server owns permission filtering (it only ever searches channels the
+    // caller can VIEW_CHANNEL) and query sanitisation: it tokenises the input
+    // and treats every FTS5 metacharacter as a separator, so a user typing `"`
+    // or `*` cannot produce a syntax error — punctuation-only input just comes
+    // back as zero matches. `searchFailed` therefore covers real failures
+    // (unauthorised, no FTS5 module on the server, transport) rather than
+    // "you typed a funny character".
+    //
+    // `nextBatch` is the opaque token from a previous page; empty for page one.
+    void searchMessages(const QString& searchTerm, int limit,
+                         const QString& nextBatch = QString());
+
+    // ── Per-room notification level ───────────────────────────────────────
+    //
+    // GET/PUT /_matrix/client/v3/bsfchat/rooms/{roomId}/notify_level.
+    // `level` is one of "all" / "mentions" / "none".
+    //
+    // Namespaced bsfchat.* rather than pretending to be Matrix push rules,
+    // which is the whole reason the client has to speak this explicitly: the
+    // setting used to live only in local QSettings, so the server could not
+    // evaluate what to push for the user on any other device.
+    void getRoomNotifyLevel(const QString& roomId);
+    void setRoomNotifyLevel(const QString& roomId, const QString& level);
 
     // Permissions / roles
     void setMemberRoles(const QString& roomId, const QString& userId, const QStringList& roleIds);
@@ -194,6 +248,27 @@ signals:
                         const bsfchat::MessagesResponse& response);
     void messagesError(const QString& error);
 
+    // Search results. `searchTerm` and `requestedNextBatch` echo the request so
+    // the receiver can drop a stale response: the search box fires a request
+    // per keystroke and replies can land out of order, and appending page 2 of
+    // an abandoned query onto page 1 of the current one is worse than dropping
+    // it. `nextBatch` (response-side) is empty when this was the last page.
+    void searchResult(const QString& searchTerm, const QString& requestedNextBatch,
+                      const bsfchat::client::SearchResponse& response);
+    // Transport-level failure only — an error *payload* arrives via searchResult
+    // with response.ok == false, so a single handler can render both.
+    void searchFailed(const QString& searchTerm, const QString& error);
+
+    // Per-room notify level read back from the server. `isDefault` is true when
+    // the user has made no explicit choice and `level` is the server's default
+    // for that room kind (DMs default to "all", channels to "mentions") — a
+    // settings UI can then render "Default (mentions)" rather than a hard
+    // selection the user never made.
+    void roomNotifyLevelResult(const QString& roomId, const QString& level,
+                               bool isDefault);
+    // PUT rejected. The local preference is rolled back by the caller.
+    void roomNotifyLevelError(const QString& roomId, const QString& error);
+
     void mediaUploaded(const QString& contentUri);
     // Per-upload progress 0..1. QNetworkAccessManager re-uses the
     // same reply object until it finishes, so `filename` identifies
@@ -237,6 +312,11 @@ private:
     QNetworkReply* makeRequest(const QString& method, const QString& path,
                                 const QByteArray& body = {});
     QUrl buildUrl(const QString& path) const;
+    // Writes the MSC3952 `m.mentions` block into `content` (no-op for an empty
+    // list). Shared by the plain-send, reply and edit paths — see the
+    // definition for why the @room sentinel is handled here and not by callers.
+    static void applyMentions(nlohmann::json& content,
+                               const QStringList& mentionedUserIds);
 
     QNetworkAccessManager m_nam;
     QString m_homeserver;

@@ -93,6 +93,7 @@ qt_add_executable(bsfchat-app
     src/identity/IdentityClient.cpp
     src/identity/IdentityApiClient.cpp
     src/net/MatrixClient.cpp
+    src/net/SyncBackoff.cpp
     src/net/SyncLoop.cpp
     src/net/ServerConnection.cpp
     src/net/ServerManager.cpp
@@ -103,6 +104,8 @@ qt_add_executable(bsfchat-app
     src/store/LocalCache.cpp
     src/util/FileLogger.cpp
     src/util/MarkdownParser.cpp
+    src/util/MentionRenderer.cpp
+    src/util/SearchParser.cpp
     # NotificationSounds is used by NotificationManager for chat
     # chimes — always needed, not voice-gated. SoundGenerator is
     # its only dep (a tiny pure-DSP helper).
@@ -114,8 +117,16 @@ if(BSFCHAT_ENABLE_VOICE)
     target_sources(bsfchat-app PRIVATE
         src/voice/VoiceEngine.cpp
         src/voice/PeerConnectionManager.cpp
+        # AudioEngine is the GUI-thread facade; AudioWorker is the
+        # real-time pipeline that runs on the dedicated audio thread,
+        # and AudioPacketQueue is the handoff between them.
         src/voice/AudioEngine.cpp
+        src/voice/AudioWorker.cpp
+        src/voice/AudioPacketQueue.cpp
         src/voice/AudioMixer.cpp
+        # Per-peer receive jitter buffer: reordering, Opus PLC and
+        # playout scheduling for the unreliable/unordered audio channel.
+        src/voice/JitterBuffer.cpp
         # SoundGenerator + NotificationSounds moved out of this
         # block — they're needed for chat chimes on mobile too.
         # Android: toggle MODE_IN_COMMUNICATION + speakerphone on

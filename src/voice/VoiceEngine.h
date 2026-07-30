@@ -27,7 +27,14 @@ public:
     explicit VoiceEngine(MatrixClient* client, QObject* parent = nullptr);
     ~VoiceEngine();
 
-    void start(const QString& roomId, const QJsonArray& members, const QJsonObject& turnConfig);
+    // Returns false when the session cannot possibly work and the join
+    // must be unwound by the caller (currently: relay-only policy with
+    // no TURN server configured — ICE would gather zero candidates and
+    // every peer would fail silently). A human-readable reason is
+    // emitted through error() first. On false NOTHING is started: no
+    // audio device, no timers, no peers.
+    [[nodiscard]] bool start(const QString& roomId, const QJsonArray& members,
+                             const QJsonObject& turnConfig);
     void stop();
     bool isRunning() const { return m_running; }
 
@@ -162,6 +169,25 @@ private:
     void onLocalDescription(const QString& peerId, const std::string& type, const std::string& sdp);
     void onLocalCandidate(const QString& peerId, const std::string& candidate, const std::string& mid);
     void flushCandidateBatch();
+    // ---- Inbound-candidate buffering (engine level) ----
+    // PeerConnectionManager also buffers candidates that arrive before
+    // its remote description is set, but that buffer dies with the
+    // object — and every replacement path (glare loss, dead-peer
+    // replace, new-callId replace, watchdog teardown) destroys it. Worse,
+    // candidates for a call id we don't hold yet used to be dropped on
+    // the floor, and they are sent exactly once (flushCandidateBatch
+    // clears its queue). Hold them here, keyed by the (sender, callId)
+    // they belong to, and replay them when a matching peer appears.
+    void bufferInboundCandidates(
+        const QString& sender, const QString& callId,
+        const std::vector<std::pair<std::string, std::string>>& candidates);
+    void replayInboundCandidates(const QString& sender, const QString& callId);
+    // Drop the buffer for one specific call (hangup / peer teardown).
+    // Scoped by call id on purpose: a peer being REPLACED by a newer
+    // call id must not lose the candidates already buffered for that
+    // newer call.
+    void dropInboundCandidates(const QString& sender, const QString& callId);
+    void pruneInboundCandidates();
     void sendCallEvent(const QString& eventType, const nlohmann::json& content);
     rtc::Configuration buildRtcConfig() const;
     QString generateCallId() const;
@@ -196,9 +222,21 @@ private:
     bool m_running = false;
     bool m_allowP2P = false;
 
-    // ICE candidate batching
+    // ICE candidate batching (OUTBOUND — ours, awaiting the next flush)
     QTimer m_candidateBatchTimer;
     QMap<QString, std::vector<std::pair<std::string, std::string>>> m_pendingCandidates;
+
+    // INBOUND candidates parked until a peer for their (sender, callId)
+    // exists. Bounded and TTL'd so a peer that never materialises (or a
+    // hostile sender) can't grow this unbounded.
+    struct InboundCandidateBucket {
+        qint64 firstSeenMs = 0;
+        std::vector<std::pair<std::string, std::string>> items;
+    };
+    QMap<QPair<QString, QString>, InboundCandidateBucket> m_inboundCandidates;
+    static constexpr qint64 kInboundCandidateTtlMs = 30000;
+    static constexpr int kMaxInboundCandidatesPerCall = 128;
+    static constexpr int kMaxInboundCandidateCalls = 32;
 
     float m_micLevel = 0.0f;
 

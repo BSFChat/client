@@ -1,45 +1,40 @@
 #include "voice/AudioMixer.h"
+
 #include <algorithm>
 #include <cstring>
 
-void AudioMixer::addFrame(const QString& peerId, const std::vector<int16_t>& pcm) {
-    auto& buf = m_peers[peerId];
-    buf.frames.push_back(pcm);
-    while (buf.frames.size() > kMaxBufferedFrames) {
-        buf.frames.pop_front();
-    }
+AudioMixer::AudioMixer(int frameSamples)
+    : m_frameSamples(frameSamples > 0 ? frameSamples : kFrameSamples)
+{
+    m_accum.assign(static_cast<size_t>(m_frameSamples), 0);
+    m_out.assign(static_cast<size_t>(m_frameSamples), 0);
 }
 
-void AudioMixer::removePeer(const QString& peerId) {
-    m_peers.remove(peerId);
+void AudioMixer::begin() {
+    std::fill(m_accum.begin(), m_accum.end(), int64_t{0});
+    m_sources = 0;
 }
 
-std::vector<int16_t> AudioMixer::mix() {
-    std::vector<int16_t> mixed(kFrameSamples, 0);
-
-    if (m_peers.isEmpty()) return mixed;
-
-    std::vector<int32_t> accum(kFrameSamples, 0);
-    bool hasData = false;
-
-    for (auto it = m_peers.begin(); it != m_peers.end(); ++it) {
-        auto& buf = it.value();
-        if (buf.frames.empty()) continue;
-
-        hasData = true;
-        const auto& frame = buf.frames.front();
-        size_t samples = std::min(frame.size(), static_cast<size_t>(kFrameSamples));
-        for (size_t i = 0; i < samples; ++i) {
-            accum[i] += frame[i];
-        }
-        buf.frames.pop_front();
+void AudioMixer::add(const int16_t* pcm, int samples) {
+    if (!pcm || samples <= 0) return;
+    const int n = std::min(samples, m_frameSamples);
+    for (int i = 0; i < n; ++i) {
+        m_accum[static_cast<size_t>(i)] += static_cast<int64_t>(pcm[i]);
     }
+    m_sources++;
+}
 
-    if (hasData) {
-        for (int i = 0; i < kFrameSamples; ++i) {
-            mixed[i] = static_cast<int16_t>(std::clamp(accum[i], (int32_t)-32768, (int32_t)32767));
-        }
+const std::vector<int16_t>& AudioMixer::finish() {
+    if (m_sources == 0) {
+        std::memset(m_out.data(), 0, m_out.size() * sizeof(int16_t));
+        return m_out;
     }
-
-    return mixed;
+    constexpr int64_t kMin = -32768;
+    constexpr int64_t kMax = 32767;
+    for (int i = 0; i < m_frameSamples; ++i) {
+        m_out[static_cast<size_t>(i)] =
+            static_cast<int16_t>(std::clamp(m_accum[static_cast<size_t>(i)],
+                                            kMin, kMax));
+    }
+    return m_out;
 }

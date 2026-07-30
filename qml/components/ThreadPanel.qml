@@ -21,6 +21,11 @@ Item {
     // Root of the thread — populated when opened. Empty ⇒ panel hidden.
     property string rootEventId: ""
 
+    // A @mention anchor inside a reply was clicked. The drawer has no
+    // profile card of its own, so the host (MessageView) opens the one
+    // it already owns.
+    signal userLinkClicked(string userId, string displayName)
+
     // Trigger a re-fetch of thread replies when the MessageModel
     // ticks count. threadMessages is a function call, not a signal,
     // so we drive re-eval via this counter.
@@ -150,8 +155,19 @@ Item {
                 }
 
                 delegate: Item {
+                    id: threadRow
                     width: ListView.view.width
                     height: row.implicitHeight + Theme.sp.s3 * 2
+
+                    // Same rule the timeline uses (see MessageView.qml's
+                    // MessageBubble): a reply naming you or the room is
+                    // worth spotting at a glance. The parent preview comes
+                    // from eventPreview(), which carries no mention data,
+                    // hence the undefined-safe reads.
+                    readonly property bool mentionsMe:
+                        !modelData._isParent
+                        && ((modelData.mentionsMe || false)
+                            || (modelData.mentionsRoom || false))
 
                     Rectangle {
                         anchors.fill: parent
@@ -162,10 +178,24 @@ Item {
                         radius: Theme.r1
                         color: modelData._isParent ? Qt.rgba(Theme.accent.r,
                                    Theme.accent.g, Theme.accent.b, 0.06)
-                                : "transparent"
+                                : threadRow.mentionsMe
+                                  ? Qt.rgba(Theme.warn.r, Theme.warn.g,
+                                            Theme.warn.b, 0.10)
+                                  : "transparent"
                         border.width: modelData._isParent ? 1 : 0
                         border.color: Qt.rgba(Theme.accent.r, Theme.accent.g,
                                               Theme.accent.b, 0.5)
+
+                        // Left bar, matching the timeline's mention marker.
+                        Rectangle {
+                            visible: threadRow.mentionsMe
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            width: 2
+                            radius: Theme.r1
+                            color: Theme.warn
+                        }
 
                         ColumnLayout {
                             id: row
@@ -198,12 +228,46 @@ Item {
                                 }
                             }
                             Text {
-                                text: modelData.body || ""
+                                id: bodyText
+                                // MessageModel bakes the highlighted mention
+                                // anchors into formattedBody, so rendering the
+                                // plain body here would print the bare
+                                // "@Name" token and lose the highlight the
+                                // timeline shows. The parent preview carries
+                                // no markup, so it stays PlainText.
+                                readonly property string html:
+                                    modelData.formattedBody || ""
+                                text: html !== "" ? html : (modelData.body || "")
+                                textFormat: html !== "" ? Text.RichText
+                                                        : Text.PlainText
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.sm
                                 color: Theme.fg1
                                 wrapMode: Text.Wrap
                                 Layout.fillWidth: true
+                                onLinkActivated: (link) => {
+                                    // Same routing MessageBubble does, so a
+                                    // link behaves identically in the drawer.
+                                    if (link.indexOf("bsfchat://user/") === 0) {
+                                        var uid = decodeURIComponent(link.substring(
+                                            "bsfchat://user/".length));
+                                        threadPanel.userLinkClicked(uid, uid);
+                                    } else if (link.indexOf("bsfchat://channel/") === 0) {
+                                        if (serverManager.activeServer)
+                                            serverManager.activeServer.activateRoomByName(
+                                                link.substring("bsfchat://channel/".length));
+                                    } else if (link.indexOf("bsfchat://message/") === 0) {
+                                        serverManager.openMessageLink(link);
+                                    } else {
+                                        Qt.openUrlExternally(link);
+                                    }
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    acceptedButtons: Qt.NoButton
+                                    cursorShape: bodyText.hoveredLink
+                                        ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                }
                             }
                         }
                     }

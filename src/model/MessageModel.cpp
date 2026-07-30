@@ -1,8 +1,11 @@
 #include "model/MessageModel.h"
 
 #include <QDateTime>
+#include <QSet>
 #include <bsfchat/Constants.h>
 #include "util/MarkdownParser.h"
+#include "util/MediaUrl.h"
+#include "util/MentionRenderer.h"
 
 MessageModel::MessageModel(QObject* parent)
     : QAbstractListModel(parent)
@@ -56,7 +59,9 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
     case ReplyPreviewRole: return msg.replyPreview;
     case ReactionsRole: return buildReactionsList(msg);
     case ThreadRootIdRole: return msg.threadRootId;
-    case ThreadReplyCountRole: return threadReplyCount(msg.eventId);
+    case ThreadReplyCountRole: return m_threadReplyCounts.value(msg.eventId, 0);
+    case MentionsMeRole: return msg.mentionsMe;
+    case MentionsRoomRole: return msg.mentionsRoom;
     default: return {};
     }
 }
@@ -85,7 +90,9 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {ReplyPreviewRole, "replyPreview"},
         {ReactionsRole, "reactions"},
         {ThreadRootIdRole, "threadRootId"},
-        {ThreadReplyCountRole, "threadReplyCount"}
+        {ThreadReplyCountRole, "threadReplyCount"},
+        {MentionsMeRole, "mentionsMe"},
+        {MentionsRoomRole, "mentionsRoom"}
     };
 }
 
@@ -126,17 +133,56 @@ QVariantMap MessageModel::reactionSummary(int idx) const
     return out;
 }
 
+int MessageModel::rowForEventId(const QString& eventId) const
+{
+    if (eventId.isEmpty()) return -1;
+    const int row = m_indexByEventId.value(eventId, -1);
+    // Defensive: an index that has drifted out of range must not be handed
+    // to index()/m_messages. Treating it as "not found" degrades to the
+    // pre-index behaviour for that one lookup instead of crashing.
+    if (row < 0 || row >= m_messages.size()) return -1;
+    return row;
+}
+
+QStringList MessageModel::mentionSetFor(const QString& eventId) const
+{
+    // O(1) via m_indexByEventId — never a linear scan.
+    const int row = rowForEventId(eventId);
+    if (row < 0) return {};
+    QStringList out = m_messages[row].mentionedUserIds;
+    // Re-flatten the room-wide flag back to the sentinel the send paths speak.
+    // Spelled literally rather than via MatrixClient::kRoomMentionSentinel:
+    // this translation unit is also linked into test_models, which has no Qt
+    // Network dependency, and MatrixClient.h would drag one in.
+    const QString kRoomSentinel = QStringLiteral("@room");
+    if (m_messages[row].mentionsRoom && !out.contains(kRoomSentinel)) {
+        out.append(kRoomSentinel);
+    }
+    return out;
+}
+
+void MessageModel::rebuildIndices()
+{
+    m_indexByEventId.clear();
+    m_threadReplyCounts.clear();
+    m_indexByEventId.reserve(m_messages.size());
+    for (int i = 0; i < m_messages.size(); ++i) {
+        m_indexByEventId.insert(m_messages[i].eventId, i);
+        if (!m_messages[i].threadRootId.isEmpty())
+            ++m_threadReplyCounts[m_messages[i].threadRootId];
+    }
+}
+
 QString MessageModel::ownReactionEventId(const QString& targetEventId, const QString& emoji,
                                           const QString& userId) const
 {
-    for (const auto& msg : m_messages) {
-        if (msg.eventId != targetEventId) continue;
-        auto it = msg.reactionsByEmoji.find(emoji);
-        if (it == msg.reactionsByEmoji.end()) return {};
-        for (const auto& p : it.value()) {
-            if (p.first == userId) return p.second;
-        }
-        return {};
+    const int row = rowForEventId(targetEventId);
+    if (row < 0) return {};
+    const auto& msg = m_messages[row];
+    auto it = msg.reactionsByEmoji.find(emoji);
+    if (it == msg.reactionsByEmoji.end()) return {};
+    for (const auto& p : it.value()) {
+        if (p.first == userId) return p.second;
     }
     return {};
 }
@@ -144,28 +190,22 @@ QString MessageModel::ownReactionEventId(const QString& targetEventId, const QSt
 int MessageModel::applyReactionToTarget(const QString& targetEventId, const QString& emoji,
                                          const QString& userId, const QString& reactionEventId)
 {
-    for (int i = 0; i < m_messages.size(); ++i) {
-        if (m_messages[i].eventId != targetEventId) continue;
-        auto& bucket = m_messages[i].reactionsByEmoji[emoji];
-        // Dedupe by reaction event id — sync may replay.
-        for (const auto& p : bucket) {
-            if (p.second == reactionEventId) return i;
-        }
-        bucket.append(qMakePair(userId, reactionEventId));
-        m_reactionIndex.insert(reactionEventId,
-                               ReactionRef{targetEventId, emoji, userId});
-        return i;
+    const int row = rowForEventId(targetEventId);
+    if (row < 0) return -1;
+    auto& bucket = m_messages[row].reactionsByEmoji[emoji];
+    // Dedupe by reaction event id — sync may replay.
+    for (const auto& p : bucket) {
+        if (p.second == reactionEventId) return row;
     }
-    return -1;
+    bucket.append(qMakePair(userId, reactionEventId));
+    m_reactionIndex.insert(reactionEventId,
+                           ReactionRef{targetEventId, emoji, userId});
+    return row;
 }
 
 int MessageModel::indexForEventId(const QString& eventId) const
 {
-    if (eventId.isEmpty()) return -1;
-    for (int i = m_messages.size() - 1; i >= 0; --i) {
-        if (m_messages[i].eventId == eventId) return i;
-    }
-    return -1;
+    return rowForEventId(eventId);
 }
 
 QVariantList MessageModel::threadReplies(const QString& rootEventId) const
@@ -179,6 +219,13 @@ QVariantList MessageModel::threadReplies(const QString& rootEventId) const
         row[QStringLiteral("sender")] = m.sender;
         row[QStringLiteral("senderDisplayName")] = m.senderDisplayName;
         row[QStringLiteral("body")] = m.body;
+        // The thread panel renders the same prose the timeline does, so it
+        // needs the mention-rendered markup and the highlight flags too —
+        // otherwise a reply that pings you looks inert in the drawer and
+        // highlighted in the channel behind it.
+        row[QStringLiteral("formattedBody")] = m.formattedBody;
+        row[QStringLiteral("mentionsMe")] = m.mentionsMe;
+        row[QStringLiteral("mentionsRoom")] = m.mentionsRoom;
         row[QStringLiteral("timestamp")] = m.timestamp;
         row[QStringLiteral("msgtype")] = m.msgtype;
         row[QStringLiteral("isOwnMessage")] = m.isOwnMessage;
@@ -190,11 +237,7 @@ QVariantList MessageModel::threadReplies(const QString& rootEventId) const
 int MessageModel::threadReplyCount(const QString& rootEventId) const
 {
     if (rootEventId.isEmpty()) return 0;
-    int n = 0;
-    for (const auto& m : m_messages) {
-        if (m.threadRootId == rootEventId) ++n;
-    }
-    return n;
+    return m_threadReplyCounts.value(rootEventId, 0);
 }
 
 QVariantList MessageModel::editHistory(const QString& eventId) const
@@ -272,10 +315,8 @@ QVariantList MessageModel::searchMessages(const QString& query, int limit) const
 
 QString MessageModel::resolveMediaUrl(const QString& mxcUri) const
 {
-    if (!mxcUri.startsWith("mxc://") || m_homeserver.isEmpty())
-        return {};
-    QString path = mxcUri.mid(6); // strip "mxc://"
-    return m_homeserver + QString::fromUtf8(bsfchat::api_path::kMediaDownload) + path;
+    return bsfchat::client::buildMediaDownloadUrl(
+        m_homeserver, m_accessToken ? *m_accessToken : QString(), mxcUri);
 }
 
 MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& event, const QString& ownUserId) const
@@ -309,15 +350,13 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
     }
 
     if (!entry.replyToEventId.isEmpty()) {
-        // Resolve the target from the already-ingested timeline, walking
-        // backward on the assumption the reply target is usually recent.
-        for (int i = m_messages.size() - 1; i >= 0; --i) {
-            if (m_messages[i].eventId != entry.replyToEventId) continue;
-            entry.replyToSender = m_messages[i].senderDisplayName;
-            QString preview = m_messages[i].body;
+        // Resolve the target from the already-ingested timeline.
+        const int target = rowForEventId(entry.replyToEventId);
+        if (target >= 0) {
+            entry.replyToSender = m_messages[target].senderDisplayName;
+            QString preview = m_messages[target].body;
             if (preview.size() > 80) preview = preview.left(80) + "…";
             entry.replyPreview = preview;
-            break;
         }
     }
 
@@ -342,12 +381,115 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
         }
     }
 
+    // --- m.mentions (MSC3952) ------------------------------------------
+    // The authoritative mention set: who the author says they pinged, and
+    // whether it was an @room broadcast. We trust it for *routing* only —
+    // the notification decision and the highlight — never for markup.
+    if (event.content.data.contains("m.mentions")
+        && event.content.data["m.mentions"].is_object()) {
+        const auto& mentions = event.content.data["m.mentions"];
+        if (mentions.contains("user_ids") && mentions["user_ids"].is_array()) {
+            for (const auto& u : mentions["user_ids"]) {
+                if (!u.is_string()) continue;
+                const QString uid = QString::fromStdString(u.get<std::string>());
+                if (uid.isEmpty() || entry.mentionedUserIds.contains(uid)) continue;
+                entry.mentionedUserIds.append(uid);
+                if (!ownUserId.isEmpty() && uid == ownUserId) entry.mentionsMe = true;
+            }
+        }
+        if (mentions.contains("room") && mentions["room"].is_boolean())
+            entry.mentionsRoom = mentions["room"].get<bool>();
+    }
+
+    // --- server-reconciled edits ---------------------------------------
+    // The server folds edits into the original event before handing it to us:
+    // `content` is already the latest text, `unsigned.m.relations.m.replace`
+    // identifies the edit that produced it, and
+    // `unsigned.bsfchat.original_content` carries the pre-edit content.
+    //
+    // Reading the bundle is what makes "Show edit history" correct on a fresh
+    // load. Before this, the original arrived looking un-edited, and the
+    // replacement — which is *also* an ordinary timeline event — then pushed
+    // the current body into `history` and re-set it as the current body, so
+    // the history popover showed the same text twice and never the original.
+    if (event.unsigned_data.has_value()) {
+        const auto& unsignedData = event.unsigned_data->data;
+        QString replaceEventId;
+        qint64 replaceTs = 0;
+        if (unsignedData.contains("m.relations")
+            && unsignedData["m.relations"].is_object()) {
+            const auto& relations = unsignedData["m.relations"];
+            if (relations.contains("m.replace")
+                && relations["m.replace"].is_object()) {
+                const auto& replace = relations["m.replace"];
+                replaceEventId = QString::fromStdString(
+                    replace.value("event_id", ""));
+                if (replace.contains("origin_server_ts")
+                    && replace["origin_server_ts"].is_number()) {
+                    replaceTs = replace["origin_server_ts"].get<qint64>();
+                }
+            }
+        }
+        if (!replaceEventId.isEmpty()) {
+            entry.edited = true;
+            // Fall back to the original's own ts rather than leaving 0, which
+            // the history popover would render as the epoch.
+            entry.editedAt = replaceTs > 0 ? replaceTs : entry.timestamp;
+            // Marking the edit as already-applied is what suppresses the
+            // duplicate when its sibling event reaches appendEvent().
+            entry.appliedEdits.insert(replaceEventId);
+            if (unsignedData.contains("bsfchat.original_content")
+                && unsignedData["bsfchat.original_content"].is_object()) {
+                const auto& original = unsignedData["bsfchat.original_content"];
+                const QString originalBody = QString::fromStdString(
+                    original.value("body", ""));
+                if (!originalBody.isEmpty())
+                    entry.history.append({originalBody, entry.timestamp});
+            }
+        }
+    }
+
     // If no formatted_body from server, apply local markdown rendering
     if (entry.formattedBody.isEmpty() && !entry.body.isEmpty() && entry.msgtype == "m.text") {
         entry.formattedBody = MarkdownParser::toHtml(entry.body);
     }
+    applyMentionMarkup(entry);
 
     return entry;
+}
+
+bool MessageModel::isReplacementEvent(const bsfchat::RoomEvent& event)
+{
+    const auto& data = event.content.data;
+    if (!data.contains("m.relates_to") || !data["m.relates_to"].is_object())
+        return false;
+    return data["m.relates_to"].value("rel_type", "") == "m.replace";
+}
+
+void MessageModel::applyMentionMarkup(MessageEntry& entry) const
+{
+    if (entry.mentionedUserIds.isEmpty() && !entry.mentionsRoom) return;
+    // Media rows render a filename, not prose; there is nothing to highlight
+    // and formattedBody is not shown for them.
+    if (entry.msgtype == "m.image" || entry.msgtype == "m.file"
+        || entry.msgtype == "m.audio" || entry.msgtype == "m.video") return;
+
+    QVector<bsfchat::client::MentionTarget> targets;
+    targets.reserve(entry.mentionedUserIds.size());
+    for (const QString& uid : entry.mentionedUserIds) {
+        targets.append({uid, resolveDisplayName(uid),
+                        !m_ownUserId.isEmpty() && uid == m_ownUserId});
+    }
+
+    // renderMentions requires already-escaped markup. When the sender supplied
+    // no formatted_body and markdown rendering didn't kick in (e.g. m.notice),
+    // escape the plain body ourselves rather than handing it raw text — the
+    // renderer would otherwise match tokens against unescaped input and the
+    // result would be interpreted as RichText.
+    QString base = entry.formattedBody.isEmpty() ? entry.body.toHtmlEscaped()
+                                                 : entry.formattedBody;
+    entry.formattedBody = bsfchat::client::renderMentions(
+        base, targets, entry.mentionsRoom);
 }
 
 void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& ownUserId)
@@ -396,22 +538,20 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
         if (it == m_reactionIndex.end()) return;
         ReactionRef ref = it.value();
         m_reactionIndex.erase(it);
-        for (int i = 0; i < m_messages.size(); ++i) {
-            if (m_messages[i].eventId != ref.targetEventId) continue;
-            auto bIt = m_messages[i].reactionsByEmoji.find(ref.emoji);
-            if (bIt == m_messages[i].reactionsByEmoji.end()) return;
-            auto& bucket = bIt.value();
-            for (int j = 0; j < bucket.size(); ++j) {
-                if (bucket[j].second == target) {
-                    bucket.removeAt(j);
-                    break;
-                }
+        const int row = rowForEventId(ref.targetEventId);
+        if (row < 0) return;
+        auto bIt = m_messages[row].reactionsByEmoji.find(ref.emoji);
+        if (bIt == m_messages[row].reactionsByEmoji.end()) return;
+        auto& bucket = bIt.value();
+        for (int j = 0; j < bucket.size(); ++j) {
+            if (bucket[j].second == target) {
+                bucket.removeAt(j);
+                break;
             }
-            if (bucket.isEmpty()) m_messages[i].reactionsByEmoji.erase(bIt);
-            auto idx = index(i);
-            emit dataChanged(idx, idx, {ReactionsRole});
-            return;
         }
+        if (bucket.isEmpty()) m_messages[row].reactionsByEmoji.erase(bIt);
+        auto idx = index(row);
+        emit dataChanged(idx, idx, {ReactionsRole});
         return;
     }
 
@@ -439,53 +579,83 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
         // sync/backfill will bring the original, and we'll see this edit
         // again or via its own m_new_content chain. Keeping edits in the
         // timeline would double-render the message.
-        for (int i = 0; i < m_messages.size(); ++i) {
-            if (m_messages[i].eventId != targetId) continue;
-            // Prefer m.new_content; fall back to stripping the "* " prefix.
-            QString newBody;
-            QString newFormatted;
-            if (data.contains("m.new_content") && data["m.new_content"].is_object()) {
-                const auto& nc = data["m.new_content"];
-                newBody = QString::fromStdString(nc.value("body", ""));
-                newFormatted = QString::fromStdString(nc.value("formatted_body", ""));
-            } else {
-                QString raw = QString::fromStdString(data.value("body", ""));
-                if (raw.startsWith("* ")) raw = raw.mid(2);
-                newBody = raw;
-            }
-            if (newFormatted.isEmpty() && !newBody.isEmpty()
-                && m_messages[i].msgtype == "m.text") {
-                newFormatted = MarkdownParser::toHtml(newBody);
-            }
-            // Stash the previous body into history so "Show edit
-            // history" can recover it. We push EITHER the pristine
-            // original (before any edit) or the last edit — so the
-            // user sees every distinct version.
-            qint64 prevTs = m_messages[i].edited
-                ? m_messages[i].editedAt : m_messages[i].timestamp;
-            m_messages[i].history.append({m_messages[i].body, prevTs});
-            m_messages[i].body = newBody;
-            m_messages[i].formattedBody = newFormatted;
-            m_messages[i].edited = true;
-            m_messages[i].editedAt = event.origin_server_ts;
-            auto idx = index(i);
-            emit dataChanged(idx, idx, {BodyRole, FormattedBodyRole, EditedRole});
-            return;
-        }
+        const int i = rowForEventId(targetId);
         // Target not found — ignore silently.
+        if (i < 0) return;
+
+        // Already reflected in the target's body? Then this sibling carries no
+        // news. Two ways that happens:
+        //   * The server reconciled the edit before sending us the original,
+        //     and recorded this event id in unsigned.m.relations.m.replace.
+        //     Applying it again would seed `history` with the CURRENT text and
+        //     "Show edit history" would list the same body twice.
+        //   * Sync replayed the same replacement event.
+        // A *later* edit has a different event id and still lands below, which
+        // is what keeps live editing working while the user watches the room.
+        const QString editEventId = QString::fromStdString(event.event_id);
+        if (!editEventId.isEmpty()
+            && m_messages[i].appliedEdits.contains(editEventId)) return;
+
+        // Prefer m.new_content; fall back to stripping the "* " prefix.
+        QString newBody;
+        QString newFormatted;
+        if (data.contains("m.new_content") && data["m.new_content"].is_object()) {
+            const auto& nc = data["m.new_content"];
+            newBody = QString::fromStdString(nc.value("body", ""));
+            newFormatted = QString::fromStdString(nc.value("formatted_body", ""));
+        } else {
+            QString raw = QString::fromStdString(data.value("body", ""));
+            if (raw.startsWith("* ")) raw = raw.mid(2);
+            newBody = raw;
+        }
+        if (newFormatted.isEmpty() && !newBody.isEmpty()
+            && m_messages[i].msgtype == "m.text") {
+            newFormatted = MarkdownParser::toHtml(newBody);
+        }
+        // Stash the previous body into history so "Show edit
+        // history" can recover it. We push EITHER the pristine
+        // original (before any edit) or the last edit — so the
+        // user sees every distinct version.
+        qint64 prevTs = m_messages[i].edited
+            ? m_messages[i].editedAt : m_messages[i].timestamp;
+        m_messages[i].history.append({m_messages[i].body, prevTs});
+        m_messages[i].body = newBody;
+        m_messages[i].formattedBody = newFormatted;
+        m_messages[i].edited = true;
+        m_messages[i].editedAt = event.origin_server_ts;
+        if (!editEventId.isEmpty()) m_messages[i].appliedEdits.insert(editEventId);
+        // The edit re-wrote the body, which threw away the mention anchors the
+        // previous rendering had baked in. Re-apply from the entry's recorded
+        // mention set so an edited message keeps its highlights.
+        applyMentionMarkup(m_messages[i]);
+        auto idx = index(i);
+        emit dataChanged(idx, idx, {BodyRole, FormattedBodyRole, EditedRole});
         return;
     }
 
-    // Regular new message — dedupe + append.
+    // Regular new message — dedupe + append. The index is authoritative for
+    // the dedupe: sync replays the same event id often enough that this was
+    // a full scan per inbound message.
     QString eventId = QString::fromStdString(event.event_id);
-    for (const auto& msg : m_messages) {
-        if (msg.eventId == eventId) return;
-    }
+    if (m_indexByEventId.contains(eventId)) return;
 
     beginInsertRows(QModelIndex(), m_messages.size(), m_messages.size());
     m_messages.append(eventToEntry(event, ownUserId));
+    m_indexByEventId.insert(eventId, m_messages.size() - 1);
+    const QString threadRoot = m_messages.last().threadRootId;
+    if (!threadRoot.isEmpty()) ++m_threadReplyCounts[threadRoot];
     endInsertRows();
     emit countChanged();
+
+    // A thread reply changes its root's reply badge. Previously that only
+    // refreshed when some unrelated change happened to repaint the root row.
+    if (!threadRoot.isEmpty()) {
+        const int rootRow = rowForEventId(threadRoot);
+        if (rootRow >= 0) {
+            auto rootIdx = index(rootRow);
+            emit dataChanged(rootIdx, rootIdx, {ThreadReplyCountRole});
+        }
+    }
 
     // Drain any reactions we received before this message landed.
     auto pIt = m_pendingReactions.find(eventId);
@@ -515,17 +685,24 @@ void MessageModel::prependEvents(const QVector<bsfchat::RoomEvent>& events, cons
 {
     m_ownUserId = ownUserId;
     QVector<MessageEntry> newEntries;
+    QSet<QString> queued;
     for (const auto& event : events) {
         if (event.type != std::string(bsfchat::event_type::kRoomMessage))
             continue;
+        // Edit siblings are not messages. /messages returns them alongside the
+        // originals, and this path never applied them — so every edit in the
+        // fetched page showed up as its own junk row rendering the "* new text"
+        // fallback body, directly above the message it had already been folded
+        // into. There is nothing to apply either: the original arrives from the
+        // same page already reconciled, carrying the bundle eventToEntry reads.
+        if (isReplacementEvent(event)) continue;
         QString eventId = QString::fromStdString(event.event_id);
-        bool duplicate = false;
-        for (const auto& msg : m_messages) {
-            if (msg.eventId == eventId) { duplicate = true; break; }
-        }
-        if (!duplicate) {
-            newEntries.append(eventToEntry(event, ownUserId));
-        }
+        // Against both the loaded rows and the batch itself: overlapping
+        // /messages pages can repeat an id inside a single call, which the
+        // old m_messages-only scan let through.
+        if (m_indexByEventId.contains(eventId) || queued.contains(eventId)) continue;
+        queued.insert(eventId);
+        newEntries.append(eventToEntry(event, ownUserId));
     }
 
     if (newEntries.isEmpty()) return;
@@ -534,6 +711,9 @@ void MessageModel::prependEvents(const QVector<bsfchat::RoomEvent>& events, cons
     for (int i = newEntries.size() - 1; i >= 0; --i) {
         m_messages.prepend(newEntries[i]);
     }
+    // Every existing row index shifted by newEntries.size(), so patching the
+    // index incrementally would cost the same as rebuilding it.
+    rebuildIndices();
     endInsertRows();
     emit countChanged();
 }
@@ -557,6 +737,8 @@ void MessageModel::clear()
 {
     beginResetModel();
     m_messages.clear();
+    m_indexByEventId.clear();
+    m_threadReplyCounts.clear();
     m_pendingReactions.clear();
     m_reactionIndex.clear();
     endResetModel();
@@ -586,15 +768,38 @@ QString MessageModel::resolveDisplayName(const QString& userId) const
 
 void MessageModel::refreshDisplayNames()
 {
-    bool any = false;
+    // Called from the sync path for every m.room.member event that carries a
+    // changed displayname, so it runs in bursts. It used to repaint the
+    // entire model — dataChanged(row 0 .. row n-1) — for a single user's
+    // rename, which in a busy channel means every delegate rebuilding while
+    // messages are still arriving. Emit only the rows that actually changed,
+    // coalesced into contiguous ranges.
+    QVector<QPair<int, int>> ranges;
     for (int i = 0; i < m_messages.size(); ++i) {
         QString resolved = resolveDisplayName(m_messages[i].sender);
-        if (resolved != m_messages[i].senderDisplayName) {
-            m_messages[i].senderDisplayName = resolved;
-            any = true;
+        if (resolved == m_messages[i].senderDisplayName) continue;
+        m_messages[i].senderDisplayName = resolved;
+        if (!ranges.isEmpty() && ranges.last().second == i - 1) {
+            ranges.last().second = i;
+        } else {
+            ranges.append({i, i});
         }
     }
-    if (any && !m_messages.isEmpty()) {
-        emit dataChanged(index(0), index(m_messages.size() - 1), {SenderDisplayNameRole});
+    if (ranges.isEmpty()) return;
+
+    // One rename usually touches a handful of runs (a person's messages are
+    // clustered). A pathological case — an initial member-state batch that
+    // renames everybody — would otherwise emit hundreds of signals, each
+    // with its own QML round trip, so collapse to a single span past a
+    // threshold. Still bounded by the changed rows rather than the model.
+    constexpr int kMaxRanges = 24;
+    if (ranges.size() > kMaxRanges) {
+        const int first = ranges.first().first;
+        const int last = ranges.last().second;
+        emit dataChanged(index(first), index(last), {SenderDisplayNameRole});
+        return;
+    }
+    for (const auto& r : ranges) {
+        emit dataChanged(index(r.first), index(r.second), {SenderDisplayNameRole});
     }
 }

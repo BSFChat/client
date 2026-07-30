@@ -14,6 +14,7 @@
 
 class MatrixClient;
 class SyncLoop;
+class LocalCache;
 class RoomListModel;
 class MessageModel;
 class MemberListModel;
@@ -215,11 +216,23 @@ public:
                                       const QStringList& mentionedUserIds);
     // Edit a previously-sent message in the currently-active room. Server
     // rejects if the caller isn't the original sender.
-    Q_INVOKABLE void editMessage(const QString& eventId, const QString& newBody);
+    //
+    // `formattedBody`/`mentionedUserIds` are optional and are carried into
+    // m.new_content so an edit doesn't strip the message's mention highlight.
+    // They cannot ADD a mention badge — the server refuses to record mention
+    // rows for an m.replace, by design. See MatrixClient::editMessage.
+    Q_INVOKABLE void editMessage(const QString& eventId, const QString& newBody,
+                                  const QString& formattedBody = QString(),
+                                  const QStringList& mentionedUserIds = {});
     // Send `body` into the currently-active room as a reply pointing at
     // `targetEventId`. The UI composer calls this when the reply banner is
     // active; no server-side support is needed beyond arbitrary content.
-    Q_INVOKABLE void replyToMessage(const QString& targetEventId, const QString& body);
+    //
+    // Mentions in a reply are honoured in full (badge + push), because a reply
+    // is an ordinary new message as far as the server's mention pipeline goes.
+    Q_INVOKABLE void replyToMessage(const QString& targetEventId, const QString& body,
+                                     const QString& formattedBody = QString(),
+                                     const QStringList& mentionedUserIds = {});
     // Forward the message identified by sourceEventId (in the active room)
     // into destRoomId on this server. Builds the attribution prefix from
     // the message model + RoomListModel.
@@ -240,6 +253,42 @@ public:
     // make it active. No-op if there's no match. Used by the
     // #channel-mention click handler.
     Q_INVOKABLE void activateRoomByName(const QString& name);
+
+    // ── Server-backed message search ──────────────────────────────────────
+    //
+    // Issues POST /_matrix/client/v3/search. Results arrive on
+    // searchResultsReady / searchErrored, never as a return value — a search box
+    // fires one of these per keystroke.
+    //
+    // `nextBatch` empty requests the first page. Pass the `nextBatch` from a
+    // previous searchResultsReady to append the following page; the signal
+    // reports `appended` so the UI knows whether to replace or extend its list.
+    //
+    // The server does the permission filtering (only channels you can see) and
+    // the query sanitising, so there is nothing to escape here.
+    Q_INVOKABLE void searchMessages(const QString& searchTerm, int limit = 30,
+                                     const QString& nextBatch = QString());
+    // Switch to `roomId` (if not already active) and then ask the message view
+    // to scroll to `eventId`. Search spans every channel you can see, so a
+    // result is frequently not in the room currently on screen.
+    Q_INVOKABLE void jumpToRoomEvent(const QString& roomId, const QString& eventId);
+
+    // ── Per-room notification level ───────────────────────────────────────
+    //
+    // "all" / "mentions" / "none". This was local-only (QSettings
+    // notifMode/<roomId>), which meant the server had no idea what to push and
+    // the choice didn't follow the user to another device.
+    //
+    // The local copy is kept as the synchronous read path — NotificationManager
+    // consults it on every inbound message and cannot wait on a round trip — so
+    // it becomes a cache of the server's value rather than the source of truth.
+    // `setRoomNotifyLevel` writes locally first (so the UI is instant) and then
+    // PUTs; a rejected PUT rolls the local value back and reports via
+    // notifyLevelFailed.
+    Q_INVOKABLE void setRoomNotifyLevel(const QString& roomId, const QString& level);
+    // Pull the server's value for one room. Fires notifyLevelChanged once the
+    // answer lands (and only if it actually differs from the local cache).
+    Q_INVOKABLE void refreshRoomNotifyLevel(const QString& roomId);
 
     // Build a self-contained link to a message: bsfchat://message/<server>/<room>/<event>.
     // Safe to call with any event id in the active room — we percent-encode
@@ -521,6 +570,23 @@ signals:
     // scroll to a specific event. MessageView listens and calls
     // positionViewAtIndex on the matching row, if loaded.
     void scrollToEventRequested(const QString& eventId);
+    // Search results, already flattened for display. Each entry is
+    // {eventId, roomId, roomName, sender, body, timestamp, msgtype}.
+    // `appended` is true when this is a subsequent page and the UI should extend
+    // rather than replace. `nextBatch` is "" when there are no further pages.
+    // `total` is the server's full match count, which can exceed what's loaded.
+    void searchResultsReady(const QVariantList& results, int total,
+                            const QStringList& highlights,
+                            const QString& nextBatch, bool appended);
+    // A search could not be completed. `message` is already user-facing.
+    void searchErrored(const QString& message);
+    // The effective notify level for `roomId` changed (either because the user
+    // set it, or because the server's answer disagreed with the local cache).
+    // QML rebinds the context-menu checkmarks on this.
+    void notifyLevelChanged(const QString& roomId, const QString& level);
+    // Server refused a notify-level write; the local value has already been
+    // rolled back to what it was.
+    void notifyLevelFailed(const QString& roomId, const QString& error);
     // Fired after a /messages response is absorbed into the MessageModel.
     // MessageView listens to drive the "paginate-until-found" loop for
     // reply-jumps whose target wasn't in the initial timeline.
@@ -542,6 +608,23 @@ private:
 
     MatrixClient* m_client;
     SyncLoop* m_syncLoop;
+    // Persisted room-state + sync-token cache. Its only job is to let
+    // startSync() resume incrementally instead of asking the server for a
+    // full initial sync on every launch.
+    LocalCache* m_cache;
+    // True only while a cached snapshot is being replayed through
+    // processSyncResponse(). Suppresses the two things in there that must
+    // react to *server* syncs and not to a local replay: the first-sync
+    // room prune, and writing the snapshot straight back to the cache.
+    bool m_hydratingFromCache = false;
+    // True once we have resumed from a persisted token, i.e. the first
+    // server sync of this session is an incremental delta rather than the
+    // whole world. Cleared if the token is later abandoned.
+    bool m_resumedFromCache = false;
+    // startSync() is reachable from four login paths; this keeps the cache
+    // from being reopened and its signal reconnected if any of them run
+    // twice in one session.
+    bool m_cacheWired = false;
     RoomListModel* m_roomListModel;
     MessageModel* m_messageModel;
     MemberListModel* m_memberListModel;
@@ -620,9 +703,28 @@ public:
     QMap<QString, QStringList> m_roomTyping;
     int m_typingGeneration = 0;
 
+    // In-flight search state. `m_searchTerm` is the most recently REQUESTED
+    // term; a response naming anything else is stale and dropped (the search box
+    // fires per keystroke and replies can complete out of order).
+    QString m_searchTerm;
+    // @mxid → display name for a search hit, falling back to the localpart.
+    // Search spans rooms, so MemberListModel (active room only) can't serve it.
+    QString displayNameForSender(const QString& userId) const;
+
+    // roomId → notify level as it was before an in-flight PUT, so a rejected
+    // write can be undone instead of leaving the local cache claiming a
+    // preference the server refused.
+    QMap<QString, QString> m_pendingNotifyLevelRollback;
+
     // Voice state
     QString m_activeVoiceRoomId;
     QString m_voiceError;
+    // True between voice/join succeeding and the TURN-config reply
+    // landing. MatrixClient reports every voice failure through the one
+    // generic voiceError signal, and a failed TURN fetch is the only one
+    // that must unwind the whole join (otherwise the user is a ghost in
+    // the channel with no engine) — this flag disambiguates it.
+    bool m_voiceTurnFetchPending = false;
     QTimer* m_voiceErrorTimer = nullptr;
     float m_micLevel = 0.0f;
     bool m_micSilent = false;

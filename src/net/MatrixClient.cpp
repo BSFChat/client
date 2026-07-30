@@ -1,5 +1,7 @@
 #include "net/MatrixClient.h"
 
+#include "util/MediaUrl.h"
+
 #include <QDateTime>
 #include <QDebug>
 #include <QJsonArray>
@@ -386,6 +388,36 @@ void MatrixClient::sendMessage(const QString& roomId, const QString& body)
     });
 }
 
+// Attach the MSC3952 `m.mentions` block to `content`, in place.
+//
+// m.mentions is the modern Matrix mention signal. Servers implementing it
+// elevate push notifications for the listed users regardless of the recipient's
+// notification settings, and BSFChat's server treats it as the ONLY source of
+// mentions (it deliberately does not scrape the body).
+//
+// Shared by the plain-send, reply and edit paths so the three cannot drift on
+// the @room-sentinel handling; the reply and edit paths previously omitted the
+// block entirely, which meant a mention typed into a reply produced no mention
+// row and no badge.
+void MatrixClient::applyMentions(json& content, const QStringList& mentionedUserIds)
+{
+    if (mentionedUserIds.isEmpty()) return;
+    json users = json::array();
+    bool roomMention = false;
+    for (const auto& u : mentionedUserIds) {
+        // "@room" is not a user id — MSC3952 spells a room-wide ping as
+        // the sibling `room` boolean.
+        if (u == kRoomMentionSentinel) { roomMention = true; continue; }
+        users.push_back(u.toStdString());
+    }
+    json mentions = json::object();
+    if (!users.empty()) mentions["user_ids"] = users;
+    // Emitted only when true: an explicit `false` would be noise on every
+    // ordinary mention, and readers treat a missing key as false anyway.
+    if (roomMention) mentions["room"] = true;
+    if (!mentions.empty()) content["m.mentions"] = mentions;
+}
+
 void MatrixClient::sendRichMessage(const QString& roomId, const QString& body,
                                     const QString& formattedBody,
                                     const QStringList& mentionedUserIds)
@@ -404,14 +436,7 @@ void MatrixClient::sendRichMessage(const QString& roomId, const QString& body,
         content["format"] = "org.matrix.custom.html";
         content["formatted_body"] = formattedBody.toStdString();
     }
-    if (!mentionedUserIds.isEmpty()) {
-        // m.mentions is the modern Matrix mention signal (MSC3952).
-        // Servers implementing it elevate push notifications for listed
-        // users regardless of the recipient's notification settings.
-        json users = json::array();
-        for (const auto& u : mentionedUserIds) users.push_back(u.toStdString());
-        content["m.mentions"] = { {"user_ids", users} };
-    }
+    applyMentions(content, mentionedUserIds);
 
     QByteArray reqBody = QByteArray::fromStdString(content.dump());
     auto* reply = makeRequest("PUT", path, reqBody);
@@ -431,7 +456,9 @@ void MatrixClient::sendRichMessage(const QString& roomId, const QString& body,
     });
 }
 
-void MatrixClient::editMessage(const QString& roomId, const QString& targetEventId, const QString& newBody)
+void MatrixClient::editMessage(const QString& roomId, const QString& targetEventId,
+                                const QString& newBody, const QString& formattedBody,
+                                const QStringList& mentionedUserIds)
 {
     static int txnCounter = 0;
     QString txnId = QString("e%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
@@ -446,6 +473,11 @@ void MatrixClient::editMessage(const QString& roomId, const QString& targetEvent
     json newContent;
     newContent["msgtype"] = "m.text";
     newContent["body"] = newBody.toStdString();
+    if (!formattedBody.isEmpty()) {
+        newContent["format"] = "org.matrix.custom.html";
+        newContent["formatted_body"] = formattedBody.toStdString();
+    }
+    applyMentions(newContent, mentionedUserIds);
 
     json content;
     content["msgtype"] = "m.text";
@@ -455,6 +487,23 @@ void MatrixClient::editMessage(const QString& roomId, const QString& targetEvent
         {"rel_type", "m.replace"},
         {"event_id", targetEventId.toStdString()},
     };
+    // m.mentions goes in BOTH places, for two different reasons.
+    //
+    // In m.new_content because the server replaces the original event's content
+    // with m.new_content when it folds the edit in, so that copy is what a
+    // client loading the room fresh sees. Dropping it is what used to make an
+    // edited message silently lose its mention highlight.
+    //
+    // At the top level because that is the copy the server VALIDATES: it reads
+    // m.mentions off the event content, not out of m.new_content, and gates
+    // `room: true` on MENTION_EVERYONE. Without the top-level copy an edit
+    // would be a way to paint an @room pill on a message without holding the
+    // permission — no badge or push would fire (the server skips
+    // record_mentions and push evaluation for every m.replace, so an edit can
+    // never retro-ping a message somebody already read), but every reader would
+    // still see the highlight. Mirroring it means such an edit is refused with
+    // 403, exactly as the original send would have been.
+    applyMentions(content, mentionedUserIds);
 
     QByteArray reqBody = QByteArray::fromStdString(content.dump());
     auto* reply = makeRequest("PUT", path, reqBody);
@@ -475,7 +524,9 @@ void MatrixClient::editMessage(const QString& roomId, const QString& targetEvent
 }
 
 void MatrixClient::replyToMessage(const QString& roomId, const QString& body,
-                                    const QString& targetEventId)
+                                    const QString& targetEventId,
+                                    const QString& formattedBody,
+                                    const QStringList& mentionedUserIds)
 {
     static int txnCounter = 0;
     QString txnId = QString("r%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
@@ -489,9 +540,18 @@ void MatrixClient::replyToMessage(const QString& roomId, const QString& body,
     json content;
     content["msgtype"] = "m.text";
     content["body"] = body.toStdString();
+    if (!formattedBody.isEmpty()) {
+        content["format"] = "org.matrix.custom.html";
+        content["formatted_body"] = formattedBody.toStdString();
+    }
     content["m.relates_to"] = {
         {"m.in_reply_to", {{"event_id", targetEventId.toStdString()}}},
     };
+    // A reply is an ordinary new send as far as the server is concerned, so the
+    // full mention pipeline applies: mention rows, highlight_count, push. This
+    // was previously omitted, which is why mentioning somebody inside a reply
+    // produced no badge for them at all.
+    applyMentions(content, mentionedUserIds);
 
     QByteArray reqBody = QByteArray::fromStdString(content.dump());
     auto* reply = makeRequest("PUT", path, reqBody);
@@ -718,12 +778,8 @@ void MatrixClient::uploadMedia(const QByteArray& data, const QString& contentTyp
 
 QString MatrixClient::mediaDownloadUrl(const QString& mxcUri) const
 {
-    // Convert mxc://server/mediaId to http(s)://homeserver/_matrix/media/v3/download/server/mediaId
-    if (!mxcUri.startsWith("mxc://"))
-        return {};
-
-    QString path = mxcUri.mid(6); // strip "mxc://"
-    return m_homeserver + QString::fromUtf8(bsfchat::api_path::kMediaDownload) + path;
+    // mxc://server/mediaId -> http(s)://homeserver/_matrix/media/v3/download/server/mediaId?access_token=...
+    return bsfchat::client::buildMediaDownloadUrl(m_homeserver, m_accessToken, mxcUri);
 }
 
 void MatrixClient::getProfile(const QString& userId)
@@ -833,6 +889,97 @@ void MatrixClient::sendReadMarker(const QString& roomId)
     connect(reply, &QNetworkReply::finished, this, [reply]() {
         reply->deleteLater();
         // Fire and forget — server pushes new count via sync
+    });
+}
+
+void MatrixClient::searchMessages(const QString& searchTerm, int limit,
+                                   const QString& nextBatch)
+{
+    // No api_path constant for this yet — protocol/ is owned elsewhere, so the
+    // path is spelled here rather than adding one.
+    static constexpr QLatin1StringView kSearchPath{"/_matrix/client/v3/search"};
+
+    json body;
+    // The server requires search_categories.room_events; anything else is a
+    // 400. `order_by` defaults to "rank" server-side, which is what a search box
+    // wants — most relevant first, not most recent.
+    json roomEvents;
+    roomEvents["search_term"] = searchTerm.toStdString();
+    roomEvents["filter"] = json{{"limit", limit}};
+    body["search_categories"] = json{{"room_events", std::move(roomEvents)}};
+    if (!nextBatch.isEmpty()) body["next_batch"] = nextBatch.toStdString();
+
+    auto* reply = makeRequest("POST", QString(kSearchPath),
+                              QByteArray::fromStdString(body.dump()));
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, searchTerm, nextBatch]() {
+        reply->deleteLater();
+        const auto data = reply->readAll();
+        const int status = reply->attribute(
+            QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
+        // A protocol error still has a body worth parsing (Matrix puts errcode /
+        // error in it), so only a genuinely bodyless transport failure — DNS,
+        // connection refused, TLS — takes the searchFailed path.
+        if (reply->error() != QNetworkReply::NoError && data.isEmpty()) {
+            emit searchFailed(searchTerm, reply->errorString());
+            return;
+        }
+        emit searchResult(searchTerm, nextBatch,
+                          bsfchat::client::parseSearchResponse(status, data));
+    });
+}
+
+// Path builder shared by the notify-level GET and PUT. No api_path constant
+// exists for the bsfchat.* namespace and protocol/ is owned elsewhere.
+static QString notifyLevelPath(const QString& roomId)
+{
+    return QStringLiteral("/_matrix/client/v3/bsfchat/rooms/")
+           + QString::fromUtf8(QUrl::toPercentEncoding(roomId))
+           + QStringLiteral("/notify_level");
+}
+
+void MatrixClient::getRoomNotifyLevel(const QString& roomId)
+{
+    if (roomId.isEmpty()) return;
+    auto* reply = makeRequest("GET", notifyLevelPath(roomId));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
+        reply->deleteLater();
+        const auto data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit roomNotifyLevelError(roomId, QString::fromUtf8(data));
+            return;
+        }
+        try {
+            auto j = json::parse(data.toStdString());
+            emit roomNotifyLevelResult(roomId,
+                QString::fromStdString(j.value("level", "")),
+                j.value("is_default", true));
+        } catch (const std::exception& e) {
+            emit roomNotifyLevelError(roomId, QString::fromStdString(e.what()));
+        }
+    });
+}
+
+void MatrixClient::setRoomNotifyLevel(const QString& roomId, const QString& level)
+{
+    if (roomId.isEmpty() || level.isEmpty()) return;
+    json body;
+    body["level"] = level.toStdString();
+    auto* reply = makeRequest("PUT", notifyLevelPath(roomId),
+                              QByteArray::fromStdString(body.dump()));
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, roomId, level]() {
+        reply->deleteLater();
+        const auto data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit roomNotifyLevelError(roomId, QString::fromUtf8(data));
+            return;
+        }
+        // Echo the accepted value back through the same signal the GET uses, so
+        // a listener has one code path. is_default is false by construction —
+        // an explicit PUT is exactly what stops it being the default.
+        emit roomNotifyLevelResult(roomId, level, false);
     });
 }
 

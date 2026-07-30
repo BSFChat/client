@@ -4,8 +4,10 @@
 #include "model/RoomListModel.h"
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
+#include "util/MentionBadge.h"
 #include "identity/IdentityClient.h"
 #include "core/Settings.h"
+#include "store/LocalCache.h"
 #ifdef BSFCHAT_VOICE_ENABLED
 #include "voice/VoiceEngine.h"
 #include "voice/NotificationSounds.h"
@@ -31,6 +33,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     : QObject(parent)
     , m_client(new MatrixClient(this))
     , m_syncLoop(new SyncLoop(m_client, this))
+    , m_cache(new LocalCache(this))
 #ifdef BSFCHAT_VOICE_ENABLED
     , m_sounds(new NotificationSounds(this))
 #endif
@@ -105,6 +108,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     }
     m_messageModel->setDisplayNameCache(&m_userDisplayNames);
     m_memberListModel->setDisplayNameCache(&m_userDisplayNames);
+    m_messageModel->setAccessTokenSource(&m_accessToken);
 
     // Connect sync signals
     connect(m_syncLoop, &SyncLoop::syncCompleted, this, &ServerConnection::processSyncResponse);
@@ -228,6 +232,78 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         emit olderMessagesLoaded();
     });
 
+    // ── Server-backed message search ──────────────────────────────────────
+    connect(m_client, &MatrixClient::searchResult, this,
+            [this](const QString& term, const QString& requestedNextBatch,
+                   const bsfchat::client::SearchResponse& resp) {
+        // Drop stale replies. One request goes out per keystroke and they can
+        // complete out of order, so without this a slow response for "ali" can
+        // land after the fast one for "alice" and overwrite it.
+        if (term != m_searchTerm) return;
+        if (!resp.ok) {
+            emit searchErrored(resp.errorMessage);
+            return;
+        }
+        QVariantList rows;
+        rows.reserve(resp.hits.size());
+        for (const auto& hit : resp.hits) {
+            QVariantMap row;
+            row[QStringLiteral("eventId")] = hit.eventId;
+            row[QStringLiteral("roomId")] = hit.roomId;
+            // Resolved here rather than in the parser: the channel name lives in
+            // RoomListModel, and search spans every channel the user can see, so
+            // a result frequently isn't in the room currently on screen.
+            row[QStringLiteral("roomName")] =
+                m_roomListModel->roomDisplayName(hit.roomId);
+            row[QStringLiteral("sender")] = displayNameForSender(hit.sender);
+            row[QStringLiteral("senderId")] = hit.sender;
+            row[QStringLiteral("body")] = hit.body;
+            row[QStringLiteral("msgtype")] = hit.msgtype;
+            row[QStringLiteral("timestamp")] = hit.timestamp;
+            rows.append(row);
+        }
+        emit searchResultsReady(rows, resp.count, resp.highlights, resp.nextBatch,
+                                /*appended=*/!requestedNextBatch.isEmpty());
+    });
+    connect(m_client, &MatrixClient::searchFailed, this,
+            [this](const QString& term, const QString& error) {
+        if (term != m_searchTerm) return;
+        emit searchErrored(error);
+    });
+
+    // ── Per-room notify level ─────────────────────────────────────────────
+    connect(m_client, &MatrixClient::roomNotifyLevelResult, this,
+            [this](const QString& roomId, const QString& level, bool isDefault) {
+        m_pendingNotifyLevelRollback.remove(roomId);
+        if (level.isEmpty()) return;
+        if (!m_settings) return;
+        // An `is_default` answer is the server saying "no explicit choice
+        // recorded". Mirroring it locally is still right: the local cache exists
+        // to answer "what should I do with this message", and the server's
+        // default is the correct answer to that question. What we must not do is
+        // treat it as a user choice and PUT it back.
+        Q_UNUSED(isDefault);
+        if (m_settings->roomNotificationMode(roomId) == level) return;
+        m_settings->setRoomNotificationMode(roomId, level);
+        emit notifyLevelChanged(roomId, level);
+    });
+    connect(m_client, &MatrixClient::roomNotifyLevelError, this,
+            [this](const QString& roomId, const QString& error) {
+        // Roll the local value back so the UI can't keep showing a preference
+        // the server never accepted.
+        auto it = m_pendingNotifyLevelRollback.find(roomId);
+        if (it != m_pendingNotifyLevelRollback.end()) {
+            if (m_settings) m_settings->setRoomNotificationMode(roomId, *it);
+            const QString restored = *it;
+            m_pendingNotifyLevelRollback.erase(it);
+            emit notifyLevelChanged(roomId, restored);
+            emit notifyLevelFailed(roomId, error);
+            return;
+        }
+        // A failed GET is not worth a user-facing error — the local cache stays
+        // as it is and the next open retries.
+    });
+
     // Typing timers
     // Debounce timer: prevents sending typing=true more than once per 4 seconds
     m_typingTimer = new QTimer(this);
@@ -281,7 +357,11 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 #ifdef BSFCHAT_VOICE_ENABLED
         m_sounds->playJoin();
 #endif
-        // Fetch TURN config to start WebRTC
+        // Fetch TURN config to start WebRTC. Flagged so the generic
+        // voiceError handler below can tell a failed TURN fetch (which
+        // must unwind the whole join) apart from the many other things
+        // that emit voiceError.
+        m_voiceTurnFetchPending = true;
         m_client->getTurnConfig();
     });
 
@@ -306,9 +386,37 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             emit viewingVoiceRoomChanged();
         }
         setVoiceError(msg);
+
+        // A failed TURN fetch used to stop here: activeVoiceRoomId was
+        // already set, m.call.member was active=true, and the 5 s member
+        // poll kept refreshing the server-side heartbeat — so the ghost
+        // reaper never removed the user. They sat in the channel with no
+        // VoiceEngine, and every inbound signaling event for them was
+        // dropped by the `m_voiceEngine` guard in processSyncResponse.
+        // There is no way back from that state, so unwind the join
+        // completely and tell the server to drop the membership.
+        //
+        // The flag narrows this to the one HTTP round trip between join
+        // and turnConfigResult. It is not surgical — any voiceError that
+        // lands inside that window (e.g. an unluckily-timed member poll
+        // failure) also unwinds — but in that window the server is
+        // failing voice requests anyway, so aborting is the right call.
+        if (m_voiceTurnFetchPending && !m_activeVoiceRoomId.isEmpty()) {
+            m_voiceTurnFetchPending = false;
+            qWarning("[voice] TURN configuration unavailable — unwinding join "
+                     "for %s", qPrintable(m_activeVoiceRoomId));
+            const QString roomId = m_activeVoiceRoomId;
+            if (m_viewingVoiceRoom) {
+                m_viewingVoiceRoom = false;
+                emit viewingVoiceRoomChanged();
+            }
+            teardownVoiceSession();   // clears activeVoiceRoomId, stops the poll
+            m_client->leaveVoice(roomId);
+        }
     });
 
     connect(m_client, &MatrixClient::turnConfigResult, this, [this](const QJsonObject& config) {
+        m_voiceTurnFetchPending = false;
 #ifdef BSFCHAT_VOICE_ENABLED
         if (!m_activeVoiceRoomId.isEmpty()) {
             // VoiceEngine::start() is one-shot per instance — a stale
@@ -393,7 +501,22 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
                 setVoiceError(message);
             });
 
-            m_voiceEngine->start(m_activeVoiceRoomId, m_voiceMembers, config);
+            // start() refuses sessions that cannot possibly connect
+            // (currently: relay-only policy with no TURN server). It has
+            // already emitted a human-readable error() → setVoiceError,
+            // and started nothing. Unwind exactly as the failed-TURN-
+            // fetch path does, so the user isn't left as a ghost in the
+            // channel with no engine behind them.
+            if (!m_voiceEngine->start(m_activeVoiceRoomId, m_voiceMembers, config)) {
+                const QString roomId = m_activeVoiceRoomId;
+                if (m_viewingVoiceRoom) {
+                    m_viewingVoiceRoom = false;
+                    emit viewingVoiceRoomChanged();
+                }
+                teardownVoiceSession();
+                m_client->leaveVoice(roomId);
+                return;
+            }
             // Apply PTT mute immediately on join so an open-mic user
             // switching to PTT before a call starts silent rather
             // than live.
@@ -652,6 +775,46 @@ void ServerConnection::disconnectFromServer()
 
 void ServerConnection::startSync()
 {
+    // Resume where the last session left off when we can. An initial /sync
+    // is the most expensive request the server serves — full state plus a
+    // VIEW_CHANNEL check for every joined room — and the client used to pay
+    // for one on every launch because LocalCache was a stub.
+    //
+    // Every condition below is a reason to fall back to the old behaviour,
+    // because a wrong resume is far worse than a slow one: an incremental
+    // sync carries only state that *changed*, so a client that resumes
+    // without a matching snapshot comes up with an empty sidebar.
+    if (!m_cacheWired && !m_userId.isEmpty()
+        && qEnvironmentVariableIntValue("BSFCHAT_NO_SYNC_CACHE") == 0
+        && m_cache->open(m_userId, m_serverUrl)) {
+        m_cacheWired = true;
+        const QString token = m_cache->syncToken();
+        const qint64 ageMs = m_cache->syncTokenAgeMs();
+        // Snapshots go stale in ways an incremental sync will never correct:
+        // a room we lost VIEW_CHANNEL on, or were removed from, simply stops
+        // appearing rather than arriving as a delta. Bound the exposure.
+        constexpr qint64 kMaxSnapshotAgeMs = 7LL * 24 * 60 * 60 * 1000;
+        bsfchat::SyncResponse hydrated;
+        if (LocalCache::isValidSyncToken(token)
+            && ageMs >= 0 && ageMs < kMaxSnapshotAgeMs
+            && m_cache->buildHydrationSync(hydrated)) {
+            m_hydratingFromCache = true;
+            // Replayed through the normal path on purpose: the state-event
+            // ingestion in processSyncResponse is long and grows, and a
+            // second copy of it here would drift within a release.
+            processSyncResponse(hydrated);
+            m_hydratingFromCache = false;
+            m_resumedFromCache = true;
+            m_syncLoop->setSince(token);
+        }
+        // If the loop ends up rejecting that token, drop it so the next
+        // launch doesn't retry it, and let the resulting full sync prune
+        // rooms again.
+        connect(m_syncLoop, &SyncLoop::sinceTokenAbandoned, this, [this] {
+            m_cache->clearSyncToken();
+            m_resumedFromCache = false;
+        });
+    }
     m_syncLoop->start();
 }
 
@@ -787,13 +950,40 @@ void ServerConnection::sendRichMessage(const QString& body,
     m_client->sendRichMessage(m_activeRoomId, body, formattedBody, mentionedUserIds);
 }
 
-void ServerConnection::editMessage(const QString& eventId, const QString& newBody)
+void ServerConnection::editMessage(const QString& eventId, const QString& newBody,
+                                    const QString& formattedBody,
+                                    const QStringList& mentionedUserIds)
 {
     if (m_activeRoomId.isEmpty() || eventId.isEmpty() || newBody.trimmed().isEmpty()) return;
-    m_client->editMessage(m_activeRoomId, eventId, newBody);
+
+    // Carry the ORIGINAL message's mention set forward, unioned with whatever
+    // the composer tracked during this edit.
+    //
+    // Necessary because the server folds an edit's m.new_content in as the
+    // event's content: a payload with no m.mentions makes the message's
+    // highlight disappear for anyone who loads the room fresh afterwards, even
+    // though the mention rows (and hence the badge) are untouched. The composer
+    // only tracks mentions picked from autocomplete in THIS editing session, so
+    // without this an ordinary typo fix would blank the highlight.
+    //
+    // Union rather than replace, because that is what the server will actually
+    // honour: it refuses to narrow a mention set on edit (an absent block can't
+    // be told apart from a deliberately-cleared one), so a client that dropped
+    // entries would only ever be lying about the state the server holds.
+    QStringList mentions = mentionedUserIds;
+    if (m_messageModel) {
+        for (const auto& uid : m_messageModel->mentionSetFor(eventId)) {
+            if (!mentions.contains(uid)) mentions.append(uid);
+        }
+    }
+
+    m_client->editMessage(m_activeRoomId, eventId, newBody, formattedBody,
+                          mentions);
 }
 
-void ServerConnection::replyToMessage(const QString& targetEventId, const QString& body)
+void ServerConnection::replyToMessage(const QString& targetEventId, const QString& body,
+                                       const QString& formattedBody,
+                                       const QStringList& mentionedUserIds)
 {
     if (m_activeRoomId.isEmpty() || targetEventId.isEmpty()
         || body.trimmed().isEmpty()) return;
@@ -803,7 +993,8 @@ void ServerConnection::replyToMessage(const QString& targetEventId, const QStrin
     m_typingStopTimer->stop();
     m_client->setTyping(m_activeRoomId, m_userId, false);
 
-    m_client->replyToMessage(m_activeRoomId, body, targetEventId);
+    m_client->replyToMessage(m_activeRoomId, body, targetEventId, formattedBody,
+                             mentionedUserIds);
 }
 
 void ServerConnection::forwardMessage(const QString& sourceEventId, const QString& destRoomId)
@@ -1050,6 +1241,79 @@ void ServerConnection::showTextView()
     if (!m_viewingVoiceRoom) return;
     m_viewingVoiceRoom = false;
     emit viewingVoiceRoomChanged();
+}
+
+QString ServerConnection::displayNameForSender(const QString& userId) const
+{
+    auto it = m_userDisplayNames.find(userId);
+    if (it != m_userDisplayNames.end() && !it->isEmpty()) return *it;
+    // Fall back to the localpart rather than showing a raw mxid.
+    if (userId.startsWith('@')) {
+        const int colon = userId.indexOf(':');
+        if (colon > 1) return userId.mid(1, colon - 1);
+    }
+    return userId;
+}
+
+void ServerConnection::searchMessages(const QString& searchTerm, int limit,
+                                       const QString& nextBatch)
+{
+    const QString term = searchTerm.trimmed();
+    // Record the term BEFORE issuing, so the result handler can recognise its
+    // own reply and discard anything belonging to an abandoned query.
+    m_searchTerm = term;
+    if (term.isEmpty()) {
+        // Clearing the box is not an error and not a query — reset to empty
+        // rather than asking the server about "".
+        emit searchResultsReady({}, 0, {}, QString(), false);
+        return;
+    }
+    m_client->searchMessages(term, limit, nextBatch);
+}
+
+void ServerConnection::jumpToRoomEvent(const QString& roomId, const QString& eventId)
+{
+    if (eventId.isEmpty()) return;
+    // Deferred exactly as the message-link path in ServerManager does it: the
+    // room switch clears and repopulates the MessageModel, and MessageView has
+    // to have processed those signals before the scroll request means anything.
+    if (!roomId.isEmpty() && roomId != m_activeRoomId) {
+        setActiveRoom(roomId);
+    }
+    QMetaObject::invokeMethod(this, [this, eventId]() {
+        emit scrollToEventRequested(eventId);
+    }, Qt::QueuedConnection);
+}
+
+void ServerConnection::setRoomNotifyLevel(const QString& roomId, const QString& level)
+{
+    if (roomId.isEmpty()) return;
+    if (level != QStringLiteral("all") && level != QStringLiteral("mentions")
+        && level != QStringLiteral("none")) {
+        return;
+    }
+    // Write locally first so the menu checkmark flips immediately;
+    // NotificationManager reads the local copy synchronously on every inbound
+    // message and can't wait for a round trip. Remember the previous value so a
+    // rejected PUT can be rolled back rather than leaving the two disagreeing.
+    // Note we PUT even when the local value already matches: "already correct
+    // locally" says nothing about the server having it, and this setting was
+    // local-only until now, so every existing user's first interaction is
+    // exactly that case.
+    QString previous = level;
+    if (m_settings) {
+        previous = m_settings->roomNotificationMode(roomId);
+        m_settings->setRoomNotificationMode(roomId, level);
+    }
+    m_pendingNotifyLevelRollback.insert(roomId, previous);
+    emit notifyLevelChanged(roomId, level);
+    m_client->setRoomNotifyLevel(roomId, level);
+}
+
+void ServerConnection::refreshRoomNotifyLevel(const QString& roomId)
+{
+    if (roomId.isEmpty()) return;
+    m_client->getRoomNotifyLevel(roomId);
 }
 
 QJsonArray ServerConnection::voiceMembers() const
@@ -1843,6 +2107,9 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
         // notification suppression below doesn't fire for events the
         // user has already seen in the live session.
         qint64 activeRoomNewestMsgTs = 0;
+        // Mentions of us seen arriving in THIS batch. Only used when the server
+        // reports no highlight_count for the room — see the apply site below.
+        int witnessedMentions = 0;
 
         // Process timeline events
         for (const auto& event : joinedRoom.timeline.events) {
@@ -1976,6 +2243,12 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                                 }
                             }
                         }
+                        // m.mentions.room — an @room broadcast names everyone
+                        // in the channel, so it counts as a mention of us.
+                        if (m.contains("room") && m["room"].is_boolean()
+                            && m["room"].get<bool>()) {
+                            mentionsMe = true;
+                        }
                     }
                     // Suppress notifications for events the user has
                     // already read in this room. Without this guard,
@@ -2003,6 +2276,28 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                         emit messageReceived(roomId, displayName, body, eventId,
                                              mentionsMe);
                     }
+                    // Mention badge — LEGACY FALLBACK ONLY. Applied below, and
+                    // only when this sync carried no
+                    // unread_notifications.highlight_count for the room (old
+                    // server, or a cache-hydration replay). Counting witnessed
+                    // arrivals can only ever under-report: a session that
+                    // resumed from a persisted sync token cannot see mentions
+                    // older than its resume token.
+                    //
+                    // Deliberately NOT gated on m_firstSyncProcessed: a badge is
+                    // a persistent "there is something here for you" marker, so
+                    // a mention the user missed while offline should still be
+                    // flagged — unlike a toast, which is only ever for live
+                    // traffic.
+                    //
+                    // It IS gated on m_hydratingFromCache: the cached snapshot
+                    // and the catch-up sync that follows it both carry the same
+                    // events, and counting a mention on each pass would double
+                    // the badge on every launch.
+                    if (mentionsMe && !m_hydratingFromCache && eventTs > readTs
+                        && roomId != m_activeRoomId) {
+                        ++witnessedMentions;
+                    }
                 }
             }
 
@@ -2012,7 +2307,29 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 QString sender = QString::fromStdString(event.sender);
                 if (sender != m_userId) {
                     const auto& c = event.content.data;
-                    if (type == QString::fromUtf8(bsfchat::event_type::kCallInvite)) {
+                    // Call signaling rides the shared room timeline, so
+                    // every participant sees every other participant's
+                    // invites/answers/candidates. Dispatching on
+                    // `sender` alone made C apply an offer A addressed
+                    // to B; since each peer gets its own call id, the
+                    // mismatch then looked like "peer restarted" and
+                    // tore down a healthy connection — voice worked 1:1
+                    // and fell apart at 3+.
+                    //
+                    // Newer clients stamp the recipient in "to". Absent
+                    // (older client) we keep the old sender-only
+                    // behaviour rather than dropping the event, so a
+                    // mixed fleet still connects.
+                    std::string toUser;
+                    if (auto toIt = c.find("to");
+                        toIt != c.end() && toIt->is_string()) {
+                        toUser = toIt->get<std::string>();
+                    }
+                    const bool addressedToUs =
+                        toUser.empty() || toUser == m_userId.toStdString();
+                    if (!addressedToUs) {
+                        // Someone else's signaling — not ours to touch.
+                    } else if (type == QString::fromUtf8(bsfchat::event_type::kCallInvite)) {
                         m_voiceEngine->handleCallInvite(sender,
                             QString::fromStdString(c.value("call_id", "")),
                             c.value("offer", nlohmann::json::object()).value("sdp", ""),
@@ -2068,6 +2385,37 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             }
         } else {
             m_roomListModel->setUnreadCount(roomId, serverUnread);
+        }
+
+        // Mention badge, from unread_notifications.highlight_count.
+        //
+        // The server counts mention rows past the SERVER-side read marker, so it
+        // sees mentions this client never witnessed arriving — which is exactly
+        // the gap the old witnessed-arrivals counter had: a session resuming
+        // from a persisted sync token gets no timeline events for anything older
+        // than its token, so it under-reported every mention from while it was
+        // offline.
+        //
+        // Because the value is ABSOLUTE it needs no m_hydratingFromCache gate:
+        // re-applying the same count is a no-op, unlike an increment. (The cache
+        // snapshot doesn't persist highlight_count anyway, so a hydration replay
+        // falls through to the Increment branch with witnessedMentions pinned at
+        // 0 by the gate in the loop above — i.e. hydration changes nothing and
+        // the first real sync sets the true count.)
+        //
+        // The three-way choice lives in mentionBadgeUpdate() so it can be tested
+        // without a server; see util/MentionBadge.h.
+        const auto badge = bsfchat::client::mentionBadgeUpdate(
+            roomId == m_activeRoomId, joinedRoom.highlight_count, witnessedMentions);
+        switch (badge.action) {
+        case bsfchat::client::MentionBadgeUpdate::Action::SetAbsolute:
+            m_roomListModel->setMentionCount(roomId, badge.value);
+            break;
+        case bsfchat::client::MentionBadgeUpdate::Action::Increment:
+            m_roomListModel->incrementMentionCount(roomId, badge.value);
+            break;
+        case bsfchat::client::MentionBadgeUpdate::Action::None:
+            break;
         }
 
         // Process ephemeral typing events for EVERY joined room so the
@@ -2158,26 +2506,43 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
     m_hasUnread = m_roomListModel->totalUnreadCount() > 0;
     if (m_hasUnread != hadUnread) emit hasUnreadChanged();
 
-    // On the first sync of a session, the server returns every room we can
-    // see. Drop any locally-cached rooms that aren't in this set — this
-    // handles the "user lost VIEW_CHANNEL while offline" case.
-    if (!m_firstSyncProcessed) {
-        QSet<QString> visible;
-        for (const auto& [roomIdStr, _unused] : response.rooms.join) {
-            visible.insert(QString::fromStdString(roomIdStr));
-        }
-        auto removed = m_roomListModel->pruneRoomsNotIn(visible);
-        if (!removed.isEmpty() && removed.contains(m_activeRoomId)) {
-            // Active room was pruned; clear the view.
-            m_activeRoomId.clear();
-            m_activeRoomName.clear();
-            m_activeRoomTopic.clear();
-            emit activeRoomIdChanged();
-            emit activeRoomNameChanged();
-            emit activeRoomTopicChanged();
+    // First sync of a session. Replaying the local snapshot doesn't count:
+    // m_firstSyncProcessed is also what suppresses notifications for the
+    // catch-up batch, and letting a replay consume it would make the first
+    // real sync look like live traffic and toast every message the user
+    // missed — the exact wall of toasts caae92d removed.
+    if (!m_firstSyncProcessed && !m_hydratingFromCache) {
+        // On a genuine initial sync the server returns every room we can
+        // see, so anything locally cached and absent here is a room we lost
+        // VIEW_CHANNEL on (or were removed from) while offline.
+        //
+        // An incremental sync's room set is a *delta*, not the world, so the
+        // same reasoning applied to a resumed session would delete every
+        // room that merely had no new events. Rooms we lost access to
+        // instead linger until the snapshot ages out and we full-sync again.
+        if (!m_resumedFromCache) {
+            QSet<QString> visible;
+            for (const auto& [roomIdStr, _unused] : response.rooms.join) {
+                visible.insert(QString::fromStdString(roomIdStr));
+            }
+            auto removed = m_roomListModel->pruneRoomsNotIn(visible);
+            if (!removed.isEmpty() && removed.contains(m_activeRoomId)) {
+                // Active room was pruned; clear the view.
+                m_activeRoomId.clear();
+                m_activeRoomName.clear();
+                m_activeRoomTopic.clear();
+                emit activeRoomIdChanged();
+                emit activeRoomNameChanged();
+                emit activeRoomTopicChanged();
+            }
         }
         m_firstSyncProcessed = true;
     }
+
+    // Snapshot this sync for the next launch. Skipped while replaying, both
+    // because it would be a no-op write and because the replay carries no
+    // next_batch to record.
+    if (!m_hydratingFromCache) m_cache->recordSync(response);
 }
 
 // ---------------------------------------------------------------------------

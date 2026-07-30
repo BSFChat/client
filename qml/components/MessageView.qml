@@ -992,6 +992,11 @@ Rectangle {
                     reactions: model.reactions || []
                     threadRootId: model.threadRootId || ""
                     threadReplyCount: model.threadReplyCount || 0
+                    // Row-level mention highlight, so a message naming you is
+                    // findable while scrolling — the inline anchor alone is
+                    // easy to miss in a busy channel.
+                    mentionsMe: (model.mentionsMe || false)
+                                || (model.mentionsRoom || false)
                     onThreadOpenRequested: (rootId) => {
                         threadPanel.openFor(rootId);
                     }
@@ -1808,5 +1813,12 @@ Rectangle {
         id: threadPanel
         anchors.fill: parent
         z: 50
+        // Mention anchors inside thread replies reuse the timeline's
+        // profile card rather than the drawer growing its own.
+        onUserLinkClicked: (userId, displayName) => {
+            messageProfileCard.userId = userId;
+            messageProfileCard.profileDisplayName = displayName;
+            messageProfileCard.open();
+        }
     }
 }
