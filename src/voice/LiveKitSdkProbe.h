@@ -23,6 +23,14 @@
 //
 // Everything here is deliberately side-effect-free: no FFI requests, no
 // network, no audio device, no Room. See LiveKitSdkProbe.cpp.
+//
+// NAMING, because it matters here more than usual: the `e2ee*` fields
+// below carry UPSTREAM's name for the API (livekit::E2EEOptions,
+// E2EEManager). They record what the vendored SDK offers. They are not a
+// statement about BSFChat, and the way BSFChat uses that API — a shared
+// key generated and held by the BSFChat server — is NOT end-to-end
+// encryption. Nothing in this struct may be surfaced to a user or
+// paraphrased into a label. Read voice/VoiceEncryption.h first.
 
 #include <QString>
 

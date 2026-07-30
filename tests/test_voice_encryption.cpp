@@ -11,13 +11,91 @@
 //      corrected. The string tests below exist so that cannot recur silently.
 
 #include <QtTest>
+#include <QDirIterator>
+#include <QFile>
 #include <QJsonDocument>
+#include <QRegularExpression>
 
 #include "voice/VoiceEncryption.h"
 
 using namespace voice;
 
 namespace {
+
+// A .qml file split into "what runs" and "what it says".
+//
+// Both halves are needed and they must not be confused. Scanning raw
+// source for a banned word would flag the comment that explains the ban;
+// scanning it for the binding would be satisfied BY that comment — which
+// is not hypothetical, it is what the first version of this file did,
+// and the mutation that deleted the binding passed.
+//
+// So: one pass, comments excluded from both outputs.
+struct QmlScan {
+    QString code;          // source with comments removed
+    QStringList literals;  // string literals appearing in that code
+};
+
+QmlScan scanQml(const QString& src) {
+    QmlScan out;
+    out.code.reserve(src.size());
+    const qsizetype n = src.size();
+    for (int i = 0; i < n; ++i) {
+        const QChar c = src.at(i);
+        const QChar next = (i + 1 < n) ? src.at(i + 1) : QChar();
+
+        if (c == u'/' && next == u'/') {                 // line comment
+            while (i < n && src.at(i) != u'\n') ++i;
+            out.code += u'\n';
+            continue;
+        }
+        if (c == u'/' && next == u'*') {                 // block comment
+            i += 2;
+            while (i + 1 < n && !(src.at(i) == u'*' && src.at(i + 1) == u'/')) ++i;
+            ++i;
+            continue;
+        }
+        if (c == u'"' || c == u'\'' || c == u'`') {      // string literal
+            const QChar quote = c;
+            QString lit;
+            lit += c;
+            ++i;
+            for (; i < n; ++i) {
+                const QChar d = src.at(i);
+                lit += d;
+                if (d == u'\\') {                        // escape: skip next
+                    if (i + 1 < n) lit += src.at(++i);
+                    continue;
+                }
+                if (d == quote) break;
+                // An unterminated literal would otherwise swallow the
+                // rest of the file. Newlines only end ' and " (a
+                // backtick template legitimately spans lines).
+                if (d == u'\n' && quote != u'`') break;
+            }
+            out.literals << lit;
+            out.code += lit;
+            continue;
+        }
+        out.code += c;
+    }
+    return out;
+}
+
+QStringList qmlFiles() {
+    QStringList out;
+    QDirIterator it(QStringLiteral(BSFCHAT_QML_DIR), {QStringLiteral("*.qml")},
+                    QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) out << it.next();
+    out.sort();
+    return out;
+}
+
+QString readAll(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return QString();
+    return QString::fromUtf8(f.readAll());
+}
 
 QJsonObject goodResponse(const QByteArray& key = QByteArray(kSharedKeyBytes, 'k'),
                          const QString& mode = QLatin1String(kEncryptionModeSharedKey)) {
@@ -172,7 +250,7 @@ private slots:
                 const QString lower = s.toLower();
                 // "not end-to-end encryption" is the one legitimate use, so
                 // check for the claim rather than the substring.
-                const int idx = lower.indexOf(QStringLiteral("end-to-end"));
+                const qsizetype idx = lower.indexOf(QStringLiteral("end-to-end"));
                 if (idx >= 0) {
                     const QString before = lower.left(idx);
                     QVERIFY2(before.endsWith(QStringLiteral("not ")) ||
@@ -227,6 +305,156 @@ private slots:
             QVERIFY(!protectionBadge(p).isEmpty());
             QVERIFY(!protectionDetail(p).isEmpty());
         }
+    }
+
+    // ---- Session → protection mapping ------------------------------
+    //
+    // The one place "what did we actually connect with" turns into "what may
+    // we say about it". A caller that picks a label by hand is how the QML
+    // badge ended up hard-coding the mesh protocol.
+
+    void meshIsMeshRegardlessOfAnySharedKey() {
+        // A mesh session has no shared key at all, so the flag must not
+        // reach the answer in either direction.
+        QCOMPARE(protectionForSession(SessionTransport::Mesh, false),
+                 MediaProtection::MeshDtls);
+        QCOMPARE(protectionForSession(SessionTransport::Mesh, true),
+                 MediaProtection::MeshDtls);
+    }
+
+    // An SFU without a key relays media it can read. That must NOT round up
+    // to "encrypted" on the strength of the TLS hop to the relay.
+    void anSfuWithoutAKeyIsLabelledUnencrypted() {
+        QCOMPARE(protectionForSession(SessionTransport::Sfu, false),
+                 MediaProtection::SfuNone);
+    }
+
+    void anSfuWithAKeyIsSharedKeyNotEndToEnd() {
+        QCOMPARE(protectionForSession(SessionTransport::Sfu, true),
+                 MediaProtection::SfuSharedKey);
+    }
+
+    // Failed means "encryption was asked for and could not be set up" — a
+    // decision made before a session exists. Deriving it from a session that
+    // DID start would let a live call display the refusal text.
+    void aStartedSessionIsNeverLabelledFailed() {
+        for (auto t : {SessionTransport::Mesh, SessionTransport::Sfu}) {
+            for (bool key : {false, true}) {
+                QVERIFY(protectionForSession(t, key) != MediaProtection::Failed);
+                QVERIFY(!encryptionFailureIsFatal(protectionForSession(t, key)));
+            }
+        }
+    }
+
+    // ---- The QML-facing surface ------------------------------------
+    //
+    // ServerConnection::voiceProtectionBadge/Detail are one-line wrappers
+    // around the two functions above plus an empty string when no session is
+    // live. Instantiating ServerConnection needs the whole app, so what is
+    // pinned here is (a) the exact strings that surface can produce and (b)
+    // that the QML actually reads it instead of writing its own.
+
+    // The regression check for the property swap: a mesh call must display
+    // exactly what the hard-coded literal used to display.
+    void aMeshCallStillReadsDtlsSctp() {
+        QCOMPARE(protectionBadge(protectionForSession(SessionTransport::Mesh, false)),
+                 QStringLiteral("DTLS · SCTP"));
+    }
+
+    // Same absence rule as noLabelEverClaimsEndToEndEncryption, applied to
+    // the set of strings reachable through the property rather than to the
+    // enum — so a new session state cannot slip a claim through by being
+    // reachable from protectionForSession but forgotten in the loop above.
+    void noStringReachableFromASessionClaimsEndToEnd() {
+        QStringList reachable;
+        for (auto t : {SessionTransport::Mesh, SessionTransport::Sfu}) {
+            for (bool key : {false, true}) {
+                const auto p = protectionForSession(t, key);
+                reachable << protectionBadge(p) << protectionDetail(p);
+            }
+        }
+        // The idle state: no session, no claim. QML hides the badge on this.
+        reachable << QString();
+
+        for (const QString& s : reachable) {
+            const QString lower = s.toLower();
+            const qsizetype idx = lower.indexOf(QStringLiteral("end-to-end"));
+            if (idx >= 0) {
+                const QString before = lower.left(idx);
+                QVERIFY2(before.endsWith(QStringLiteral("not ")) ||
+                             before.endsWith(QStringLiteral("not an ")),
+                         qPrintable(QStringLiteral("'end-to-end' used as a claim in: %1").arg(s)));
+            }
+            QVERIFY2(!lower.contains(QStringLiteral("e2e")), qPrintable(s));
+            QVERIFY2(!lower.contains(QStringLiteral("mls")), qPrintable(s));
+        }
+    }
+
+    // The badge is bound, not written. Without this, deleting the badge
+    // entirely would leave the scan below trivially green — a test passing
+    // because there is nothing left to check.
+    //
+    // Checked against the COMMENT-STRIPPED source. Checking the raw file
+    // was the first version of this test and it did not work: the comment
+    // above the badge names the property, so the assertion held even with
+    // the binding removed.
+    void theVoiceRoomBadgeBindsToTheCppProperty() {
+        const QString src = readAll(QStringLiteral(BSFCHAT_QML_DIR "/components/VoiceRoom.qml"));
+        QVERIFY2(!src.isEmpty(), "VoiceRoom.qml not readable — has it moved?");
+        const QString code = scanQml(src).code;
+        QVERIFY2(code.contains(QStringLiteral("voiceProtectionBadge")),
+                 "VoiceRoom must render ServerConnection.voiceProtectionBadge, "
+                 "not a label of its own");
+        QVERIFY2(code.contains(QStringLiteral("voiceProtectionDetail")),
+                 "the badge's tooltip must render voiceProtectionDetail — the "
+                 "badge alone states a guarantee without its limitation");
+    }
+
+    // No security claim may be written in QML, in any form, ever. The words
+    // live in VoiceEncryption.cpp and reach the UI through a Q_PROPERTY —
+    // that indirection is the only thing that keeps the label honest when the
+    // transport changes underneath it, and it is exactly what was missing
+    // when VoiceRoom.qml hard-coded the mesh protocol.
+    //
+    // Comments are not scanned: they are not shown to anyone, and the ban
+    // would make it impossible to explain the rule where it is needed.
+    void qmlHoldsNoHardCodedSecurityLabel() {
+        const QStringList files = qmlFiles();
+        QVERIFY2(files.size() > 10,
+                 qPrintable(QStringLiteral("only %1 .qml files found under %2 — the "
+                                           "scan is not looking at the real tree")
+                                .arg(files.size()).arg(QStringLiteral(BSFCHAT_QML_DIR))));
+
+        // Tokens that can only be a claim about how media is protected. If a
+        // new user-facing string genuinely needs one of these, add it to
+        // VoiceEncryption.cpp and bind it — do not add it here.
+        static const QStringList banned = {
+            QStringLiteral("mls"),        QStringLiteral("e2e"),
+            QStringLiteral("end-to-end"), QStringLiteral("end to end"),
+            QStringLiteral("srtp"),       QStringLiteral("dtls"),
+            QStringLiteral("sctp"),       QStringLiteral("encrypt"),
+            QStringLiteral("zero-knowledge"),
+        };
+
+        int scanned = 0;
+        for (const QString& path : files) {
+            const QString src = readAll(path);
+            QVERIFY2(!src.isEmpty(), qPrintable(path));
+            for (const QString& lit : scanQml(src).literals) {
+                ++scanned;
+                const QString lower = lit.toLower();
+                for (const QString& bad : banned) {
+                    QVERIFY2(!lower.contains(bad),
+                             qPrintable(QStringLiteral("%1 contains the string %2 — "
+                                                       "security wording belongs in "
+                                                       "voice/VoiceEncryption.cpp, bound "
+                                                       "through a Q_PROPERTY")
+                                            .arg(path, lit)));
+                }
+            }
+        }
+        QVERIFY2(scanned > 100, "string-literal extraction found almost nothing — "
+                                "the regex is broken, not the QML");
     }
 
     // Only a genuine failure interrupts. A deliberately-unencrypted server is

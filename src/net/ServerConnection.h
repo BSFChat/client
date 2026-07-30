@@ -11,6 +11,10 @@
 #include <functional>
 
 #include <bsfchat/MatrixTypes.h>
+// Header-only dependency (QString + QJsonObject), safe in non-voice
+// builds. The .cpp side of it is voice-gated, so every CALL into
+// voice:: below sits behind BSFCHAT_VOICE_ENABLED.
+#include "voice/VoiceEncryption.h"
 
 class MatrixClient;
 class SyncLoop;
@@ -65,6 +69,20 @@ class ServerConnection : public QObject {
     // whenever a text channel becomes active or voice is left.
     Q_PROPERTY(bool viewingVoiceRoom READ viewingVoiceRoom NOTIFY viewingVoiceRoomChanged)
     Q_PROPERTY(QJsonArray voiceMembers READ voiceMembers NOTIFY voiceMembersChanged)
+    // How the CURRENT call's media is protected, as the badge string for
+    // the VoiceRoom header and the long form for its tooltip. Empty
+    // strings when no session is live, so QML hides the badge rather
+    // than asserting a property nothing is providing.
+    //
+    // Both strings come from voice::protectionBadge/protectionDetail and
+    // are NOT written here. That indirection is the point: the QML badge
+    // used to hard-code "DTLS · SCTP", which would have kept claiming the
+    // mesh protocol on an SFU call. Read src/voice/VoiceEncryption.h
+    // before touching any of this — the wording rules live there.
+    Q_PROPERTY(QString voiceProtectionBadge READ voiceProtectionBadge
+                   NOTIFY voiceProtectionChanged)
+    Q_PROPERTY(QString voiceProtectionDetail READ voiceProtectionDetail
+                   NOTIFY voiceProtectionChanged)
     // Remote-video surface registry (VideoStreamRegistry; null when
     // voice is compiled out). QML attaches VideoOutput sinks via its
     // invokables — see VoiceRoom / ParticipantTile.
@@ -126,6 +144,13 @@ public:
     bool voiceMuted() const { return m_voiceMuted; }
     bool voiceDeafened() const { return m_voiceDeafened; }
     bool inVoiceChannel() const { return !m_activeVoiceRoomId.isEmpty(); }
+
+    // Empty until a transport has actually started, and empty again the
+    // moment it stops. Deliberately not "assume mesh until told
+    // otherwise": a badge shown before the session exists is a claim
+    // about a connection that has not been made.
+    QString voiceProtectionBadge() const;
+    QString voiceProtectionDetail() const;
 #ifdef BSFCHAT_VOICE_ENABLED
     // Accessor for the screen-share controller to bind to the
     // currently-running voice engine. Null when no voice session.
@@ -570,6 +595,7 @@ signals:
     void voiceMutedChanged();
     void voiceDeafenedChanged();
     void voiceMembersChanged();
+    void voiceProtectionChanged();
     void micLevelChanged();
     void micSilentChanged();
     void avatarUrlChanged();
@@ -785,6 +811,15 @@ public:
     // consult voiceMode / PTT prefs without a global singleton.
     void setSettings(Settings* settings);
 private:
+    // Media-protection state of the live session. `m_voiceProtection` is
+    // only meaningful while `m_voiceProtectionActive` is true; the two
+    // getters return empty strings otherwise. Set exactly where a
+    // transport starts, cleared exactly where one stops, so the badge
+    // cannot outlive the connection it describes.
+    voice::MediaProtection m_voiceProtection = voice::MediaProtection::SfuNone;
+    bool m_voiceProtectionActive = false;
+    void setVoiceProtection(voice::MediaProtection p);
+    void clearVoiceProtection();
     bool m_voiceDeafened = false;
     QJsonArray m_voiceMembers;
     QTimer* m_voicePollTimer = nullptr;

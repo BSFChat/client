@@ -4,14 +4,39 @@
 
 namespace voice {
 
+MediaProtection protectionForSession(SessionTransport t, bool sfuHasSharedKey) {
+    switch (t) {
+    case SessionTransport::Mesh:
+        // No relay, no shared key, no third party in the media path.
+        // sfuHasSharedKey is meaningless here and is not consulted.
+        return MediaProtection::MeshDtls;
+    case SessionTransport::Sfu:
+        // The key is the whole difference. Without one the relay reads
+        // the media, and SfuNone says so plainly — this must not
+        // collapse into SfuSharedKey "because the SFU is encrypted",
+        // which is true of the TLS hop and irrelevant to the relay.
+        return sfuHasSharedKey ? MediaProtection::SfuSharedKey
+                               : MediaProtection::SfuNone;
+    }
+    return MediaProtection::SfuNone;
+}
+
 QString protectionBadge(MediaProtection p) {
     switch (p) {
     case MediaProtection::MeshDtls:
-        // Unchanged from today, and deliberately so. Accurate: Opus
-        // frames ride an SCTP data channel over libdatachannel's DTLS
-        // 1.2 handshake, peer to peer. There is NO SRTP on this path —
-        // see PeerConnectionManager.cpp:367,559. (server/docs/
-        // livekit-migration.md called it "DTLS-SRTP"; that is wrong.)
+        // Unchanged from today, and deliberately so. Accurate for what
+        // it names: Opus frames ride an SCTP data channel over
+        // libdatachannel's DTLS 1.2 handshake, peer to peer, with no
+        // SRTP — see PeerConnectionManager.cpp:367,559.
+        //
+        // Precisely: no SRTP on the AUDIO path. Video RTP tracks on the
+        // same peer connection DO use SRTP, keyed by the same DTLS
+        // handshake (cmake/Dependencies.cmake:38 vendors libsrtp for
+        // exactly that). So server/docs/livekit-migration.md calling the
+        // whole mesh "DTLS-SRTP" was wrong about audio, and a flat
+        // "there is no SRTP" is wrong about video. The badge understates
+        // rather than overstates, which is the right way round — but if
+        // it is ever reworded, "DTLS" is the part that covers both.
         return QStringLiteral("DTLS · SCTP");
     case MediaProtection::SfuSharedKey:
         // "shared key" is doing real work here. It signals that one key

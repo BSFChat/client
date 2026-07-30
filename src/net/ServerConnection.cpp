@@ -518,6 +518,21 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
                 m_client->leaveVoice(roomId);
                 return;
             }
+
+            // The transport is up — only now does the UI get to say how
+            // this call is protected. Derived from the transport that
+            // actually started rather than assumed, so the LiveKit
+            // branch (when it lands here) cannot inherit the mesh label:
+            // it must call setVoiceProtection with
+            // protectionForSession(SessionTransport::Sfu,
+            // joinConfig.hasKey()), or MediaProtection::Failed if
+            // encryption was expected and could not be set up.
+            setVoiceProtection(voice::protectionForSession(
+                m_voiceEngine->kind() == IVoiceTransport::Kind::LiveKit
+                    ? voice::SessionTransport::Sfu
+                    : voice::SessionTransport::Mesh,
+                /*sfuHasSharedKey=*/false));
+
             // Apply PTT mute immediately on join so an open-mic user
             // switching to PTT before a call starts silent rather
             // than live.
@@ -1441,6 +1456,10 @@ void ServerConnection::leaveVoiceChannel()
 
 void ServerConnection::teardownVoiceSession()
 {
+    // First thing, and outside the voice #ifdef: the badge must not
+    // survive the session by even one event loop turn. Every leave /
+    // switch / kick / failed-start path funnels through here.
+    clearVoiceProtection();
 #ifdef BSFCHAT_VOICE_ENABLED
     if (!m_activeVoiceRoomId.isEmpty()) m_sounds->playLeave();
     if (m_voiceEngine) {
@@ -1588,6 +1607,45 @@ void ServerConnection::clearVoiceError()
     if (m_voiceError.isEmpty()) return;
     m_voiceError.clear();
     emit voiceErrorChanged();
+}
+
+// ---------------------------------------------------------------------
+// Media-protection state — what the VoiceRoom badge is allowed to say
+// ---------------------------------------------------------------------
+// Every string these produce comes from voice/VoiceEncryption.cpp. None
+// is written here, and none may be written in QML. See the header of
+// that file before changing anything in this section.
+
+QString ServerConnection::voiceProtectionBadge() const
+{
+#ifdef BSFCHAT_VOICE_ENABLED
+    if (m_voiceProtectionActive) return voice::protectionBadge(m_voiceProtection);
+#endif
+    // No live transport → no claim. QML hides the badge on empty.
+    return QString();
+}
+
+QString ServerConnection::voiceProtectionDetail() const
+{
+#ifdef BSFCHAT_VOICE_ENABLED
+    if (m_voiceProtectionActive) return voice::protectionDetail(m_voiceProtection);
+#endif
+    return QString();
+}
+
+void ServerConnection::setVoiceProtection(voice::MediaProtection p)
+{
+    if (m_voiceProtectionActive && m_voiceProtection == p) return;
+    m_voiceProtectionActive = true;
+    m_voiceProtection = p;
+    emit voiceProtectionChanged();
+}
+
+void ServerConnection::clearVoiceProtection()
+{
+    if (!m_voiceProtectionActive) return;
+    m_voiceProtectionActive = false;
+    emit voiceProtectionChanged();
 }
 
 void ServerConnection::setSettings(Settings* settings)

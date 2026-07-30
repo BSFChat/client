@@ -40,10 +40,20 @@ namespace voice {
 
 // How media is protected on the wire for the current session.
 enum class MediaProtection {
-    // Mesh: DTLS-SRTP directly between participants. No relay sees the
-    // media at all. Still not end-to-end in the cryptographic sense
-    // people mean by E2EE (no identity verification, no forward
-    // secrecy across membership changes), so it is not labelled as such.
+    // Mesh: peer to peer, no relay in the media path at all. One DTLS
+    // 1.2 handshake per peer PAIR keys everything that rides it, but
+    // the two media types ride it differently, and the badge names
+    // only the audio half:
+    //   audio — Opus frames on an SCTP data channel. No SRTP.
+    //   video — H.264/AV1 RTP on rtc::Tracks, which IS SRTP, keyed by
+    //           that same DTLS handshake (libdatachannel builds it with
+    //           its vendored libsrtp — cmake/Dependencies.cmake:38).
+    // So "DTLS" is the honest common denominator, and a flat "there is
+    // no SRTP here" is true of audio only.
+    //
+    // Still not end-to-end in the cryptographic sense people mean by
+    // E2EE (no identity verification, no forward secrecy across
+    // membership changes), so it is not labelled as such.
     MeshDtls,
     // SFU with a server-minted shared key. The relay cannot read media.
     SfuSharedKey,
@@ -53,6 +63,31 @@ enum class MediaProtection {
     // see encryptionFailureIsFatal() below.
     Failed,
 };
+
+// Which transport actually carries this session's media.
+//
+// Deliberately a small local enum rather than IVoiceTransport::Kind:
+// this unit stays free of the transport headers (libdatachannel,
+// nlohmann, QVideoFrame) so the labelling — the part that has been
+// wrong before — can be unit-tested with nothing but Qt Core.
+enum class SessionTransport {
+    Mesh,
+    Sfu,
+};
+
+// The protection state a LIVE session provides. This is the single
+// mapping from "what did we actually connect with" to "what are we
+// allowed to say about it", so a caller cannot pick a label by hand and
+// get it wrong the way the QML badge did.
+//
+// `sfuHasSharedKey` is the server's answer, not a wish: true only when
+// parseLiveKitJoin() returned a key. It is ignored for Mesh, which has
+// no shared key at all.
+//
+// Never returns Failed — that state means "encryption was requested and
+// could not be set up", which is a decision the caller makes before a
+// session exists, not something derivable from a session that started.
+MediaProtection protectionForSession(SessionTransport t, bool sfuHasSharedKey);
 
 // Short badge text. Fits next to a connection indicator.
 QString protectionBadge(MediaProtection p);

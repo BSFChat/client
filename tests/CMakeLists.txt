@@ -133,6 +133,12 @@ qt_add_executable(test_voice_encryption
     ${CMAKE_SOURCE_DIR}/src/voice/VoiceEncryption.cpp
 )
 target_include_directories(test_voice_encryption PRIVATE ${CMAKE_SOURCE_DIR}/src)
+# The labelling tests also scan the QML tree for hard-coded security
+# strings — the mistake that put "DTLS · SCTP" in VoiceRoom.qml with no
+# C++ behind it. Source path rather than an installed copy: the point is
+# to fail on what someone just wrote, before it is built into anything.
+target_compile_definitions(test_voice_encryption PRIVATE
+    BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml")
 target_link_libraries(test_voice_encryption PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_voice_encryption COMMAND test_voice_encryption)
 
