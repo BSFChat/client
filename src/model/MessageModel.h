@@ -95,6 +95,37 @@ public:
     // preserving-and-unioning here is the behaviour that matches it.
     QStringList mentionSetFor(const QString& eventId) const;
 
+    // THE MENTION SET THAT ACTUALLY NOTIFIED SOMEBODY, for `event`.
+    //
+    // Returns the `m.mentions` object to trust, or an empty object when the
+    // event names nobody. Read this instead of `event.content.data["m.mentions"]`
+    // anywhere the answer drives a highlight, a badge or a toast.
+    //
+    // Why it is not simply the event's content: the server DELIBERATELY records
+    // no mention rows and fires no push for an m.replace
+    // (server/src/api/EventHandler.cpp, at the record_mentions call), because a
+    // replacement lands at a brand-new stream position — past everybody's read
+    // marker — so honouring its mentions would let anyone edit an old,
+    // long-since-read message into a ping with no new message to explain it.
+    // That is the right call, but it splits "what the message says" from "what
+    // was notified": the server folds an edit's m.new_content in as the event's
+    // content, so `content["m.mentions"]` on a reloaded message is the EDIT's
+    // mention set. Rendering a highlight from it shows a pill to somebody who
+    // was never told, which is worse than showing nothing — it looks like a
+    // message they missed.
+    //
+    // The bundle the server sends makes the two distinguishable: an edited
+    // event carries unsigned.m.relations.m.replace plus
+    // unsigned.bsfchat.original_content, and original_content is the ORIGINAL
+    // event's full content — mentions included (see read_event_row in
+    // server/src/store/SqliteStore.cpp). So for an edited event the answer is
+    // the original's block; for everything else it is the event's own.
+    //
+    // Mentions the edit REMOVED stay in the set, deliberately: the server does
+    // not narrow a mention set on edit either (the mention row survives), so
+    // dropping them here would show less than what was notified.
+    static const nlohmann::json& notifiedMentions(const bsfchat::RoomEvent& event);
+
     // Unread-divider helpers. `firstEventIdAfterTs` returns the oldest
     // loaded event whose ts is strictly greater than `tsMs` (empty if
     // none). `newestTimestampMs` returns the newest loaded event's ts

@@ -12,6 +12,7 @@
 #include "util/MediaUrl.h"
 #include "util/MentionBadge.h"
 #include "util/MentionRenderer.h"
+#include "util/ModerationScope.h"
 #include "util/PermissionMath.h"
 #include "util/SearchParser.h"
 
@@ -165,6 +166,38 @@ private:
         if (!userIds.empty()) mentions["user_ids"] = userIds;
         if (roomMention) mentions["room"] = true;
         event.content.data["m.mentions"] = mentions;
+        return event;
+    }
+
+    // A server-reconciled edited event where the ORIGINAL and the CURRENT
+    // content carry different mention sets — the shape that makes "who did this
+    // message actually notify" answerable. An empty vector means the key is
+    // absent entirely, which is how "mentioned nobody" appears on the wire and
+    // is exactly the case an edit-added mention has to be told apart from.
+    bsfchat::RoomEvent makeReconciledMentionEvent(
+        const std::string& eventId, const std::string& sender,
+        const std::string& currentBody, const std::vector<std::string>& currentMentions,
+        const std::string& originalBody, const std::vector<std::string>& originalMentions,
+        bool includeReplaceRelation = true)
+    {
+        auto event = makeMessageEvent(eventId, sender, currentBody, 1000);
+        if (!currentMentions.empty())
+            event.content.data["m.mentions"] = {{"user_ids", currentMentions}};
+
+        nlohmann::json original = {{"msgtype", "m.text"}, {"body", originalBody}};
+        if (!originalMentions.empty())
+            original["m.mentions"] = {{"user_ids", originalMentions}};
+
+        nlohmann::json unsignedData;
+        if (includeReplaceRelation) {
+            unsignedData["m.relations"]["m.replace"] = {
+                {"event_id", eventId + "_edit"},
+                {"sender", sender},
+                {"origin_server_ts", 5000}
+            };
+        }
+        unsignedData["bsfchat.original_content"] = original;
+        event.unsigned_data = bsfchat::EventContent{unsignedData};
         return event;
     }
 
@@ -1110,6 +1143,146 @@ private slots:
         QVERIFY(html.contains("again"));
     }
 
+    // ---- Edit-added mentions -------------------------------------------
+    //
+    // The server records NO mention row and fires NO push for an m.replace
+    // (server/src/api/EventHandler.cpp, at the record_mentions call): a
+    // replacement lands past everybody's read marker, so honouring its mentions
+    // would let anyone edit a long-since-read message into a ping. Correct — but
+    // it splits "what the message says" from "what was notified", and the client
+    // renders the highlight. Editing "hi" into "hi @Josh" used to show Josh a
+    // pill for a notification that was never sent, and only after a reload,
+    // because the server folds the edit's content in as the event's content.
+    //
+    // These four pin the rule: the highlight comes from the mention set the
+    // ORIGINAL SEND carried, which unsigned.bsfchat.original_content preserves.
+
+    void testEditAddedMentionRendersNoHighlight()
+    {
+        MessageModel model;
+        QMap<QString, QString> cache;
+        cache["@josh:server"] = "Josh";
+        model.setDisplayNameCache(&cache);
+        for (int i = 0; i < 4; ++i) {
+            model.appendEvent(makeMessageEvent("$ev" + std::to_string(i),
+                                               "@alice:server", "m", 1000 + i * 1000),
+                              "@josh:server");
+        }
+
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        // Sent as "hi", mentioning nobody; edited into "hi @Josh".
+        model.appendEvent(makeReconciledMentionEvent("$m1", "@alice:server",
+                                                     "hi @Josh", {"@josh:server"},
+                                                     "hi", {}),
+                          "@josh:server");
+
+        auto idx = model.index(4);
+        // The message still shows its post-edit text — this is about the
+        // highlight, not about hiding the edit.
+        QCOMPARE(model.data(idx, MessageModel::BodyRole).toString(),
+                 QStringLiteral("hi @Josh"));
+        QCOMPARE(model.data(idx, MessageModel::MentionsMeRole).toBool(), false);
+        QVERIFY2(!model.data(idx, MessageModel::FormattedBodyRole)
+                      .toString().contains("bsfchat://user/"),
+                 "an edit-added mention rendered a pill for a notification the "
+                 "server deliberately never sent");
+        // Ingest is still a plain insert: no existing row repainted.
+        QCOMPARE(rowsTouched(spy), 0);
+    }
+
+    void testMentionFromTheOriginalSendSurvivesAnEdit()
+    {
+        // The other direction, and the reason this cannot be fixed by simply
+        // dropping mentions on edited events: a real ping that the sender later
+        // fixed a typo in must keep its highlight.
+        MessageModel model;
+        QMap<QString, QString> cache;
+        cache["@josh:server"] = "Josh";
+        model.setDisplayNameCache(&cache);
+        model.appendEvent(makeReconciledMentionEvent("$m1", "@alice:server",
+                                                     "hey @Josh again", {"@josh:server"},
+                                                     "hey @Josh", {"@josh:server"}),
+                          "@josh:server");
+
+        auto idx = model.index(0);
+        QCOMPARE(model.data(idx, MessageModel::MentionsMeRole).toBool(), true);
+        QVERIFY(model.data(idx, MessageModel::FormattedBodyRole)
+                     .toString().contains(">@Josh</a>"));
+    }
+
+    void testEditThatDropsAMentionKeepsTheHighlight()
+    {
+        // The notification already happened and the server does not retract it
+        // — record_mentions is skipped for the replacement, so the original's
+        // mention row stays. Removing the pill here would show LESS than what
+        // was notified, which is the same class of lie in the other direction.
+        MessageModel model;
+        QMap<QString, QString> cache;
+        cache["@josh:server"] = "Josh";
+        model.setDisplayNameCache(&cache);
+        model.appendEvent(makeReconciledMentionEvent("$m1", "@alice:server",
+                                                     "@Josh never mind", {},
+                                                     "@Josh look at this",
+                                                     {"@josh:server"}),
+                          "@josh:server");
+
+        QCOMPARE(model.data(model.index(0), MessageModel::MentionsMeRole).toBool(), true);
+    }
+
+    void testAnUneditedMessageStillUsesItsOwnMentions()
+    {
+        // The redirect keys off the m.replace RELATION, not off the mere
+        // presence of original_content. Without that, an event carrying
+        // original_content for any other reason would silently have its
+        // mentions read from the wrong place — and every ordinary mention in
+        // the room would stop highlighting.
+        MessageModel model;
+        QMap<QString, QString> cache;
+        cache["@josh:server"] = "Josh";
+        model.setDisplayNameCache(&cache);
+        model.appendEvent(makeReconciledMentionEvent("$m1", "@alice:server",
+                                                     "yo @Josh", {"@josh:server"},
+                                                     "ignored", {},
+                                                     /*includeReplaceRelation=*/false),
+                          "@josh:server");
+
+        auto idx = model.index(0);
+        QCOMPARE(model.data(idx, MessageModel::MentionsMeRole).toBool(), true);
+        QVERIFY(model.data(idx, MessageModel::FormattedBodyRole)
+                     .toString().contains(">@Josh</a>"));
+    }
+
+    void testLiveEditCannotIntroduceAMention()
+    {
+        // The same rule on the OTHER path. A client watching the room applies
+        // the replacement event directly instead of reloading the reconciled
+        // form, so if that path read the edit's own m.mentions the highlight
+        // would appear live and vanish on relaunch (or the reverse). Both paths
+        // must agree, and they agree on the original's set.
+        MessageModel model;
+        QMap<QString, QString> cache;
+        cache["@josh:server"] = "Josh";
+        model.setDisplayNameCache(&cache);
+        model.appendEvent(makeMessageEvent("$m1", "@alice:server", "hi", 1000),
+                          "@josh:server");
+
+        auto edit = makeEditEvent("$edit", "@alice:server", "$m1", "hi @Josh");
+        edit.content.data["m.mentions"] = {{"user_ids", {"@josh:server"}}};
+        edit.content.data["m.new_content"]["m.mentions"] = {{"user_ids", {"@josh:server"}}};
+
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        model.appendEvent(edit, "@josh:server");
+
+        auto idx = model.index(0);
+        QCOMPARE(model.data(idx, MessageModel::BodyRole).toString(),
+                 QStringLiteral("hi @Josh"));
+        QCOMPARE(model.data(idx, MessageModel::MentionsMeRole).toBool(), false);
+        QVERIFY(!model.data(idx, MessageModel::FormattedBodyRole)
+                     .toString().contains("bsfchat://user/"));
+        // Still exactly one row repainted — the edit did not widen scope.
+        QCOMPARE(rowsTouched(spy), 1);
+    }
+
     void testMentionsAreNotRenderedWithoutTheMentionsBlock()
     {
         // No m.mentions ⇒ nothing to trust, so a bare "@Josh" stays plain
@@ -1746,6 +1919,103 @@ private slots:
             roles, {QStringLiteral("builder")}, QStringLiteral("@bob:t"), nullptr);
         QVERIFY((p & kManageChannels) != 0);
         QVERIFY((p & kSendMessages) != 0);
+    }
+
+    // ---- Moderation scope (ban/unban vs kick) ---------------------------
+    //
+    // The client used to loop all three actions over every synced room, with a
+    // comment conceding that unsynced rooms "fall through the cracks". Since
+    // the server grew a real server-wide ban list (migration v15, enforced at
+    // /join, auto-join, /sync, /invite and registration) that is false for ban
+    // and unban: POST /rooms/{anyRoom}/ban is server-wide and projects the
+    // membership itself, so the room id is audit context and one request is the
+    // whole action. It is still true for kick, which is genuinely per-channel
+    // server-side — see server/src/api/RoomHandler.cpp,
+    // apply_membership_moderation, where ban/unban take the
+    // project_membership_everywhere branch and kick does not.
+    //
+    // The asymmetry is the thing worth testing: collapsing kick would silently
+    // stop kicking people out of most channels, and re-expanding ban would put
+    // one audit row per channel behind a single moderator click.
+
+    void testBanAndUnbanAreOneRequestWhileKickStillLoops()
+    {
+        using namespace bsfchat::client;
+        const QMap<QString, QString> membership{
+            {QStringLiteral("!a:t"), QStringLiteral("join")},
+            {QStringLiteral("!b:t"), QStringLiteral("join")},
+            {QStringLiteral("!c:t"), QStringLiteral("join")},
+            {QStringLiteral("!d:t"), QStringLiteral("leave")},
+        };
+
+        // Kick: one request per channel the user is actually in.
+        QCOMPARE(moderationRooms(ModerationAction::Kick, membership).size(), 3);
+        QCOMPARE(moderationRooms(ModerationAction::Ban, membership).size(), 1);
+        QCOMPARE(moderationRooms(ModerationAction::Unban, membership).size(), 1);
+    }
+
+    void testKickSkipsChannelsTheUserIsNotIn()
+    {
+        using namespace bsfchat::client;
+        const QMap<QString, QString> membership{
+            {QStringLiteral("!a:t"), QStringLiteral("join")},
+            {QStringLiteral("!b:t"), QStringLiteral("invite")},
+            {QStringLiteral("!c:t"), QStringLiteral("leave")},
+            {QStringLiteral("!d:t"), QStringLiteral("ban")},
+            {QStringLiteral("!e:t"), QString()},  // no member event at all
+        };
+        const QStringList rooms = moderationRooms(ModerationAction::Kick, membership);
+        QCOMPARE(rooms, QStringList({QStringLiteral("!a:t"), QStringLiteral("!b:t")}));
+    }
+
+    void testBanNamesARoomTheTargetIsIn()
+    {
+        using namespace bsfchat::client;
+        // "!a:t" sorts first, so naming the joined room proves a preference
+        // rather than an accident of ordering. The audit record quotes this
+        // room; naming one the user was never in reads as nonsense.
+        const QMap<QString, QString> membership{
+            {QStringLiteral("!a:t"), QStringLiteral("leave")},
+            {QStringLiteral("!b:t"), QStringLiteral("join")},
+        };
+        QCOMPARE(moderationRooms(ModerationAction::Ban, membership),
+                 QStringList({QStringLiteral("!b:t")}));
+    }
+
+    void testUnbanNamesARoomTheBanIsVisibleIn()
+    {
+        using namespace bsfchat::client;
+        const QMap<QString, QString> membership{
+            {QStringLiteral("!a:t"), QStringLiteral("leave")},
+            {QStringLiteral("!b:t"), QStringLiteral("ban")},
+        };
+        QCOMPARE(moderationRooms(ModerationAction::Unban, membership),
+                 QStringList({QStringLiteral("!b:t")}));
+    }
+
+    void testBanStillFiresForSomebodyWhoLeftEveryChannel()
+    {
+        using namespace bsfchat::client;
+        // The case the old loop got wrong in the other direction: a user who
+        // left everything must still be bannable, because the ban list — not
+        // the membership rows — is what keeps them out. Exactly one request.
+        const QMap<QString, QString> membership{
+            {QStringLiteral("!a:t"), QStringLiteral("leave")},
+            {QStringLiteral("!b:t"), QStringLiteral("leave")},
+        };
+        QCOMPARE(moderationRooms(ModerationAction::Ban, membership).size(), 1);
+        QCOMPARE(moderationRooms(ModerationAction::Kick, membership).size(), 0);
+    }
+
+    void testModerationWithNoSyncedRoomsSendsNothing()
+    {
+        using namespace bsfchat::client;
+        // No room id to name means no request can be formed. Sending to a
+        // fabricated room id would 404 and log a moderation failure.
+        const QMap<QString, QString> none;
+        QVERIFY(moderationRooms(ModerationAction::Kick, none).isEmpty());
+        QVERIFY(moderationRooms(ModerationAction::Ban, none).isEmpty());
+        QVERIFY(moderationRooms(ModerationAction::Unban, none).isEmpty());
     }
 };
 

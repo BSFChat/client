@@ -432,9 +432,14 @@ public:
                                 const QString& reason = {});
     Q_INVOKABLE void unbanMember(const QString& roomId, const QString& userId);
 
-    // Server-scope moderation — iterate every room the bot knows about and
-    // apply the matching Matrix per-room action. "Server-wide ban" maps to
-    // banning the user from each room; next sync updates the caches.
+    // Server-scope moderation. NOT symmetric, on purpose:
+    //   * ban / unban are ONE request — the server keeps a real server-wide ban
+    //     list and projects the membership across every room itself, including
+    //     rooms this client has never synced. The room id is audit context.
+    //   * kick is one request PER synced channel the user is in, because a kick
+    //     is genuinely per-channel server-side (matches Discord).
+    // The rule and its justification live in util/ModerationScope.h; the .cpp
+    // side of these three is a loop over what it returns.
     Q_INVOKABLE void kickFromServer(const QString& userId, const QString& reason = {});
     Q_INVOKABLE void banFromServer(const QString& userId, const QString& reason = {});
     Q_INVOKABLE void unbanFromServer(const QString& userId);
@@ -666,6 +671,11 @@ signals:
 private:
     void startSync();
     void processSyncResponse(const bsfchat::SyncResponse& response);
+    // `userId`'s latest membership value in every synced room, keyed by room id
+    // (empty string where the room has no member event for them). The input to
+    // bsfchat::client::moderationRooms(); split out so the three moderation
+    // entry points cannot drift on how "latest" is computed.
+    QMap<QString, QString> membershipByRoom(const QString& userId) const;
 
     MatrixClient* m_client;
     SyncLoop* m_syncLoop;

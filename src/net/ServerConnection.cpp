@@ -5,6 +5,7 @@
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
 #include "util/MentionBadge.h"
+#include "util/ModerationScope.h"
 #include "util/PermissionMath.h"
 #include "identity/IdentityClient.h"
 #include "core/Settings.h"
@@ -2336,10 +2337,18 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     // this to bypass the "skip if focused" rule — if you
                     // were mentioned, you want to know even if the window
                     // is in the foreground.
+                    //
+                    // Read through MessageModel::notifiedMentions, not off the
+                    // content: a catch-up /sync or a backfill hands us the
+                    // server-reconciled form of an edited message, whose
+                    // content is the EDIT's. The server files no mention row
+                    // and no push for an m.replace, so counting those would
+                    // badge and toast for a ping that was never sent — and
+                    // would do it on relaunch only, which is the worst kind of
+                    // inconsistency to debug. Same rule as the highlight.
                     bool mentionsMe = false;
-                    if (event.content.data.contains("m.mentions")
-                        && event.content.data["m.mentions"].is_object()) {
-                        const auto& m = event.content.data["m.mentions"];
+                    {
+                        const auto& m = MessageModel::notifiedMentions(event);
                         if (m.contains("user_ids") && m["user_ids"].is_array()) {
                             for (const auto& u : m["user_ids"]) {
                                 if (u.is_string()
@@ -3198,16 +3207,28 @@ void ServerConnection::unbanMember(const QString& roomId, const QString& userId)
     m_client->unbanUser(roomId, userId);
 }
 
-// "Server-wide" moderation helpers. Matrix has no native server-ban
-// primitive, so we apply the action to every room the sync has surfaced.
-// Rooms the client hasn't synced yet fall through the cracks — acceptable
-// for v1 since the server also enforces each request, but flagged.
+// Server-wide moderation helpers.
+//
+// All three route through bsfchat::client::moderationRooms(), which is where
+// the per-action rule and the reasoning behind it live — read that header
+// before changing any of this. The short version, because the asymmetry below
+// is otherwise easy to mistake for an oversight:
+//
+//   ban / unban  — ONE request. The server has a real server-wide ban list and
+//                  projects the membership itself, across rooms this client has
+//                  never synced. The room id is audit context only.
+//   kick         — N requests, one per synced channel the user is in, because a
+//                  kick genuinely is per-channel server-side (matches Discord).
+//                  This is the one action a channel the client has not synced
+//                  still slips out of, and that is a channel the user remains
+//                  in rather than a hole in an enforcement boundary.
+//
+// So do not "fix" the kick loop into a single call, and do not reintroduce a
+// loop for ban or unban: each would be wrong in the other's direction.
 
-void ServerConnection::kickFromServer(const QString& userId, const QString& reason) {
+QMap<QString, QString> ServerConnection::membershipByRoom(const QString& userId) const {
+    QMap<QString, QString> out;
     for (auto it = m_roomMembers.constBegin(); it != m_roomMembers.constEnd(); ++it) {
-        const QString& roomId = it.key();
-        // Only try rooms where the user's latest membership is "join" —
-        // kicking a non-member is a no-op server-side but spams noise.
         QString latest;
         for (const auto& ev : it.value()) {
             if (ev.state_key.has_value()
@@ -3216,49 +3237,27 @@ void ServerConnection::kickFromServer(const QString& userId, const QString& reas
                     ev.content.data.value("membership", ""));
             }
         }
-        if (latest == QStringLiteral("join")
-            || latest == QStringLiteral("invite")) {
-            m_client->kickUser(roomId, userId, reason);
-        }
+        out.insert(it.key(), latest);
     }
+    return out;
+}
+
+void ServerConnection::kickFromServer(const QString& userId, const QString& reason) {
+    const auto rooms = bsfchat::client::moderationRooms(
+        bsfchat::client::ModerationAction::Kick, membershipByRoom(userId));
+    for (const QString& roomId : rooms) m_client->kickUser(roomId, userId, reason);
 }
 
 void ServerConnection::banFromServer(const QString& userId, const QString& reason) {
-    // Ban applies regardless of current membership — even leaving users
-    // should be banned so they can't rejoin. The server will ignore redundant
-    // bans, and we intentionally skip rooms where the user is already banned
-    // to avoid the event spam.
-    for (auto it = m_roomMembers.constBegin(); it != m_roomMembers.constEnd(); ++it) {
-        const QString& roomId = it.key();
-        QString latest;
-        for (const auto& ev : it.value()) {
-            if (ev.state_key.has_value()
-                && QString::fromStdString(*ev.state_key) == userId) {
-                latest = QString::fromStdString(
-                    ev.content.data.value("membership", ""));
-            }
-        }
-        if (latest != QStringLiteral("ban")) {
-            m_client->banUser(roomId, userId, reason);
-        }
-    }
+    const auto rooms = bsfchat::client::moderationRooms(
+        bsfchat::client::ModerationAction::Ban, membershipByRoom(userId));
+    for (const QString& roomId : rooms) m_client->banUser(roomId, userId, reason);
 }
 
 void ServerConnection::unbanFromServer(const QString& userId) {
-    for (auto it = m_roomMembers.constBegin(); it != m_roomMembers.constEnd(); ++it) {
-        const QString& roomId = it.key();
-        QString latest;
-        for (const auto& ev : it.value()) {
-            if (ev.state_key.has_value()
-                && QString::fromStdString(*ev.state_key) == userId) {
-                latest = QString::fromStdString(
-                    ev.content.data.value("membership", ""));
-            }
-        }
-        if (latest == QStringLiteral("ban")) {
-            m_client->unbanUser(roomId, userId);
-        }
-    }
+    const auto rooms = bsfchat::client::moderationRooms(
+        bsfchat::client::ModerationAction::Unban, membershipByRoom(userId));
+    for (const QString& roomId : rooms) m_client->unbanUser(roomId, userId);
 }
 
 QVariantList ServerConnection::serverMembers() const {
@@ -3319,6 +3318,17 @@ QVariantList ServerConnection::serverMembers() const {
 }
 
 QVariantList ServerConnection::bannedMembers() const {
+    // STILL BUILT FROM THE CLIENT CACHE, because there is nothing else to build
+    // it from. The server has the authoritative list — SqliteStore keeps a
+    // `server_bans` table and even exposes list_server_bans() — but as of this
+    // writing that function has no HTTP route and no caller anywhere in
+    // server/, so it is unreachable from here. Until a read endpoint exists,
+    // this list is a projection of the ban membership rows the server writes
+    // into each room, and it under-reports in exactly one case: a user banned
+    // while holding no membership row in any room this client has synced never
+    // appears, so they cannot be unbanned from this tab. Wire this to the real
+    // list the moment the endpoint lands.
+    //
     // Walk the per-room member cache, keeping the latest membership event
     // per (roomId, userId). Collect entries whose latest state is "ban" and
     // dedupe into a per-user aggregate with the list of rooms + a reason

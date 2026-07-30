@@ -496,6 +496,42 @@ Popup {
                         }
                     }
 
+                    // SPEC §3.10: the ONLY honest security surface in Settings.
+                    // There is no "Security & Keys" pane and there must not be —
+                    // this client has no device keys, no cross-signing and no
+                    // key backup, so such a pane could only invent content, and
+                    // invented content in a security pane is read as a promise.
+                    // The one thing that can be shown truthfully is the state of
+                    // the call currently running.
+                    //
+                    // The text below is ServerConnection.voiceProtectionDetail
+                    // VERBATIM — not summarised, not shortened to fit, not
+                    // rephrased. It already states the limitation alongside the
+                    // guarantee, which is the whole reason it reads the way it
+                    // does. Every word this app says about voice security lives
+                    // in src/voice/VoiceEncryption.cpp and reaches the UI through
+                    // that single Q_PROPERTY; read that header before touching
+                    // anything here, and note that test_voice_encryption
+                    // (qmlHoldsNoHardCodedSecurityLabel) scans every .qml file in
+                    // the tree and fails if such wording reappears as a literal.
+                    SettingRow {
+                        title: "Call protection"
+                        // Both protection properties return an empty string when
+                        // no transport is live — an idle client has no call to
+                        // describe, and describing one it has not made would be
+                        // the exact failure this surface exists to avoid. So the
+                        // resting text states only that there is nothing to
+                        // describe yet. It deliberately makes no claim about what
+                        // a future call would get: that varies by transport and
+                        // by server, and asserting it here would be QML making a
+                        // promise on the C++ layer's behalf.
+                        readonly property string live: serverManager.activeServer
+                            ? serverManager.activeServer.voiceProtectionDetail : ""
+                        description: live.length > 0
+                            ? live
+                            : "You're not in a voice call. Join one and this row describes that call."
+                    }
+
                     Item { Layout.fillHeight: true }
                 }
             }

@@ -385,9 +385,12 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
     // The authoritative mention set: who the author says they pinged, and
     // whether it was an @room broadcast. We trust it for *routing* only —
     // the notification decision and the highlight — never for markup.
-    if (event.content.data.contains("m.mentions")
-        && event.content.data["m.mentions"].is_object()) {
-        const auto& mentions = event.content.data["m.mentions"];
+    //
+    // Sourced through notifiedMentions() rather than straight off the content,
+    // so an edited message highlights the people its ORIGINAL send notified and
+    // not the ones an edit added afterwards — see that function's header.
+    {
+        const auto& mentions = notifiedMentions(event);
         if (mentions.contains("user_ids") && mentions["user_ids"].is_array()) {
             for (const auto& u : mentions["user_ids"]) {
                 if (!u.is_string()) continue;
@@ -456,6 +459,43 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
     applyMentionMarkup(entry);
 
     return entry;
+}
+
+const nlohmann::json& MessageModel::notifiedMentions(const bsfchat::RoomEvent& event)
+{
+    static const nlohmann::json kNone = nlohmann::json::object();
+
+    auto mentionsOf = [](const nlohmann::json& content) -> const nlohmann::json& {
+        if (content.is_object() && content.contains("m.mentions")
+            && content["m.mentions"].is_object()) {
+            return content["m.mentions"];
+        }
+        return kNone;
+    };
+
+    // Only a SERVER-RECONCILED edit redirects the lookup. Both halves of the
+    // bundle are required: m.relations.m.replace is what says "this content is
+    // post-edit", and original_content is the pre-edit content it displaced.
+    // Without the relation check a client (or a future server) writing
+    // original_content for some other reason would silently reroute mentions;
+    // without original_content there is nothing to reroute TO, and falling back
+    // to the event's own content is right — an unedited message's mentions are
+    // its own.
+    if (event.unsigned_data.has_value()) {
+        const auto& u = event.unsigned_data->data;
+        const bool edited = u.is_object() && u.contains("m.relations")
+            && u["m.relations"].is_object()
+            && u["m.relations"].contains("m.replace")
+            && u["m.relations"]["m.replace"].is_object();
+        if (edited && u.contains("bsfchat.original_content")
+            && u["bsfchat.original_content"].is_object()) {
+            // Note this returns the ORIGINAL's block even when it is absent
+            // entirely — an original that mentioned nobody notified nobody, so
+            // an edit that adds "@alice" must render no pill for her.
+            return mentionsOf(u["bsfchat.original_content"]);
+        }
+    }
+    return mentionsOf(event.content.data);
 }
 
 bool MessageModel::isReplacementEvent(const bsfchat::RoomEvent& event)
@@ -627,6 +667,14 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
         // The edit re-wrote the body, which threw away the mention anchors the
         // previous rendering had baked in. Re-apply from the entry's recorded
         // mention set so an edited message keeps its highlights.
+        //
+        // From the ENTRY's set — the original's — never from this replacement
+        // event's own m.mentions, which is why nothing above reads it. The
+        // server records no mention row and fires no push for an m.replace, so
+        // a mention an edit introduces notified nobody and must not render as
+        // though it had. notifiedMentions() is the same rule applied to the
+        // reconciled event a later reload sees; the two paths have to agree or
+        // a highlight would appear on relaunch that was not there live.
         applyMentionMarkup(m_messages[i]);
         auto idx = index(i);
         emit dataChanged(idx, idx, {BodyRole, FormattedBodyRole, EditedRole});

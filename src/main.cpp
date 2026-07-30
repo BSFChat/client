@@ -21,10 +21,24 @@
 // Mirror the platform gate below where these get instantiated.
 // Keep the includes paired with the use sites so a platform-gate
 // edit only has to be made in one place to widen support.
-#if defined(Q_OS_MACOS) || defined(Q_OS_WIN) \
-    || (defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID))
+//
+// BSFCHAT_VOICE_ENABLED belongs in this gate as much as the platform
+// does: ScreenShareController.cpp is compiled only inside the
+// `if(BSFCHAT_ENABLE_VOICE)` block in CMakeLists.txt, so without it a
+// voice-off desktop build declares a controller that links to nothing.
+// Voice-off is a shipped configuration, not a hypothetical — iOS
+// defaults BSFCHAT_ENABLE_VOICE to OFF (see CMakeLists.txt).
+//
+// voice/VoiceEngine.h used to be included here unconditionally, and
+// nothing in this file has ever named VoiceEngine — main() only touches
+// the screen-share and camera controllers. It pulls in rtc/rtc.hpp, so
+// `-DBSFCHAT_ENABLE_VOICE=OFF` died at the first translation unit.
+// Deleted rather than gated: an include with no use site is not
+// something worth keeping correct.
+#if defined(BSFCHAT_VOICE_ENABLED) \
+    && (defined(Q_OS_MACOS) || defined(Q_OS_WIN) \
+        || (defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)))
 #include "voice/ScreenShareController.h"
-#include "voice/VoiceEngine.h"
 #endif
 #if defined(Q_OS_ANDROID) && defined(BSFCHAT_VOICE_ENABLED)
 #include "voice/AndroidScreenShareController.h"
@@ -173,7 +187,9 @@ int main(int argc, char *argv[])
 
     engine.rootContext()->setContextProperty("serverManager", application.serverManager());
     engine.rootContext()->setContextProperty("appSettings", application.settings());
-    // Screen-share controller binds for every desktop platform.
+    // Screen-share controller binds for every desktop platform that
+    // has voice compiled in (ScreenShareController.cpp is voice-gated
+    // in CMakeLists, and the capture feeds the voice transport).
     // ScreenShareController internally branches on the build target:
     // macOS uses our CG/ScreenCaptureKit-backed MacScreenCapturer
     // (Homebrew Qt ships without QT_FEATURE_screen_capture), while
@@ -183,8 +199,9 @@ int main(int argc, char *argv[])
     // Android one lives in its own #if block below; iOS hasn't been
     // wired yet so the QML button stays hidden there via the
     // `typeof screenShare !== "undefined"` check in VoiceDock.
-#if defined(Q_OS_MACOS) || defined(Q_OS_WIN) \
-    || (defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID))
+#if defined(BSFCHAT_VOICE_ENABLED) \
+    && (defined(Q_OS_MACOS) || defined(Q_OS_WIN) \
+        || (defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)))
     ScreenShareController screenShare;
     QQmlEngine::setObjectOwnership(&screenShare, QQmlEngine::CppOwnership);
     engine.rootContext()->setContextProperty("screenShare", &screenShare);

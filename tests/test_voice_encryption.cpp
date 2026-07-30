@@ -410,6 +410,27 @@ private slots:
                  "badge alone states a guarantee without its limitation");
     }
 
+    // SPEC §3.10: the only honest security surface in Settings is a row in
+    // Voice & Activation showing the LIVE call's protection state. Settings has
+    // no "Security & Keys" pane and must never grow one — there are no keys to
+    // manage, so its content could only be invented, and invented content in a
+    // security pane is read as a guarantee.
+    //
+    // Same comment-stripped check as the badge above, for the same reason: the
+    // comment sitting over that row names the property, so scanning the raw
+    // file would hold with the binding deleted.
+    void theSettingsProtectionRowBindsToTheCppProperty() {
+        const QString src = readAll(
+            QStringLiteral(BSFCHAT_QML_DIR "/components/ClientSettings.qml"));
+        QVERIFY2(!src.isEmpty(), "ClientSettings.qml not readable — has it moved?");
+        const QString code = scanQml(src).code;
+        QVERIFY2(code.contains(QStringLiteral("voiceProtectionDetail")),
+                 "the Voice & Activation protection row must render "
+                 "ServerConnection.voiceProtectionDetail verbatim — it is the "
+                 "only security statement Settings is allowed to make, and "
+                 "writing it here instead of binding it is how it goes stale");
+    }
+
     // No security claim may be written in QML, in any form, ever. The words
     // live in VoiceEncryption.cpp and reach the UI through a Q_PROPERTY —
     // that indirection is the only thing that keeps the label honest when the
