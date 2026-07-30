@@ -1,5 +1,7 @@
 #include "Updater.h"
 
+#include "ReleaseSelection.h"
+
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
@@ -11,6 +13,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QProcess>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QUrl>
 #include <QtGlobal>
@@ -21,26 +24,23 @@
 
 namespace {
 
-// Compare two semver-ish strings (`major.minor.patch`, optional
-// `-suffix` ignored). Returns >0 if a is newer than b, <0 if older,
-// 0 equal. Tolerant of leading "v".
-int compareSemver(const QString& aIn, const QString& bIn)
+// Version comparison used to live here as a `major.minor.patch` compare
+// that threw the `-suffix` away, which made 0.0.44-rc.1 compare EQUAL to
+// 0.0.44. It now lives in core/ReleaseSelection.h with real semver
+// prerelease precedence, because with RCs published that equality is the
+// difference between "here is 0.0.44" and "you are already on it".
+
+// Read the persisted channel without owning a Settings instance.
+// Settings uses QSettings("BSFChat", "BSFChat") and sync()s on write, so
+// this sees the current value; reading fresh per check also means a
+// toggle takes effect on the next check with no wiring between the two
+// objects (Updater is constructed in main() before Settings is reachable).
+bsfchat::updates::Channel persistedChannel()
 {
-    auto strip = [](QString s) {
-        if (s.startsWith('v') || s.startsWith('V')) s = s.mid(1);
-        int dash = s.indexOf('-');
-        if (dash >= 0) s = s.left(dash);
-        return s;
-    };
-    QStringList ap = strip(aIn).split('.');
-    QStringList bp = strip(bIn).split('.');
-    int n = std::max(ap.size(), bp.size());
-    for (int i = 0; i < n; ++i) {
-        int av = i < ap.size() ? ap[i].toInt() : 0;
-        int bv = i < bp.size() ? bp[i].toInt() : 0;
-        if (av != bv) return av - bv;
-    }
-    return 0;
+    QSettings s(QStringLiteral("BSFChat"), QStringLiteral("BSFChat"));
+    return bsfchat::updates::channelFromString(
+        s.value(QStringLiteral("updateChannel"),
+                QStringLiteral("stable")).toString());
 }
 
 QString cacheDir()
@@ -74,9 +74,21 @@ void Updater::setError(const QString& msg)
     setState(Failed);
 }
 
-bool Updater::isNewer(const QString& candidate) const
+bool Updater::prereleaseBuild() const
 {
-    return compareSemver(candidate, m_currentVersion) > 0;
+    return bsfchat::updates::parseVersion(m_currentVersion).isPrerelease();
+}
+
+QString Updater::buildLabel() const
+{
+    return bsfchat::updates::buildChannelLabel(m_currentVersion);
+}
+
+QString Updater::channel() const
+{
+    return m_channel.isEmpty()
+        ? bsfchat::updates::channelToString(persistedChannel())
+        : m_channel;
 }
 
 QString Updater::platformAssetSuffix() const
@@ -108,8 +120,15 @@ void Updater::checkNow()
         || m_state == Applying) return;
 
     setState(Checking);
+    // One GET per check, as before — the list endpoint just returns a
+    // bigger body than /releases/latest did. per_page=30 is GitHub's
+    // default and is roughly a year of our tagging cadence; we never
+    // follow the `Link: rel="next"` page, because a release that has
+    // fallen off page one is older than thirty more recent ones and
+    // cannot be the newest on any channel. Paginating would also turn
+    // one check into N requests against a 60/hour budget.
     QNetworkRequest req(QUrl(QStringLiteral(
-        "https://api.github.com/repos/BSFChat/client/releases/latest")));
+        "https://api.github.com/repos/BSFChat/client/releases?per_page=30")));
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setRawHeader("User-Agent", "BSFChat-Updater");
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
@@ -128,51 +147,63 @@ void Updater::onCheckReply()
         setError(QStringLiteral("Check failed: %1").arg(reply->errorString()));
         return;
     }
-    QJsonParseError perr;
-    QJsonDocument doc = QJsonDocument::fromJson(reply->readAll(), &perr);
-    if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
-        setError(QStringLiteral("Bad JSON from GitHub: %1").arg(perr.errorString()));
-        return;
-    }
-    QJsonObject obj = doc.object();
-    QString tag = obj.value("tag_name").toString();
-    if (tag.isEmpty()) {
-        setError(QStringLiteral("Latest release has no tag_name"));
-        return;
-    }
-    if (!isNewer(tag)) {
-        m_availableVersion.clear();
-        setState(UpToDate);
+    using namespace bsfchat::updates;
+
+    QString perr;
+    const QVector<Release> releases = parseReleaseList(reply->readAll(), &perr);
+    if (!perr.isEmpty()) {
+        setError(QStringLiteral("Bad JSON from GitHub: %1").arg(perr));
         return;
     }
 
+    const Channel ch = persistedChannel();
+    m_channel = channelToString(ch);
+    const Selection sel = selectRelease(releases, ch, m_currentVersion);
+    m_latestStableVersion = sel.newestStableTag;
+
+    switch (sel.outcome) {
+    case Outcome::NoUsableRelease:
+        // Every entry was a draft / unclassifiable / unparseable, the
+        // repo has no releases, or our own version doesn't parse. We
+        // learned nothing, so we say nothing rather than claiming to be
+        // current — and there is nothing to download, so this is not an
+        // error the user can act on either.
+        m_availableVersion.clear();
+        setState(Idle);
+        return;
+    case Outcome::UpToDate:
+        m_availableVersion.clear();
+        setState(UpToDate);
+        return;
+    case Outcome::AheadOfChannel:
+        // Typically: opted out of beta while running an RC. Product
+        // decision is to stay put — no downgrade offer — but this is a
+        // different thing from being up to date and is surfaced as such.
+        m_availableVersion.clear();
+        setState(AheadOfChannel);
+        return;
+    case Outcome::UpdateAvailable:
+        break;
+    }
+
     // Newer tag found. Resolve our platform's asset URL.
-    QString suffix = platformAssetSuffix();
+    const QString suffix = platformAssetSuffix();
     if (suffix.isEmpty()) {
         // Unsupported platform — leave as Idle so the UI doesn't
         // promise something we can't deliver.
         setState(Idle);
         return;
     }
-    QJsonArray assets = obj.value("assets").toArray();
-    QString matchedUrl;
-    for (const auto& v : assets) {
-        QJsonObject a = v.toObject();
-        QString name = a.value("name").toString();
-        if (name == suffix) {
-            matchedUrl = a.value("browser_download_url").toString();
-            break;
-        }
-    }
+    const QString matchedUrl = assetUrlNamed(sel.release, suffix);
     if (matchedUrl.isEmpty()) {
         setError(QStringLiteral("Release %1 has no asset named %2")
-                 .arg(tag, suffix));
+                 .arg(sel.release.tag, suffix));
         return;
     }
 
-    m_availableVersion = tag;
-    m_releaseHtmlUrl = obj.value("html_url").toString();
-    m_releaseNotes = obj.value("body").toString();
+    m_availableVersion = sel.release.tag;
+    m_releaseHtmlUrl = sel.release.htmlUrl;
+    m_releaseNotes = sel.release.notes;
     m_assetUrl = matchedUrl;
     setState(UpdateAvailable);
 }

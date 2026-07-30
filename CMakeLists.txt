@@ -407,6 +407,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/ShortcutsDialog.qml
         qml/components/SearchPopup.qml
         qml/components/UpdateDialog.qml
+        qml/components/UpdateChannelSettings.qml
         qml/components/StatusPicker.qml
         qml/components/ThreadPanel.qml
         qml/components/RoleAssignPopup.qml

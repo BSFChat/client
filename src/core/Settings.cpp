@@ -1,4 +1,5 @@
 #include "core/Settings.h"
+#include "core/ReleaseSelection.h"
 #include "util/FileLogger.h"
 
 #include <QLoggingCategory>
@@ -663,6 +664,29 @@ void Settings::setAutoUpdateCheck(bool v)
     if (v == autoUpdateCheck()) return;
     m_settings.setValue(QStringLiteral("autoUpdateCheck"), v);
     emit autoUpdateCheckChanged();
+}
+
+QString Settings::updateChannel() const
+{
+    // Normalised through channelFromString so a hand-edited or corrupt
+    // value reads back as "stable" rather than as an unknown channel.
+    return bsfchat::updates::channelToString(bsfchat::updates::channelFromString(
+        m_settings.value(QStringLiteral("updateChannel"),
+                         QStringLiteral("stable")).toString()));
+}
+
+void Settings::setUpdateChannel(const QString& channel)
+{
+    const QString norm = bsfchat::updates::channelToString(
+        bsfchat::updates::channelFromString(channel));
+    if (norm == updateChannel()) return;
+    m_settings.setValue(QStringLiteral("updateChannel"), norm);
+    // Updater reads this key through its own QSettings handle (it is not
+    // wired to this object), so flush before returning — the very next
+    // thing the UI does after a toggle is ask the Updater to re-check,
+    // and it must not read the pre-toggle value.
+    m_settings.sync();
+    emit updateChannelChanged();
 }
 
 QString Settings::voiceMode() const

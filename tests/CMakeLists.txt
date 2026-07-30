@@ -190,6 +190,15 @@ if(BSFCHAT_HAVE_LIVEKIT)
     bsfchat_livekit_bundle_runtime(platform_audio_probe)
 endif()
 
+# Update channel selection + semver precedence. Header-only logic
+# (src/core/ReleaseSelection.h), so there is nothing to compile but the
+# test itself: no QNetworkAccessManager, no event loop, no GitHub, and
+# no dependency on BSFCHAT_ENABLE_VOICE — it runs in every configuration.
+qt_add_executable(test_update_channel test_update_channel.cpp)
+target_include_directories(test_update_channel PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_update_channel PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_update_channel COMMAND test_update_channel)
+
 # Media-path loopback: proves H.264 AUs survive packetize → DTLS-SRTP →
 # depacketize between two in-process peer connections using the exact
 # handler chain production builds. No Qt, no codecs, no network.

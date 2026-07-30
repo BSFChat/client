@@ -759,6 +759,37 @@ jobs:
         with:
           path: artifacts
 
+      # Which channel this tag publishes to. The in-app updater filters
+      # releases on GitHub's `prerelease` boolean — never on the text of
+      # the tag — so this step is what makes that flag trustworthy:
+      #
+      #   v0.0.44        → prerelease: false → everyone sees it
+      #   v0.0.44-rc.1   → prerelease: true  → only beta-channel users
+      #
+      # A prerelease is also excluded from /releases/latest by GitHub,
+      # which is what keeps any other consumer of that endpoint (install
+      # docs, scripts) on stable builds without further changes.
+      #
+      # Same tag grammar as the "Derive version" step above. A tag that
+      # does not match fails here rather than publishing artefacts whose
+      # embedded version was silently synthesised as a -dev build.
+      - name: Classify release channel
+        id: channel
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[A-Za-z0-9.]+$ ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG → RC / prerelease (beta channel only)"
+          elif [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG → stable release"
+          else
+            echo "::error::Tag '$TAG' is not vMAJOR.MINOR.PATCH[-suffix];" \
+                 "the build embedded a -dev version for it. Retag."
+            exit 1
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -767,3 +798,4 @@ jobs:
             artifacts/BSFChat-Windows/BSFChat-Setup.exe
             artifacts/BSFChat-Linux/BSFChat-linux-x86_64.tar.gz
           generate_release_notes: true
+          prerelease: ${{ steps.channel.outputs.prerelease }}

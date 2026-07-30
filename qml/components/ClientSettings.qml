@@ -840,6 +840,8 @@ Popup {
                         }
                     }
 
+                    UpdateChannelSettings { Layout.fillWidth: true }
+
                     // Status row: shows current version + latest known +
                     // a manual-check button. State string is derived
                     // inline so it tracks the C++ Updater::State enum
