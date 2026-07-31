@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import BSFChat
+import "../js/UpdateFormat.js" as UF
 
 // Beta-channel opt-in for the Updates pane, kept in its own file so it
 // can be dropped into ClientSettings.qml with a single line:
@@ -72,8 +73,13 @@ ColumnLayout {
                     Text {
                         id: buildBadge
                         anchors.centerIn: parent
+                        // Version spelling goes through UF.vtag like every
+                        // other version in the updater UI; this badge used
+                        // to print a bare "0.0.44-rc.2" a few rows under a
+                        // panel that said "v0.0.44-rc.2".
                         text: root._hasUpdater
-                            ? updater.buildLabel + " " + updater.currentVersion
+                            ? updater.buildLabel + " "
+                              + UF.vtag(updater.currentVersion)
                             : ""
                         font.family: Theme.fontMono
                         font.pixelSize: Theme.fontSize.xs
@@ -114,31 +120,29 @@ ColumnLayout {
         }
     }
 
-    // ---- Honest state for a build ahead of its channel -------------
+    // ---- What the toggle means for a build ahead of its channel ----
     //
     // The opt-out case the product decision creates: you were on an RC,
     // you turned beta off, and the newest stable release is older than
-    // what you are running. Nothing is offered, but "You're up to date"
-    // would be false, so the Updater reports a distinct state and this
-    // banner explains it rather than leaving the pane silent.
+    // what you are running.
+    //
+    // The Updater reports that as its own state (AheadOfChannel) and the
+    // UpdatePanel above already states the fact — which build, which
+    // channel, which stable release, nothing to install. This banner
+    // therefore covers only the part that belongs to the switch it sits
+    // under: what happens next and what the switch would change. It used
+    // to restate the versions too, which put the same sentence on screen
+    // twice once the pane grew a status panel.
     InfoBanner {
         visible: root._aheadOfChannel
         icon: "bolt"
         tint: Theme.warn
-        text: {
-            if (!root._hasUpdater) return "";
-            var stable = updater.latestStableVersion;
-            var head = "This build (" + updater.currentVersion
-                     + ") is newer than the latest "
-                     + (root._onBeta ? "release on the beta channel"
-                                     : "stable release")
-                     + (stable ? " (" + stable + ")" : "") + ".";
-            return head + " No update is being offered. You'll be "
-                 + "prompted again once a "
-                 + (root._onBeta ? "newer build" : "stable release")
-                 + " goes past this one — or turn the beta channel "
-                 + (root._onBeta ? "off" : "back on")
-                 + " to follow release candidates again.";
-        }
+        text: root._onBeta
+            ? "You'll be prompted again once a newer build is published "
+              + "on the beta channel. Turning the switch off would leave "
+              + "this build in place and wait for stable to catch up."
+            : "You'll be prompted again once a stable release goes past "
+              + "this build. Turn the beta channel back on to follow "
+              + "release candidates again."
     }
 }

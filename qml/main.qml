@@ -427,9 +427,17 @@ ApplicationWindow {
     // Auto-update dialog — opens itself when the C++ Updater
     // reports an actionable state. Disabled on builds where the
     // `updater` context property is absent (mobile).
+    //
+    // `suppressed` is the one thing the dialog can't work out for
+    // itself: whether the user is already looking at Client Settings →
+    // Updates, which has the same status panel inline. Without it, a
+    // Download pressed in that pane throws a modal over the dialog it
+    // was pressed in.
     Loader {
         active: typeof updater !== "undefined"
-        sourceComponent: UpdateDialog { }
+        sourceComponent: UpdateDialog {
+            suppressed: clientSettingsGlobal.opened
+        }
     }
 
     function openUserSettings() { userSettingsGlobal.open(); }

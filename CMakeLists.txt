@@ -408,6 +408,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/ShortcutsDialog.qml
         qml/components/SearchPopup.qml
         qml/components/UpdateDialog.qml
+        qml/components/UpdatePanel.qml
         qml/components/UpdateChannelSettings.qml
         qml/components/StatusPicker.qml
         qml/components/ThreadPanel.qml
@@ -423,6 +424,11 @@ qt_add_qml_module(bsfchat-app
         # tests/qml/tst_playbackmath.qml — the only part of the video
         # player that can be checked without a window and a decoder.
         qml/js/PlaybackMath.js
+        # Updater state → wording/severity/progress formatting, shared by
+        # UpdatePanel.qml (modal + inline) and tested in
+        # tests/qml/tst_updateformat.qml. Imports PlaybackMath.js for the
+        # byte formatter, so both must stay in this resource set.
+        qml/js/UpdateFormat.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt

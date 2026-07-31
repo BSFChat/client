@@ -827,13 +827,36 @@ Popup {
 
                     SectionHeader { text: "Updates" }
 
+                    // Status first, preferences second: "do I need to do
+                    // anything" is why people open this pane.
+                    //
+                    // Same component the modal UpdateDialog uses, so the
+                    // eight updater states are worded once. This replaced
+                    // a "Current version" row whose description was a
+                    // second, slightly different copy of that table plus
+                    // a loose row of buttons underneath it.
+                    //
+                    // While Client Settings is open the modal suppresses
+                    // itself (see UpdateDialog.qml and main.qml), so this
+                    // panel — not a popup over the top of this dialog —
+                    // is what reports the download.
+                    UpdatePanel {
+                        Layout.fillWidth: true
+                        embedded: true
+                    }
+
                     SettingRow {
                         title: "Check for updates automatically"
+                        // Was: promises a one-click "Restart to install".
+                        // True on macOS and Windows, false on Linux —
+                        // where applyUpdate() opens the release page and
+                        // the package manager does the rest — so the
+                        // promise is now the prompt, not the mechanism.
                         description: "Polls GitHub Releases on launch and "
                                    + "every six hours afterwards. When a "
-                                   + "newer build is published, you'll see "
-                                   + "a one-click \"Restart to install\" "
-                                   + "prompt — no manual download."
+                                   + "newer build is published you get a "
+                                   + "prompt, rather than having to come "
+                                   + "here and look."
                         ThemedSwitch {
                             checked: appSettings.autoUpdateCheck
                             onToggled: appSettings.autoUpdateCheck = checked
@@ -842,117 +865,11 @@ Popup {
 
                     UpdateChannelSettings { Layout.fillWidth: true }
 
-                    // Status row: shows current version + latest known +
-                    // a manual-check button. State string is derived
-                    // inline so it tracks the C++ Updater::State enum
-                    // without needing Q_ENUM marshalling on QML side.
-                    SettingRow {
-                        title: "Current version"
-                        description: {
-                            if (typeof updater === "undefined")
-                                return "Updater unavailable on this build.";
-                            if (updater.state === 1) return "Checking GitHub…";
-                            if (updater.state === 2) return "You're up to date.";
-                            if (updater.state === 3) return "v" + updater.availableVersion + " is available.";
-                            if (updater.state === 4) return "Downloading v" + updater.availableVersion + "…";
-                            if (updater.state === 5) return "v" + updater.availableVersion + " ready to install.";
-                            if (updater.state === 7) return updater.lastError;
-                            return "Click \"Check now\" to see if there's a new release.";
-                        }
-                        Text {
-                            text: typeof updater !== "undefined"
-                                ? "v" + updater.currentVersion : "?"
-                            color: Theme.fg0
-                            font.family: Theme.fontMono
-                            font.pixelSize: Theme.fontSize.sm
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: Theme.sp.s3
-
-                        Button {
-                            text: "Check now"
-                            enabled: typeof updater !== "undefined"
-                                     && updater.state !== 1
-                                     && updater.state !== 4
-                                     && updater.state !== 6
-                            onClicked: if (typeof updater !== "undefined")
-                                            updater.checkNow()
-                            contentItem: Text {
-                                text: parent.text
-                                font.family: Theme.fontSans
-                                font.pixelSize: Theme.fontSize.sm
-                                font.weight: Theme.fontWeight.medium
-                                color: Theme.fg0
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            background: Rectangle {
-                                color: parent.hovered ? Theme.bg3 : Theme.bg2
-                                border.color: Theme.line
-                                border.width: 1
-                                radius: Theme.r2
-                                implicitWidth: 120
-                                implicitHeight: 36
-                            }
-                        }
-
-                        // Manual download button — only meaningful when
-                        // an update has been discovered but not pulled
-                        // yet. Saves the user from waiting for the
-                        // popup if they're already on this tab.
-                        Button {
-                            visible: typeof updater !== "undefined"
-                                     && updater.state === 3
-                            text: "Download " + (typeof updater !== "undefined"
-                                ? "v" + updater.availableVersion : "")
-                            onClicked: if (typeof updater !== "undefined")
-                                            updater.downloadUpdate()
-                            contentItem: Text {
-                                text: parent.text
-                                font.family: Theme.fontSans
-                                font.pixelSize: Theme.fontSize.sm
-                                font.weight: Theme.fontWeight.semibold
-                                color: Theme.onAccent
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            background: Rectangle {
-                                color: parent.hovered ? Theme.accentDim : Theme.accent
-                                radius: Theme.r2
-                                implicitWidth: 160
-                                implicitHeight: 36
-                            }
-                        }
-
-                        // Apply button — once download finished.
-                        Button {
-                            visible: typeof updater !== "undefined"
-                                     && updater.state === 5
-                            text: "Restart to install"
-                            onClicked: if (typeof updater !== "undefined")
-                                            updater.applyUpdate()
-                            contentItem: Text {
-                                text: parent.text
-                                font.family: Theme.fontSans
-                                font.pixelSize: Theme.fontSize.sm
-                                font.weight: Theme.fontWeight.semibold
-                                color: Theme.onAccent
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            background: Rectangle {
-                                color: parent.hovered ? Theme.accentDim : Theme.accent
-                                radius: Theme.r2
-                                implicitWidth: 160
-                                implicitHeight: 36
-                            }
-                        }
-
-                        Item { Layout.fillWidth: true }
-                    }
+                    // The "Current version" row and the loose Check now /
+                    // Download / Restart button row that used to live
+                    // here are both inside UpdatePanel above now — same
+                    // controls, grouped with the status they act on
+                    // instead of floating below it.
 
                     InfoBanner {
                         icon: "shield"
