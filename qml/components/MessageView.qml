@@ -377,7 +377,36 @@ Rectangle {
                                   easing.type: Easing.OutCubic }
             }
 
-            model: serverManager.activeServer ? serverManager.activeServer.messageModel : null
+            // ── NEVER READ `model` FROM THIS VIEW'S OWN HANDLERS ──────
+            //
+            // Reading a ListView's `model` property is NOT safe from any
+            // handler that can run while the model is being swapped, and a
+            // JS null check cannot save you: the fault happens INSIDE the
+            // property read, before a value ever comes back.
+            //
+            // QQuickItemView::model() is, in Qt 6.9+, a tail call:
+            //     ldr x0, [d, #0x590]        // d->model, unchecked
+            //     b   QQmlDelegateModel::model()
+            // With d->model null, QQmlDelegateModel::model() runs with
+            // `this == nullptr` and its Q_D reads d_ptr at +0x8 —
+            // EXC_BAD_ACCESS at 0x0000000000000008.
+            //
+            // d->model IS null for part of QQuickItemView::setModel(): the
+            // old delegate model is released, then `setPosition(0)` drives
+            // setContentY → setViewportY → contentItem->setY → a geometry
+            // change that emits contentYChanged — all before the new
+            // delegate model is installed. So `onContentYChanged` is
+            // re-entered, from inside setModel, with a null delegate model.
+            //
+            // `messageModelRef` reaches the same object from the OTHER
+            // side — ServerConnection's own `messageModel` property — so
+            // the read never touches QQuickItemView at all. Every handler
+            // and helper below uses it. The `model:` binding is pointed at
+            // it too, so there is exactly one source of truth.
+            readonly property var messageModelRef: serverManager.activeServer
+                ? serverManager.activeServer.messageModel : null
+
+            model: messageModelRef
 
             // ── Unread-messages divider ───────────────────────────────
             // When the user enters a room, we snapshot the stored
@@ -392,7 +421,7 @@ Rectangle {
             property string _currentRoomId: ""
 
             function _recomputeUnreadDivider() {
-                var mm = model;
+                var mm = messageModelRef;   // never the view's `model`
                 if (!mm || unreadBoundaryMs <= 0) {
                     unreadDividerEventId = "";
                     return;
@@ -408,7 +437,7 @@ Rectangle {
 
             function _persistLastReadForCurrent() {
                 if (!_currentRoomId) return;
-                var mm = model;
+                var mm = messageModelRef;   // never the view's `model`
                 if (!mm) return;
                 // Only the model those rows actually came from can answer
                 // "what was the newest message in the room I'm leaving?".
@@ -438,7 +467,7 @@ Rectangle {
             function _persistLastReadIfAtBottom() {
                 if (!atBottom) return;
                 if (!_currentRoomId) return;
-                var mm = model;
+                var mm = messageModelRef;   // never the view's `model`
                 if (!mm) return;
                 if (mm !== _currentModel) return;   // see above
                 var ts = mm.newestTimestampMs();
@@ -595,7 +624,7 @@ Rectangle {
             // bottom" — those come from transient layout churn, not from
             // the user intentionally being at the end.
             function _isAtEnd() {
-                var mm = model;
+                var mm = messageModelRef;   // never the view's `model`
                 if (!mm) return true;
                 return mm.isPinnedToEnd(contentHeight, contentY,
                                         height, bottomTolerance);
@@ -612,7 +641,7 @@ Rectangle {
             // The decision lives in C++ (util/ScrollAnchor.h) so it can be
             // tested; the view only routes the answer.
             function _scrollPolicy(paginating) {
-                var mm = model;
+                var mm = messageModelRef;   // never the view's `model`
                 if (!mm) return kPreserve;
                 return mm.scrollPolicy(initialLoad, paginating,
                                        atBottom, _forceFollow);
@@ -932,7 +961,7 @@ Rectangle {
                 // last-read ts equals the newest loaded message,
                 // firstEventIdAfterTs returns "" → no divider →
                 // fall through to scroll-to-end.
-                var mm = model;
+                var mm = messageModelRef;   // never the view's `model`
                 if (!mm) return false;
                 // `restoreIndexForDivider` returns -1 for "scroll to the
                 // end" — an empty anchor, an anchor from another room that

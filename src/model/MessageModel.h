@@ -159,6 +159,22 @@ public:
     // over from another room — both resolve to -1.
     Q_INVOKABLE int restoreIndexForDivider(const QString& dividerEventId) const;
 
+    // THE NEXT TWO ANSWER FROM THEIR ARGUMENTS ALONE — NEVER FROM ROWS.
+    //
+    // That is a load-bearing invariant, not an implementation detail. Both
+    // are called from MessageView's contentY / contentHeight handlers, and
+    // those handlers are re-entered from INSIDE QQuickItemView::setModel()
+    // while the view's delegate model is null. The view therefore cannot
+    // reach them through its own `model` property (that read segfaults —
+    // see the comment on `messageModelRef` in MessageView.qml); it reaches
+    // them through ServerConnection's `messageModel` instead, which during
+    // a server switch may already be the INCOMING server's model.
+    //
+    // Handing a geometry question to the "wrong" model has to be harmless,
+    // and it is only harmless while the answer cannot depend on which model
+    // was asked. If either of these ever consults m_messages, that stops
+    // being true. testScrollGeometryAnswersAreModelIndependent pins it.
+
     // Whether the viewport is inside the tolerance band at the end of the
     // content. Two-sided: a contentY parked past the end is NOT at the end.
     Q_INVOKABLE bool isPinnedToEnd(qreal contentHeight, qreal contentY,

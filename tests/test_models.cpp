@@ -2225,6 +2225,47 @@ private slots:
         QCOMPARE(model.restoreIndexForDivider(anchor), 2);
     }
 
+    void testScrollGeometryAnswersAreModelIndependent()
+    {
+        // WHY THIS MATTERS, in one sentence: MessageView cannot ask these
+        // questions through the ListView's own `model` property, because
+        // that property read segfaults when it happens during
+        // QQuickItemView::setModel() — so it asks through
+        // ServerConnection's messageModel, which mid-switch may already be
+        // the INCOMING server's model. Asking the "wrong" model is only
+        // safe while the answer cannot depend on which model was asked.
+        MessageModel empty;
+        MessageModel populated;
+        for (int i = 0; i < 40; ++i) {
+            populated.appendEvent(makeMessageEvent("$p" + std::to_string(i),
+                                                    "@alice:server", "m",
+                                                    1000 + i * 10),
+                                  "@josh:server");
+        }
+        QCOMPARE(empty.rowCount(), 0);
+        QCOMPARE(populated.rowCount(), 40);
+
+        const double geometry[][4] = {
+            {1000, 800, 200, 80},   // exactly at the end
+            {1000, 760, 200, 80},   // inside the band
+            {1000, 700, 200, 80},   // scrolled up
+            {1000, 1500, 200, 80},  // parked past the end
+            {120, 0, 200, 80},      // shorter than the viewport
+            {0, 0, 200, 80},        // nothing laid out yet
+        };
+        for (const auto& g : geometry) {
+            QCOMPARE(empty.isPinnedToEnd(g[0], g[1], g[2], g[3]),
+                     populated.isPinnedToEnd(g[0], g[1], g[2], g[3]));
+        }
+
+        // Whole truth table, both models.
+        for (int bits = 0; bits < 16; ++bits) {
+            const bool a = bits & 1, b = bits & 2, c = bits & 4, d = bits & 8;
+            QCOMPARE(empty.scrollPolicy(a, b, c, d),
+                     populated.scrollPolicy(a, b, c, d));
+        }
+    }
+
     void testScrollQueriesDoNotRepaint()
     {
         // These run on every contentY change and every content-height
