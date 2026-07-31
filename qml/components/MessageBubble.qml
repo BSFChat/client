@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
 import BSFChat
+import "../js/PlaybackMath.js" as PlaybackMath
 
 Item {
     id: bubble
@@ -870,12 +871,28 @@ Item {
             // clutter the message row.
             Loader {
                 Layout.fillWidth: true
-                Layout.preferredHeight: item ? item.implicitHeight : 0
+                // Reserve the row from the event's info.w/h, not from the
+                // card. The card doesn't exist until mediaUrl resolves and
+                // item.implicitHeight is 0 until it does, so reserving from
+                // the item reserves late — contentHeight grows under the
+                // viewport and the channel looks like it scrolled up. Same
+                // helpers the card lays itself out with, so the reservation
+                // and the card cannot disagree. Keyed on msgtype, NOT on
+                // `active`: keying it on active would reserve only once
+                // mediaUrl resolves, which is the jump we're removing.
+                Layout.preferredHeight: bubble.msgtype === "m.video"
+                    ? PlaybackMath.cardHeight(
+                          bubble.mediaWidth, bubble.mediaHeight, Theme.isMobile,
+                          bubble.mediaFileName !== "", Theme.fontSize.sm,
+                          Theme.sp.s1)
+                    : 0
                 active: bubble.msgtype === "m.video" && bubble.mediaUrl !== ""
                 sourceComponent: VideoPlayerCard {
                     source: bubble.mediaUrl
                     fileName: bubble.mediaFileName
                     fileSize: bubble.mediaFileSize
+                    mediaWidth: bubble.mediaWidth
+                    mediaHeight: bubble.mediaHeight
                 }
             }
 

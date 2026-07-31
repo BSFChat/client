@@ -61,6 +61,64 @@ function seekTargetMs(x, leftPadding, availableWidth, durationMs) {
     return Math.round(frac * durationMs);
 }
 
+// ── Card geometry ─────────────────────────────────────────────────────
+//
+// The size of an inline video card is decided by the event, not by the media:
+// the m.video info block carries w/h, so the row can reserve the exact box
+// before a single byte is fetched. Getting this from the media instead is what
+// makes a channel appear to scroll: the card renders small, the real size
+// arrives, contentHeight grows underneath the viewport and the newest message
+// slides out of view.
+//
+// These are shared with MessageBubble.qml, which needs the same number BEFORE
+// the card exists in order to reserve the row. Two copies of this arithmetic
+// would drift, and the drift would be invisible until a row jumped.
+//
+// The scale is deliberately identical to the inline-image path in
+// MessageBubble.qml, including the 1.0 clamp — a 160x120 clip renders at
+// 160x120 rather than being blown up to the cap.
+
+function cardMaxWidth(isMobile)  { return isMobile ? 260 : 400; }
+function cardMaxHeight(isMobile) { return isMobile ? 200 : 300; }
+
+function _cardScale(mediaW, mediaH, isMobile) {
+    return Math.min(cardMaxWidth(isMobile) / mediaW,
+                    cardMaxHeight(isMobile) / mediaH, 1.0);
+}
+
+// A server that omits info.w/h leaves us guessing, and the guess has to match
+// the image path's: a 4:3 box at the cap width. Anything else means the two
+// media types reserve differently for the same missing information.
+function cardBoxWidth(mediaW, mediaH, isMobile) {
+    if (mediaW > 0 && mediaH > 0)
+        return Math.round(mediaW * _cardScale(mediaW, mediaH, isMobile));
+    return cardMaxWidth(isMobile);
+}
+
+function cardBoxHeight(mediaW, mediaH, isMobile) {
+    if (mediaW > 0 && mediaH > 0)
+        return Math.round(mediaH * _cardScale(mediaW, mediaH, isMobile));
+    return Math.round(cardMaxWidth(isMobile) * 3 / 4);
+}
+
+// The filename/size caption under the card. Given a fixed height rather than
+// measured from the text so that the row's total is knowable before the card
+// is instantiated; VideoPlayerCard pins the row to this number so the two
+// cannot disagree. 1.5x the font is enough headroom for ascenders and
+// descenders at every size in the theme.
+function captionRowHeight(hasCaption, fontPx) {
+    return hasCaption ? Math.round(fontPx * 1.5) : 0;
+}
+
+// What MessageBubble.qml should reserve for the whole card: the picture box,
+// plus the caption row and the spacing above it when there is one.
+function cardHeight(mediaW, mediaH, isMobile, hasCaption, fontPx, spacing) {
+    var h = cardBoxHeight(mediaW, mediaH, isMobile);
+    var caption = captionRowHeight(hasCaption, fontPx);
+    if (caption > 0) h += caption + spacing;
+    return h;
+}
+
 // Which Window.Visibility to put the window back to when the video leaves
 // fullscreen.
 //

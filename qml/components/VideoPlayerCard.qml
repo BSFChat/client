@@ -112,6 +112,18 @@ ColumnLayout {
         }
     }
 
+    // Intrinsic media dimensions from the m.video event's info block,
+    // forwarded by MessageBubble.qml. 0 = the server didn't say.
+    //
+    // These are what stop the card perturbing the message list. The row
+    // is laid out the moment the event arrives, long before the media
+    // resolves; if the card's height depends on the media, the row grows
+    // afterwards, contentHeight grows under the viewport and the channel
+    // looks like it scrolled up on its own. Sized from the event, the
+    // box is right on the first frame and never changes again.
+    property int mediaWidth: 0
+    property int mediaHeight: 0
+
     // Cap dimensions to the same 400×300 envelope as the inline image
     // renderer — keeps a long conversation with mixed media visually
     // consistent. The real aspect ratio is preserved by VideoOutput's
@@ -119,8 +131,16 @@ ColumnLayout {
     // Mobile bubbles are ~260px wide (matches MessageBubble.qml's image
     // cap); on a narrow phone a 400×300 card overflows the bubble and
     // pushes off the right edge. Desktop keeps the original envelope.
-    property int maxWidth:  Theme.isMobile ? 260 : 400
-    property int maxHeight: Theme.isMobile ? 200 : 300
+    property int maxWidth:  PlaybackMath.cardMaxWidth(Theme.isMobile)
+    property int maxHeight: PlaybackMath.cardMaxHeight(Theme.isMobile)
+
+    // The actual box, aspect-fitted inside that envelope. Same scale as
+    // the inline-image path, from the same helpers MessageBubble.qml
+    // uses to reserve the row — one arithmetic, two callers, no drift.
+    readonly property int boxWidth:
+        PlaybackMath.cardBoxWidth(mediaWidth, mediaHeight, Theme.isMobile)
+    readonly property int boxHeight:
+        PlaybackMath.cardBoxHeight(mediaWidth, mediaHeight, Theme.isMobile)
 
     // Audio state. Writable — the volume slider / mute button drive
     // these, and the AudioOutput binds to them. Starts at 1.0 so the
@@ -132,10 +152,10 @@ ColumnLayout {
 
     Rectangle {
         id: videoCard
-        Layout.preferredWidth: maxWidth
-        Layout.preferredHeight: maxHeight
-        Layout.maximumWidth: maxWidth
-        Layout.maximumHeight: maxHeight
+        Layout.preferredWidth: root.boxWidth
+        Layout.preferredHeight: root.boxHeight
+        Layout.maximumWidth: root.maxWidth
+        Layout.maximumHeight: root.maxHeight
         color: "black"
         radius: Theme.r2
         clip: true
@@ -638,9 +658,18 @@ ColumnLayout {
     }
 
     // Filename + size below. Same cue as the inline-image caption.
+    //
+    // Pinned to the height MessageBubble.qml reserved for it rather than
+    // measured from the text: the row has to be worth a known number of
+    // pixels before the card exists, and a caption that settled one pixel
+    // off after the font resolved would move every message below it.
     RowLayout {
+        id: captionRow
         spacing: Theme.sp.s1
         visible: root.fileName !== ""
+        Layout.preferredHeight: PlaybackMath.captionRowHeight(
+            root.fileName !== "", Theme.fontSize.sm)
+        Layout.maximumHeight: Layout.preferredHeight
         Text {
             text: root.fileName
             font.family: Theme.fontSans
