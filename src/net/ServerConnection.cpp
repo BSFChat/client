@@ -576,8 +576,13 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             }
 #endif
         }
-        // Update voice member count in room list
-        m_roomListModel->updateVoiceMemberCount(roomId, members.size());
+        // Deliberately does NOT touch the sidebar's per-room roster. That is
+        // derived from m.call.member room state in processSyncResponse, which
+        // covers every voice channel rather than only the one we're in, and
+        // cannot be raced by a poll reply that was already in flight when
+        // somebody left. This reply exists for mesh reconciliation and for the
+        // server-side liveness heartbeat; it is not a source of truth for the
+        // UI.
     });
 
     connect(m_client, &MatrixClient::voiceChannelCreated, this, [this](const QString& /*roomId*/) {
@@ -616,6 +621,9 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             m_messageModel->refreshDisplayNames();
             m_memberListModel->refreshDisplayNames();
             emit voiceMembersChanged();
+            // Sidebar voice rows carry a stamped display name, so they only
+            // rename when the snapshot is rebuilt.
+            rebuildCategorizedRooms();
         }
         emit profileFetched(userId, displayName, avatarUrl);
     });
@@ -639,6 +647,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             m_messageModel->refreshDisplayNames();
             m_memberListModel->refreshDisplayNames();
             emit voiceMembersChanged();
+            rebuildCategorizedRooms();
         }
         emit nicknameChanged(userId, nickname);
     });
@@ -922,6 +931,21 @@ void ServerConnection::setActiveRoom(const QString& roomId)
     }
 
     m_activeRoomId = roomId;
+
+    // Remember this channel for the next time this server comes to the
+    // foreground — a server switch, or the next launch. Keyed per server, so
+    // switching between servers restores each one's own channel rather than
+    // dropping the user on an empty state.
+    //
+    // Lives here rather than in the QML shells because both shells had to
+    // duplicate it and neither could see the server-switch path at all. Voice
+    // rooms are excluded: restoring one on launch would put the microphone on
+    // the network without the user asking. A restore is not a no-op guard —
+    // setActiveRoom is only reached for a channel the user (or a restore)
+    // actually opened, and rewriting the same value is harmless.
+    if (m_settings && !roomId.isEmpty() && !m_roomListModel->isVoiceRoom(roomId))
+        m_settings->setLastTextRoomFor(m_serverUrl, roomId);
+
     m_messageModel->clear();
     m_memberListModel->clear();
 
@@ -1455,6 +1479,54 @@ void ServerConnection::leaveVoiceChannel()
     m_client->leaveVoice(roomId);
 }
 
+void ServerConnection::applyCallMemberEvent(const QString& roomId,
+                                            const bsfchat::RoomEvent& event)
+{
+    if (!event.state_key.has_value()) return;
+
+    bsfchat::client::VoiceParticipant p;
+    p.userId = QString::fromStdString(*event.state_key);
+    p.muted = event.content.data.value("muted", false);
+    p.deafened = event.content.data.value("deafened", false);
+    p.cameraOn = event.content.data.value("camera_on", false);
+    p.screenSharing = event.content.data.value("screen_sharing", false);
+    p.joinedAt = static_cast<qint64>(event.content.data.value("joined_at", int64_t(0)));
+    const bool active = event.content.data.value("active", false);
+
+    // A room only carries m.call.member if it is a voice channel, and the
+    // m.room.voice marker may sit later in the same state batch — mark it now
+    // so the sidebar can render the roster on the first pass rather than the
+    // second.
+    if (active) m_roomListModel->updateVoiceState(roomId, true);
+
+    if (!m_roomListModel->applyCallMember(roomId, p, active)) return;
+
+    // Only the room we're actually in needs the HTTP round trip: its reply
+    // drives mesh peer reconciliation and doubles as our liveness heartbeat.
+    // Every other channel's occupancy is fully described by the state event we
+    // just folded in, so it costs nothing to display.
+    if (roomId == m_activeVoiceRoomId) m_client->getVoiceMembers(roomId);
+}
+
+void ServerConnection::restoreLastTextRoom()
+{
+    if (!m_activeRoomId.isEmpty()) { m_pendingRoomRestore = false; return; }
+    if (!m_roomListModel) return;
+
+    const QString remembered = m_settings
+        ? m_settings->lastTextRoomFor(m_serverUrl) : QString();
+    const auto choice = m_roomListModel->restoreChoice(remembered,
+                                                       m_firstSyncProcessed);
+    using Outcome = bsfchat::client::ChannelRestoreChoice::Outcome;
+    if (choice.outcome == Outcome::Wait) {
+        m_pendingRoomRestore = true;
+        return;
+    }
+    m_pendingRoomRestore = false;
+    if (choice.roomId.isEmpty()) return;
+    setActiveRoom(choice.roomId);
+}
+
 void ServerConnection::teardownVoiceSession()
 {
     // First thing, and outside the voice #ifdef: the badge must not
@@ -1805,6 +1877,36 @@ void ServerConnection::rebuildCategorizedRooms()
     // flagged as DMs — those live in their own "Direct Messages"
     // channel-list section and shouldn't double-appear as channels.
     auto groups = m_roomListModel->getCategoriesWithChannels();
+
+    // Resolve voice participants' @mxid → display name. Done here rather than
+    // in RoomListModel because the name cache lives on the connection, and as
+    // a stamped value rather than a QML-side lookup because a function call
+    // from a delegate is not a reactive dependency: a name that arrives after
+    // the row was built would never repaint. Every path that learns a new name
+    // rebuilds, so the sidebar renames in step with the member list.
+    for (auto& g : groups) {
+        QVariantMap cat = g.toMap();
+        QVariantList channels = cat.value(QStringLiteral("channels")).toList();
+        bool touched = false;
+        for (auto& c : channels) {
+            QVariantMap ch = c.toMap();
+            QVariantList members = ch.value(QStringLiteral("voiceMembers")).toList();
+            if (members.isEmpty()) continue;
+            for (auto& m : members) {
+                QVariantMap row = m.toMap();
+                row[QStringLiteral("displayName")] = displayNameForSender(
+                    row.value(QStringLiteral("user_id")).toString());
+                m = row;
+            }
+            ch[QStringLiteral("voiceMembers")] = members;
+            c = ch;
+            touched = true;
+        }
+        if (!touched) continue;
+        cat[QStringLiteral("channels")] = channels;
+        g = cat;
+    }
+
     if (!m_directRoomPeers.isEmpty()) {
         QVariantList filtered;
         for (const auto& g : groups) {
@@ -2150,7 +2252,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomVoice)) {
                 m_roomListModel->updateVoiceState(roomId, true);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kCallMember)) {
-                m_client->getVoiceMembers(roomId);
+                applyCallMemberEvent(roomId, event);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomType)) {
                 QString rtype = QString::fromStdString(event.content.data.value("type", ""));
                 m_roomListModel->updateRoomType(roomId, rtype);
@@ -2235,7 +2337,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomVoice)) {
                 m_roomListModel->updateVoiceState(roomId, true);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kCallMember)) {
-                m_client->getVoiceMembers(roomId);
+                applyCallMemberEvent(roomId, event);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomType)) {
                 QString rtype = QString::fromStdString(event.content.data.value("type", ""));
                 m_roomListModel->updateRoomType(roomId, rtype);
@@ -2608,7 +2710,10 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
         }
     }
 
-    // Rebuild categorized rooms after sync processing
+    // Rebuild categorized rooms after sync processing. This is what publishes
+    // the voice rosters folded in above — m_categorizedRooms is a snapshot,
+    // so anything that mutates RoomListModel outside a sync pass has to
+    // rebuild it or the sidebar keeps rendering the previous batch's numbers.
     rebuildCategorizedRooms();
 
     // Let any Bans-tab binding re-evaluate. This fires once per sync
@@ -2654,6 +2759,15 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
         }
         m_firstSyncProcessed = true;
     }
+
+    // A restore that had to wait for the channel list gets another go now that
+    // this batch (and, on the first pass, the prune above) has been folded in.
+    // Deliberately AFTER m_firstSyncProcessed flips: that flag is what lets
+    // restoreLastTextRoom tell "the remembered channel is gone" from "it
+    // hasn't arrived yet", and running before it would cost an extra sync
+    // round trip on every launch whose remembered channel was deleted.
+    // Self-disarming — the no-op guard clears the flag once a channel is open.
+    if (m_pendingRoomRestore) restoreLastTextRoom();
 
     // Snapshot this sync for the next launch. Skipped while replaying, both
     // because it would be a no-op write and because the replay carries no

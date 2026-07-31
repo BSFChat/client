@@ -6,6 +6,9 @@
 #include <QVariantList>
 #include <QVector>
 
+#include "util/ChannelRestore.h"
+#include "util/VoiceRoster.h"
+
 class RoomListModel : public QAbstractListModel {
     Q_OBJECT
 
@@ -20,6 +23,7 @@ public:
         LastMessageTimeRole,
         IsVoiceRole,
         VoiceMemberCountRole,
+        VoiceMembersRole,
         ParentIdRole,
         RoomTypeRole,
         SortOrderRole,
@@ -84,8 +88,31 @@ public:
     // restored on launch (would transmit mic without consent).
     Q_INVOKABLE bool isVoiceRoom(const QString& roomId) const;
     Q_INVOKABLE bool hasRoom(const QString& roomId) const;
+
+    // Which channel to open when this server comes to the foreground. Returns
+    // "" for both "wait, sync hasn't delivered the list" and "there is nothing
+    // to open" — callers that need to tell those apart use
+    // bsfchat::client::chooseChannelToRestore directly. `syncComplete` says
+    // whether the room list is the whole world yet; see ChannelRestore.h.
+    Q_INVOKABLE QString restoreTargetRoomId(const QString& remembered,
+                                            bool syncComplete) const;
+    bsfchat::client::ChannelRestoreChoice restoreChoice(const QString& remembered,
+                                                 bool syncComplete) const;
+
     void updateVoiceState(const QString& roomId, bool isVoice);
-    void updateVoiceMemberCount(const QString& roomId, int count);
+
+    // Voice occupancy, folded one m.call.member state event at a time —
+    // `active` decides insert/update vs. remove. The roster IS the count:
+    // there is no separately stored number that could disagree with the list,
+    // and that disagreement is exactly how a user who left kept their seat in
+    // the sidebar. Returns true iff the roster changed, so callers can skip
+    // republishing the sidebar when a re-delivered event says nothing new.
+    bool applyCallMember(const QString& roomId,
+                         const bsfchat::client::VoiceParticipant& participant,
+                         bool active);
+    const bsfchat::client::VoiceRoster& voiceMembers(const QString& roomId) const;
+    Q_INVOKABLE int voiceMemberCount(const QString& roomId) const;
+
     void removeRoom(const QString& roomId);
     // Remove any room whose ID is not in the given set. Used to drop rooms
     // the server has made invisible to us (e.g. after permission change).
@@ -112,7 +139,10 @@ private:
         QString lastMessage;
         qint64 lastMessageTime = 0;
         bool isVoice = false;
-        int voiceMemberCount = 0;
+        // Exactly the users whose newest m.call.member said active. The
+        // sidebar's participant count is voiceMembers.size(), never a
+        // separately tracked integer.
+        bsfchat::client::VoiceRoster voiceMembers;
         QString parentId;
         QString roomType;
         int sortOrder = 0;

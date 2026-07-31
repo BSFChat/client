@@ -14,7 +14,10 @@
 #include "util/MentionRenderer.h"
 #include "util/ModerationScope.h"
 #include "util/PermissionMath.h"
+#include "util/ScrollAnchor.h"
+#include "util/ChannelRestore.h"
 #include "util/SearchParser.h"
+#include "util/VoiceRoster.h"
 
 #include <bsfchat/MatrixTypes.h>
 #include <bsfchat/Constants.h>
@@ -2016,6 +2019,574 @@ private slots:
         QVERIFY(moderationRooms(ModerationAction::Kick, none).isEmpty());
         QVERIFY(moderationRooms(ModerationAction::Ban, none).isEmpty());
         QVERIFY(moderationRooms(ModerationAction::Unban, none).isEmpty());
+    }
+
+    // ── Scroll position (util/ScrollAnchor.h + MessageModel) ─────────────
+    //
+    // The defect these cover: send enough messages to overflow a channel,
+    // switch server, switch back, and the view sits short of the bottom.
+    // The mechanism was never a missing scroll call — it was the unread
+    // anchor. It is computed from a read-marker snapshot that is frozen for
+    // the duration of a visit, the snapshot was only refreshed on
+    // activeRoomIdChanged (which does not fire on a server switch), and the
+    // scan behind it counted the user's OWN messages as unread. Re-entry
+    // then anchored on the first message the user had just sent, and set
+    // atBottom = false, which gates off every subsequent scroll-to-end.
+
+    void testIsPinnedToEndBand()
+    {
+        using namespace bsfchat::client;
+        // Exactly at the end.
+        QVERIFY(isPinnedToEnd(1000, 800, 200, 80));
+        // Inside the band, short of the end.
+        QVERIFY(isPinnedToEnd(1000, 760, 200, 80));
+        // Outside the band: the user has scrolled up and must be left there.
+        QVERIFY(!isPinnedToEnd(1000, 700, 200, 80));
+        // Content shorter than the viewport is always "at the end" — there
+        // is nowhere else to be.
+        QVERIFY(isPinnedToEnd(120, 0, 200, 80));
+    }
+
+    void testContentYPastTheEndIsNotPinned()
+    {
+        using bsfchat::client::isPinnedToEnd;
+        // A contentY parked PAST the valid end is what layout churn
+        // produces (an image resolves its size and contentHeight shrinks
+        // under a contentY already at the old end). A one-sided test calls
+        // that "at the bottom" and latches a position the view can never
+        // reach, after which every auto-scroll agrees there is nothing to
+        // do. Just inside the band is tolerated; well past it is not.
+        QVERIFY(isPinnedToEnd(1000, 840, 200, 80));    // 40px past, tolerated
+        QVERIFY(!isPinnedToEnd(1000, 1500, 200, 80));  // far past, rejected
+    }
+
+    void testChooseRestoreTargetFallsBackToEnd()
+    {
+        using namespace bsfchat::client;
+        using Kind = RestoreTarget::Kind;
+        // Empty model.
+        QCOMPARE(chooseRestoreTarget(0, 3).kind, Kind::End);
+        // No divider resolved.
+        QCOMPARE(chooseRestoreTarget(10, -1).kind, Kind::End);
+        // Row 0 is indistinguishable from "top of the loaded history".
+        QCOMPARE(chooseRestoreTarget(10, 0).kind, Kind::End);
+        // Stale anchor from a bigger model.
+        QCOMPARE(chooseRestoreTarget(10, 10).kind, Kind::End);
+        QCOMPARE(chooseRestoreTarget(10, 99).kind, Kind::End);
+        // A real unread run does get honoured — the point of the divider.
+        QCOMPARE(chooseRestoreTarget(10, 4), (RestoreTarget{Kind::Row, 4}));
+    }
+
+    void testPositionPolicyLeavesScrolledUpUserAlone()
+    {
+        using namespace bsfchat::client;
+        // THE invariant: a user who scrolled away from the end is never
+        // dragged back by content arriving.
+        QCOMPARE(positionPolicyForModelChange(false, false, false, false),
+                 PositionPolicy::Preserve);
+        // Pinned to the end → follow it.
+        QCOMPARE(positionPolicyForModelChange(false, false, true, false),
+                 PositionPolicy::FollowEnd);
+        // Just sent a message → follow even from a non-bottom position.
+        QCOMPARE(positionPolicyForModelChange(false, false, false, true),
+                 PositionPolicy::FollowEnd);
+        // Fresh room context → run initial placement.
+        QCOMPARE(positionPolicyForModelChange(true, false, false, false),
+                 PositionPolicy::Reenter);
+    }
+
+    void testBackPaginationNeverMovesTheUser()
+    {
+        using namespace bsfchat::client;
+        // Prepends win over every other reason to move. A user who scrolled
+        // far enough up to trigger back-pagination must not be thrown to the
+        // bottom by the batch they asked for — not by the pin, not by the
+        // send latch, and not by an entry window that happens to still be
+        // open when the page lands.
+        QCOMPARE(positionPolicyForModelChange(false, true, true, true),
+                 PositionPolicy::Preserve);
+        QCOMPARE(positionPolicyForModelChange(true, true, true, true),
+                 PositionPolicy::Preserve);
+    }
+
+    void testOwnMessagesAreNeverUnread()
+    {
+        MessageModel model;
+        const QString me = "@josh:server";
+        model.appendEvent(makeMessageEvent("$read", "@alice:server", "old", 1000),
+                          me);
+        model.appendEvent(makeMessageEvent("$mine1", "@josh:server", "hi", 2000),
+                          me);
+        model.appendEvent(makeMessageEvent("$mine2", "@josh:server", "there", 3000),
+                          me);
+
+        // The plain scan still reports the user's own message — that is what
+        // it is for, and what the divider used to be built from.
+        QCOMPARE(model.firstEventIdAfterTs(1000), QStringLiteral("$mine1"));
+        // The unread scan skips it: you have read what you just typed. With
+        // nothing else after the marker there is no divider at all, so
+        // re-entry falls through to the newest message.
+        QVERIFY(model.firstUnreadEventIdAfterTs(1000).isEmpty());
+        QCOMPARE(model.restoreIndexForDivider(
+                     model.firstUnreadEventIdAfterTs(1000)), -1);
+    }
+
+    void testOwnMessagesAreSkippedNotTerminal()
+    {
+        MessageModel model;
+        const QString me = "@josh:server";
+        model.appendEvent(makeMessageEvent("$read", "@alice:server", "old", 1000), me);
+        model.appendEvent(makeMessageEvent("$mine", "@josh:server", "hi", 2000), me);
+        model.appendEvent(makeMessageEvent("$theirs", "@alice:server", "yo", 3000), me);
+        model.appendEvent(makeMessageEvent("$later", "@bob:server", "hey", 4000), me);
+
+        // Somebody else's message that landed AFTER yours is still unread
+        // and is what the divider belongs above — so own messages have to be
+        // skipped over, not treated as the end of the scan.
+        QCOMPARE(model.firstUnreadEventIdAfterTs(1000), QStringLiteral("$theirs"));
+        QCOMPARE(model.restoreIndexForDivider(QStringLiteral("$theirs")), 2);
+    }
+
+    void testRestoreIndexRejectsForeignAndBoundaryAnchors()
+    {
+        MessageModel model;
+        const QString me = "@josh:server";
+        for (int i = 0; i < 4; ++i) {
+            model.appendEvent(makeMessageEvent("$ev" + std::to_string(i),
+                                                "@alice:server", "m",
+                                                1000 + i * 10),
+                              me);
+        }
+        // Empty anchor → scroll to the end.
+        QCOMPARE(model.restoreIndexForDivider(QString()), -1);
+        // An anchor left over from ANOTHER server's model isn't in this one.
+        // This is the exact shape of the stale state a server switch used to
+        // carry across, and -1 is what turns it back into "scroll to end".
+        QCOMPARE(model.restoreIndexForDivider(QStringLiteral("$from-other-room")), -1);
+        // Row 0 is not distinguishable from the top of loaded history.
+        QCOMPARE(model.restoreIndexForDivider(QStringLiteral("$ev0")), -1);
+        // A genuine mid-history anchor survives.
+        QCOMPARE(model.restoreIndexForDivider(QStringLiteral("$ev2")), 2);
+    }
+
+    void testServerSwitchBackLandsAtEndAfterOwnMessages()
+    {
+        // The reported repro, at model level: a channel read to the end,
+        // then a screenful of the user's own messages, then leave and come
+        // back. Both the fresh marker and the stale one must resolve to
+        // "no divider" so re-entry scrolls to the newest message.
+        MessageModel model;
+        const QString me = "@josh:server";
+        const qint64 readTo = 1000;
+        model.appendEvent(makeMessageEvent("$old", "@alice:server", "hi", readTo), me);
+        for (int i = 0; i < 12; ++i) {
+            model.appendEvent(makeMessageEvent("$mine" + std::to_string(i),
+                                                "@josh:server", "spam",
+                                                2000 + i * 10),
+                              me);
+        }
+
+        // Fresh marker: the view rolled it forward while parked at the
+        // bottom, so re-entry re-reads it and there is nothing after it.
+        const qint64 fresh = model.newestTimestampMs();
+        QCOMPARE(fresh, static_cast<qint64>(2110));
+        QVERIFY(model.firstUnreadEventIdAfterTs(fresh).isEmpty());
+        QCOMPARE(model.restoreIndexForDivider(
+                     model.firstUnreadEventIdAfterTs(fresh)), -1);
+
+        // STALE marker — the state the old code was actually in, because the
+        // snapshot was frozen at first entry and a server switch never
+        // refreshed it. It must STILL resolve to the end, because everything
+        // past it is the user's own writing.
+        QVERIFY(model.firstUnreadEventIdAfterTs(readTo).isEmpty());
+        QCOMPARE(model.restoreIndexForDivider(
+                     model.firstUnreadEventIdAfterTs(readTo)), -1);
+
+        // And the policy for that entry is Reenter, which is what routes it
+        // through restoreIndexForDivider in the first place.
+        QCOMPARE(model.scrollPolicy(/*contextChanged=*/true, false, true, false),
+                 static_cast<int>(bsfchat::client::PositionPolicy::Reenter));
+    }
+
+    void testGenuineUnreadFromOthersStillAnchorsTheDivider()
+    {
+        // The guard against "fixing" the bug by always scrolling to the end:
+        // messages that arrived from other people while the user was away
+        // must still park them at the first one.
+        MessageModel model;
+        const QString me = "@josh:server";
+        model.appendEvent(makeMessageEvent("$a", "@alice:server", "1", 1000), me);
+        model.appendEvent(makeMessageEvent("$b", "@josh:server", "2", 2000), me);
+        model.appendEvent(makeMessageEvent("$c", "@alice:server", "3", 3000), me);
+        model.appendEvent(makeMessageEvent("$d", "@alice:server", "4", 4000), me);
+
+        const QString anchor = model.firstUnreadEventIdAfterTs(2000);
+        QCOMPARE(anchor, QStringLiteral("$c"));
+        QCOMPARE(model.restoreIndexForDivider(anchor), 2);
+    }
+
+    void testScrollQueriesDoNotRepaint()
+    {
+        // These run on every contentY change and every content-height
+        // reflow. A repaint from a position query would relayout the very
+        // delegates whose heights the query is about — feeding the layout
+        // flap that made scroll position unstable in the first place.
+        MessageModel model;
+        const QString me = "@josh:server";
+        for (int i = 0; i < 5; ++i) {
+            model.appendEvent(makeMessageEvent("$s" + std::to_string(i),
+                                                "@alice:server", "m",
+                                                1000 + i * 10),
+                              me);
+        }
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        model.isPinnedToEnd(1000, 800, 200, 80);
+        model.scrollPolicy(false, false, true, false);
+        model.restoreIndexForDivider(QStringLiteral("$s2"));
+        model.firstUnreadEventIdAfterTs(1000);
+        QCOMPARE(rowsTouched(spy), 0);
+    }
+
+    // ── Voice roster (util/VoiceRoster.h + RoomListModel) ────────────────
+    //
+    // The defect: join a voice channel from two machines, leave from one, and
+    // the channel row kept showing its member badge — with no name ever shown
+    // beside it. The server was right the whole time (the newest m.call.member
+    // for the leaver said active:false).
+    //
+    // Two mechanisms, both client-side. The count came from
+    // `members.size()` of whatever the 5 s /voice/members poll last returned,
+    // stored as a standalone integer; and the sidebar reads a QVariantList
+    // SNAPSHOT (ServerConnection::m_categorizedRooms) that was only rebuilt at
+    // the end of a /sync pass, so an async poll reply could never reach it.
+    // Leaving stopped the poll, so the last number written was the one from
+    // while the user was still in the call, and it stuck.
+    //
+    // The fix makes the roster the only stored thing and derives the count from
+    // it, so the two cannot disagree; and derives the roster from m.call.member
+    // room state during sync, so it is published by the rebuild that already
+    // runs there. These cover the rule itself.
+
+private:
+    static bsfchat::client::VoiceParticipant participant(const QString& uid,
+                                                          qint64 joinedAt = 0)
+    {
+        bsfchat::client::VoiceParticipant p;
+        p.userId = uid;
+        p.joinedAt = joinedAt;
+        return p;
+    }
+private slots:
+
+    void testVoiceRosterMembershipIsTheActiveFlag()
+    {
+        using namespace bsfchat::client;
+        VoiceRoster roster;
+        QVERIFY(applyCallMember(roster, participant("@josh:t"), true));
+        QCOMPARE(roster.size(), 1);
+        // The SAME user going inactive is a removal, not a second row and not
+        // a row that lingers with active=false. There is no tombstone state
+        // for a count to accidentally include.
+        QVERIFY(applyCallMember(roster, participant("@josh:t"), false));
+        QCOMPARE(roster.size(), 0);
+    }
+
+    void testVoiceRosterEmptiesWhenTheLastParticipantLeaves()
+    {
+        using namespace bsfchat::client;
+        // THE regression: the screenshot showed a "1" badge on a channel
+        // nobody was in. An empty roster is the only representation of that
+        // state, so the badge (sized from the roster) cannot survive it.
+        VoiceRoster roster;
+        applyCallMember(roster, participant("@josh:t", 100), true);
+        applyCallMember(roster, participant("@ana:t", 200), true);
+        QCOMPARE(roster.size(), 2);
+        applyCallMember(roster, participant("@ana:t", 200), false);
+        QCOMPARE(roster.size(), 1);
+        applyCallMember(roster, participant("@josh:t", 100), false);
+        QVERIFY(roster.isEmpty());
+    }
+
+    void testVoiceRosterRemoteLeaveRemovesOnlyThatUser()
+    {
+        using namespace bsfchat::client;
+        // Explicitly the remote case: the owner called out that the count has
+        // to be right when SOMEONE ELSE leaves, not just the local user. The
+        // rule is per-user by construction — there is no "am I the local
+        // user" branch anywhere in it.
+        VoiceRoster roster;
+        applyCallMember(roster, participant("@josh:t", 100), true);
+        applyCallMember(roster, participant("@ana:t", 200), true);
+        applyCallMember(roster, participant("@bo:t", 300), true);
+        QVERIFY(applyCallMember(roster, participant("@ana:t", 200), false));
+        QCOMPARE(roster.size(), 2);
+        QCOMPARE(roster[0].userId, QStringLiteral("@josh:t"));
+        QCOMPARE(roster[1].userId, QStringLiteral("@bo:t"));
+    }
+
+    void testVoiceRosterRepeatedStateReportsNoChange()
+    {
+        using namespace bsfchat::client;
+        // The no-flicker property. The 5 s poll and re-delivered state events
+        // re-assert the same membership constantly; each of those must report
+        // "nothing changed" so the caller skips the repaint and the sidebar
+        // snapshot rebuild. Without this the participant list would rebuild
+        // (and visibly restart its animations) twelve times a minute.
+        VoiceRoster roster;
+        QVERIFY(applyCallMember(roster, participant("@josh:t", 100), true));
+        QVERIFY(!applyCallMember(roster, participant("@josh:t", 100), true));
+        QVERIFY(!applyCallMember(roster, participant("@josh:t", 100), true));
+        // A leave for somebody who was never here is equally a no-op — the
+        // server re-sends an inactive m.call.member on every reap sweep.
+        QVERIFY(!applyCallMember(roster, participant("@ghost:t"), false));
+        QCOMPARE(roster.size(), 1);
+    }
+
+    void testVoiceRosterReportsChangeWhenOnlyAFlagMoves()
+    {
+        using namespace bsfchat::client;
+        // Counterpart to the above: muting is NOT a no-op, or the mic-off
+        // glyph would never appear until somebody joined or left.
+        VoiceRoster roster;
+        applyCallMember(roster, participant("@josh:t", 100), true);
+        auto muted = participant("@josh:t", 100);
+        muted.muted = true;
+        QVERIFY(applyCallMember(roster, muted, true));
+        QCOMPARE(roster.size(), 1);
+        QVERIFY(roster[0].muted);
+    }
+
+    void testVoiceRosterOrderIsStableAcrossPolls()
+    {
+        using namespace bsfchat::client;
+        // Join order, ties by user id. Events arrive in whatever order the
+        // sync batch happens to carry them, so an unsorted roster would
+        // reshuffle the visible list on every update.
+        VoiceRoster a;
+        applyCallMember(a, participant("@bo:t", 300), true);
+        applyCallMember(a, participant("@josh:t", 100), true);
+        applyCallMember(a, participant("@ana:t", 200), true);
+
+        VoiceRoster b;
+        applyCallMember(b, participant("@ana:t", 200), true);
+        applyCallMember(b, participant("@bo:t", 300), true);
+        applyCallMember(b, participant("@josh:t", 100), true);
+
+        QCOMPARE(a, b);
+        QCOMPARE(a[0].userId, QStringLiteral("@josh:t"));
+        QCOMPARE(a[1].userId, QStringLiteral("@ana:t"));
+        QCOMPARE(a[2].userId, QStringLiteral("@bo:t"));
+    }
+
+    void testRoomListVoiceCountIsDerivedFromTheRoster()
+    {
+        using namespace bsfchat::client;
+        // The model-level version of the same invariant: there is no setter
+        // for the count, so no code path can leave it disagreeing with the
+        // list. (There used to be — updateVoiceMemberCount — and that is
+        // exactly what the poll wrote a stale number into.)
+        RoomListModel model;
+        const QString room = QStringLiteral("!voice:t");
+        model.ensureRoom(room);
+        model.updateVoiceState(room, true);
+
+        QCOMPARE(model.voiceMemberCount(room), 0);
+        model.applyCallMember(room, participant("@josh:t", 100), true);
+        model.applyCallMember(room, participant("@ana:t", 200), true);
+        QCOMPARE(model.voiceMemberCount(room), 2);
+        QCOMPARE(model.voiceMembers(room).size(), 2);
+
+        model.applyCallMember(room, participant("@ana:t", 200), false);
+        model.applyCallMember(room, participant("@josh:t", 100), false);
+        QCOMPARE(model.voiceMemberCount(room), 0);
+        QVERIFY(model.voiceMembers(room).isEmpty());
+
+        const int row = 0;
+        QCOMPARE(model.data(model.index(row),
+                            RoomListModel::VoiceMemberCountRole).toInt(), 0);
+        QVERIFY(model.data(model.index(row),
+                           RoomListModel::VoiceMembersRole).toList().isEmpty());
+    }
+
+    void testRoomListVoiceRosterRepaintsOnlyOnRealChange()
+    {
+        using namespace bsfchat::client;
+        RoomListModel model;
+        const QString room = QStringLiteral("!voice:t");
+        model.ensureRoom(room);
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+
+        QVERIFY(model.applyCallMember(room, participant("@josh:t", 100), true));
+        QCOMPARE(spy.count(), 1);
+        // Re-delivery of identical state: no signal, no rebuild, no flicker.
+        QVERIFY(!model.applyCallMember(room, participant("@josh:t", 100), true));
+        QCOMPARE(spy.count(), 1);
+        QVERIFY(model.applyCallMember(room, participant("@josh:t", 100), false));
+        QCOMPARE(spy.count(), 2);
+    }
+
+    void testVoiceRosterReachesTheSidebarSnapshot()
+    {
+        using namespace bsfchat::client;
+        // The sidebar does not read the model directly — it reads the
+        // QVariantList this builds. A roster that updates the model but never
+        // makes it into here is invisible, which is the half of the defect
+        // that hid the participant NAMES.
+        RoomListModel model;
+        const QString room = QStringLiteral("!voice:t");
+        model.ensureRoom(room);
+        model.updateVoiceState(room, true);
+        model.applyCallMember(room, participant("@ana:t", 200), true);
+
+        auto groups = model.getCategoriesWithChannels();
+        QCOMPARE(groups.size(), 1);
+        auto channels = groups[0].toMap().value(QStringLiteral("channels")).toList();
+        QCOMPARE(channels.size(), 1);
+        auto ch = channels[0].toMap();
+        QCOMPARE(ch.value(QStringLiteral("voiceMemberCount")).toInt(), 1);
+        auto members = ch.value(QStringLiteral("voiceMembers")).toList();
+        QCOMPARE(members.size(), 1);
+        QCOMPARE(members[0].toMap().value(QStringLiteral("user_id")).toString(),
+                 QStringLiteral("@ana:t"));
+
+        // …and empties there too, not just in the model.
+        model.applyCallMember(room, participant("@ana:t", 200), false);
+        channels = model.getCategoriesWithChannels()[0].toMap()
+                       .value(QStringLiteral("channels")).toList();
+        ch = channels[0].toMap();
+        QCOMPARE(ch.value(QStringLiteral("voiceMemberCount")).toInt(), 0);
+        QVERIFY(ch.value(QStringLiteral("voiceMembers")).toList().isEmpty());
+    }
+
+    // ── Last-opened channel per server (util/ChannelRestore.h) ───────────
+    //
+    // The defect: switching to a server showed "Pick a channel" instead of the
+    // channel that server was last on. The memory existed and was even keyed
+    // per server — but the only thing that ever READ it was a one-shot QML
+    // hook on the room model's rowsInserted, which fires while a server's
+    // channel list first populates and therefore never again. Nothing ran on
+    // the server-SWITCH path at all, so only the server that happened to be
+    // syncing at launch got restored.
+    //
+    // These cover the selection rule, including the two cases that make a
+    // naive "just fall back to the first channel" fix wrong.
+
+private:
+    static QVector<bsfchat::client::ChannelRestoreCandidate> threeChannels()
+    {
+        return {
+            {QStringLiteral("!general:t"), false, false},
+            {QStringLiteral("!random:t"),  false, false},
+            {QStringLiteral("!lounge:t"),  true,  false},
+        };
+    }
+private slots:
+
+    void testRestoresTheRememberedChannel()
+    {
+        using namespace bsfchat::client;
+        using Outcome = ChannelRestoreChoice::Outcome;
+        const auto c = chooseChannelToRestore(QStringLiteral("!random:t"),
+                                              threeChannels(), true);
+        QCOMPARE(c.outcome, Outcome::Remembered);
+        QCOMPARE(c.roomId, QStringLiteral("!random:t"));
+    }
+
+    void testRestoreFallsBackWhenTheRememberedChannelIsGone()
+    {
+        using namespace bsfchat::client;
+        using Outcome = ChannelRestoreChoice::Outcome;
+        // Deleted, or we lost VIEW_CHANNEL on it — either way the room list
+        // no longer contains it (pruneRoomsNotIn drops inaccessible rooms), so
+        // both look the same from here, and both must land somewhere real
+        // rather than on the empty state.
+        const auto c = chooseChannelToRestore(QStringLiteral("!deleted:t"),
+                                              threeChannels(), true);
+        QCOMPARE(c.outcome, Outcome::Fallback);
+        QCOMPARE(c.roomId, QStringLiteral("!general:t"));
+    }
+
+    void testRestoreWaitsRatherThanFallingBackBeforeSyncLands()
+    {
+        using namespace bsfchat::client;
+        using Outcome = ChannelRestoreChoice::Outcome;
+        // The trap in the obvious fix. Before the initial sync, "the
+        // remembered channel isn't in the list" means "it hasn't arrived",
+        // not "it's gone". Falling back here would open the wrong channel AND
+        // — because opening a channel is what writes the memory — overwrite
+        // the remembered one, losing it permanently.
+        QCOMPARE(chooseChannelToRestore(QStringLiteral("!general:t"), {}, false).outcome,
+                 Outcome::Wait);
+        // Partial list that doesn't contain it yet: still wait.
+        const QVector<ChannelRestoreCandidate> partial{
+            {QStringLiteral("!random:t"), false, false}};
+        QCOMPARE(chooseChannelToRestore(QStringLiteral("!general:t"), partial, false).outcome,
+                 Outcome::Wait);
+        // Once sync has landed, the same input is a real answer.
+        QCOMPARE(chooseChannelToRestore(QStringLiteral("!general:t"), partial, true),
+                 (ChannelRestoreChoice{Outcome::Fallback, QStringLiteral("!random:t")}));
+    }
+
+    void testRestoreNeverOpensAVoiceChannelOrACategory()
+    {
+        using namespace bsfchat::client;
+        using Outcome = ChannelRestoreChoice::Outcome;
+        // Restoring into voice would put the microphone on the network the
+        // instant the app opens. A category is not a destination at all.
+        const QVector<ChannelRestoreCandidate> channels{
+            {QStringLiteral("!cat:t"),    false, true},
+            {QStringLiteral("!lounge:t"), true,  false},
+            {QStringLiteral("!general:t"), false, false},
+        };
+        QCOMPARE(chooseChannelToRestore(QString(), channels, true),
+                 (ChannelRestoreChoice{Outcome::Fallback, QStringLiteral("!general:t")}));
+        // A remembered channel that has since become a voice channel falls
+        // back rather than dropping the user into a call.
+        QCOMPARE(chooseChannelToRestore(QStringLiteral("!lounge:t"), channels, true),
+                 (ChannelRestoreChoice{Outcome::Fallback, QStringLiteral("!general:t")}));
+    }
+
+    void testRestoreOpensNothingWhenThereIsNoTextChannel()
+    {
+        using namespace bsfchat::client;
+        using Outcome = ChannelRestoreChoice::Outcome;
+        const QVector<ChannelRestoreCandidate> voiceOnly{
+            {QStringLiteral("!cat:t"),    false, true},
+            {QStringLiteral("!lounge:t"), true,  false},
+        };
+        // Sync has landed and there is genuinely nowhere to go: the empty
+        // state is correct here, and must be distinguishable from "wait".
+        QCOMPARE(chooseChannelToRestore(QString(), voiceOnly, true).outcome,
+                 Outcome::Nothing);
+        QCOMPARE(chooseChannelToRestore(QString(), voiceOnly, false).outcome,
+                 Outcome::Wait);
+    }
+
+    void testRoomListRestoreChoiceUsesDisplayOrderAndLosesInaccessibleRooms()
+    {
+        using namespace bsfchat::client;
+        using Outcome = ChannelRestoreChoice::Outcome;
+        RoomListModel model;
+        // The container rows go FIRST, so "skip containers" is load-bearing
+        // rather than an accident of ordering — a fallback that just took
+        // row 0 would hand back a category here, and the user would land on
+        // something that isn't a channel at all.
+        model.updateRoomType(QStringLiteral("!cat:t"), QStringLiteral("category"));
+        model.updateRoomType(QStringLiteral("!space:t"), QStringLiteral("m.space"));
+        model.ensureRoom(QStringLiteral("!general:t"));
+        model.ensureRoom(QStringLiteral("!secret:t"));
+
+        // Remembered and present.
+        QCOMPARE(model.restoreChoice(QStringLiteral("!secret:t"), true),
+                 (ChannelRestoreChoice{Outcome::Remembered, QStringLiteral("!secret:t")}));
+
+        // Losing VIEW_CHANNEL on it is expressed as the room leaving the
+        // model — the same prune that runs on the first sync of a session.
+        model.pruneRoomsNotIn({QStringLiteral("!general:t"),
+                               QStringLiteral("!cat:t"),
+                               QStringLiteral("!space:t")});
+        QCOMPARE(model.restoreChoice(QStringLiteral("!secret:t"), true),
+                 (ChannelRestoreChoice{Outcome::Fallback, QStringLiteral("!general:t")}));
     }
 };
 

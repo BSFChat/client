@@ -387,6 +387,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/EmojiPicker.qml
         qml/components/VoiceDock.qml
         qml/components/VoiceRoom.qml
+        qml/components/VoiceParticipantList.qml
         qml/components/ParticipantTile.qml
         qml/components/Icon.qml
         qml/components/ThemedSwitch.qml
@@ -418,6 +419,10 @@ qt_add_qml_module(bsfchat-app
         qml/theme/Theme.qml
     RESOURCES
         qml/data/EmojiData.js
+        # Pure playback maths shared by VideoPlayerCard.qml and
+        # tests/qml/tst_playbackmath.qml — the only part of the video
+        # player that can be checked without a window and a decoder.
+        qml/js/PlaybackMath.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt

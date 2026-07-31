@@ -6,6 +6,7 @@
 #include "util/MarkdownParser.h"
 #include "util/MediaUrl.h"
 #include "util/MentionRenderer.h"
+#include "util/ScrollAnchor.h"
 
 MessageModel::MessageModel(QObject* parent)
     : QAbstractListModel(parent)
@@ -286,10 +287,50 @@ QString MessageModel::firstEventIdAfterTs(qint64 tsMs) const
     return {};
 }
 
+QString MessageModel::firstUnreadEventIdAfterTs(qint64 tsMs) const
+{
+    if (tsMs <= 0) return {};
+    for (int i = 0; i < m_messages.size(); ++i) {
+        if (m_messages[i].timestamp <= tsMs) continue;
+        // Skip, don't stop: a message from somebody else after your own is
+        // still unread, and it is the one the divider belongs above.
+        if (m_messages[i].isOwnMessage) continue;
+        return m_messages[i].eventId;
+    }
+    return {};
+}
+
 qint64 MessageModel::newestTimestampMs() const
 {
     if (m_messages.isEmpty()) return 0;
     return m_messages.last().timestamp;
+}
+
+int MessageModel::restoreIndexForDivider(const QString& dividerEventId) const
+{
+    // rowForEventId already answers -1 for an empty id and for an id this
+    // model has never seen — an anchor carried over from another server's
+    // timeline is exactly the latter.
+    const int idx = rowForEventId(dividerEventId);
+    const auto target = bsfchat::client::chooseRestoreTarget(
+        static_cast<int>(m_messages.size()), idx);
+    return target.kind == bsfchat::client::RestoreTarget::Kind::Row
+        ? target.index : -1;
+}
+
+bool MessageModel::isPinnedToEnd(qreal contentHeight, qreal contentY,
+                                 qreal viewportHeight, qreal tolerance) const
+{
+    return bsfchat::client::isPinnedToEnd(contentHeight, contentY,
+                                          viewportHeight, tolerance);
+}
+
+int MessageModel::scrollPolicy(bool contextChanged, bool paginating,
+                               bool pinnedToEnd, bool followLatch) const
+{
+    return static_cast<int>(
+        bsfchat::client::positionPolicyForModelChange(contextChanged, paginating,
+                                                      pinnedToEnd, followLatch));
 }
 
 QVariantList MessageModel::searchMessages(const QString& query, int limit) const

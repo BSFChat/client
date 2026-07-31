@@ -3,6 +3,35 @@
 #include <QVariantMap>
 #include <algorithm>
 
+using bsfchat::client::ChannelRestoreCandidate;
+using bsfchat::client::ChannelRestoreChoice;
+using bsfchat::client::VoiceParticipant;
+using bsfchat::client::VoiceRoster;
+
+namespace {
+
+// One participant as QML consumes it. Keys match the wire names the voice
+// panel already reads (`user_id`, `muted`, …) so the sidebar rows and the
+// in-call tiles can share delegates without a translation layer.
+QVariantList voiceRosterToVariantList(const VoiceRoster& roster)
+{
+    QVariantList out;
+    out.reserve(roster.size());
+    for (const auto& p : roster) {
+        QVariantMap m;
+        m[QStringLiteral("user_id")] = p.userId;
+        m[QStringLiteral("muted")] = p.muted;
+        m[QStringLiteral("deafened")] = p.deafened;
+        m[QStringLiteral("cameraOn")] = p.cameraOn;
+        m[QStringLiteral("screenSharing")] = p.screenSharing;
+        m[QStringLiteral("joined_at")] = p.joinedAt;
+        out.append(m);
+    }
+    return out;
+}
+
+} // namespace
+
 RoomListModel::RoomListModel(QObject* parent)
     : QAbstractListModel(parent)
 {
@@ -30,7 +59,8 @@ QVariant RoomListModel::data(const QModelIndex& index, int role) const
     case LastMessageRole: return room.lastMessage;
     case LastMessageTimeRole: return room.lastMessageTime;
     case IsVoiceRole: return room.isVoice;
-    case VoiceMemberCountRole: return room.voiceMemberCount;
+    case VoiceMemberCountRole: return int(room.voiceMembers.size());
+    case VoiceMembersRole: return voiceRosterToVariantList(room.voiceMembers);
     case ParentIdRole: return room.parentId;
     case RoomTypeRole: return room.roomType;
     case SortOrderRole: return room.sortOrder;
@@ -51,6 +81,7 @@ QHash<int, QByteArray> RoomListModel::roleNames() const
         {LastMessageTimeRole, "lastMessageTime"},
         {IsVoiceRole, "isVoice"},
         {VoiceMemberCountRole, "voiceMemberCount"},
+        {VoiceMembersRole, "voiceMembers"},
         {ParentIdRole, "parentId"},
         {RoomTypeRole, "roomType"},
         {SortOrderRole, "sortOrder"}
@@ -253,13 +284,56 @@ void RoomListModel::updateVoiceState(const QString& roomId, bool isVoice)
     emit dataChanged(index(idx), index(idx), {IsVoiceRole});
 }
 
-void RoomListModel::updateVoiceMemberCount(const QString& roomId, int count)
+bool RoomListModel::applyCallMember(const QString& roomId,
+                                    const VoiceParticipant& participant,
+                                    bool active)
 {
+    // ensureRoom, not a findRoom guard: an m.call.member can legitimately be
+    // the first thing we learn about a voice channel during an initial sync,
+    // and dropping it would leave the channel showing an empty roster until
+    // somebody joined again.
+    ensureRoom(roomId);
     int idx = findRoom(roomId);
-    if (idx < 0) return;
-    if (m_rooms[idx].voiceMemberCount == count) return;
-    m_rooms[idx].voiceMemberCount = count;
-    emit dataChanged(index(idx), index(idx), {VoiceMemberCountRole});
+    if (idx < 0) return false;
+    if (!bsfchat::client::applyCallMember(m_rooms[idx].voiceMembers,
+                                          participant, active))
+        return false;
+    emit dataChanged(index(idx), index(idx),
+                     {VoiceMemberCountRole, VoiceMembersRole});
+    return true;
+}
+
+const VoiceRoster& RoomListModel::voiceMembers(const QString& roomId) const
+{
+    static const VoiceRoster kEmpty;
+    int idx = findRoom(roomId);
+    if (idx < 0) return kEmpty;
+    return m_rooms[idx].voiceMembers;
+}
+
+int RoomListModel::voiceMemberCount(const QString& roomId) const
+{
+    return int(voiceMembers(roomId).size());
+}
+
+ChannelRestoreChoice RoomListModel::restoreChoice(const QString& remembered,
+                                           bool syncComplete) const
+{
+    QVector<ChannelRestoreCandidate> candidates;
+    candidates.reserve(m_rooms.size());
+    for (const auto& r : m_rooms) {
+        candidates.append({r.roomId, r.isVoice,
+                           r.roomType == QStringLiteral("category")
+                               || r.roomType == QStringLiteral("m.space")});
+    }
+    return bsfchat::client::chooseChannelToRestore(remembered, candidates,
+                                                 syncComplete);
+}
+
+QString RoomListModel::restoreTargetRoomId(const QString& remembered,
+                                           bool syncComplete) const
+{
+    return restoreChoice(remembered, syncComplete).roomId;
 }
 
 void RoomListModel::removeRoom(const QString& roomId)
@@ -387,7 +461,10 @@ QVariantList RoomListModel::getCategoriesWithChannels() const
         ch[QStringLiteral("isVoice")] = room.isVoice;
         ch[QStringLiteral("unreadCount")] = room.unreadCount;
         ch[QStringLiteral("mentionCount")] = room.mentionCount;
-        ch[QStringLiteral("voiceMemberCount")] = room.voiceMemberCount;
+        // Count and roster come out of the same vector, so the badge can
+        // never outlive the last participant it was counting.
+        ch[QStringLiteral("voiceMemberCount")] = int(room.voiceMembers.size());
+        ch[QStringLiteral("voiceMembers")] = voiceRosterToVariantList(room.voiceMembers);
         ch[QStringLiteral("topic")] = room.topic;
         ch[QStringLiteral("sortOrder")] = room.sortOrder;
         ch[QStringLiteral("lastMessageTime")] = room.lastMessageTime;

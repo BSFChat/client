@@ -66,24 +66,21 @@ ApplicationWindow {
         _maybeRestoreLastRoom();
     }
 
-    // Auto-restore persisted channel. Called from Component.onCompleted
-    // and re-invoked when the active server's room list populates
-    // from /sync — because on a cold launch the room model may be
-    // empty the moment we hit onCompleted.
+    // Auto-restore persisted channel. The selection rule (remembered →
+    // first text channel → wait for sync) and the per-server persistence
+    // both live in ServerConnection now: this used to be duplicated here
+    // and in MobileMain, and neither copy could see the server-SWITCH path,
+    // so every server but the one syncing at launch opened on the empty
+    // state. ServerManager::setActiveServer drives it now; this stays as
+    // the cold-launch kick, since onCompleted can beat the connection.
     function _maybeRestoreLastRoom() {
         var s = serverManager ? serverManager.activeServer : null;
-        if (!s || !s.roomListModel) return;
-        if (s.activeRoomId && s.activeRoomId.length > 0) return;
-        var remembered = appSettings.lastTextRoomFor(s.serverUrl);
-        if (remembered && s.roomListModel.hasRoom(remembered)
-            && !s.roomListModel.isVoiceRoom(remembered)) {
-            s.setActiveRoom(remembered);
-        }
+        if (s) s.restoreLastTextRoom();
     }
     Connections {
-        target: serverManager && serverManager.activeServer
-                ? serverManager.activeServer.roomListModel : null
-        function onRowsInserted() { root._maybeRestoreLastRoom(); }
+        target: serverManager ? serverManager.activeServer : null
+        ignoreUnknownSignals: true
+        function onConnectedChanged() { root._maybeRestoreLastRoom(); }
     }
     // Surface server-side send errors (429 rate-limit, M_FORBIDDEN,
     // generic failures) as toasts. ServerConnection pre-formats the
@@ -96,18 +93,11 @@ ApplicationWindow {
                 toastHostGlobal.show(text, kind || "error");
         }
     }
-    Connections {
-        target: serverManager ? serverManager.activeServer : null
-        ignoreUnknownSignals: true
-        function onActiveRoomIdChanged() {
-            var s = serverManager.activeServer;
-            if (!s || !s.roomListModel) return;
-            var rid = s.activeRoomId;
-            if (!rid || rid.length === 0) return;
-            if (s.roomListModel.isVoiceRoom(rid)) return;
-            appSettings.setLastTextRoomFor(s.serverUrl, rid);
-        }
-    }
+    // (The "remember this channel" write used to live here. It moved into
+    // ServerConnection::setActiveRoom so it covers every path that opens a
+    // channel — including ones this window never sees — and so it cannot
+    // drift from the restore rule that reads it back.)
+
     // Guard so geometry-save handlers ignore the restore-driven property
     // changes during the first paint.
     property bool _restoredGeometry: false

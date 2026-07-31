@@ -4,11 +4,25 @@ import QtQuick.Layouts
 import QtQuick.Window
 import QtMultimedia
 import BSFChat
+import "../js/PlaybackMath.js" as PlaybackMath
 
 // Inline video player for m.video messages. Paused by default;
 // click the play overlay to start. Transport bar fades in on hover
 // and while playing, out at rest, so a paused video in a scrollback
 // doesn't clutter the message row.
+//
+// ── INPUT RULES (the thing this component keeps getting wrong) ──
+// Clicking the picture toggles play/pause. Clicking the control bar
+// does whatever that control does — and NOTHING else. The second half
+// is not automatic: the bar is a plain Rectangle, so any pixel of it
+// not covered by a child that actually accepts the press falls through
+// to the full-bleed MouseArea underneath (gaps between buttons, the
+// RowLayout spacing, the strips above/below a 28px button in a 40px
+// bar). That fall-through is why clicking beside the scrubber used to
+// collapse the fullscreen view. Every bar therefore starts with an
+// event-absorbing MouseArea (`*BarBlocker`) as its FIRST child, so the
+// real controls sit above it and everything else stops there. Add a
+// new floating panel over the video? It needs one too.
 ColumnLayout {
     id: root
 
@@ -294,10 +308,36 @@ ColumnLayout {
             anchors.bottom: parent.bottom
             height: 40
             color: Qt.rgba(0, 0, 0, 0.65)
-            opacity: cardMouse.containsMouse
+            // Same reasoning as the fullscreen bar: don't assume a
+            // hoverEnabled MouseArea on top leaves cardMouse's hover
+            // intact, or the bar fades out from under the cursor the
+            // moment it reaches a button.
+            readonly property bool _hovered: cardMouse.containsMouse
+                  || playPauseMouse.containsMouse || seekSlider.hovered
+                  || seekSlider.pressed || volumeHover.containsMouse
+                  || volumePopupHover.containsMouse || volumeSlider.pressed
+                  || fullscreenHover.containsMouse
+            opacity: _hovered
                   || mediaPlayer.playbackState === MediaPlayer.PlayingState ? 1.0 : 0.0
             Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
             visible: opacity > 0.01
+
+            // Event boundary for the bar. Declared FIRST so every real
+            // control is above it; anything that lands on bare chrome
+            // (margins, inter-button spacing, the strip above/below a
+            // 28px button) stops here instead of reaching cardMouse and
+            // pausing the video the user was aiming a scrub at.
+            // hoverEnabled stays false on purpose — cardMouse below is
+            // what decides whether this bar is shown, and stealing its
+            // hover would make the bar fade out from under the cursor.
+            MouseArea {
+                id: transportBarBlocker
+                anchors.fill: parent
+                acceptedButtons: Qt.AllButtons
+                cursorShape: Qt.ArrowCursor
+                onClicked: (m) => { m.accepted = true; }
+                onPressed: (m) => { m.accepted = true; }
+            }
 
             RowLayout {
                 anchors.fill: parent
@@ -347,12 +387,36 @@ ColumnLayout {
                 Slider {
                     id: seekSlider
                     Layout.fillWidth: true
+                    // Fill the bar's height so the whole strip around the
+                    // 3px groove is a seek target rather than a hole that
+                    // leaks clicks to whatever is underneath.
+                    Layout.fillHeight: true
                     from: 0
                     to: Math.max(1, mediaPlayer.duration)
                     // Read-back is driven by mediaPlayer.position; only
                     // write the position when the user is dragging.
                     value: pressed ? value : mediaPlayer.position
                     onMoved: mediaPlayer.position = value
+                    // Never take keyboard focus: `value` is bound to
+                    // mediaPlayer.position, and Slider's own arrow-key
+                    // handling assigns to `value` imperatively, which
+                    // would break that binding for good — the bar would
+                    // freeze mid-video with no visible cause.
+                    focusPolicy: Qt.NoFocus
+
+                    // Click-to-seek. Slider alone only moves for a drag,
+                    // so a plain click on the track does nothing at all.
+                    // DragThreshold keeps this passive: move past the
+                    // threshold and the Slider's own drag takes over.
+                    TapHandler {
+                        gesturePolicy: TapHandler.DragThreshold
+                        onTapped: (ep) => {
+                            if (mediaPlayer.duration <= 0) return;
+                            mediaPlayer.position = PlaybackMath.seekTargetMs(
+                                ep.position.x, seekSlider.leftPadding,
+                                seekSlider.availableWidth, mediaPlayer.duration);
+                        }
+                    }
                     background: Rectangle {
                         x: seekSlider.leftPadding
                         y: seekSlider.topPadding
@@ -443,8 +507,22 @@ ColumnLayout {
                                  || volumeSlider.pressed) ? 1.0 : 0.0
                         Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
 
+                        // Same event boundary as the bar: this panel
+                        // floats over the picture, so a click on its
+                        // padding would otherwise reach cardMouse and
+                        // pause the video while you were setting volume.
+                        MouseArea {
+                            id: volumeBarBlocker
+                            anchors.fill: parent
+                            acceptedButtons: Qt.AllButtons
+                            cursorShape: Qt.ArrowCursor
+                            onClicked: (m) => { m.accepted = true; }
+                            onPressed: (m) => { m.accepted = true; }
+                        }
+
                         Slider {
                             id: volumeSlider
+                            focusPolicy: Qt.NoFocus
                             anchors.centerIn: parent
                             height: parent.height - 16
                             width: 24
@@ -502,11 +580,11 @@ ColumnLayout {
                     }
                 }
 
-                // Fullscreen. Pauses the inline player + hands off the
-                // current position to a full-window popup. On close the
-                // inline seeks back to wherever the popup left off, so
-                // playback feels continuous even though we're swapping
-                // MediaPlayer instances.
+                // Fullscreen. Takes the WINDOW fullscreen (same call as
+                // VoiceRoom's fullscreen toggle) and raises the video
+                // over it — the button says "fullscreen", so it has to
+                // mean fullscreen, not "fill the app window". The same
+                // MediaPlayer keeps decoding; only its VideoOutput moves.
                 Rectangle {
                     Layout.preferredWidth: 28
                     Layout.preferredHeight: 28
@@ -600,25 +678,48 @@ ColumnLayout {
         }
     }
 
-    function formatTime(ms) {
-        if (!ms || ms < 0) return "0:00";
-        var s = Math.floor(ms / 1000);
-        var m = Math.floor(s / 60);
-        var sec = s % 60;
-        if (m >= 60) {
-            var h = Math.floor(m / 60);
-            var min = m % 60;
-            return h + ":" + (min < 10 ? "0" : "") + min
-                     + ":" + (sec < 10 ? "0" : "") + sec;
-        }
-        return m + ":" + (sec < 10 ? "0" : "") + sec;
+    // Relative seek, used by the arrow keys in fullscreen. Clamping
+    // lives in PlaybackMath so it can be tested without a decoder.
+    function seekBy(deltaMs) {
+        if (mediaPlayer.duration <= 0) return;
+        mediaPlayer.position = PlaybackMath.clampSeek(
+            mediaPlayer.position, deltaMs, mediaPlayer.duration);
     }
 
-    function formatFileSize(bytes) {
-        if (bytes < 1024) return bytes + " B";
-        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-        if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
-        return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
+    function formatTime(ms) { return PlaybackMath.formatTime(ms); }
+
+    function formatFileSize(bytes) { return PlaybackMath.formatFileSize(bytes); }
+
+    // ── Real fullscreen ───────────────────────────────────────────
+    // "Fullscreen" means the window goes fullscreen, the way it does
+    // in every other player; the popup on top of it is only how we get
+    // a full-window surface for the picture. Same mechanism as
+    // VoiceRoom's fullscreen toggle (Window.visibility), so the two
+    // can't drift apart.
+    //
+    // Both halves hang off the popup's open/closed signals rather than
+    // off the button, so that EVERY exit path — the button, Escape,
+    // anything closing the popup later — puts the window back. A
+    // restore hung off the button only would leave the app stuck
+    // fullscreen the first time someone pressed Escape.
+    property bool fullscreen: false
+    property int _savedVisibility: Window.AutomaticVisibility
+
+    function _enterWindowFullscreen() {
+        var w = Window.window;
+        if (!w) return;
+        root._savedVisibility = w.visibility;
+        w.visibility = Window.FullScreen;
+        root.fullscreen = true;
+    }
+
+    function _restoreWindowVisibility() {
+        root.fullscreen = false;
+        var w = Window.window;
+        if (!w) return;
+        w.visibility = PlaybackMath.visibilityToRestore(
+            root._savedVisibility, Window.Hidden, Window.Minimized,
+            Window.AutomaticVisibility);
     }
 
     // Set when openFullscreen() is invoked before the mobile download
@@ -668,9 +769,6 @@ ColumnLayout {
         closePolicy: Popup.CloseOnEscape
         focus: true
 
-        property real seedPosition: 0
-        property bool seedPlaying: false
-
         background: Rectangle { color: Qt.rgba(0, 0, 0, 0.95) }
 
         onOpened: {
@@ -678,6 +776,11 @@ ColumnLayout {
                         + root.effectiveSource
                         + " pos=" + mediaPlayer.position
                         + " state=" + mediaPlayer.playbackState);
+            // Take the window fullscreen for real. Deliberately before
+            // the play() below so a slow visibility change can't be
+            // mistaken for a slow start.
+            root._enterWindowFullscreen();
+            fsKeys.forceActiveFocus();
             // Fullscreen implies intent to watch — start playing if
             // we weren't already (e.g. user tapped fullscreen on a
             // paused / never-played card).
@@ -685,12 +788,43 @@ ColumnLayout {
                 mediaPlayer.play();
         }
         onClosed: {
+            // Every close path lands here: the exit button, Escape, or
+            // anything closing the popup programmatically.
+            root._restoreWindowVisibility();
             // Return video frames to the inline card.
             root._videoOutputTarget = videoOutput;
         }
 
         contentItem: Item {
+            id: fsKeys
             anchors.fill: parent
+            focus: true
+
+            // Keyboard transport, matching what people already have in
+            // their fingers from every other player. Escape is left to
+            // the popup's CloseOnEscape policy.
+            Keys.onPressed: (e) => {
+                switch (e.key) {
+                case Qt.Key_Space:
+                case Qt.Key_K:
+                    root.togglePlay(); e.accepted = true; break;
+                case Qt.Key_Left:
+                    root.seekBy(-5000); e.accepted = true; break;
+                case Qt.Key_Right:
+                    root.seekBy(5000); e.accepted = true; break;
+                case Qt.Key_Up:
+                    root.volume = Math.min(1.0, root.volume + 0.05);
+                    root.muted = false; e.accepted = true; break;
+                case Qt.Key_Down:
+                    root.volume = Math.max(0.0, root.volume - 0.05);
+                    e.accepted = true; break;
+                case Qt.Key_M:
+                    root.muted = !root.muted; e.accepted = true; break;
+                case Qt.Key_F:
+                    fullscreenPopup.close(); e.accepted = true; break;
+                default: break;
+                }
+            }
 
             // Fullscreen has its OWN VideoOutput. The shared
             // mediaPlayer's `videoOutput` is swapped to point here
@@ -702,12 +836,15 @@ ColumnLayout {
                 fillMode: VideoOutput.PreserveAspectFit
             }
 
-            // Click empty area / hit Esc to close.
+            // Clicking the picture toggles play/pause — the same thing
+            // it does on the inline card, and what a click on a video
+            // means everywhere else. It used to close fullscreen, which
+            // is how a mis-aimed scrub ended up collapsing the video.
+            // Exit is Escape, or the button on the bar.
             MouseArea {
                 anchors.fill: parent
                 acceptedButtons: Qt.LeftButton
-                onClicked: fullscreenPopup.close()
-                onDoubleClicked: fullscreenPopup.close()
+                onClicked: root.togglePlay()
                 z: -1
             }
 
@@ -730,6 +867,21 @@ ColumnLayout {
                 }
             }
 
+            // Reveal zone: the bar's own footprint plus 60px above it,
+            // so a cursor heading for the controls brings them back
+            // before it gets there. It lives OUTSIDE the bar because
+            // the bar is `visible: false` while hidden — a hover
+            // detector inside it could never bring it back.
+            MouseArea {
+                id: fsTransportHover
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 116
+                hoverEnabled: true
+                acceptedButtons: Qt.NoButton
+            }
+
             // Bottom transport bar — same vocabulary as inline, but
             // spans the full window width for cinema feel.
             Rectangle {
@@ -739,16 +891,31 @@ ColumnLayout {
                 anchors.bottom: parent.bottom
                 height: 56
                 color: Qt.rgba(0, 0, 0, 0.75)
-                opacity: fsTransportHover.containsMouse
+                // Hover is tracked on every control as well as on the
+                // reveal zone: whether a hoverEnabled MouseArea on top
+                // masks the one underneath is a Qt version detail we
+                // shouldn't be betting the visibility of the controls on.
+                readonly property bool _hovered: fsTransportHover.containsMouse
+                    || fsPlayPauseMouse.containsMouse || fsMuteMouse.containsMouse
+                    || fsExitMouse.containsMouse || fsSeekSlider.hovered
+                    || fsSeekSlider.pressed
+                opacity: _hovered
                     || mediaPlayer.playbackState !== MediaPlayer.PlayingState ? 1.0 : 0.0
                 Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
+                // A faded-out bar must also stop being clickable. Without
+                // this, an invisible pause button and an invisible
+                // scrubber sit over the bottom of the picture and eat
+                // clicks meant for the video.
+                visible: opacity > 0.01
 
+                // Event boundary — see the note at the top of the file.
                 MouseArea {
-                    id: fsTransportHover
+                    id: fsTransportBarBlocker
                     anchors.fill: parent
-                    anchors.topMargin: -60   // expanded hit area so a
-                    hoverEnabled: true        // cursor near the bar keeps it visible
-                    acceptedButtons: Qt.NoButton
+                    acceptedButtons: Qt.AllButtons
+                    cursorShape: Qt.ArrowCursor
+                    onClicked: (m) => { m.accepted = true; }
+                    onPressed: (m) => { m.accepted = true; }
                 }
 
                 RowLayout {
@@ -794,10 +961,26 @@ ColumnLayout {
                     Slider {
                         id: fsSeekSlider
                         Layout.fillWidth: true
+                        Layout.fillHeight: true
                         from: 0
                         to: Math.max(1, mediaPlayer.duration)
                         value: pressed ? value : mediaPlayer.position
                         onMoved: mediaPlayer.position = value
+                        // Keep the keys for the fullscreen key handler,
+                        // and keep Slider's arrow handling from
+                        // overwriting the `value` binding above.
+                        focusPolicy: Qt.NoFocus
+
+                        // Click-to-seek; see the inline slider.
+                        TapHandler {
+                            gesturePolicy: TapHandler.DragThreshold
+                            onTapped: (ep) => {
+                                if (mediaPlayer.duration <= 0) return;
+                                mediaPlayer.position = PlaybackMath.seekTargetMs(
+                                    ep.position.x, fsSeekSlider.leftPadding,
+                                    fsSeekSlider.availableWidth, mediaPlayer.duration);
+                            }
+                        }
                         background: Rectangle {
                             x: fsSeekSlider.leftPadding
                             y: fsSeekSlider.topPadding
@@ -875,7 +1058,7 @@ ColumnLayout {
                             onClicked: fullscreenPopup.close()
                         }
                         ToolTip.visible: fsExitMouse.containsMouse
-                        ToolTip.text: "Exit fullscreen  (Esc)"
+                        ToolTip.text: "Exit fullscreen  (Esc or F)"
                         ToolTip.delay: 500
                     }
                 }

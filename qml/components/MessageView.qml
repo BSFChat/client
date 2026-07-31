@@ -397,13 +397,30 @@ Rectangle {
                     unreadDividerEventId = "";
                     return;
                 }
-                unreadDividerEventId = mm.firstEventIdAfterTs(unreadBoundaryMs) || "";
+                // Own messages are not candidates — see
+                // MessageModel::firstUnreadEventIdAfterTs. A divider above
+                // your own message is both wrong on its face and, because
+                // the anchor doubles as the re-entry scroll target, the
+                // thing that parks you above the batch you just sent.
+                unreadDividerEventId =
+                    mm.firstUnreadEventIdAfterTs(unreadBoundaryMs) || "";
             }
 
             function _persistLastReadForCurrent() {
                 if (!_currentRoomId) return;
                 var mm = model;
                 if (!mm) return;
+                // Only the model those rows actually came from can answer
+                // "what was the newest message in the room I'm leaving?".
+                // On a SERVER switch the `model` binding has already been
+                // re-pointed at the incoming server's model by the time we
+                // get here, and reading it would stamp the outgoing room's
+                // read marker with a timestamp from a different server's
+                // timeline. Skipping is safe: `_persistLastReadIfAtBottom`
+                // has been rolling the marker forward on every count change
+                // throughout the visit, and ServerConnection advances it
+                // from /sync for the active room as well.
+                if (mm !== _currentModel) return;
                 var ts = mm.newestTimestampMs();
                 if (ts > 0) appSettings.setLastReadTs(_currentRoomId, ts);
             }
@@ -423,50 +440,110 @@ Rectangle {
                 if (!_currentRoomId) return;
                 var mm = model;
                 if (!mm) return;
+                if (mm !== _currentModel) return;   // see above
                 var ts = mm.newestTimestampMs();
                 if (ts > 0) appSettings.setLastReadTs(_currentRoomId, ts);
             }
 
-            // React to room changes: write the OUTGOING room's lastRead,
-            // then load the INCOMING room's boundary for divider placement.
-            Connections {
-                target: serverManager.activeServer
-                ignoreUnknownSignals: true
-                function onActiveRoomIdChanged() {
-                    // Persist newest-seen ts for the room we're leaving.
-                    messageListView._persistLastReadForCurrent();
-                    var s = serverManager.activeServer;
-                    var next = s ? s.activeRoomId : "";
-                    messageListView._currentRoomId = next;
-                    messageListView.unreadBoundaryMs = next
-                        ? appSettings.lastReadTs(next) : 0;
-                    // Defer recompute until the model has repopulated
-                    // for the new room. Trigger via onCountChanged below.
-                    messageListView.unreadDividerEventId = "";
-                    // Reset scroll state so the new room enters its own
-                    // initial-load grace window. Without this, switching
-                    // rooms reuses the previous room's atBottom/initialLoad
-                    // values — which, after a back-paginate or any non-
-                    // bottom dwell, leaves both false and skips the scroll-
-                    // to-end on re-entry. The model object is shared across
-                    // rooms on a given server, so onModelChanged doesn't
-                    // fire here and can't be relied on for this reset.
-                    messageListView.initialLoad = true;
-                    messageListView.atBottom = true;
-                    messageListView._forceFollow = false;
-                    scrollTimer.restart();
-                }
+            // ── Room-context entry ────────────────────────────────────
+            //
+            // WHAT IS ON SCREEN IS A (server, room, model) TRIPLE, NOT A
+            // ROOM ID. This is the whole reason "switch server, come back,
+            // land short of the bottom" survived every previous fix.
+            //
+            // The reset below used to hang off a
+            // `Connections { target: activeServer; onActiveRoomIdChanged }`.
+            // Neither half of that fires on a server switch:
+            //
+            //   • ServerManager::setActiveServer emits activeServerChanged
+            //     only — it never touches any connection's activeRoomId, so
+            //     the room id genuinely does not change; each connection
+            //     keeps the room it was last reading.
+            //   • Re-binding a Connections target does not replay its
+            //     handlers for the new object.
+            //
+            // So on a server switch the ONLY thing that reset was
+            // onModelChanged's `initialLoad = true`, and `unreadBoundaryMs`
+            // / `unreadDividerEventId` survived from whichever room last
+            // emitted activeRoomIdChanged. `_recomputeUnreadDivider` then
+            // resolved that stale, frozen boundary against the incoming
+            // model and initial placement anchored on it — parking the view
+            // mid-history and setting atBottom = false, which disables every
+            // subsequent scroll-to-end. Adding more scroll-to-end calls
+            // could never fix that; they were all gated off by the very
+            // state the bad anchor had just set.
+            //
+            // Keying on the triple makes the entry run on BOTH transitions,
+            // and on a connection being replaced in place (reconnect), where
+            // the url and room id are unchanged but the model object is new.
+            readonly property string roomContextKey: {
+                var s = serverManager.activeServer;
+                if (!s) return "";
+                // U+001F (unit separator) cannot occur in either half.
+                return s.serverUrl + "\u001f" + s.activeRoomId;
+            }
+            property bool _contextEntered: false
+            property string _enteredContextKey: ""
+            property var _currentModel: null
+            // Bindings can evaluate while the object tree is still being
+            // built, and `scrollTimer` is a sibling declared further down —
+            // referencing it from a binding-triggered handler that ran early
+            // would be a ReferenceError. Component.onCompleted opens the
+            // gate and then performs the first entry itself.
+            property bool _ready: false
+
+            onRoomContextKeyChanged: _enterRoomContext()
+
+            function _enterRoomContext() {
+                if (!_ready) return;
+                var s = serverManager.activeServer;
+                var nextModel = s ? s.messageModel : null;
+                var key = roomContextKey;
+                if (_contextEntered && key === _enteredContextKey
+                    && nextModel === _currentModel) return;
+
+                // Persist newest-seen ts for the room we're leaving. No-ops
+                // when the model has already been re-pointed (server switch).
+                _persistLastReadForCurrent();
+
+                _contextEntered = true;
+                _enteredContextKey = key;
+                _currentRoomId = s ? s.activeRoomId : "";
+                _currentModel = nextModel;
+                // Re-snapshot the read marker from settings on EVERY entry.
+                // The in-memory boundary is deliberately frozen for the
+                // duration of a visit so the divider doesn't crawl as
+                // messages arrive — which means it is stale the moment the
+                // visit ends, and re-reading here is what makes it a
+                // per-visit snapshot rather than a per-lifetime one.
+                unreadBoundaryMs = _currentRoomId
+                    ? appSettings.lastReadTs(_currentRoomId) : 0;
+                // Defer recompute until the model has repopulated for the
+                // new room. Trigger via onCountChanged below. Clearing it
+                // here is what stops another room's anchor from being
+                // honoured by the initial placement.
+                unreadDividerEventId = "";
+                // Reset scroll state so the new context enters its own
+                // initial-load grace window. Without this, switching reuses
+                // the previous room's atBottom/initialLoad values — which,
+                // after a back-paginate or any non-bottom dwell, leaves both
+                // false and skips the scroll-to-end on re-entry.
+                initialLoad = true;
+                atBottom = true;
+                _forceFollow = false;
+                // In-flight bookkeeping belongs to the room we just left.
+                paginationAnchorContentHeight = -1;
+                _jumpPendingEventId = "";
+                _jumpAttemptsLeft = 10;
+                scrollTimer.restart();
             }
 
             // Initial-load: pick up whichever room is already active
             // when the view is constructed, so the divider works on
             // first app start (not just after a room switch).
             Component.onCompleted: {
-                var s = serverManager.activeServer;
-                var rid = s ? s.activeRoomId : "";
-                _currentRoomId = rid;
-                unreadBoundaryMs = rid ? appSettings.lastReadTs(rid) : 0;
-                _recomputeUnreadDivider();
+                _ready = true;
+                _enterRoomContext();
             }
 
             // Whether the user is pinned to the bottom. Updated ONLY by
@@ -518,9 +595,27 @@ Rectangle {
             // bottom" — those come from transient layout churn, not from
             // the user intentionally being at the end.
             function _isAtEnd() {
-                if (contentHeight <= height) return true;
-                var dist = contentHeight - contentY - height;
-                return dist >= -bottomTolerance && dist <= bottomTolerance;
+                var mm = model;
+                if (!mm) return true;
+                return mm.isPinnedToEnd(contentHeight, contentY,
+                                        height, bottomTolerance);
+            }
+
+            // Policy constants — mirror bsfchat::client::PositionPolicy,
+            // returned as ints by MessageModel::scrollPolicy because the
+            // model isn't a registered QML type and can't export an enum.
+            readonly property int kPreserve: 0
+            readonly property int kFollowEnd: 1
+            readonly property int kReenter: 2
+
+            // What the change that just happened means for scroll position.
+            // The decision lives in C++ (util/ScrollAnchor.h) so it can be
+            // tested; the view only routes the answer.
+            function _scrollPolicy(paginating) {
+                var mm = model;
+                if (!mm) return kPreserve;
+                return mm.scrollPolicy(initialLoad, paginating,
+                                       atBottom, _forceFollow);
             }
 
             onContentYChanged: {
@@ -589,10 +684,12 @@ Rectangle {
             property string _jumpPendingEventId: ""
             property int _jumpAttemptsLeft: 10
 
-            onModelChanged: {
-                initialLoad = true;
-                atBottom = true;
-            }
+            // The model object changes on a SERVER switch (each connection
+            // owns its own MessageModel). Route it through the same entry
+            // point as a room switch — `_enterRoomContext` is idempotent on
+            // the (server, room, model) triple, so whichever of the two
+            // notifications lands first does the work and the other no-ops.
+            onModelChanged: _enterRoomContext()
 
             // Any user-driven scroll (drag, flick, wheel) cancels the
             // initial-load grace period and its pending scroll-to-end
@@ -639,9 +736,26 @@ Rectangle {
             // growth delta so the user's viewport stays on the same
             // message instead of being shoved downward by the prepended
             // batch.
+            //
+            // Which of those applies is `positionPolicyForModelChange` in
+            // util/ScrollAnchor.h — including the invariant that matters
+            // most here: a user who has scrolled away from the end is left
+            // alone, whatever the content does.
             onContentHeightChanged: {
-                if (paginationAnchorContentHeight >= 0
-                    && contentHeight > paginationAnchorContentHeight) {
+                var paginating = paginationAnchorContentHeight >= 0
+                              && contentHeight > paginationAnchorContentHeight;
+                if (_scrollPolicy(paginating) !== kPreserve) {
+                    // Reenter (initial placement: divider or end) and
+                    // FollowEnd (chase the growing bottom) share one
+                    // deferred dispatcher, which re-checks the state at
+                    // fire time. _forceFollow is what lets a post-send jump
+                    // catch up when the new delegate's height materialises a
+                    // few frames after the count change.
+                    _scrollToEndSoon();
+                    return;
+                }
+                if (!paginating) return;
+                {
                     var delta = contentHeight - paginationAnchorContentHeight;
                     // Has Qt already shifted contentY to compensate for the
                     // prepend? It does this for inserts at index 0 when
@@ -656,25 +770,7 @@ Rectangle {
                         contentY = paginationAnchorContentY + delta;
                     }
                     paginationAnchorContentHeight = -1;
-                    return;
                 }
-                // Three paths into here:
-                //   • atBottom — normal pin-to-bottom for incoming
-                //     messages while the user's at the end.
-                //   • _forceFollow — the user just sent a message,
-                //     and we need to chase the bottom while the
-                //     new row's delegate spins up + contentHeight
-                //     settles.
-                //   • initialLoad — first paint after switching
-                //     rooms.
-                //
-                // _forceFollow being honoured here is what lets a
-                // post-send jump catch up to the actual bottom
-                // when the new delegate's height materialises a
-                // few frames after the count change. movementStarted
-                // clears it so a user dragging up isn't fought by
-                // an in-flight reflow.
-                if (initialLoad || atBottom || _forceFollow) _scrollToEndSoon();
             }
 
             // Sticky "follow latest" flag. Set when the user sends
@@ -714,7 +810,10 @@ Rectangle {
             }
 
             onCountChanged: {
-                if (initialLoad || atBottom || _forceFollow) {
+                // Rows arriving is never a back-pagination as far as this
+                // handler is concerned — prepends are anchored by
+                // onContentHeightChanged, which sees the height delta.
+                if (_scrollPolicy(false) !== kPreserve) {
                     _scrollToEndSoon();
                     if (initialLoad) scrollTimer.restart();
                     // _forceFollow is consumed by `_scrollToEndSoon`
@@ -833,21 +932,22 @@ Rectangle {
                 // last-read ts equals the newest loaded message,
                 // firstEventIdAfterTs returns "" → no divider →
                 // fall through to scroll-to-end.
-                if (!unreadDividerEventId
-                    || unreadDividerEventId.length === 0) return false;
-                if (!serverManager.activeServer) return false;
-                var mm = serverManager.activeServer.messageModel;
+                var mm = model;
                 if (!mm) return false;
-                var idx = mm.indexForEventId(unreadDividerEventId);
+                // `restoreIndexForDivider` returns -1 for "scroll to the
+                // end" — an empty anchor, an anchor from another room that
+                // isn't in this model, or row 0 (indistinguishable from
+                // "top of the loaded history", so honouring it would park
+                // the user at the top of a back-paginated page pretending
+                // it's the start of the unread run). See
+                // bsfchat::client::chooseRestoreTarget.
+                var idx = mm.restoreIndexForDivider(unreadDividerEventId);
                 if (idx < 0) return false;
-                // If the divider lands at row 0 the user can't
-                // distinguish it from "top of channel" — fall
-                // through to scroll-to-end so they at least see
-                // the newest. Better than parking them at the
-                // top of paginated history pretending it's
-                // "first unread".
-                if (idx === 0) return false;
                 positionViewAtIndex(idx, ListView.Beginning);
+                // Deliberate: the user is being placed at genuinely-unread
+                // content, so the pin-to-bottom behaviour must not drag
+                // them off it. This is also why the anchor has to be
+                // correct — a wrong one disables every later scroll-to-end.
                 atBottom = false;
                 return true;
             }

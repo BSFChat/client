@@ -225,6 +225,16 @@ public:
     Q_INVOKABLE void registerUser(const QString& username, const QString& password);
     Q_INVOKABLE void disconnectFromServer();
     Q_INVOKABLE void setActiveRoom(const QString& roomId);
+
+    // Open the channel the user last had open on THIS server, falling back to
+    // its first text channel. No-op if a channel is already open, so it is
+    // safe to call from every "this server came to the foreground" path.
+    //
+    // If the remembered channel is not in the room list yet and the initial
+    // /sync hasn't landed, this arms a retry instead of falling back — landing
+    // on a fallback would also overwrite the memory, which is how the
+    // remembered channel gets forgotten permanently.
+    Q_INVOKABLE void restoreLastTextRoom();
     Q_INVOKABLE void sendMessage(const QString& body);
     // Send an m.emote message (the /me slash command). Renders in
     // italics + "<sender> <body>" form on the receiving side.
@@ -833,6 +843,13 @@ private:
     bool m_voiceDeafened = false;
     QJsonArray m_voiceMembers;
     QTimer* m_voicePollTimer = nullptr;
+    // Fold one m.call.member state event into the per-room voice roster the
+    // sidebar renders. Sync is the ONLY writer of that roster: room state is
+    // the server's own answer to "who is in this channel", it arrives for
+    // every voice channel (not just the one we are in), and it cannot race
+    // the /voice/members poll because the poll no longer touches it.
+    void applyCallMemberEvent(const QString& roomId,
+                              const bsfchat::RoomEvent& event);
 #ifdef BSFCHAT_VOICE_ENABLED
     VoiceEngine* m_voiceEngine = nullptr;
     NotificationSounds* m_sounds = nullptr;
@@ -895,5 +912,8 @@ private:
     // Track first sync in this session — only prune hidden rooms once, since
     // subsequent (incremental) syncs only include rooms with new activity.
     bool m_firstSyncProcessed = false;
+    // A restore asked for a channel the room list didn't have yet. Re-tried at
+    // the end of every sync until the list can answer.
+    bool m_pendingRoomRestore = false;
     QSet<QString> m_knownRoomIds;
 };

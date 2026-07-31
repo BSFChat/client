@@ -548,13 +548,12 @@ ApplicationWindow {
         }
     }
 
-    // Drop the user into a channel the moment we have one. Prefer
-    // the channel they were last reading on this server — stored in
-    // appSettings by the persistence Connections block below — and
-    // fall back to the first text room if that room is unknown (new
-    // login, room deleted, etc.). Voice rooms are never restored on
-    // launch: auto-rejoining voice would push the user's mic onto
-    // the network the instant the app opens, which is a bad default.
+    // Drop the user into a channel the moment we have one. The rule
+    // (remembered channel for THIS server → first text channel → wait,
+    // because sync may not have delivered the list yet) lives in
+    // ServerConnection::restoreLastTextRoom, shared with the desktop
+    // shell. Voice rooms are never restored: auto-rejoining voice would
+    // push the user's mic onto the network the instant the app opens.
     function _maybeAutoSelect() {
         var s = serverManager ? serverManager.activeServer : null;
         if (!s) {
@@ -566,28 +565,15 @@ ApplicationWindow {
             }
             return;
         }
-        if (s.activeRoomId && s.activeRoomId.length > 0) return;
-        if (!s.roomListModel) return;
-
-        // 1) Try the remembered channel for this server.
-        var remembered = appSettings.lastTextRoomFor(s.serverUrl);
-        if (remembered && s.roomListModel.hasRoom(remembered)
-            && !s.roomListModel.isVoiceRoom(remembered)) {
-            s.setActiveRoom(remembered);
-            return;
-        }
-        // 2) Otherwise pick the first text room.
-        var rid = s.roomListModel.firstTextRoomId();
-        if (rid && rid.length > 0) s.setActiveRoom(rid);
+        s.restoreLastTextRoom();
     }
 
-    // If rooms populate asynchronously (initial /sync lands after
-    // Component.onCompleted), retry once the active server announces
-    // a new room list.
+    // Component.onCompleted can beat the connection coming up; the
+    // sync-side retry inside restoreLastTextRoom covers the rest.
     Connections {
-        target: serverManager && serverManager.activeServer
-                ? serverManager.activeServer.roomListModel : null
-        function onRowsInserted() { _maybeAutoSelect(); }
+        target: serverManager ? serverManager.activeServer : null
+        ignoreUnknownSignals: true
+        function onConnectedChanged() { _maybeAutoSelect(); }
     }
 
     // Send-side feedback (rate limits, permission errors, …) as
@@ -600,22 +586,10 @@ ApplicationWindow {
         }
     }
 
-    // Persist the active text channel every time it changes. Skip
-    // voice rooms so a quick-tap into voice doesn't clobber the
-    // "last text channel" memory — on restart we'd jump into voice
-    // and (accidentally) transmit.
-    Connections {
-        target: serverManager ? serverManager.activeServer : null
-        ignoreUnknownSignals: true
-        function onActiveRoomIdChanged() {
-            var s = serverManager.activeServer;
-            if (!s || !s.roomListModel) return;
-            var rid = s.activeRoomId;
-            if (!rid || rid.length === 0) return;
-            if (s.roomListModel.isVoiceRoom(rid)) return;
-            appSettings.setLastTextRoomFor(s.serverUrl, rid);
-        }
-    }
+    // (Persisting the active text channel moved into
+    // ServerConnection::setActiveRoom — same write, but on the side of
+    // the boundary that also owns the restore, and reached by every path
+    // that opens a channel rather than only the ones this shell sees.)
 
     // Android "Share to BSFChat" handler — sends the shared payload
     // to the currently-active channel. Text payloads become normal

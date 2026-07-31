@@ -214,3 +214,29 @@ if(BSFCHAT_ENABLE_VOICE)
         set_tests_properties(test_media_loopback PROPERTIES TIMEOUT 60)
     endif()
 endif()
+
+# Video-player playback maths (qml/js/PlaybackMath.js), driven through a
+# QML test runner because that is where the code lives and where the app
+# calls it — a C++ copy of the same arithmetic would prove nothing about
+# the file VideoPlayerCard.qml actually imports.
+#
+# Scope is deliberately narrow: time formatting, seek clamping, the
+# click-to-seek pixel→ms mapping, and the leave-fullscreen visibility
+# rule (tst_playbackmath.qml), plus the Qt input behaviour the control
+# bar depends on, checked against a replica of that bar because the real
+# component imports the BSFChat module and only the app binary has it
+# (tst_transportbarinput.qml — read its header before trusting it).
+# Everything else in the player is hit-testing against a live window.
+find_package(Qt6 QUIET COMPONENTS QuickTest)
+if(Qt6QuickTest_FOUND AND NOT ANDROID AND NOT IOS)
+    qt_add_executable(test_playback_math qml_test_main.cpp)
+    target_compile_definitions(test_playback_math PRIVATE
+        QUICK_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/qml")
+    target_link_libraries(test_playback_math PRIVATE
+        Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickTest)
+    add_test(NAME test_playback_math COMMAND test_playback_math)
+    # Headless: this asserts on arithmetic, so it must not need a display
+    # (or steal focus from whoever is at the keyboard when ctest runs).
+    set_tests_properties(test_playback_math PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()

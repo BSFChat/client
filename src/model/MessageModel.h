@@ -133,6 +133,43 @@ public:
     Q_INVOKABLE QString firstEventIdAfterTs(qint64 tsMs) const;
     Q_INVOKABLE qint64 newestTimestampMs() const;
 
+    // THE ANCHOR THE UNREAD DIVIDER IS ALLOWED TO USE.
+    //
+    // Same scan as firstEventIdAfterTs, but a message the LOCAL USER SENT is
+    // never a candidate: you have read what you just typed, and a divider
+    // above your own message is a claim you missed it.
+    //
+    // This is not cosmetic. The divider anchor doubles as the scroll-restore
+    // target when a room is re-entered, so counting your own messages as
+    // unread is how "send a screenful of messages, leave, come back" lands
+    // you above the first message YOU sent instead of at the bottom. Own
+    // messages are skipped rather than terminating the scan, so somebody
+    // else's message that arrived after yours still anchors the divider.
+    Q_INVOKABLE QString firstUnreadEventIdAfterTs(qint64 tsMs) const;
+
+    // ── Scroll-position policy (see util/ScrollAnchor.h) ─────────────────
+    //
+    // Thin Q_INVOKABLE wrappers so MessageView.qml asks these questions
+    // instead of answering them inline, where nothing could test the answer.
+    // The model is the only C++ object the view holds a handle to, which is
+    // why the two geometry-only helpers hang off it.
+
+    // Row to restore to when this room is (re-)entered, or -1 for "scroll to
+    // the newest message". `dividerEventId` may be empty, or an anchor left
+    // over from another room — both resolve to -1.
+    Q_INVOKABLE int restoreIndexForDivider(const QString& dividerEventId) const;
+
+    // Whether the viewport is inside the tolerance band at the end of the
+    // content. Two-sided: a contentY parked past the end is NOT at the end.
+    Q_INVOKABLE bool isPinnedToEnd(qreal contentHeight, qreal contentY,
+                                   qreal viewportHeight, qreal tolerance) const;
+
+    // What a change to this model means for scroll position.
+    // 0 = Preserve (do not move the user), 1 = FollowEnd, 2 = Reenter
+    // (run initial placement). Mirrors bsfchat::client::PositionPolicy.
+    Q_INVOKABLE int scrollPolicy(bool contextChanged, bool paginating,
+                                 bool pinnedToEnd, bool followLatch) const;
+
     // Case-insensitive substring search over loaded message bodies +
     // sender display names. Returns up to `limit` matches, newest
     // first, each a map with {eventId, sender, body, timestamp}.

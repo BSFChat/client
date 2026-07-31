@@ -1416,130 +1416,18 @@ Rectangle {
                                                 }
                                             }
 
-                                            // Voice members nested list
-                                            // (SPEC §3.2: 16px indent, 22h rows, 16×16 avatar).
-                                            // `voiceMembers` on the connection already carries
-                                            // displayName + peerState, so we render directly
-                                            // without another lookup.
-                                            Column {
-                                                visible: modelData.isVoice && modelData.voiceMemberCount > 0
-                                                leftPadding: 16
-                                                spacing: 2
-                                                bottomPadding: 4
+                                            // Everyone currently in this voice
+                                            // channel, nested under its row.
+                                            // Rendered for EVERY voice channel,
+                                            // not just the one we're in — the
+                                            // roster comes from the room list's
+                                            // per-room m.call.member state, so
+                                            // "who's already in there" is
+                                            // visible before you join.
+                                            VoiceParticipantList {
                                                 width: parent.width
-
-                                                Repeater {
-                                                    model: {
-                                                        if (!serverManager.activeServer) return [];
-                                                        if (modelData.roomId !== serverManager.activeServer.activeVoiceRoomId) return [];
-                                                        return serverManager.activeServer.voiceMembers;
-                                                    }
-                                                    delegate: Item {
-                                                        id: voiceMemberRow
-                                                        required property var modelData
-                                                        width: parent.width
-                                                        height: 22
-
-                                                        readonly property bool isSelf:
-                                                            serverManager.activeServer
-                                                            && modelData.user_id === serverManager.activeServer.userId
-                                                        readonly property bool muted:
-                                                            modelData.muted === true
-                                                        readonly property bool deafened:
-                                                            modelData.deafened === true
-                                                        readonly property real micLevel:
-                                                            isSelf && serverManager.activeServer
-                                                            ? serverManager.activeServer.micLevel : 0
-                                                        readonly property bool speaking:
-                                                            isSelf && !muted && micLevel > 0.05
-
-                                                        Row {
-                                                            anchors.verticalCenter: parent.verticalCenter
-                                                            anchors.left: parent.left
-                                                            anchors.right: parent.right
-                                                            spacing: Theme.sp.s3
-
-                                                            // 16×16 avatar. Green ring pulses when
-                                                            // the local mic detects speech above
-                                                            // the silence floor — only for self,
-                                                            // since we don't get remote-speaking
-                                                            // signalling yet.
-                                                            Item {
-                                                                width: 18; height: 18
-                                                                Rectangle {
-                                                                    anchors.centerIn: parent
-                                                                    width: 16; height: 16
-                                                                    radius: 8
-                                                                    color: Theme.senderColor(
-                                                                        voiceMemberRow.modelData.user_id || "")
-                                                                    opacity: voiceMemberRow.muted
-                                                                          || voiceMemberRow.deafened ? 0.5 : 1.0
-                                                                    Text {
-                                                                        anchors.centerIn: parent
-                                                                        text: {
-                                                                            var m = voiceMemberRow.modelData;
-                                                                            var n = (m.displayName || m.user_id || "?");
-                                                                            var s = n.replace(/^[^a-zA-Z0-9]+/, "");
-                                                                            return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
-                                                                        }
-                                                                        font.family: Theme.fontSans
-                                                                        font.pixelSize: 9
-                                                                        font.weight: Theme.fontWeight.semibold
-                                                                        color: Theme.onAccent
-                                                                    }
-                                                                }
-                                                                Rectangle {
-                                                                    anchors.centerIn: parent
-                                                                    width: 18 + voiceMemberRow.micLevel * 6
-                                                                    height: width
-                                                                    radius: width / 2
-                                                                    color: "transparent"
-                                                                    border.color: Theme.online
-                                                                    border.width: 1.5
-                                                                    opacity: voiceMemberRow.speaking ? 0.8 : 0
-                                                                    visible: opacity > 0.01
-                                                                    Behavior on opacity { NumberAnimation { duration: 80 } }
-                                                                    Behavior on width { NumberAnimation { duration: 60 } }
-                                                                }
-                                                            }
-
-                                                            Text {
-                                                                anchors.verticalCenter: parent.verticalCenter
-                                                                text: voiceMemberRow.modelData.displayName
-                                                                      || voiceMemberRow.modelData.user_id
-                                                                      || ""
-                                                                font.family: Theme.fontSans
-                                                                font.pixelSize: Theme.fontSize.sm
-                                                                font.weight: voiceMemberRow.isSelf
-                                                                    ? Theme.fontWeight.semibold
-                                                                    : Theme.fontWeight.regular
-                                                                color: voiceMemberRow.muted
-                                                                    || voiceMemberRow.deafened
-                                                                    ? Theme.fg3 : Theme.fg1
-                                                                elide: Text.ElideRight
-                                                                width: voiceMemberRow.width - 18 - 24 - Theme.sp.s3 * 2
-                                                            }
-
-                                                            // Trailing status icon: deafened >
-                                                            // muted > speaking (none). Tiny 12px
-                                                            // glyph in danger red so the row stays
-                                                            // scannable.
-                                                            Item {
-                                                                anchors.verticalCenter: parent.verticalCenter
-                                                                width: 14; height: 14
-                                                                Icon {
-                                                                    anchors.centerIn: parent
-                                                                    visible: voiceMemberRow.deafened
-                                                                           || voiceMemberRow.muted
-                                                                    name: voiceMemberRow.deafened
-                                                                          ? "headphones-off" : "mic-off"
-                                                                    size: 11
-                                                                    color: Theme.danger
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
+                                                participants: modelData.voiceMembers || []
+                                                connection: serverManager.activeServer
                                             }
                                         }
 

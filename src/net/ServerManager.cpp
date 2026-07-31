@@ -275,6 +275,16 @@ void ServerManager::setActiveServer(int index)
     m_activeServer = (index >= 0) ? m_connections[index] : nullptr;
     m_settings->setActiveServerIndex(index);
     emit activeServerChanged();
+
+    // Open the channel the user last had open on the server they just switched
+    // to. Without this the only thing that ever restored a channel was the
+    // QML shells' one-shot hook on the roomListModel's rowsInserted, which
+    // fires while a server's list is first populating and therefore never
+    // again — so every server except the one that happened to be syncing at
+    // launch landed on the "Pick a channel" empty state. No-op when that
+    // server already has a channel open, and defers itself if its channel
+    // list hasn't arrived yet.
+    if (m_activeServer) m_activeServer->restoreLastTextRoom();
 }
 
 ServerConnection* ServerManager::voiceServer() const
