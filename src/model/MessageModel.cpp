@@ -333,6 +333,19 @@ int MessageModel::scrollPolicy(bool contextChanged, bool paginating,
                                                       pinnedToEnd, followLatch));
 }
 
+bool MessageModel::followEndAfterContentYSample(bool followEnd, bool userDriven,
+                                                bool liveAtEnd) const
+{
+    return bsfchat::client::followEndAfterContentYSample(followEnd, userDriven,
+                                                         liveAtEnd);
+}
+
+int MessageModel::geometryChangePolicy(bool followEnd) const
+{
+    return static_cast<int>(
+        bsfchat::client::positionPolicyForGeometryChange(followEnd));
+}
+
 QVariantList MessageModel::searchMessages(const QString& query, int limit) const
 {
     QVariantList out;

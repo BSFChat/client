@@ -2264,6 +2264,114 @@ private slots:
             QCOMPARE(empty.scrollPolicy(a, b, c, d),
                      populated.scrollPolicy(a, b, c, d));
         }
+        for (int bits = 0; bits < 8; ++bits) {
+            const bool a = bits & 1, b = bits & 2, c = bits & 4;
+            QCOMPARE(empty.followEndAfterContentYSample(a, b, c),
+                     populated.followEndAfterContentYSample(a, b, c));
+        }
+        QCOMPARE(empty.geometryChangePolicy(true),
+                 populated.geometryChangePolicy(true));
+        QCOMPARE(empty.geometryChangePolicy(false),
+                 populated.geometryChangePolicy(false));
+    }
+
+    // ── Content that resolves its size AFTER being positioned ────────────
+    //
+    // The mechanism behind all three scroll reports: the view is placed
+    // correctly, and THEN a video card learns its real dimensions, an image
+    // resolves, a link preview appears, or the window resizes and every text
+    // delegate re-wraps. contentHeight grows under a contentY that was right
+    // a frame ago. The position was never wrong when it was set — it went
+    // stale — which is why a better-timed one-shot jump could never fix it.
+    //
+    // What made that unrecoverable was that the pin was re-derived from the
+    // geometry on every contentY tick, including the ticks layout itself
+    // produces from half-updated triples. One bad sample cleared the pin, and
+    // with the model unchanged nothing ever set it back.
+
+    void testLayoutDrivenScrollNeverRevokesFollowIntent()
+    {
+        using bsfchat::client::followEndAfterContentYSample;
+        // A video card grows, contentHeight jumps, and the sample taken
+        // mid-reflow says "not at the end". That is layout talking, not the
+        // user, and it must not unpin the view.
+        QCOMPARE(followEndAfterContentYSample(true, /*userDriven=*/false,
+                                              /*liveAtEnd=*/false), true);
+        // Same tick shape while the user is deliberately scrolled up: still
+        // nothing to say, and in particular it must not RE-pin them.
+        QCOMPARE(followEndAfterContentYSample(false, false, true), false);
+    }
+
+    void testUserScrollDoesRevokeFollowIntent()
+    {
+        using bsfchat::client::followEndAfterContentYSample;
+        // The other direction, which matters just as much: when the input
+        // really is the user's, the live geometry is the answer.
+        QCOMPARE(followEndAfterContentYSample(true, /*userDriven=*/true,
+                                              /*liveAtEnd=*/false), false);
+        // And dragging back down to the end re-pins them.
+        QCOMPARE(followEndAfterContentYSample(false, true, true), true);
+    }
+
+    void testViewportResizeFollowsIntentBothWays()
+    {
+        using namespace bsfchat::client;
+        // Exiting fullscreen video resizes the window: the model does not
+        // change, so no model-change path fires at all. Pinned before →
+        // pinned after.
+        QCOMPARE(positionPolicyForGeometryChange(true), PositionPolicy::FollowEnd);
+        // Scrolled up before → a resize must not be an excuse to move them.
+        QCOMPARE(positionPolicyForGeometryChange(false), PositionPolicy::Preserve);
+    }
+
+    void testFollowIntentSurvivesARunOfLateGrowth()
+    {
+        using namespace bsfchat::client;
+        // The full repro as a sequence: placed at the end, then a video card
+        // reports its real height in three steps. Each step produces a
+        // layout-driven contentY tick whose live sample is "not at the end"
+        // (the content grew beneath us), and each step asks the policy what
+        // to do. The intent must survive every one of them, and the answer
+        // must stay FollowEnd — otherwise the chase stops and the view is
+        // left short of the bottom, which is exactly what the user saw.
+        bool followEnd = true;
+        const double viewport = 600.0;
+        double contentHeight = 2000.0;
+        double contentY = contentHeight - viewport;   // placed at the end
+
+        for (const double growth : {180.0, 240.0, 90.0}) {
+            contentHeight += growth;                  // card resolves bigger
+            const bool live = isPinnedToEnd(contentHeight, contentY, viewport, 80);
+            QVERIFY(!live);                           // genuinely short now
+            followEnd = followEndAfterContentYSample(followEnd, false, live);
+            QVERIFY2(followEnd, "layout-driven growth revoked the pin");
+            QCOMPARE(positionPolicyForModelChange(false, false, followEnd, false),
+                     PositionPolicy::FollowEnd);
+            contentY = contentHeight - viewport;      // the chase re-pins
+        }
+        QVERIFY(isPinnedToEnd(contentHeight, contentY, viewport, 80));
+    }
+
+    void testDeliberatelyScrolledUpUserSurvivesTheSameRun()
+    {
+        using namespace bsfchat::client;
+        // Mirror image, and the invariant that must never regress: the user
+        // scrolled up, then the same video card grows. Nothing may move them.
+        bool followEnd = false;                       // revoked by a real drag
+        const double viewport = 600.0;
+        double contentHeight = 2000.0;
+        const double contentY = 400.0;                // well up the history
+
+        for (const double growth : {180.0, 240.0, 90.0}) {
+            contentHeight += growth;
+            const bool live = isPinnedToEnd(contentHeight, contentY, viewport, 80);
+            followEnd = followEndAfterContentYSample(followEnd, false, live);
+            QVERIFY2(!followEnd, "layout-driven growth re-pinned a scrolled-up user");
+            QCOMPARE(positionPolicyForModelChange(false, false, followEnd, false),
+                     PositionPolicy::Preserve);
+            QCOMPARE(positionPolicyForGeometryChange(followEnd),
+                     PositionPolicy::Preserve);
+        }
     }
 
     void testScrollQueriesDoNotRepaint()

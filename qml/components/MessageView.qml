@@ -362,7 +362,10 @@ Rectangle {
             // recover.
             boundsBehavior: Flickable.StopAtBounds
 
-            ScrollBar.vertical: ThemedScrollBar {}
+            // Named so `_userDrivenScroll()` can read `pressed` — a thumb
+            // drag is real user input but raises no movementStarted, so it
+            // is the one user gesture the movement signals cannot see.
+            ScrollBar.vertical: ThemedScrollBar { id: verticalScrollBar }
 
             // Hide the list while it's mid-settle on a fresh channel
             // open. Without this, every batch of messages and every
@@ -558,12 +561,18 @@ Rectangle {
                 // after a back-paginate or any non-bottom dwell, leaves both
                 // false and skips the scroll-to-end on re-entry.
                 initialLoad = true;
+                // Entering a room is an intent to read its newest message,
+                // so both flags reset. `_jumpToUnreadDivider` revokes the
+                // intent again if there is genuinely-unread content to land
+                // on instead.
+                followEnd = true;
                 atBottom = true;
                 _forceFollow = false;
                 // In-flight bookkeeping belongs to the room we just left.
                 paginationAnchorContentHeight = -1;
                 _jumpPendingEventId = "";
                 _jumpAttemptsLeft = 10;
+                settleTimer.stop();
                 scrollTimer.restart();
             }
 
@@ -575,10 +584,39 @@ Rectangle {
                 _enterRoomContext();
             }
 
-            // Whether the user is pinned to the bottom. Updated ONLY by
-            // user-initiated scroll completion (onMovementEnded) so
-            // content growth doesn't transiently flip it. Content growth
-            // uses the latched value to decide whether to auto-scroll.
+            // ── TWO FLAGS, DELIBERATELY. DO NOT MERGE THEM AGAIN. ─────
+            //
+            // `followEnd` is INTENT: does the user want to be reading the
+            // newest message? Only user input changes it — a drag, a
+            // flick, a wheel tick, a scrollbar-thumb drag, the
+            // jump-to-latest button, an explicit jump-to-event, or
+            // entering a room. Layout never touches it.
+            //
+            // `atBottom` is a SAMPLE: is the viewport, at this instant, at
+            // the end of the content? It drives the jump-to-latest chevron
+            // and the read marker, and it is re-derived on every contentY
+            // tick.
+            //
+            // These used to be one variable, and that was the defect
+            // behind three separate bug reports — server-switch, exiting
+            // fullscreen video, and "the newest message is a video and the
+            // view drifts up on its own". Most contentY ticks come from
+            // LAYOUT, not the user: a video card renders small and grows
+            // when its metadata arrives, an image resolves its intrinsic
+            // size, a link preview appears, the window resizes and every
+            // text delegate re-wraps. Each of those produces samples taken
+            // from a half-updated (contentHeight, contentY, height) triple.
+            // One sample outside the tolerance band used to clear the pin
+            // for good, and because the MODEL never changes in any of those
+            // scenarios, nothing ever restored it.
+            //
+            // That is also why every previous fix failed: they all set the
+            // position once. The position was right when it was set and
+            // stale a frame later, and the flag that would have re-run it
+            // had already been destroyed by the same reflow.
+            //
+            // See bsfchat::client::followEndAfterContentYSample.
+            property bool followEnd: true
             property bool atBottom: true
             property bool initialLoad: true
             // Tolerance for "near the bottom" — wider on mobile so a
@@ -643,8 +681,24 @@ Rectangle {
             function _scrollPolicy(paginating) {
                 var mm = messageModelRef;   // never the view's `model`
                 if (!mm) return kPreserve;
+                // INTENT drives the policy, not the instantaneous sample.
                 return mm.scrollPolicy(initialLoad, paginating,
-                                       atBottom, _forceFollow);
+                                       followEnd, _forceFollow);
+            }
+
+            // Is the contentY change we are looking at the user's doing?
+            //
+            // Drags, flicks and wheel ticks all raise movementStarted, which
+            // revokes the intent directly. A scrollbar-thumb drag does NOT —
+            // it pokes contentY programmatically — so it is resolved from the
+            // thumb's own pressed state. Between them these are every way a
+            // user can scroll this list; everything else that moves contentY
+            // is layout, and layout does not get a vote on intent.
+            // `_ready` short-circuits first so the scrollbar id is never
+            // read before the object tree is built (see `_ready` below).
+            function _userDrivenScroll() {
+                return _ready && verticalScrollBar
+                    && verticalScrollBar.pressed === true;
             }
 
             onContentYChanged: {
@@ -657,10 +711,41 @@ Rectangle {
                 // the user at the top of a freshly opened channel.
                 // initialLoad is now cleared only by movementStarted
                 // (real user input) or scrollTimer expiry.
-                atBottom = _isAtEnd();
+                var live = _isAtEnd();
+                atBottom = live;
+                var mm = messageModelRef;
+                if (mm) {
+                    followEnd = mm.followEndAfterContentYSample(
+                        followEnd, _userDrivenScroll(), live);
+                }
                 if (!initialLoad && contentY < paginationTriggerPx) {
                     _maybeLoadOlder();
                 }
+            }
+
+            // ── Viewport geometry ─────────────────────────────────────
+            //
+            // Window resize, fullscreen enter/exit (the video card sets
+            // Window.visibility = Window.FullScreen), member-list toggle.
+            // The model is untouched, so NONE of the model-change paths
+            // fire — this case simply had no handler at all, which is why
+            // leaving fullscreen video left the list scrolled up.
+            //
+            // Both `height` and `width` matter: width re-wraps every text
+            // delegate, which moves contentHeight just as surely.
+            onHeightChanged: _onViewportGeometryChanged()
+            onWidthChanged: _onViewportGeometryChanged()
+
+            function _onViewportGeometryChanged() {
+                if (!_ready) return;
+                var mm = messageModelRef;
+                if (mm && mm.geometryChangePolicy(followEnd) !== kPreserve)
+                    _scrollToEndSoon();
+                // A resize is not one event: the viewport changes, then
+                // delegates re-wrap over the following frames. Re-assert
+                // once the dust settles rather than trusting any single
+                // moment during it.
+                settleTimer.restart();
             }
 
             // Event id to pulse-highlight after a reply/link jump. Set by
@@ -696,8 +781,12 @@ Rectangle {
                     return false;
                 }
                 // Disable auto-scroll-to-bottom so the jump sticks even if
-                // content height updates arrive right after.
+                // content height updates arrive right after. Revoking the
+                // INTENT is what makes it stick — clearing only the derived
+                // sample would let the next reflow re-pin them.
+                messageListView.followEnd = false;
                 messageListView.atBottom = false;
+                settleTimer.stop();
                 messageListView.positionViewAtIndex(idx, ListView.Center);
                 messageListView.highlightedEventId = eventId;
                 highlightTimer.restart();
@@ -753,10 +842,18 @@ Rectangle {
                 // and the normal pin behaviour resumes.
                 _forceFollow = false;
                 atBottom = false;
+                // Revoke the intent. This is the direction that must never
+                // regress: from here on, nothing — no image load, no video
+                // card growing, no window resize — may move this user.
+                followEnd = false;
+                settleTimer.stop();
             }
 
             onMovementEnded: {
+                // The user let go. Where they landed IS their intent, so
+                // this is one of the few places allowed to set both.
                 atBottom = _isAtEnd();
+                followEnd = atBottom;
             }
 
             // When content grows (new message, image loaded), auto-scroll
@@ -773,6 +870,13 @@ Rectangle {
             onContentHeightChanged: {
                 var paginating = paginationAnchorContentHeight >= 0
                               && contentHeight > paginationAnchorContentHeight;
+                // Content that resolves its real size AFTER being laid out —
+                // a video card growing when its metadata lands, an image
+                // resolving its intrinsic dimensions, a link preview
+                // appearing, an embed — arrives here, and may arrive several
+                // times. Re-assert on the last one too, not just on the ones
+                // that happen to be followed by another signal.
+                if (!paginating && _ready) settleTimer.restart();
                 if (_scrollPolicy(paginating) !== kPreserve) {
                     // Reenter (initial placement: divider or end) and
                     // FollowEnd (chase the growing bottom) share one
@@ -835,6 +939,32 @@ Rectangle {
                 if (atBottom) {
                     _forceFollow = false;
                     _persistLastReadIfAtBottom();
+                }
+            }
+
+            // ── The re-assertion that makes "pinned" survive ──────────
+            //
+            // A one-shot jump is correct at the instant it runs and stale
+            // the moment anything below the viewport resolves its real
+            // size. The event-driven chase above handles each individual
+            // reflow; this handles the LAST one, which by definition has
+            // no following signal to react to. Restarted by every content
+            // and geometry change, so it fires once the churn stops.
+            //
+            // It re-asserts INTENT and nothing else: with followEnd false
+            // it does not move the view, it only refreshes the derived
+            // sample so the chevron tells the truth.
+            Timer {
+                id: settleTimer
+                interval: 160
+                onTriggered: {
+                    if (messageListView.followEnd) {
+                        messageListView.forceLayout();
+                        messageListView._jumpToEnd();
+                        messageListView.atBottom = true;
+                    } else {
+                        messageListView.atBottom = messageListView._isAtEnd();
+                    }
                 }
             }
 
@@ -920,7 +1050,7 @@ Rectangle {
                         }
                         return;
                     }
-                    if (atBottom || _forceFollow) {
+                    if (followEnd || _forceFollow) {
                         // Force the ListView to commit any pending
                         // delegate heights so contentHeight is the
                         // real post-insert value instead of a
@@ -977,7 +1107,9 @@ Rectangle {
                 // content, so the pin-to-bottom behaviour must not drag
                 // them off it. This is also why the anchor has to be
                 // correct — a wrong one disables every later scroll-to-end.
+                followEnd = false;
                 atBottom = false;
+                settleTimer.stop();
                 return true;
             }
 
@@ -994,7 +1126,7 @@ Rectangle {
                         if (!messageListView._jumpToUnreadDivider()) {
                             messageListView._jumpToEnd();
                         }
-                    } else if (messageListView.atBottom) {
+                    } else if (messageListView.followEnd) {
                         messageListView._jumpToEnd();
                     }
                     messageListView.initialLoad = false;
@@ -1272,6 +1404,12 @@ Rectangle {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
+                        // The most explicit statement of intent there is:
+                        // set the intent, not just the sample, so content
+                        // that resolves its size a moment later is chased
+                        // rather than lost.
+                        messageListView.followEnd = true;
+                        messageListView.forceLayout();
                         messageListView._jumpToEnd();
                         messageListView.atBottom = true;
                     }

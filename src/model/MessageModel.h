@@ -186,6 +186,18 @@ public:
     Q_INVOKABLE int scrollPolicy(bool contextChanged, bool paginating,
                                  bool pinnedToEnd, bool followLatch) const;
 
+    // Whether a contentY sample may revoke follow-the-end intent. Only a
+    // user-driven scroll may; layout-driven ticks may not. See the long note
+    // on bsfchat::client::followEndAfterContentYSample — this is the rule
+    // that stops content growing after placement from silently unpinning the
+    // view, which is what made three separate scroll reports look unfixable.
+    Q_INVOKABLE bool followEndAfterContentYSample(bool followEnd, bool userDriven,
+                                                  bool liveAtEnd) const;
+
+    // What a viewport resize (window, fullscreen, panel toggle) means. Same
+    // encoding as scrollPolicy.
+    Q_INVOKABLE int geometryChangePolicy(bool followEnd) const;
+
     // Case-insensitive substring search over loaded message bodies +
     // sender display names. Returns up to `limit` matches, newest
     // first, each a map with {eventId, sender, body, timestamp}.

@@ -120,4 +120,57 @@ inline PositionPolicy positionPolicyForModelChange(bool contextChanged,
     return PositionPolicy::Preserve;
 }
 
+// ── 4. Intent vs. instantaneous geometry ────────────────────────────────────
+//
+// THE DEFECT BEHIND THREE SEPARATE REPORTS, AND WHY EVERY FIX BEFORE THIS ONE
+// FAILED.
+//
+// The view used to keep ONE flag, `atBottom`, and make it do two jobs:
+//
+//   (a) the record of whether the user wants to follow the newest message, and
+//   (b) a sample of whether the viewport is, right now, at the end of the
+//       content.
+//
+// (b) was re-latched into the same variable on EVERY contentY tick — and most
+// contentY ticks are produced by layout, not by the user. Layout emits them
+// from transiently inconsistent (contentHeight, contentY, viewportHeight)
+// triples: the viewport resizes a frame before delegates re-wrap, a video card
+// renders small and grows when its metadata lands, an image resolves its
+// intrinsic size, a link preview appears. Any ONE such sample landing outside
+// the tolerance band destroyed (a) permanently — and since the model does not
+// change in any of those scenarios, nothing ever restored it. The view then
+// sat wherever it happened to be, with the jump-to-latest chevron showing,
+// which is precisely what all three bug reports describe.
+//
+// That is also why a better-timed one-shot `positionViewAtEnd()` could never
+// have worked: the position was correct when it was set and stale one frame
+// later, and the flag that would have re-run it had already been cleared.
+//
+// So the two jobs are now two flags, and this function is the rule that keeps
+// them apart: only a USER-DRIVEN contentY change is evidence about intent.
+// Layout may move the view; it may not change the user's mind.
+//
+// `userDriven` is true for a drag, a flick, a wheel tick or a scrollbar-thumb
+// drag — the caller resolves that from real input signals, never by guessing
+// from the geometry.
+inline bool followEndAfterContentYSample(bool followEnd, bool userDriven,
+                                         bool liveAtEnd)
+{
+    return userDriven ? liveAtEnd : followEnd;
+}
+
+// ── 5. Viewport geometry changes ────────────────────────────────────────────
+//
+// A window resize, a fullscreen enter/exit, a side-panel toggle. The model is
+// completely unchanged, so none of the model-change paths fire at all — this
+// was simply an unhandled case, and it is why exiting fullscreen video left
+// the list scrolled up.
+//
+// Same two directions as everywhere else: follow the end if that is what the
+// user was doing, and otherwise do not move them.
+inline PositionPolicy positionPolicyForGeometryChange(bool followEnd)
+{
+    return followEnd ? PositionPolicy::FollowEnd : PositionPolicy::Preserve;
+}
+
 } // namespace bsfchat::client
