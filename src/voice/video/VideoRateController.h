@@ -47,13 +47,18 @@ public:
     void reportDeliveryRatio(const QString& userId, double ratio);
     void reportKeyframeRequest();
 
+    // One evaluation of the control law. Production drives this from
+    // the internal 500 ms timer and nothing else calls it; it is public
+    // so the unit tests can step the loop deterministically instead of
+    // sleeping through timer ticks.
+    void tick();
+
 signals:
     // Fired when a back-off just happened — the next frame must be an
     // IDR so receivers resync at the new rate immediately.
     void forceKeyframe();
 
 private:
-    void tick();
     double worstRecentRatio() const;
     double bppAt(int longEdge, int kbps) const;
 

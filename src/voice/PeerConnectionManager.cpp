@@ -1,4 +1,6 @@
 #include "voice/PeerConnectionManager.h"
+
+#include "voice/video/RtpSeqTracker.h"
 #include <QDateTime>
 #include <mutex>
 #include <QDebug>
@@ -77,6 +79,7 @@ public:
 
     void incoming(rtc::message_vector& messages,
                   const rtc::message_callback&) override {
+        const int64_t now = QDateTime::currentMSecsSinceEpoch();
         for (const auto& msg : messages) {
             if (!msg || msg->size() < sizeof(rtc::RtpHeader)) continue;
             const auto* h = reinterpret_cast<const rtc::RtpHeader*>(msg->data());
@@ -88,25 +91,20 @@ public:
             // stray RTCP packet masquerade as a sequence jump.
             const uint8_t pt = std::to_integer<uint8_t>(msg->at(1));
             if (pt >= 192 && pt <= 223) continue;
-            const uint16_t seq = h->seqNumber();
-            if (m_hasLast) {
-                // Serial-number arithmetic: ahead==0 is in-order;
-                // ahead in (0, 2^15) means packets went missing;
-                // ahead >= 2^15 is a late/reordered duplicate whose
-                // absence was already accounted — don't resync on it.
-                const uint16_t ahead = uint16_t(seq - uint16_t(m_lastSeq + 1));
-                if (ahead >= 0x8000) continue;
-                if (ahead != 0 && m_onGap) m_onGap();
-            }
-            m_lastSeq = seq;
-            m_hasLast = true;
+            // S-4: the gap verdict is held for a short reorder window
+            // (see RtpSeqTracker) instead of firing on the first
+            // out-of-order packet — single-packet reordering used to
+            // cost a dropped access unit and an IDR request every time.
+            if (m_tracker.observe(h->seqNumber(), now) && m_onGap) m_onGap();
         }
+        // A gap at the tail of this batch would otherwise wait for the
+        // next one; resolve it on elapsed time here.
+        if (m_tracker.poll(now) && m_onGap) m_onGap();
     }
 
 private:
     std::function<void()> m_onGap;
-    uint16_t m_lastSeq = 0;
-    bool m_hasLast = false;
+    RtpSeqTracker m_tracker;
 };
 
 // Token-bucket RTP pacer with a BOUNDED backlog (S-15).

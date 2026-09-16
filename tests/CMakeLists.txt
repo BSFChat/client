@@ -83,6 +83,59 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
     add_test(NAME test_video_codec COMMAND test_video_codec)
 endif()
 
+# Video pipeline logic with no other coverage: the RTP-vs-JPEG routing
+# predicates (S-1), the receive side's keyframe re-request loop (S-2),
+# the RTP reorder window (S-4), the delivery-ratio estimate that feeds
+# the rate controller and the control law itself (S-3), and the send
+# pipeline's session rebuild / forced IDR (S-11, S-16). Needs a software
+# H.264 backend for the send-pipeline cases, same condition as
+# test_video_codec; the pure-logic cases would run anywhere.
+if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
+    qt_add_executable(test_video_pipeline
+        test_video_pipeline.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoCodecFactory.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/FrameConverter.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/OpenH264Encoder.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/OpenH264Decoder.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoRateController.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoReceivePipeline.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoSendPipeline.cpp
+    )
+    # PeerCaps.h parses the caps JSON, so the routing-predicate tests
+    # need the same header-only json the app builds against.
+    target_include_directories(test_video_pipeline PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${libyuv_SOURCE_DIR}/include
+        ${nlohmann_json_SOURCE_DIR}/include)
+    target_compile_definitions(test_video_pipeline PRIVATE BSFCHAT_HAVE_OPENH264)
+    target_link_libraries(test_video_pipeline PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test
+        yuv openh264::openh264)
+    if(APPLE AND NOT IOS)
+        target_sources(test_video_pipeline PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm
+        )
+        target_compile_definitions(test_video_pipeline PRIVATE
+            BSFCHAT_HAVE_VIDEOTOOLBOX)
+        target_link_libraries(test_video_pipeline PRIVATE
+            "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo")
+    endif()
+    if(BSFCHAT_HAVE_AOM)
+        target_sources(test_video_pipeline PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/voice/video/AomLosslessEncoder.cpp
+            ${CMAKE_SOURCE_DIR}/src/voice/video/AomLosslessDecoder.cpp
+        )
+        target_compile_definitions(test_video_pipeline PRIVATE BSFCHAT_HAVE_AOM)
+        target_link_libraries(test_video_pipeline PRIVATE aom)
+        target_include_directories(test_video_pipeline PRIVATE
+            ${libaom_SOURCE_DIR} ${libaom_BINARY_DIR})
+    endif()
+    add_test(NAME test_video_pipeline COMMAND test_video_pipeline)
+    # Headless: no window, no capture device, no audio.
+    set_tests_properties(test_video_pipeline PROPERTIES
+        TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
+
 # Voice receive jitter buffer: reordering, PLC on gaps, late/duplicate
 # discard and uint16 sequence wraparound. Pure logic — no Qt Multimedia,
 # no audio device, no network. Links opus for the decoder handle.

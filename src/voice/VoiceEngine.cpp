@@ -492,14 +492,13 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
         if (!peer) return;
         const quint64 rxBytes = doc.value("b", quint64(0));
         const quint64 txBytes = peer->videoTxBytes(VideoStreamId(stream));
-        auto& snap = m_rrSnapshots[{userId, stream}];
-        const quint64 dRx = rxBytes - qMin(rxBytes, snap.rxBytes);
-        const quint64 dTx = txBytes - qMin(txBytes, snap.txBytes);
-        snap.rxBytes = rxBytes;
-        snap.txBytes = txBytes;
-        if (dTx == 0) return;   // idle window — nothing to grade
-        const double ratio = qMin(1.0, double(dRx) / double(dTx));
-        emit videoDeliveryRatio(userId, stream, ratio);
+        // S-3: graded against what we sent in the PREVIOUS window, not
+        // this one. Comparing against this window counted every byte
+        // still in flight as loss, which made each IDR look like
+        // congestion and pulsed the quality on a 500 ms cycle.
+        double ratio = 1.0;
+        if (m_rrSnapshots[{userId, stream}].update(rxBytes, txBytes, ratio))
+            emit videoDeliveryRatio(userId, stream, ratio);
     } else {
         qCDebug(logVoice, "unhandled control '%s' from %s",
                t.c_str(), qPrintable(userId));

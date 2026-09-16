@@ -16,6 +16,7 @@
 // VideoRateController. Those must keep working.
 
 #include "voice/IVoiceTransport.h"
+#include "voice/video/DeliveryRatioEstimator.h"
 #include "voice/video/VideoCodec.h"
 
 #include <QObject>
@@ -263,7 +264,9 @@ private:
     // last-seen (rx, tx) snapshots per peer×stream turn the next report
     // into a windowed delivery ratio.
     QTimer m_rrTimer;
-    struct RrSnapshot { quint64 rxBytes = 0; quint64 txBytes = 0; };
-    QMap<QPair<QString, int>, RrSnapshot> m_rrSnapshots;
+    // Per peer x stream delivery-ratio state. Lags the denominator by
+    // one report so bytes still in flight are not read as loss (S-3) —
+    // see DeliveryRatioEstimator for why that mattered.
+    QMap<QPair<QString, int>, DeliveryRatioEstimator> m_rrSnapshots;
     void sendReceiverReports();
 };
