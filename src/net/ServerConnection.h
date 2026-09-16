@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QHash>
 #include <QJsonArray>
 #include <QMap>
 #include <QObject>
@@ -225,6 +226,24 @@ public:
     Q_INVOKABLE void registerUser(const QString& username, const QString& password);
     Q_INVOKABLE void disconnectFromServer();
     Q_INVOKABLE void setActiveRoom(const QString& roomId);
+
+    // ── THE READ MARKER IS THE VIEW'S CALL, NOT THE ROOM SWITCH'S ────
+    //
+    // U-M3. Opening a room used to reset its unread count and POST a read
+    // marker straight away, and leaving it wrote the newest LOADED
+    // message's timestamp into settings — both regardless of whether the
+    // user had seen any of it. Open a busy channel, read the top two
+    // messages, switch away: everything below was marked read, the badge
+    // was gone, and the "New messages" divider never came back.
+    //
+    // MessageView calls markRoomRead() when, and only when, its viewport
+    // is parked at the end of the timeline, so "read" means what it says.
+    // setTimelineAtBottom() mirrors that same sample into this object so
+    // the room-switch path — which has to persist before the model is
+    // cleared, and therefore cannot ask the view — can tell whether the
+    // user was caught up when they left.
+    Q_INVOKABLE void markRoomRead(const QString& roomId, qint64 tsMs);
+    Q_INVOKABLE void setTimelineAtBottom(bool atBottom);
 
     // Open the channel the user last had open on THIS server, falling back to
     // its first text channel. No-op if a channel is already open, so it is
@@ -737,6 +756,15 @@ public:
     // bounded by the roster size rather than growing per event (U-M16).
     QMap<QString, QVector<bsfchat::RoomEvent>> m_roomMembers;
     QMap<QString, QStringList> m_roomPinnedEvents;
+    // Whether the timeline view last reported itself parked at the end.
+    // Starts true so a room opened and left without the view ever
+    // reporting (no rows, model never populated) behaves as before.
+    bool m_timelineAtBottom = true;
+    // Newest ts whose read marker we have already POSTed, per room.
+    // markRoomRead is called on every count change while the user sits at
+    // the bottom of a busy channel; without this it would be one HTTP
+    // request per inbound message.
+    QHash<QString, qint64> m_sentReadMarkerTs;
     QMap<QString, qint64> m_userLastActivityMs; // for activity-based presence
     QString m_selfPresence = QStringLiteral("online");
     QString m_selfStatusMessage;

@@ -19,36 +19,42 @@ import BSFChat
 Item {
     id: host
     anchors.fill: parent
-    // Passes mouse through to content below unless a toast is under
-    // the cursor (each toast has its own MouseArea for hover tracking).
-    enabled: false
+    // A bare Item accepts no pointer input of its own, so the stack does
+    // not block clicks on the content underneath — only the cards' own
+    // MouseAreas do. This used to be `enabled: false`, which ANDed down
+    // into every descendant and silently disabled the dismiss button and
+    // the hover-to-pause MouseArea (D-H1): neither the X nor hovering
+    // did anything, on any platform.
     visible: true
 
-    property var _queue: []
+    // Backing store is a ListModel, not a re-assigned JS array (D-M1).
+    // With an array, every enqueue and every dismiss handed the Repeater
+    // a brand-new model object, so all four cards were destroyed and
+    // rebuilt — restarting each surviving toast's dismiss timer from
+    // zero and re-running its slide-in animation. With a ListModel the
+    // Repeater sees an insert or a remove and leaves the others alone.
+    ListModel { id: toastModel }
     property int _nextId: 1
 
     function toast(text, kind) {
         if (!text || text.length === 0) return;
         var k = kind || "info";
-        var entry = {
-            id:      host._nextId++,
-            text:    text,
-            kind:    k,
+        toastModel.append({
+            toastId:   host._nextId++,
+            toastText: String(text),
+            toastKind: k,
             // Errors + warnings linger; info / success fade sooner.
-            duration: (k === "error" || k === "warn") ? 6000 : 3500
-        };
-        var q = host._queue.slice();
-        q.push(entry);
+            toastDuration: (k === "error" || k === "warn") ? 6000 : 3500
+        });
         // Cap the visible stack at 4 — older toasts drop off when a 5th
         // arrives, so a burst of failures doesn't wallpaper the screen.
-        while (q.length > 4) q.shift();
-        host._queue = q;
+        while (toastModel.count > 4) toastModel.remove(0);
     }
 
     function _dismiss(id) {
-        var q = host._queue.slice();
-        var idx = q.findIndex(e => e.id === id);
-        if (idx >= 0) { q.splice(idx, 1); host._queue = q; }
+        for (var i = 0; i < toastModel.count; ++i) {
+            if (toastModel.get(i).toastId === id) { toastModel.remove(i); return; }
+        }
     }
 
     // Shortcut helpers — match the kind name so call sites read well.
@@ -70,11 +76,14 @@ Item {
         width: 360
 
         Repeater {
-            model: host._queue
+            model: toastModel
 
             delegate: Rectangle {
                 id: card
-                required property var modelData
+                required property int toastId
+                required property string toastText
+                required property string toastKind
+                required property int toastDuration
                 width: stack.width
                 implicitHeight: toastRow.implicitHeight + Theme.sp.s4 * 2
                 radius: Theme.r2
@@ -83,12 +92,9 @@ Item {
                 border.width: 1
                 opacity: 0
                 scale: 0.95
-                // Enable pointer input on the card itself so its MouseArea
-                // tracks hover despite the host Item having `enabled:false`.
-                enabled: true
 
                 readonly property color tintColor: {
-                    switch (modelData.kind) {
+                    switch (card.toastKind) {
                         case "error":   return Theme.danger;
                         case "warn":    return Theme.warn;
                         case "success": return Theme.online;
@@ -96,7 +102,7 @@ Item {
                     }
                 }
                 readonly property string iconName: {
-                    switch (modelData.kind) {
+                    switch (card.toastKind) {
                         case "error":   return "x";
                         case "warn":    return "bolt";
                         case "success": return "check";
@@ -141,7 +147,7 @@ Item {
                     }
                     Text {
                         Layout.fillWidth: true
-                        text: modelData.text
+                        text: card.toastText
                         color: Theme.fg0
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm
@@ -169,7 +175,7 @@ Item {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: host._dismiss(modelData.id)
+                            onClicked: host._dismiss(card.toastId)
                         }
                     }
                 }
@@ -188,10 +194,10 @@ Item {
 
                 Timer {
                     id: dismissTimer
-                    interval: modelData.duration
+                    interval: card.toastDuration
                     running: true
                     repeat: false
-                    onTriggered: host._dismiss(modelData.id)
+                    onTriggered: host._dismiss(card.toastId)
                 }
             }
         }

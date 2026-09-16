@@ -8,6 +8,11 @@
 #include "identity/IdentityApiClient.h"
 
 #include <QClipboard>
+#include <QDateTime>
+#include <QDir>
+#include <QImage>
+#include <QMimeData>
+#include <QStandardPaths>
 #include <QDesktopServices>
 #include <QGuiApplication>
 #include <QJsonArray>
@@ -19,12 +24,43 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
     , m_settings(settings)
     , m_serverListModel(new ServerListModel(this))
 {
+    // Everything the roster is not allowed to know about: the sidebar
+    // model, QSettings, this object's signals, and ServerConnection's
+    // teardown. The roster decides the *order*; these do the work.
+    m_roster.hooks.rowRemoved = [this](int index) {
+        m_serverListModel->removeServer(index);
+        m_settings->removeServer(index);
+    };
+    m_roster.hooks.persistIndex = [this](int index) {
+        m_settings->setActiveServerIndex(index);
+    };
+    m_roster.hooks.activeChanged = [this]() {
+        emit activeServerChanged();
+        // Open the channel the user last had open on the server they just
+        // switched to. Without this the only thing that ever restored a
+        // channel was the QML shells' one-shot hook on the roomListModel's
+        // rowsInserted, which fires while a server's list is first
+        // populating and therefore never again — so every server except the
+        // one that happened to be syncing at launch landed on the "Pick a
+        // channel" empty state. No-op when that server already has a channel
+        // open, and defers itself if its channel list hasn't arrived yet.
+        if (m_roster.active()) m_roster.active()->restoreLastTextRoom();
+    };
+    m_roster.hooks.serverRemoved = [this](int index) {
+        emit serverRemoved(index);
+    };
+    m_roster.hooks.retire = [](ServerConnection* conn) {
+        if (!conn) return;
+        conn->disconnectFromServer();
+        conn->deleteLater();
+    };
+
     // Restore saved servers
     auto saved = m_settings->savedServers();
     for (const auto& entry : saved) {
         auto* conn = new ServerConnection(entry.url, this);
         conn->setCredentials(entry.userId, entry.accessToken, entry.deviceId, entry.displayName);
-        m_connections.append(conn);
+        m_roster.append(conn);
         QUrl url(entry.url);
         QString serverName = url.host().isEmpty() ? entry.displayName : url.host();
         m_serverListModel->addServer(serverName, entry.url);
@@ -32,7 +68,7 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
     }
 
     int savedIndex = m_settings->activeServerIndex();
-    if (savedIndex >= 0 && savedIndex < m_connections.size()) {
+    if (savedIndex >= 0 && savedIndex < m_roster.count()) {
         setActiveServer(savedIndex);
     }
 }
@@ -42,11 +78,11 @@ ServerManager::~ServerManager() = default;
 void ServerManager::addServer(const QString& url, const QString& username, const QString& password)
 {
     auto* conn = new ServerConnection(url, this);
-    m_connections.append(conn);
+    m_roster.append(conn);
     m_serverListModel->addServer(url, url); // Temporary name until login
     wireConnection(conn);
 
-    int index = m_connections.size() - 1;
+    int index = m_roster.count() - 1;
 
     connect(conn, &ServerConnection::loginSucceeded, this, [this, conn, index]() {
         onLoginSuccess(conn);
@@ -59,7 +95,7 @@ void ServerManager::addServer(const QString& url, const QString& username, const
     emit serverAdded(index);
 
     // Auto-select if first server
-    if (m_connections.size() == 1) {
+    if (m_roster.count() == 1) {
         setActiveServer(0);
     }
 }
@@ -67,11 +103,11 @@ void ServerManager::addServer(const QString& url, const QString& username, const
 void ServerManager::registerServer(const QString& url, const QString& username, const QString& password)
 {
     auto* conn = new ServerConnection(url, this);
-    m_connections.append(conn);
+    m_roster.append(conn);
     m_serverListModel->addServer(url, url);
     wireConnection(conn);
 
-    int index = m_connections.size() - 1;
+    int index = m_roster.count() - 1;
 
     connect(conn, &ServerConnection::registerSucceeded, this, [this, conn, index]() {
         onLoginSuccess(conn);
@@ -83,7 +119,7 @@ void ServerManager::registerServer(const QString& url, const QString& username, 
     conn->registerUser(username, password);
     emit serverAdded(index);
 
-    if (m_connections.size() == 1) {
+    if (m_roster.count() == 1) {
         setActiveServer(0);
     }
 }
@@ -124,11 +160,11 @@ void ServerManager::checkLoginFlows(const QString& url)
 void ServerManager::addServerWithOidc(const QString& url)
 {
     auto* conn = new ServerConnection(url, this);
-    m_connections.append(conn);
+    m_roster.append(conn);
     m_serverListModel->addServer(url, url);
     wireConnection(conn);
 
-    int index = m_connections.size() - 1;
+    int index = m_roster.count() - 1;
 
     connect(conn, &ServerConnection::loginSucceeded, this, [this, conn]() {
         onLoginSuccess(conn);
@@ -167,36 +203,23 @@ void ServerManager::addServerWithOidc(const QString& url)
 
     emit serverAdded(index);
 
-    if (m_connections.size() == 1) {
+    if (m_roster.count() == 1) {
         setActiveServer(0);
     }
 }
 
 void ServerManager::removeServer(int index)
 {
-    if (index < 0 || index >= m_connections.size()) return;
-
-    auto* conn = m_connections.takeAt(index);
-    conn->disconnectFromServer();
-    conn->deleteLater();
-
-    m_serverListModel->removeServer(index);
-    m_settings->removeServer(index);
-
-    if (m_activeServerIndex == index) {
-        int newIndex = m_connections.isEmpty() ? -1 : qMin(index, m_connections.size() - 1);
-        setActiveServer(newIndex);
-    } else if (m_activeServerIndex > index) {
-        m_activeServerIndex--;
-        m_settings->setActiveServerIndex(m_activeServerIndex);
-    }
-
-    emit serverRemoved(index);
+    // All of the ordering — clear the active pointer before anything can
+    // observe it, emit activeServerChanged when the pointer *or* the index
+    // moves, retire the connection last — lives in ServerRoster::remove so
+    // it can be tested without a network (see tests/test_server_roster.cpp).
+    m_roster.remove(index);
 }
 
 void ServerManager::updateServerUrl(int index, const QString& newUrl)
 {
-    if (index < 0 || index >= m_connections.size()) return;
+    if (index < 0 || index >= m_roster.count()) return;
 
     QString url = newUrl.trimmed();
     if (url.isEmpty()) return;
@@ -207,7 +230,7 @@ void ServerManager::updateServerUrl(int index, const QString& newUrl)
         url = QStringLiteral("https://") + url;
     while (url.endsWith(QLatin1Char('/'))) url.chop(1);
 
-    if (url == m_connections[index]->serverUrl()) return;
+    if (url == m_roster.connections()[index]->serverUrl()) return;
 
     // Persist first — the saved-servers array is index-aligned with
     // m_connections, and rebuildConnection reads nothing from it, so
@@ -230,13 +253,13 @@ void ServerManager::updateServerUrl(int index, const QString& newUrl)
 
 void ServerManager::reconnectServer(int index)
 {
-    if (index < 0 || index >= m_connections.size()) return;
-    rebuildConnection(index, m_connections[index]->serverUrl());
+    if (index < 0 || index >= m_roster.count()) return;
+    rebuildConnection(index, m_roster.connections()[index]->serverUrl());
 }
 
 void ServerManager::rebuildConnection(int index, const QString& url)
 {
-    auto* old = m_connections[index];
+    auto* old = m_roster.connections()[index];
 
     // A voice session can't survive its connection — leave cleanly so
     // peers get hangups instead of waiting out the dead-peer grace.
@@ -248,13 +271,11 @@ void ServerManager::rebuildConnection(int index, const QString& url)
     auto* conn = new ServerConnection(url, this);
     conn->setCredentials(old->userId(), old->accessToken(),
                          old->deviceId(), old->displayName());
-    m_connections[index] = conn;
     wireConnection(conn);
 
-    if (m_activeServerIndex == index) {
-        m_activeServer = conn;
-        emit activeServerChanged();
-    }
+    // Swaps the slot and emits activeServerChanged if this was the active
+    // one — still before `old` is retired, below.
+    m_roster.replace(index, conn);
 
     old->disconnectFromServer();
     old->deleteLater();
@@ -268,23 +289,9 @@ void ServerManager::rebuildConnection(int index, const QString& url)
 
 void ServerManager::setActiveServer(int index)
 {
-    if (index < -1 || index >= m_connections.size()) return;
-    if (m_activeServerIndex == index) return;
-
-    m_activeServerIndex = index;
-    m_activeServer = (index >= 0) ? m_connections[index] : nullptr;
-    m_settings->setActiveServerIndex(index);
-    emit activeServerChanged();
-
-    // Open the channel the user last had open on the server they just switched
-    // to. Without this the only thing that ever restored a channel was the
-    // QML shells' one-shot hook on the roomListModel's rowsInserted, which
-    // fires while a server's list is first populating and therefore never
-    // again — so every server except the one that happened to be syncing at
-    // launch landed on the "Pick a channel" empty state. No-op when that
-    // server already has a channel open, and defers itself if its channel
-    // list hasn't arrived yet.
-    if (m_activeServer) m_activeServer->restoreLastTextRoom();
+    // Persists the index, emits activeServerChanged and restores the last
+    // open channel via the hooks installed in the constructor.
+    m_roster.setActive(index);
 }
 
 ServerConnection* ServerManager::voiceServer() const
@@ -292,7 +299,7 @@ ServerConnection* ServerManager::voiceServer() const
     // Normally at most one connection is in voice; if the user manages
     // to be in voice on two servers, the first (oldest) wins — the
     // controllers can only broadcast into one mesh anyway.
-    for (auto* conn : m_connections) {
+    for (auto* conn : m_roster.connections()) {
         if (conn && conn->inVoiceChannel()) return conn;
     }
     return nullptr;
@@ -326,8 +333,8 @@ static void syncViewingDmsForConnection(ServerManager* mgr,
 QVariantList ServerManager::allDirectRooms() const
 {
     QVariantList out;
-    for (int i = 0; i < m_connections.size(); ++i) {
-        ServerConnection* conn = m_connections[i];
+    for (int i = 0; i < m_roster.count(); ++i) {
+        ServerConnection* conn = m_roster.connections()[i];
         if (!conn) continue;
         QVariantList rooms = conn->directRooms();
         for (const QVariant& v : rooms) {
@@ -375,8 +382,8 @@ QVariantList ServerManager::searchKnownUsers(const QString& query,
     // in recent /sync) then merge-and-trim. We don't try to de-dup
     // across servers: the same MXID on two different servers is two
     // distinct chat identities, and a user might want to DM either.
-    for (int i = 0; i < m_connections.size(); ++i) {
-        ServerConnection* conn = m_connections[i];
+    for (int i = 0; i < m_roster.count(); ++i) {
+        ServerConnection* conn = m_roster.connections()[i];
         if (!conn) continue;
         auto hits = conn->searchKnownUsers(query, limit);
         for (QVariant& v : hits) {
@@ -397,7 +404,7 @@ void ServerManager::wireConnection(ServerConnection* conn)
     // connection's hasUnread. The index can shift as servers are added or
     // removed, so resolve it at signal-emission time.
     auto pushUnread = [this, conn]() {
-        int idx = m_connections.indexOf(conn);
+        int idx = m_roster.indexOf(conn);
         if (idx < 0) return;
         m_serverListModel->setUnreadCount(idx, conn->hasUnread() ? 1 : 0);
     };
@@ -409,7 +416,7 @@ void ServerManager::wireConnection(ServerConnection* conn)
     // sticks across restarts. Only the identity fields change; tokens
     // stay as persisted.
     connect(conn, &ServerConnection::identityCorrected, this, [this, conn]() {
-        int idx = m_connections.indexOf(conn);
+        int idx = m_roster.indexOf(conn);
         if (idx < 0) return;
         auto servers = m_settings->savedServers();
         if (idx >= servers.size()) return;
@@ -422,7 +429,7 @@ void ServerManager::wireConnection(ServerConnection* conn)
     // Keep the sidebar's label and tooltip in sync with the server-wide
     // name. serverName() falls back to hostname when no name is set.
     auto pushName = [this, conn]() {
-        int idx = m_connections.indexOf(conn);
+        int idx = m_roster.indexOf(conn);
         if (idx < 0) return;
         m_serverListModel->updateServer(idx, conn->serverName(), conn->serverUrl());
     };
@@ -431,7 +438,7 @@ void ServerManager::wireConnection(ServerConnection* conn)
     // Same pattern for the server icon — push the resolved HTTP URL
     // into the list model's IconUrlRole whenever it changes.
     auto pushIcon = [this, conn]() {
-        int idx = m_connections.indexOf(conn);
+        int idx = m_roster.indexOf(conn);
         if (idx < 0) return;
         m_serverListModel->setIconUrl(idx, conn->serverAvatarUrl());
     };
@@ -473,7 +480,7 @@ void ServerManager::registerServerMembership(const QString& identityUrl,
 
 void ServerManager::onLoginSuccess(ServerConnection* conn)
 {
-    int index = m_connections.indexOf(conn);
+    int index = m_roster.indexOf(conn);
     if (index < 0) return;
 
     // Use the server hostname as display name for the sidebar icon
@@ -503,7 +510,7 @@ void ServerManager::onLoginSuccess(ServerConnection* conn)
 
 void ServerManager::onLoginFailed(ServerConnection* conn, const QString& error)
 {
-    int index = m_connections.indexOf(conn);
+    int index = m_roster.indexOf(conn);
     emit loginError(conn->serverUrl(), error);
 
     // Remove the failed connection
@@ -559,7 +566,7 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
                         // Skip servers we're already connected to — the user
                         // might re-run the sync while connections exist.
                         bool already = false;
-                        for (auto* existing : m_connections) {
+                        for (auto* existing : m_roster.connections()) {
                             if (existing->serverUrl() == serverUrl) {
                                 already = true;
                                 break;
@@ -621,13 +628,45 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
 
 void ServerManager::leaveAllVoice()
 {
-    for (auto* conn : m_connections) {
+    for (auto* conn : m_roster.connections()) {
         if (!conn) continue;
         // leaveVoiceChannel() no-ops when m_activeVoiceRoomId is
         // empty, so this is safe to fire on every connection even
         // if only one is actually in voice.
         conn->leaveVoiceChannel();
     }
+}
+
+QStringList ServerManager::clipboardFileUrls() const
+{
+    QStringList out;
+    auto* cb = QGuiApplication::clipboard();
+    if (!cb) return out;
+    const QMimeData* mime = cb->mimeData();
+    if (!mime) return out;
+
+    if (mime->hasUrls()) {
+        const auto urls = mime->urls();
+        for (const QUrl& u : urls) {
+            // Remote URLs would need a fetch-and-reupload path we do not
+            // have; the media upload reads bytes off disk.
+            if (u.isLocalFile()) out.append(u.toString());
+        }
+        if (!out.isEmpty()) return out;
+    }
+
+    if (mime->hasImage()) {
+        const QImage img = qvariant_cast<QImage>(mime->imageData());
+        if (!img.isNull()) {
+            const QString path =
+                QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                    .filePath(QStringLiteral("bsfchat-paste-%1.png")
+                                  .arg(QDateTime::currentMSecsSinceEpoch()));
+            if (img.save(path, "PNG"))
+                out.append(QUrl::fromLocalFile(path).toString());
+        }
+    }
+    return out;
 }
 
 void ServerManager::copyToClipboard(const QString& text)
@@ -657,18 +696,18 @@ bool ServerManager::openMessageLink(const QString& link)
 
     // Find the matching connection by URL.
     int foundIdx = -1;
-    for (int i = 0; i < m_connections.size(); ++i) {
-        if (m_connections[i]->serverUrl() == serverUrl) {
+    for (int i = 0; i < m_roster.count(); ++i) {
+        if (m_roster.connections()[i]->serverUrl() == serverUrl) {
             foundIdx = i;
             break;
         }
     }
     if (foundIdx < 0) return false;
 
-    if (foundIdx != m_activeServerIndex)
+    if (foundIdx != m_roster.activeIndex())
         setActiveServer(foundIdx);
     // Delegate navigation to the connection (which owns the MessageModel).
-    auto* conn = m_connections[foundIdx];
+    auto* conn = m_roster.connections()[foundIdx];
     if (conn) {
         // Deferred so MessageView can receive the scroll signal after any
         // room-switch signals have propagated.

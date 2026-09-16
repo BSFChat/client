@@ -112,6 +112,7 @@ qt_add_executable(bsfchat-app
     src/model/ServerListModel.cpp
     src/model/RoomListModel.cpp
     src/model/MessageModel.cpp
+    src/model/ThreadFilterModel.cpp
     src/model/MemberListModel.cpp
     src/store/LocalCache.cpp
     src/util/FileLogger.cpp
@@ -436,6 +437,9 @@ qt_add_qml_module(bsfchat-app
         # delegate — that is the whole point, see the file header — and
         # tested in tests/qml/tst_linkpreviewcache.qml.
         qml/js/LinkPreviewCache.js
+        # Overlay visibility rules for the message timeline, shared by
+        # MessageView.qml and tests/qml/tst_timelineoverlay.qml.
+        qml/js/TimelineOverlay.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt

@@ -23,7 +23,94 @@ Rectangle {
 
     property string roomName: ""
     property string activeRoomId: serverManager.activeServer ? serverManager.activeServer.activeRoomId : ""
-    property bool uploading: false
+
+    // U-H6. `uploading` used to be a plain bool: set true when an upload
+    // started, set false by the FIRST mediaSendCompleted. With N files in
+    // flight the composer unlocked after one of them finished, and a
+    // server switch mid-upload re-targeted the Connections below so the
+    // completion never arrived at all and the composer stayed locked for
+    // the rest of the session. It is now derived from the count of
+    // uploads this composer has actually started and not yet seen finish,
+    // and that count is reset outright on a room / server change.
+    property int _inFlightUploads: 0
+    readonly property bool uploading: _inFlightUploads > 0
+    // Called by every site that kicks off an upload — the attach button,
+    // MessageView's drop area, and paste.
+    function noteUploadStarted() { inputRoot._inFlightUploads++; }
+    function _noteUploadFinished() {
+        if (inputRoot._inFlightUploads > 0) inputRoot._inFlightUploads--;
+    }
+    function _resetUploads() {
+        inputRoot._inFlightUploads = 0;
+        inputRoot._uploads = ({});
+        uploadSweepTimer.stop();
+    }
+
+    // ── Per-room composer state (U-H3) ───────────────────────────────
+    //
+    // The edit target, the reply target and the mention tokens all name
+    // something in ONE room, and all three used to survive a channel
+    // switch: "edit a message in #general, click #random, press Enter"
+    // sent an m.replace for a #general event into #random, and the server
+    // accepted it. The composer text survived too, with nowhere to put a
+    // per-channel draft, so a half-typed message silently followed the
+    // user into whatever channel they looked at next.
+    //
+    // Keyed on (server, room) rather than the room id alone: a server
+    // switch does not change any connection's activeRoomId (see the note
+    // on roomContextKey in MessageView.qml), so keying on the room id
+    // would miss it — and two servers can host the same room id.
+    readonly property string roomKey: {
+        var s = serverManager.activeServer;
+        if (!s) return "";
+        return s.serverUrl + "\u001f" + s.activeRoomId;   // U+001F: in neither half
+    }
+    property var _drafts: ({})
+    property string _lastRoomKey: ""
+
+    onRoomKeyChanged: inputRoot._swapRoomState()
+    Component.onCompleted: inputRoot._lastRoomKey = inputRoot.roomKey
+
+    function _swapRoomState() {
+        var prev = inputRoot._lastRoomKey;
+        if (prev === inputRoot.roomKey) return;
+
+        // Stash the outgoing room's draft. An in-progress EDIT is not a
+        // draft — its text belongs to a message that already exists —
+        // so it is dropped rather than saved under the room key.
+        if (prev !== "") {
+            var d = {};
+            for (var k in inputRoot._drafts) d[k] = inputRoot._drafts[k];
+            if (inputRoot.editingEventId === "" && inputArea.text.length > 0) {
+                d[prev] = { text: inputArea.text, tokens: inputRoot.mentionTokens };
+            } else {
+                delete d[prev];
+            }
+            inputRoot._drafts = d;
+        }
+        inputRoot._lastRoomKey = inputRoot.roomKey;
+
+        // Nothing that named something in the old room may survive.
+        inputRoot.editingEventId = "";
+        inputRoot.editingOriginalBody = "";
+        inputRoot.replyToEventId = "";
+        inputRoot.replyToSenderName = "";
+        inputRoot.replyToPreview = "";
+        inputRoot._clearMentionState();
+        inputRoot.slashQuery = "";
+        inputRoot.slashAnchor = -1;
+        // Slowmode is per-channel; carrying the send timestamp over locks
+        // the composer in a channel the user has not posted in.
+        inputRoot.lastSentAt = 0;
+        // In-flight uploads were started against the room we just left,
+        // and their completion signals are no longer routed here.
+        inputRoot._resetUploads();
+
+        var next = inputRoot._drafts[inputRoot.roomKey];
+        inputArea.text = (next && next.text) ? next.text : "";
+        if (next && next.tokens) inputRoot.mentionTokens = next.tokens;
+        inputArea.cursorPosition = inputArea.text.length;
+    }
 
     // Editing state. When `editingEventId` is non-empty, pressing Enter
     // sends an edit event referencing that event_id rather than a new
@@ -508,6 +595,21 @@ Rectangle {
                 }
 
                 Keys.onPressed: (event) => {
+                    // Paste (U-M14). Only claims the event when the
+                    // clipboard actually holds an image or local files;
+                    // a text paste falls through to TextArea untouched.
+                    // Both modifiers are tested because Qt maps the mac
+                    // Command key onto ControlModifier by default, but
+                    // not in every embedding.
+                    if (event.key === Qt.Key_V
+                        && (event.modifiers & (Qt.ControlModifier | Qt.MetaModifier))
+                        && !(event.modifiers & Qt.AltModifier)) {
+                        if (inputRoot._pasteAttachments()) {
+                            event.accepted = true;
+                            return;
+                        }
+                    }
+
                     // Intercept nav keys while the mention popup is open so
                     // arrow/tab/enter drive the popup instead of moving the
                     // caret or submitting the message.
@@ -970,23 +1072,45 @@ Rectangle {
         onAccepted: {
             if (serverManager.activeServer) {
                 serverManager.activeServer.sendMediaMessage(fileDialog.file.toString());
-                inputRoot.uploading = true;
+                inputRoot.noteUploadStarted();
             }
         }
     }
 
-    // Listen for upload completion to reset uploading state
+    // One completion per upload — decrement rather than clear, so N
+    // files in flight unlock the composer only when the last one lands.
     Connections {
         target: serverManager.activeServer ? serverManager.activeServer : null
+        ignoreUnknownSignals: true
 
         function onMediaSendCompleted() {
-            inputRoot.uploading = false;
+            inputRoot._noteUploadFinished();
         }
 
         function onMediaSendFailed(error) {
-            inputRoot.uploading = false;
+            inputRoot._noteUploadFinished();
             console.warn("Media upload failed:", error);
         }
+    }
+
+    // ── Paste an image or a file into the composer (U-M14) ───────────
+    //
+    // Routes to exactly the same upload path as the attach button and
+    // the drop area. Returns false when there is nothing pasteable on
+    // the clipboard, which is the caller's signal to let the normal
+    // text paste happen.
+    function _pasteAttachments() {
+        if (!inputRoot.canAttach) return false;
+        var s = serverManager.activeServer;
+        if (!s || !s.activeRoomId || s.activeRoomId.length === 0) return false;
+        if (!serverManager.clipboardFileUrls) return false;
+        var urls = serverManager.clipboardFileUrls();
+        if (!urls || urls.length === 0) return false;
+        for (var i = 0; i < urls.length; ++i) {
+            s.sendMediaMessage(urls[i]);
+            inputRoot.noteUploadStarted();
+        }
+        return true;
     }
 
     // Canonical catalogue of supported slash commands. Drives both
@@ -1341,6 +1465,21 @@ Rectangle {
         inputRoot.lastSentAt = Date.now();
     }
 
+    // Word-boundary matcher for a mention token (U-M11).
+    //
+    // `text.indexOf("@Al")` is true for "@Alice", so picking Al from the
+    // autocomplete and then typing about Alice pinged Al — and picking
+    // both put Al's anchor inside Alice's name. \b does not help: `@` is
+    // itself a non-word character, so /\b@Al\b/ still matches inside
+    // "@Alice". The rule that does work: the token starts at the
+    // beginning of the text or after whitespace, and is not followed by
+    // another name character. Same shape as the @room test above.
+    function _escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+    function _mentionRegExp(token, flags) {
+        return new RegExp("(^|\\s)" + inputRoot._escapeRegExp(token)
+                          + "(?![A-Za-z0-9_-])", flags || "");
+    }
+
     function _clearMentionState() {
         inputRoot.mentionTokens = [];
         inputRoot.mentionQuery = "";
@@ -1369,7 +1508,7 @@ Rectangle {
                 if (/(^|\s)@room(?![A-Za-z0-9_])/.test(text)) activeMentions.push(t);
                 continue;
             }
-            if (text.indexOf(t.token) >= 0) activeMentions.push(t);
+            if (inputRoot._mentionRegExp(t.token).test(text)) activeMentions.push(t);
         }
 
         var hasMarkdown = _hasMarkdown(text);
@@ -1401,7 +1540,11 @@ Rectangle {
                          + '" style="color:' + Theme.accent
                          + '; text-decoration:none; font-weight:bold;">'
                          + m.token + '</a>';
-            html = html.split(m.token).join(anchor);
+            // Boundary-matched, not split/join: a plain substring swap
+            // rewrote the "@Al" inside "@Alice" and cut the longer name
+            // in half, leaving a broken anchor and a stray "ice".
+            html = html.replace(inputRoot._mentionRegExp(m.token, "g"),
+                                function(_, lead) { return lead + anchor; });
             if (uids.indexOf(m.userId) < 0) uids.push(m.userId);
         }
         return { html: html, uids: uids };

@@ -68,10 +68,18 @@ Dialog {
         function onLoginSuccess(serverUrl) {
             dialog.oidcInProgress = false;
             dialog.isConnecting = false;
+            dialog.errorMessage = "";
+            dialog.close();
         }
         function onLoginError(serverUrl, error) {
             dialog.oidcInProgress = false;
             dialog.isConnecting = false;
+            // THE inline surface for a login failure (D-H5 / U-M13). This
+            // used to be set from main.qml's own Connections on the same
+            // signal, while a third handler toasted it — so one failure
+            // produced up to three messages. The dialog owns the inline
+            // copy; the shell only toasts when the dialog is not up.
+            dialog.errorMessage = error;
         }
         function onIdentityLoginComplete(serverUrls) {
             dialog.identitySyncInProgress = false;
@@ -84,6 +92,18 @@ Dialog {
             dialog.identitySyncInProgress = false;
             dialog.errorMessage = "Identity login failed: " + error;
         }
+    }
+
+    // Every re-open starts clean. Without this a failure that arrived
+    // after the dialog was dismissed — or one left over from a previous
+    // attempt at a different server — greeted the user the next time
+    // they opened it (D-H5).
+    onAboutToShow: {
+        dialog.errorMessage = "";
+        dialog.isConnecting = false;
+        dialog.oidcInProgress = false;
+        dialog.identitySyncInProgress = false;
+        dialog.checkingFlows = false;
     }
 
     onClosed: {

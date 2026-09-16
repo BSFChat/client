@@ -2,6 +2,9 @@
 
 #include <QObject>
 #include <QList>
+#include <QStringList>
+
+#include "net/ServerRoster.h"
 
 class ServerConnection;
 class ServerListModel;
@@ -29,17 +32,15 @@ public:
     ~ServerManager() override;
 
     ServerListModel* servers() const { return m_serverListModel; }
-    ServerConnection* activeServer() const { return m_activeServer; }
-    int activeServerIndex() const { return m_activeServerIndex; }
+    ServerConnection* activeServer() const { return m_roster.active(); }
+    int activeServerIndex() const { return m_roster.activeIndex(); }
     // Count / lookup helpers for the NotificationManager (which needs to
     // wire every existing + future connection for inbound-message signals).
     // connectionAt is also invokable from QML so the server rail's
     // context menu can show per-server connection status.
-    int connectionCount() const { return m_connections.size(); }
-    Q_INVOKABLE ServerConnection* connectionAt(int index) const {
-        return (index >= 0 && index < m_connections.size()) ? m_connections[index] : nullptr;
-    }
-    int indexOfConnection(ServerConnection* conn) const { return m_connections.indexOf(conn); }
+    int connectionCount() const { return m_roster.count(); }
+    Q_INVOKABLE ServerConnection* connectionAt(int index) const { return m_roster.at(index); }
+    int indexOfConnection(ServerConnection* conn) const { return m_roster.indexOf(conn); }
     // The connection currently in a voice channel, or nullptr. Distinct
     // from activeServer(): the user can be in voice on server A while
     // browsing server B, and the screen/camera controllers must keep
@@ -101,6 +102,19 @@ public:
     // identityUrl defaults to https://id.bsfchat.com when empty.
     Q_INVOKABLE void loginWithIdentityAndSync(const QString& identityUrl);
 
+    // Local files currently on the system clipboard, as file:// URLs, so
+    // the composer can paste an image or a file into the channel (U-M14).
+    //
+    // Two sources, in order: URLs the source app put on the clipboard
+    // (a Finder / Explorer copy), and — when the clipboard holds raw
+    // image data with no URL, which is what a screenshot or a
+    // copy-image-from-browser gives you — a PNG spilled to a temp file so
+    // the existing sendMediaMessage path, which reads bytes off disk, can
+    // take it unchanged. Empty when the clipboard holds nothing
+    // pasteable (e.g. plain text), which is the composer's signal to let
+    // the normal text paste happen.
+    Q_INVOKABLE QStringList clipboardFileUrls() const;
+
     // Copy arbitrary text to the system clipboard. Exposed on ServerManager
     // (rather than a separate helper) because QML already has it injected
     // and adding a second context property is noisier than adding a method.
@@ -146,9 +160,9 @@ private:
 
     Settings* m_settings;
     ServerListModel* m_serverListModel;
-    QList<ServerConnection*> m_connections;
-    ServerConnection* m_activeServer = nullptr;
-    int m_activeServerIndex = -1;
+    // Connection list + active pointer/index. See ServerRoster.h for why
+    // the bookkeeping lives there rather than inline.
+    ServerRoster<ServerConnection> m_roster;
     bool m_viewingDms = false;
 
     // Identity-first login state. m_identityClient runs the OIDC browser

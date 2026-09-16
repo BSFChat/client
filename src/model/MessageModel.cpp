@@ -1,4 +1,5 @@
 #include "model/MessageModel.h"
+#include "model/ThreadFilterModel.h"
 
 #include <QDateTime>
 #include <QSet>
@@ -621,15 +622,23 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
     }
 
     // --- m.room.redaction ----------------------------------------------
-    // Currently only the server plumbs redactions for reactions; message
-    // redactions are handled elsewhere. We only care about reactions being
-    // redacted: find the reaction in our index and remove it from its target.
+    // A redaction targets either a reaction (fold it out of the target
+    // message's aggregate) or a message (take the row out of the timeline).
+    // The message half used to say "handled elsewhere" and elsewhere did not
+    // exist, so deleted messages never left the view until the room was
+    // re-entered (U-H5).
     if (event.type == std::string(bsfchat::event_type::kRoomRedaction)) {
         const auto& data = event.content.data;
         QString target = QString::fromStdString(data.value("redacts", ""));
         if (target.isEmpty()) return;
         auto it = m_reactionIndex.find(target);
-        if (it == m_reactionIndex.end()) return;
+        if (it == m_reactionIndex.end()) {
+            // Not a reaction we know about — try it as a message. Unknown
+            // ids (never loaded, or already removed optimistically by
+            // redactEvent) fall through harmlessly.
+            removeMessage(target);
+            return;
+        }
         ReactionRef ref = it.value();
         m_reactionIndex.erase(it);
         const int row = rowForEventId(ref.targetEventId);
@@ -818,6 +827,72 @@ void MessageModel::prependEvents(const QVector<bsfchat::RoomEvent>& events, cons
     rebuildIndices();
     endInsertRows();
     emit countChanged();
+
+    // The message that used to be row 0 is no longer row 0 (U-M7). Both
+    // ShowSenderRole and ShowDateSeparator special-case row 0 as "always
+    // true" and otherwise compare against the previous row, so without this
+    // the first message of the old page keeps a sender header and a date
+    // separator it no longer earns — a duplicate header at every page
+    // boundary. The view has no reason to re-query a row that only shifted.
+    const int formerFirst = newEntries.size();
+    if (formerFirst < m_messages.size()) {
+        auto idx = index(formerFirst);
+        emit dataChanged(idx, idx, {ShowSenderRole, ShowDateSeparator});
+    }
+}
+
+bool MessageModel::removeMessage(const QString& eventId)
+{
+    const int row = rowForEventId(eventId);
+    if (row < 0) return false;
+
+    const QString threadRoot = m_messages[row].threadRootId;
+
+    beginRemoveRows(QModelIndex(), row, row);
+    // Reactions on the doomed message: their index entries would otherwise
+    // survive as pointers to an event id that no longer has a row, and the
+    // next reaction redaction against one of them would resolve rowForEventId
+    // to -1 at best, or a re-used id at worst.
+    for (auto bIt = m_messages[row].reactionsByEmoji.cbegin();
+         bIt != m_messages[row].reactionsByEmoji.cend(); ++bIt) {
+        for (const auto& pair : bIt.value()) m_reactionIndex.remove(pair.second);
+    }
+    m_messages.remove(row);
+    m_pendingReactions.remove(eventId);
+    // Every row after `row` shifted down by one, and m_threadReplyCounts has
+    // to lose this message's contribution — rebuildIndices does both.
+    rebuildIndices();
+    endRemoveRows();
+    emit countChanged();
+
+    // The root's reply badge shrank.
+    if (!threadRoot.isEmpty()) {
+        const int rootRow = rowForEventId(threadRoot);
+        if (rootRow >= 0) {
+            auto rootIdx = index(rootRow);
+            emit dataChanged(rootIdx, rootIdx, {ThreadReplyCountRole});
+        }
+    }
+
+    // The row that slid into this slot has a new predecessor, so its sender
+    // header and date separator may have flipped — same reason as the
+    // prepend case above.
+    if (row < m_messages.size()) {
+        auto idx = index(row);
+        emit dataChanged(idx, idx, {ShowSenderRole, ShowDateSeparator});
+    }
+    return true;
+}
+
+QAbstractItemModel* MessageModel::threadModel(const QString& rootEventId)
+{
+    if (rootEventId.isEmpty()) return nullptr;
+    if (!m_threadProxy) {
+        m_threadProxy = new ThreadFilterModel(this);
+        m_threadProxy->setSourceModel(this);
+    }
+    m_threadProxy->setRootEventId(rootEventId);
+    return m_threadProxy;
 }
 
 void MessageModel::setPrevBatchToken(const QString& token)

@@ -12,6 +12,8 @@
 
 #include <bsfchat/MatrixTypes.h>
 
+class ThreadFilterModel;
+
 class MessageModel : public QAbstractListModel {
     Q_OBJECT
     Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
@@ -51,6 +53,17 @@ public:
         MentionsMeRole,     // m.mentions.user_ids contains the local user
         MentionsRoomRole    // m.mentions.room — an @room broadcast
     };
+
+    // A live, role-preserving view of one thread over this model (U-M8),
+    // for the thread drawer to bind its ListView to. One proxy per model,
+    // re-pointed as the user opens different threads; owned by this object
+    // and valid for its lifetime, which is what makes it safe to hand to
+    // QML. Returns nullptr for an empty root.
+    //
+    // Prefer this over threadReplies() anywhere the answer drives a view:
+    // the snapshot list below cannot see an edit or a reaction, because
+    // neither changes the row count that was the only thing re-running it.
+    Q_INVOKABLE QAbstractItemModel* threadModel(const QString& rootEventId);
 
     // Thread helpers. `threadReplies` returns the messages whose
     // threadRootId == rootEventId, oldest-first, as {eventId, sender,
@@ -229,6 +242,23 @@ public:
     void prependEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);
     void clear();
 
+    // Take a message out of the timeline (U-H5). Returns true if a row was
+    // actually removed.
+    //
+    // Two callers: the m.room.redaction branch of appendEvent, which is how
+    // somebody *else's* deletion reaches us, and ServerConnection::redactEvent,
+    // which removes optimistically so the author doesn't watch their own
+    // deleted message sit there until the next sync. Both go through here so
+    // the second one is idempotent against the first.
+    //
+    // Does the whole job, not just the rows: the reaction index entries that
+    // pointed into this message are dropped (otherwise a later reaction
+    // redaction resolves a row that has since moved), the thread reply count
+    // on its root is decremented, and the row that inherits this slot is
+    // repainted because its sender header / date separator is computed from
+    // its predecessor.
+    bool removeMessage(const QString& eventId);
+
     // Back-pagination state. ServerConnection writes these as sync+messages
     // responses come in; MessageView reads them to drive the scroll-to-top
     // trigger and the reply-jump paginate-until-found loop.
@@ -338,6 +368,7 @@ private:
     // Empty => no more history (or never populated). The exact format is
     // server-defined; we pass it back verbatim as the `from` param on
     // /rooms/{id}/messages.
+    ThreadFilterModel* m_threadProxy = nullptr;
     QString m_prevBatchToken;
     bool m_loadingHistory = false;
     const QMap<QString, QString>* m_dnCache = nullptr;

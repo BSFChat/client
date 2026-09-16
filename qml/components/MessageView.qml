@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import BSFChat
+import "../js/TimelineOverlay.js" as Overlay
 
 // Message view (playing the role of SPEC §3.6 ChatPanel while we're
 // still text-first). bg0 backdrop — matches the VoiceRoom and the
@@ -72,7 +73,9 @@ Rectangle {
                     uploaded++;
                 }
             }
-            if (uploaded > 0) messageInput.uploading = true;
+            // One per file, so the composer stays locked until the LAST
+            // of a multi-file drop lands (U-H6).
+            for (var j = 0; j < uploaded; ++j) messageInput.noteUploadStarted();
             drop.accepted = uploaded > 0;
         }
     }
@@ -332,7 +335,13 @@ Rectangle {
                         : "Show member list  (⌃M)"
                     toggled: Window.window.showMemberList
                     visible: serverManager.activeServer !== null
-                    onClicked: Window.window.showMemberList = !Window.window.showMemberList
+                    // Ask the shell to toggle rather than assigning to its
+                    // property (U-M12): on mobile `showMemberList` is a
+                    // BINDING to `rightDrawer.opened`, and writing to it
+                    // destroyed that binding — after which the button
+                    // flipped a now-dead bool and the drawer never moved
+                    // again, in either direction.
+                    onClicked: Window.window.toggleMemberList()
                 }
             }
 
@@ -344,1134 +353,1255 @@ Rectangle {
             }
         }
 
-        // Messages list
-        ListView {
-            id: messageListView
+        // ── The timeline, and the overlays that float over it ────────
+        //
+        // U-H1, corrected. The audit expected the pagination spinner, the
+        // scroll-to-latest chevron and the empty state to be scrolling
+        // away with the conversation, because they were declared inside
+        // the ListView and a Flickable reparents its visual children into
+        // `contentItem` — the item that moves.
+        //
+        // That is true of Flickable and NOT of ListView. QQuickItemView
+        // keeps inline children as direct children of the VIEW, so all
+        // three were already anchored to the viewport and the reported
+        // symptom does not reproduce. tests/qml/tst_timelineoverlay.qml
+        // pins both halves of that difference, because it is the kind of
+        // thing that is obvious only once somebody has measured it.
+        //
+        // They are siblings of the list now anyway. The placement no
+        // longer rests on a subclass overriding a default property — a
+        // detail nothing in this file mentioned and no test covered — and
+        // the overlays stop inheriting the list's `clip` and its
+        // `opacity: initialLoad ? 0 : 1` fade, so the empty state is
+        // visible during the initial-load grace window instead of being
+        // faded out with a list that has nothing in it. The wrapper Item
+        // carries the Layout attachments the list used to hold; the list
+        // fills it, and the overlay fills the list.
+        Item {
+            id: timelineArea
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.leftMargin: Theme.sp.s7
             Layout.rightMargin: Theme.sp.s7
-            clip: true
-            verticalLayoutDirection: ListView.TopToBottom
-            spacing: 2
-            // Prevent rubber-band overshoot. Without this, async delegate
-            // height changes (image loads, reaction chip layout) combined
-            // with positionViewAtEnd() during the initial settle could
-            // park `contentY` thousands of pixels past `contentHeight`,
-            // from which the normal "am I at bottom?" heuristic couldn't
-            // recover.
-            boundsBehavior: Flickable.StopAtBounds
 
-            // Named so `_userDrivenScroll()` can read `pressed` — a thumb
-            // drag is real user input but raises no movementStarted, so it
-            // is the one user gesture the movement signals cannot see.
-            ScrollBar.vertical: ThemedScrollBar { id: verticalScrollBar }
+            ListView {
+                id: messageListView
+                anchors.fill: parent
+                clip: true
+                verticalLayoutDirection: ListView.TopToBottom
+                spacing: 2
+                // Prevent rubber-band overshoot. Without this, async delegate
+                // height changes (image loads, reaction chip layout) combined
+                // with positionViewAtEnd() during the initial settle could
+                // park `contentY` thousands of pixels past `contentHeight`,
+                // from which the normal "am I at bottom?" heuristic couldn't
+                // recover.
+                boundsBehavior: Flickable.StopAtBounds
 
-            // Hide the list while it's mid-settle on a fresh channel
-            // open. Without this, every batch of messages and every
-            // async delegate-height resolution kicks off another
-            // _scrollToEndSoon, and the user sees contentY bounce
-            // through several intermediate positions before parking
-            // at the divider / bottom. Fading in only once initialLoad
-            // clears makes the room appear "ready" instead of churning.
-            opacity: initialLoad ? 0 : 1
-            Behavior on opacity {
-                NumberAnimation { duration: Theme.motion.fastMs
-                                  easing.type: Easing.OutCubic }
-            }
+                // Named so `_userDrivenScroll()` can read `pressed` — a thumb
+                // drag is real user input but raises no movementStarted, so it
+                // is the one user gesture the movement signals cannot see.
+                ScrollBar.vertical: ThemedScrollBar { id: verticalScrollBar }
 
-            // ── NEVER READ `model` FROM THIS VIEW'S OWN HANDLERS ──────
-            //
-            // Reading a ListView's `model` property is NOT safe from any
-            // handler that can run while the model is being swapped, and a
-            // JS null check cannot save you: the fault happens INSIDE the
-            // property read, before a value ever comes back.
-            //
-            // QQuickItemView::model() is, in Qt 6.9+, a tail call:
-            //     ldr x0, [d, #0x590]        // d->model, unchecked
-            //     b   QQmlDelegateModel::model()
-            // With d->model null, QQmlDelegateModel::model() runs with
-            // `this == nullptr` and its Q_D reads d_ptr at +0x8 —
-            // EXC_BAD_ACCESS at 0x0000000000000008.
-            //
-            // d->model IS null for part of QQuickItemView::setModel(): the
-            // old delegate model is released, then `setPosition(0)` drives
-            // setContentY → setViewportY → contentItem->setY → a geometry
-            // change that emits contentYChanged — all before the new
-            // delegate model is installed. So `onContentYChanged` is
-            // re-entered, from inside setModel, with a null delegate model.
-            //
-            // `messageModelRef` reaches the same object from the OTHER
-            // side — ServerConnection's own `messageModel` property — so
-            // the read never touches QQuickItemView at all. Every handler
-            // and helper below uses it. The `model:` binding is pointed at
-            // it too, so there is exactly one source of truth.
-            readonly property var messageModelRef: serverManager.activeServer
-                ? serverManager.activeServer.messageModel : null
-
-            model: messageModelRef
-
-            // ── Unread-messages divider ───────────────────────────────
-            // When the user enters a room, we snapshot the stored
-            // "last read" timestamp into `unreadBoundaryMs`. The
-            // delegate draws a red "New" divider above the first
-            // message whose ts > boundary. The boundary is frozen for
-            // the visit so the divider doesn't jump while messages
-            // arrive. On leaving the room we write the newest loaded
-            // message's ts back into settings, marking it read.
-            property real unreadBoundaryMs: 0
-            property string unreadDividerEventId: ""
-            property string _currentRoomId: ""
-
-            function _recomputeUnreadDivider() {
-                var mm = messageModelRef;   // never the view's `model`
-                if (!mm || unreadBoundaryMs <= 0) {
-                    unreadDividerEventId = "";
-                    return;
+                // Hide the list while it's mid-settle on a fresh channel
+                // open. Without this, every batch of messages and every
+                // async delegate-height resolution kicks off another
+                // _scrollToEndSoon, and the user sees contentY bounce
+                // through several intermediate positions before parking
+                // at the divider / bottom. Fading in only once initialLoad
+                // clears makes the room appear "ready" instead of churning.
+                opacity: initialLoad ? 0 : 1
+                Behavior on opacity {
+                    NumberAnimation { duration: Theme.motion.fastMs
+                                      easing.type: Easing.OutCubic }
                 }
-                // Own messages are not candidates — see
-                // MessageModel::firstUnreadEventIdAfterTs. A divider above
-                // your own message is both wrong on its face and, because
-                // the anchor doubles as the re-entry scroll target, the
-                // thing that parks you above the batch you just sent.
-                unreadDividerEventId =
-                    mm.firstUnreadEventIdAfterTs(unreadBoundaryMs) || "";
-            }
 
-            function _persistLastReadForCurrent() {
-                if (!_currentRoomId) return;
-                var mm = messageModelRef;   // never the view's `model`
-                if (!mm) return;
-                // Only the model those rows actually came from can answer
-                // "what was the newest message in the room I'm leaving?".
-                // On a SERVER switch the `model` binding has already been
-                // re-pointed at the incoming server's model by the time we
-                // get here, and reading it would stamp the outgoing room's
-                // read marker with a timestamp from a different server's
-                // timeline. Skipping is safe: `_persistLastReadIfAtBottom`
-                // has been rolling the marker forward on every count change
-                // throughout the visit, and ServerConnection advances it
-                // from /sync for the active room as well.
-                if (mm !== _currentModel) return;
-                var ts = mm.newestTimestampMs();
-                if (ts > 0) appSettings.setLastReadTs(_currentRoomId, ts);
-            }
-
-            // Continuously refresh the persisted last-read marker
-            // while the user is parked at the bottom of the loaded
-            // history. Called from `onCountChanged` whenever new
-            // rows arrive while atBottom is true: by definition,
-            // the user is reading those rows as they appear, so
-            // the persisted ts should track the model's newest.
-            // This makes the divider on next room re-entry
-            // correspond to "messages that arrived after I left",
-            // not "messages I might have missed because we raced
-            // the model-clear at switch time".
-            function _persistLastReadIfAtBottom() {
-                if (!atBottom) return;
-                if (!_currentRoomId) return;
-                var mm = messageModelRef;   // never the view's `model`
-                if (!mm) return;
-                if (mm !== _currentModel) return;   // see above
-                var ts = mm.newestTimestampMs();
-                if (ts > 0) appSettings.setLastReadTs(_currentRoomId, ts);
-            }
-
-            // ── Room-context entry ────────────────────────────────────
-            //
-            // WHAT IS ON SCREEN IS A (server, room, model) TRIPLE, NOT A
-            // ROOM ID. This is the whole reason "switch server, come back,
-            // land short of the bottom" survived every previous fix.
-            //
-            // The reset below used to hang off a
-            // `Connections { target: activeServer; onActiveRoomIdChanged }`.
-            // Neither half of that fires on a server switch:
-            //
-            //   • ServerManager::setActiveServer emits activeServerChanged
-            //     only — it never touches any connection's activeRoomId, so
-            //     the room id genuinely does not change; each connection
-            //     keeps the room it was last reading.
-            //   • Re-binding a Connections target does not replay its
-            //     handlers for the new object.
-            //
-            // So on a server switch the ONLY thing that reset was
-            // onModelChanged's `initialLoad = true`, and `unreadBoundaryMs`
-            // / `unreadDividerEventId` survived from whichever room last
-            // emitted activeRoomIdChanged. `_recomputeUnreadDivider` then
-            // resolved that stale, frozen boundary against the incoming
-            // model and initial placement anchored on it — parking the view
-            // mid-history and setting atBottom = false, which disables every
-            // subsequent scroll-to-end. Adding more scroll-to-end calls
-            // could never fix that; they were all gated off by the very
-            // state the bad anchor had just set.
-            //
-            // Keying on the triple makes the entry run on BOTH transitions,
-            // and on a connection being replaced in place (reconnect), where
-            // the url and room id are unchanged but the model object is new.
-            readonly property string roomContextKey: {
-                var s = serverManager.activeServer;
-                if (!s) return "";
-                // U+001F (unit separator) cannot occur in either half.
-                return s.serverUrl + "\u001f" + s.activeRoomId;
-            }
-            property bool _contextEntered: false
-            property string _enteredContextKey: ""
-            property var _currentModel: null
-            // Bindings can evaluate while the object tree is still being
-            // built, and `scrollTimer` is a sibling declared further down —
-            // referencing it from a binding-triggered handler that ran early
-            // would be a ReferenceError. Component.onCompleted opens the
-            // gate and then performs the first entry itself.
-            property bool _ready: false
-
-            onRoomContextKeyChanged: _enterRoomContext()
-
-            function _enterRoomContext() {
-                if (!_ready) return;
-                var s = serverManager.activeServer;
-                var nextModel = s ? s.messageModel : null;
-                var key = roomContextKey;
-                if (_contextEntered && key === _enteredContextKey
-                    && nextModel === _currentModel) return;
-
-                // Persist newest-seen ts for the room we're leaving. No-ops
-                // when the model has already been re-pointed (server switch).
-                _persistLastReadForCurrent();
-
-                _contextEntered = true;
-                _enteredContextKey = key;
-                _currentRoomId = s ? s.activeRoomId : "";
-                _currentModel = nextModel;
-                // Re-snapshot the read marker from settings on EVERY entry.
-                // The in-memory boundary is deliberately frozen for the
-                // duration of a visit so the divider doesn't crawl as
-                // messages arrive — which means it is stale the moment the
-                // visit ends, and re-reading here is what makes it a
-                // per-visit snapshot rather than a per-lifetime one.
-                unreadBoundaryMs = _currentRoomId
-                    ? appSettings.lastReadTs(_currentRoomId) : 0;
-                // Defer recompute until the model has repopulated for the
-                // new room. Trigger via onCountChanged below. Clearing it
-                // here is what stops another room's anchor from being
-                // honoured by the initial placement.
-                unreadDividerEventId = "";
-                // Reset scroll state so the new context enters its own
-                // initial-load grace window. Without this, switching reuses
-                // the previous room's atBottom/initialLoad values — which,
-                // after a back-paginate or any non-bottom dwell, leaves both
-                // false and skips the scroll-to-end on re-entry.
-                initialLoad = true;
-                // Entering a room is an intent to read its newest message,
-                // so both flags reset. `_jumpToUnreadDivider` revokes the
-                // intent again if there is genuinely-unread content to land
-                // on instead.
-                followEnd = true;
-                atBottom = true;
-                _forceFollow = false;
-                // In-flight bookkeeping belongs to the room we just left.
-                paginationAnchorContentHeight = -1;
-                _jumpPendingEventId = "";
-                _jumpAttemptsLeft = 10;
-                settleTimer.stop();
-                scrollTimer.restart();
-            }
-
-            // Initial-load: pick up whichever room is already active
-            // when the view is constructed, so the divider works on
-            // first app start (not just after a room switch).
-            Component.onCompleted: {
-                _ready = true;
-                _enterRoomContext();
-            }
-
-            // ── TWO FLAGS, DELIBERATELY. DO NOT MERGE THEM AGAIN. ─────
-            //
-            // `followEnd` is INTENT: does the user want to be reading the
-            // newest message? Only user input changes it — a drag, a
-            // flick, a wheel tick, a scrollbar-thumb drag, the
-            // jump-to-latest button, an explicit jump-to-event, or
-            // entering a room. Layout never touches it.
-            //
-            // `atBottom` is a SAMPLE: is the viewport, at this instant, at
-            // the end of the content? It drives the jump-to-latest chevron
-            // and the read marker, and it is re-derived on every contentY
-            // tick.
-            //
-            // These used to be one variable, and that was the defect
-            // behind three separate bug reports — server-switch, exiting
-            // fullscreen video, and "the newest message is a video and the
-            // view drifts up on its own". Most contentY ticks come from
-            // LAYOUT, not the user: a video card renders small and grows
-            // when its metadata arrives, an image resolves its intrinsic
-            // size, a link preview appears, the window resizes and every
-            // text delegate re-wraps. Each of those produces samples taken
-            // from a half-updated (contentHeight, contentY, height) triple.
-            // One sample outside the tolerance band used to clear the pin
-            // for good, and because the MODEL never changes in any of those
-            // scenarios, nothing ever restored it.
-            //
-            // That is also why every previous fix failed: they all set the
-            // position once. The position was right when it was set and
-            // stale a frame later, and the flag that would have re-run it
-            // had already been destroyed by the same reflow.
-            //
-            // See bsfchat::client::followEndAfterContentYSample.
-            property bool followEnd: true
-            property bool atBottom: true
-            property bool initialLoad: true
-            // Tolerance for "near the bottom" — wider on mobile so a
-            // touch flick's kinetic overshoot doesn't flap `atBottom`
-            // false and flicker the jump-to-latest button.
-            readonly property int bottomTolerance: Theme.isMobile ? 160 : 80
-
-            // Back-pagination bookkeeping. Record contentHeight AND contentY
-            // just before we request older messages; after they prepend we
-            // use both to figure out whether Qt's ListView auto-shifted
-            // contentY (it does, for inserts at index 0) or we need to
-            // nudge it ourselves. Double-adjusting caused the view to
-            // jump back toward the bottom after pagination.
-            property real paginationAnchorContentHeight: -1
-            property real paginationAnchorContentY: 0
-            readonly property int paginationTriggerPx: 200
-
-            function _maybeLoadOlder() {
-                if (!serverManager.activeServer) return;
-                var mm = serverManager.activeServer.messageModel;
-                if (!mm || !mm.hasMoreHistory || mm.loadingHistory) return;
-                if (count === 0) return;
-                paginationAnchorContentHeight = contentHeight;
-                paginationAnchorContentY = contentY;
-                serverManager.activeServer.loadOlderMessages(50);
-            }
-
-            // Fires whenever contentY moves, from any source: user drag,
-            // wheel, kinetic flick, ScrollBar drag, positionViewAtEnd().
-            // This is the one chokepoint that catches every way of
-            // scrolling, including ScrollBar drags (which bypass
-            // movementStarted because they poke contentY programmatically).
-            //
-            // Two jobs:
-            //   1. If the new contentY is not near the bottom, drop the
-            //      "pin to end" state so subsequent content growth doesn't
-            //      snap us back. This also ends the 2-second initial-load
-            //      grace window.
-            //   2. Near the top, kick off back-pagination.
-            // Helper: is `contentY` currently within the tight band at
-            // the end of the list? Unlike a one-sided check, this rejects
-            // contentY values PAST the valid end (dist < 0) as "not at
-            // bottom" — those come from transient layout churn, not from
-            // the user intentionally being at the end.
-            function _isAtEnd() {
-                var mm = messageModelRef;   // never the view's `model`
-                if (!mm) return true;
-                return mm.isPinnedToEnd(contentHeight, contentY,
-                                        height, bottomTolerance);
-            }
-
-            // Policy constants — mirror bsfchat::client::PositionPolicy,
-            // returned as ints by MessageModel::scrollPolicy because the
-            // model isn't a registered QML type and can't export an enum.
-            readonly property int kPreserve: 0
-            readonly property int kFollowEnd: 1
-            readonly property int kReenter: 2
-
-            // What the change that just happened means for scroll position.
-            // The decision lives in C++ (util/ScrollAnchor.h) so it can be
-            // tested; the view only routes the answer.
-            function _scrollPolicy(paginating) {
-                var mm = messageModelRef;   // never the view's `model`
-                if (!mm) return kPreserve;
-                // INTENT drives the policy, not the instantaneous sample.
-                return mm.scrollPolicy(initialLoad, paginating,
-                                       followEnd, _forceFollow);
-            }
-
-            // Is the contentY change we are looking at the user's doing?
-            //
-            // Drags, flicks and wheel ticks all raise movementStarted, which
-            // revokes the intent directly. A scrollbar-thumb drag does NOT —
-            // it pokes contentY programmatically — so it is resolved from the
-            // thumb's own pressed state. Between them these are every way a
-            // user can scroll this list; everything else that moves contentY
-            // is layout, and layout does not get a vote on intent.
-            // `_ready` short-circuits first so the scrollbar id is never
-            // read before the object tree is built (see `_ready` below).
-            function _userDrivenScroll() {
-                return _ready && verticalScrollBar
-                    && verticalScrollBar.pressed === true;
-            }
-
-            onContentYChanged: {
-                if (contentHeight <= height) return;
-                // Don't clear `initialLoad` here. ListView shifts contentY
-                // on its own during async delegate creation / incremental
-                // height correction; reading those programmatic shifts as
-                // "user scrolled away from end" used to clear initialLoad
-                // before our deferred scroll-to-end could fire, parking
-                // the user at the top of a freshly opened channel.
-                // initialLoad is now cleared only by movementStarted
-                // (real user input) or scrollTimer expiry.
-                var live = _isAtEnd();
-                atBottom = live;
-                var mm = messageModelRef;
-                if (mm) {
-                    followEnd = mm.followEndAfterContentYSample(
-                        followEnd, _userDrivenScroll(), live);
-                }
-                if (!initialLoad && contentY < paginationTriggerPx) {
-                    _maybeLoadOlder();
-                }
-            }
-
-            // ── Viewport geometry ─────────────────────────────────────
-            //
-            // Window resize, fullscreen enter/exit (the video card sets
-            // Window.visibility = Window.FullScreen), member-list toggle.
-            // The model is untouched, so NONE of the model-change paths
-            // fire — this case simply had no handler at all, which is why
-            // leaving fullscreen video left the list scrolled up.
-            //
-            // Both `height` and `width` matter: width re-wraps every text
-            // delegate, which moves contentHeight just as surely.
-            onHeightChanged: _onViewportGeometryChanged()
-            onWidthChanged: _onViewportGeometryChanged()
-
-            function _onViewportGeometryChanged() {
-                if (!_ready) return;
-                var mm = messageModelRef;
-                if (mm && mm.geometryChangePolicy(followEnd) !== kPreserve)
-                    _scrollToEndSoon();
-                // A resize is not one event: the viewport changes, then
-                // delegates re-wrap over the following frames. Re-assert
-                // once the dust settles rather than trusting any single
-                // moment during it.
-                settleTimer.restart();
-            }
-
-            // Event id to pulse-highlight after a reply/link jump. Set by
-            // onJumpToEvent / scrollToEventRequested, cleared by
-            // highlightTimer. Each delegate binds its overlay visibility to
-            // (highlightedEventId === model.eventId).
-            property string highlightedEventId: ""
-            Timer {
-                id: highlightTimer
-                interval: 1500
-                onTriggered: messageListView.highlightedEventId = ""
-            }
-
-            function jumpToLoadedEvent(eventId) {
-                if (!serverManager.activeServer) return false;
-                var mm = serverManager.activeServer.messageModel;
-                if (!mm) return false;
-                var idx = mm.indexForEventId(eventId);
-                if (idx < 0) {
-                    // Not in the loaded timeline — try back-paginating up
-                    // to a cap and re-check on each response. The cap
-                    // prevents an unbounded hammer if the target event
-                    // doesn't exist or was redacted.
-                    if (mm.hasMoreHistory && _jumpAttemptsLeft > 0) {
-                        _jumpPendingEventId = eventId;
-                        _jumpAttemptsLeft -= 1;
-                        paginationAnchorContentHeight = contentHeight;
-                        serverManager.activeServer.loadOlderMessages(100);
-                        return false;
-                    }
-                    console.warn("MessageView: target event not in loaded history:",
-                                 eventId);
-                    return false;
-                }
-                // Disable auto-scroll-to-bottom so the jump sticks even if
-                // content height updates arrive right after. Revoking the
-                // INTENT is what makes it stick — clearing only the derived
-                // sample would let the next reflow re-pin them.
-                messageListView.followEnd = false;
-                messageListView.atBottom = false;
-                settleTimer.stop();
-                messageListView.positionViewAtIndex(idx, ListView.Center);
-                messageListView.highlightedEventId = eventId;
-                highlightTimer.restart();
-                _jumpPendingEventId = "";
-                _jumpAttemptsLeft = 10;
-                return true;
-            }
-
-            // Paginate-until-found state for jumpToLoadedEvent. When a
-            // reply-target isn't loaded yet, we kick off back-pagination
-            // and re-try after each batch lands, up to _jumpAttemptsLeft
-            // pages. Fresh jumps reset the counter.
-            property string _jumpPendingEventId: ""
-            property int _jumpAttemptsLeft: 10
-
-            // The model object changes on a SERVER switch (each connection
-            // owns its own MessageModel). Route it through the same entry
-            // point as a room switch — `_enterRoomContext` is idempotent on
-            // the (server, room, model) triple, so whichever of the two
-            // notifications lands first does the work and the other no-ops.
-            onModelChanged: _enterRoomContext()
-
-            // Any user-driven scroll (drag, flick, wheel) cancels the
-            // initial-load grace period and its pending scroll-to-end
-            // timer. Without this, scrolling up in the first ~2s after a
-            // channel loaded got yanked back to the bottom when the timer
-            // fired — or when an inline image loaded and
-            // onContentHeightChanged triggered a forced end-scroll while
-            // initialLoad was still true.
-            // Any user-driven movement cancels the 2-second initial-load
-            // grace window. The `atBottom` state is derived from position
-            // in onContentYChanged now (bidirectional), so we don't
-            // preemptively flip it false here — a short wheel tick that
-            // happens to land inside the end band shouldn't be punished
-            // by having atBottom first set false and then back true.
-            onMovementStarted: {
-                initialLoad = false;
-                scrollTimer.stop();
-                // User dragging / wheeling means they explicitly
-                // want to leave the bottom — release every pin
-                // mechanism: the post-send follow lock AND the
-                // tolerance-band atBottom flag. Without the
-                // latter, a small upward drag stays inside the
-                // 80-px tolerance band → atBottom remains true →
-                // any subsequent contentHeight reflow (link
-                // preview resolving, an edit, an emoji react) re-
-                // pins them and they appear to "bounce back" the
-                // moment they let go.
+                // ── NEVER READ `model` FROM THIS VIEW'S OWN HANDLERS ──────
                 //
-                // movementEnded re-evaluates _isAtEnd, so if the
-                // user lets go while still inside the tolerance
-                // band, atBottom will correctly snap back to true
-                // and the normal pin behaviour resumes.
-                _forceFollow = false;
-                atBottom = false;
-                // Revoke the intent. This is the direction that must never
-                // regress: from here on, nothing — no image load, no video
-                // card growing, no window resize — may move this user.
-                followEnd = false;
-                settleTimer.stop();
-            }
+                // Reading a ListView's `model` property is NOT safe from any
+                // handler that can run while the model is being swapped, and a
+                // JS null check cannot save you: the fault happens INSIDE the
+                // property read, before a value ever comes back.
+                //
+                // QQuickItemView::model() is, in Qt 6.9+, a tail call:
+                //     ldr x0, [d, #0x590]        // d->model, unchecked
+                //     b   QQmlDelegateModel::model()
+                // With d->model null, QQmlDelegateModel::model() runs with
+                // `this == nullptr` and its Q_D reads d_ptr at +0x8 —
+                // EXC_BAD_ACCESS at 0x0000000000000008.
+                //
+                // d->model IS null for part of QQuickItemView::setModel(): the
+                // old delegate model is released, then `setPosition(0)` drives
+                // setContentY → setViewportY → contentItem->setY → a geometry
+                // change that emits contentYChanged — all before the new
+                // delegate model is installed. So `onContentYChanged` is
+                // re-entered, from inside setModel, with a null delegate model.
+                //
+                // `messageModelRef` reaches the same object from the OTHER
+                // side — ServerConnection's own `messageModel` property — so
+                // the read never touches QQuickItemView at all. Every handler
+                // and helper below uses it. The `model:` binding is pointed at
+                // it too, so there is exactly one source of truth.
+                readonly property var messageModelRef: serverManager.activeServer
+                    ? serverManager.activeServer.messageModel : null
 
-            onMovementEnded: {
-                // The user let go. Where they landed IS their intent, so
-                // this is one of the few places allowed to set both.
-                atBottom = _isAtEnd();
-                followEnd = atBottom;
-            }
+                model: messageModelRef
 
-            // When content grows (new message, image loaded), auto-scroll
-            // if we were at the bottom before the growth. Exception:
-            // if a back-pagination just landed, shift contentY by the
-            // growth delta so the user's viewport stays on the same
-            // message instead of being shoved downward by the prepended
-            // batch.
-            //
-            // Which of those applies is `positionPolicyForModelChange` in
-            // util/ScrollAnchor.h — including the invariant that matters
-            // most here: a user who has scrolled away from the end is left
-            // alone, whatever the content does.
-            onContentHeightChanged: {
-                var paginating = paginationAnchorContentHeight >= 0
-                              && contentHeight > paginationAnchorContentHeight;
-                // Content that resolves its real size AFTER being laid out —
-                // a video card growing when its metadata lands, an image
-                // resolving its intrinsic dimensions, a link preview
-                // appearing, an embed — arrives here, and may arrive several
-                // times. Re-assert on the last one too, not just on the ones
-                // that happen to be followed by another signal.
-                if (!paginating && _ready) settleTimer.restart();
-                if (_scrollPolicy(paginating) !== kPreserve) {
-                    // Reenter (initial placement: divider or end) and
-                    // FollowEnd (chase the growing bottom) share one
-                    // deferred dispatcher, which re-checks the state at
-                    // fire time. _forceFollow is what lets a post-send jump
-                    // catch up when the new delegate's height materialises a
-                    // few frames after the count change.
-                    _scrollToEndSoon();
-                    return;
-                }
-                if (!paginating) return;
-                {
-                    var delta = contentHeight - paginationAnchorContentHeight;
-                    // Has Qt already shifted contentY to compensate for the
-                    // prepend? It does this for inserts at index 0 when
-                    // they're outside the visible area. If the current cY
-                    // is already at/near (anchorCY + delta), we'd be
-                    // double-adjusting by adding delta again — which
-                    // pushed the view back toward the bottom. Only nudge
-                    // contentY if Qt hasn't.
-                    var expectedAuto = paginationAnchorContentY + delta;
-                    var alreadyShifted = Math.abs(contentY - expectedAuto) < 2;
-                    if (!alreadyShifted) {
-                        contentY = paginationAnchorContentY + delta;
-                    }
-                    paginationAnchorContentHeight = -1;
-                }
-            }
+                // ── Unread-messages divider ───────────────────────────────
+                // When the user enters a room, we snapshot the stored
+                // "last read" timestamp into `unreadBoundaryMs`. The
+                // delegate draws a red "New" divider above the first
+                // message whose ts > boundary. The boundary is frozen for
+                // the visit so the divider doesn't jump while messages
+                // arrive. On leaving the room we write the newest loaded
+                // message's ts back into settings, marking it read.
+                property real unreadBoundaryMs: 0
+                property string unreadDividerEventId: ""
+                property string _currentRoomId: ""
 
-            // Sticky "follow latest" flag. Set when the user sends
-            // a message; cleared the moment they manually scroll
-            // away (movementStarted on the Flickable) or once we
-            // reach the bottom and atBottom takes over.
-            //
-            // Replaces an earlier 5-second `_justSent` window that
-            // had two failure modes: it expired before slow media
-            // finished loading, and (worse) it kept overriding
-            // every contentHeight reflow during those 5s, so users
-            // couldn't scroll up at all if they tried within the
-            // window.
-            property bool _forceFollow: false
-
-            Connections {
-                target: messageInput
-                ignoreUnknownSignals: true
-                function onLastSentAtChanged() {
-                    if (messageInput.lastSentAt > 0) {
-                        messageListView._forceFollow = true;
-                    }
-                }
-            }
-
-            // Once we successfully reach the bottom, the regular
-            // atBottom pin-to-end behaviour takes over and we no
-            // longer need the post-send override. Also persist
-            // last-read here so a user who scrolls down to catch
-            // up (without any new messages arriving while they
-            // do) still gets their position recorded.
-            onAtBottomChanged: {
-                if (atBottom) {
-                    _forceFollow = false;
-                    _persistLastReadIfAtBottom();
-                }
-            }
-
-            // ── The re-assertion that makes "pinned" survive ──────────
-            //
-            // A one-shot jump is correct at the instant it runs and stale
-            // the moment anything below the viewport resolves its real
-            // size. The event-driven chase above handles each individual
-            // reflow; this handles the LAST one, which by definition has
-            // no following signal to react to. Restarted by every content
-            // and geometry change, so it fires once the churn stops.
-            //
-            // It re-asserts INTENT and nothing else: with followEnd false
-            // it does not move the view, it only refreshes the derived
-            // sample so the chevron tells the truth.
-            Timer {
-                id: settleTimer
-                interval: 160
-                onTriggered: {
-                    if (messageListView.followEnd) {
-                        messageListView.forceLayout();
-                        messageListView._jumpToEnd();
-                        messageListView.atBottom = true;
-                    } else {
-                        messageListView.atBottom = messageListView._isAtEnd();
-                    }
-                }
-            }
-
-            onCountChanged: {
-                // Rows arriving is never a back-pagination as far as this
-                // handler is concerned — prepends are anchored by
-                // onContentHeightChanged, which sees the height delta.
-                if (_scrollPolicy(false) !== kPreserve) {
-                    _scrollToEndSoon();
-                    if (initialLoad) scrollTimer.restart();
-                    // _forceFollow is consumed by `_scrollToEndSoon`
-                    // itself once the deferred jump runs — clearing
-                    // it here would invalidate the deferred lambda's
-                    // own re-check and silently no-op the scroll.
-                }
-                _recomputeUnreadDivider();
-                // Roll the persisted last-read forward if the user
-                // is at the bottom — they're seeing the newest row
-                // as it lands, so it's "read".
-                _persistLastReadIfAtBottom();
-            }
-
-            // Don't try to scroll the moment lastSentAt advances —
-            // the message hasn't landed yet, so jumping immediately
-            // parks us at the bottom of the *old* content, and the
-            // subsequent insert pushes the new row below the
-            // viewport. We rely on onCountChanged + _forceFollow to
-            // pick up the scroll AFTER the row is in the model.
-
-            // Jump to the end. We used to call the builtin
-            // `positionViewAtEnd()`, but during layout flap (async image
-            // loads, delegate recycling) it computed targets from stale
-            // item heights and parked contentY well past the actual end
-            // of content — which then latched atBottom=false because dist
-            // went negative. Doing the arithmetic ourselves against the
-            // live contentHeight/height is both simpler and stable.
-            function _jumpToEnd() {
-                if (contentHeight <= height) {
-                    contentY = originY;
-                } else {
-                    contentY = originY + contentHeight - height;
-                }
-            }
-
-            // Guarded callLater — re-checks the pin state at fire time so
-            // a mid-frame user scroll can abort a pending auto-scroll.
-            // `_forceFollow` opts in even when the user has
-            // scrolled up — the local user explicitly authored
-            // that message and expects to see it land. We DON'T
-            // consume it here: ListView creates the new row's
-            // delegate lazily, so the first jump may run before
-            // the delegate's height is committed and undershoots
-            // by ~1 row. Leaving _forceFollow set means subsequent
-            // contentHeight / count changes (delegate creation,
-            // image-info resolve, etc.) keep chasing the bottom
-            // until atBottom flips true (normal pin takes over)
-            // or the user starts scrolling (movementStarted clears
-            // it).
-            function _scrollToEndSoon() {
-                Qt.callLater(function() {
-                    if (initialLoad) {
-                        // First positioning after a room switch:
-                        // prefer landing on the unread divider if
-                        // there's one resolved in the loaded
-                        // history, otherwise fall through to the
-                        // bottom. Either way we forceLayout first so
-                        // contentHeight / row indices are real.
-                        forceLayout();
-                        if (!_jumpToUnreadDivider()) _jumpToEnd();
-                        // First successful positioning — reveal the
-                        // list. Subsequent contentHeight / count
-                        // changes (delegate height correction, new
-                        // messages arriving) are handled by the
-                        // atBottom path and produce smooth single-
-                        // step jumps instead of the multi-bounce
-                        // settle the user otherwise sees on room
-                        // switch. scrollTimer is still armed as a
-                        // fallback in case the first jump was a no-op
-                        // (e.g. count was 0).
-                        if (count > 0) {
-                            initialLoad = false;
-                            scrollTimer.stop();
-                        }
+                function _recomputeUnreadDivider() {
+                    var mm = messageModelRef;   // never the view's `model`
+                    if (!mm || unreadBoundaryMs <= 0) {
+                        unreadDividerEventId = "";
                         return;
                     }
-                    if (followEnd || _forceFollow) {
-                        // Force the ListView to commit any pending
-                        // delegate heights so contentHeight is the
-                        // real post-insert value instead of a
-                        // pre-creation snapshot. Without this the
-                        // jump consistently lands ~1 row short of
-                        // the actual end.
-                        forceLayout();
-                        _jumpToEnd();
+                    // Own messages are not candidates — see
+                    // MessageModel::firstUnreadEventIdAfterTs. A divider above
+                    // your own message is both wrong on its face and, because
+                    // the anchor doubles as the re-entry scroll target, the
+                    // thing that parks you above the batch you just sent.
+                    unreadDividerEventId =
+                        mm.firstUnreadEventIdAfterTs(unreadBoundaryMs) || "";
+                }
+
+                function _persistLastReadForCurrent() {
+                    if (!_currentRoomId) return;
+                    var mm = messageModelRef;   // never the view's `model`
+                    if (!mm) return;
+                    // Only the model those rows actually came from can answer
+                    // "what was the newest message in the room I'm leaving?".
+                    // On a SERVER switch the `model` binding has already been
+                    // re-pointed at the incoming server's model by the time we
+                    // get here, and reading it would stamp the outgoing room's
+                    // read marker with a timestamp from a different server's
+                    // timeline. Skipping is safe: `_persistLastReadIfAtBottom`
+                    // has been rolling the marker forward on every count change
+                    // throughout the visit, and ServerConnection advances it
+                    // from /sync for the active room as well.
+                    if (mm !== _currentModel) return;
+                    // Only when the user was actually caught up (U-M3).
+                    // This ran unconditionally, so leaving a room halfway
+                    // up its history stamped the newest LOADED message as
+                    // read and the unread divider never came back.
+                    if (!atBottom) return;
+                    var ts = mm.newestTimestampMs();
+                    if (ts > 0) _markRead(ts);
+                }
+
+                // Routes through the connection rather than writing
+                // settings directly: the read marker the SERVER holds and
+                // the timestamp the divider is computed from have to
+                // advance together, or the badge and the divider disagree.
+                function _markRead(ts) {
+                    if (!_currentRoomId) return;
+                    var s = serverManager.activeServer;
+                    if (s && s.markRoomRead) s.markRoomRead(_currentRoomId, ts);
+                    else appSettings.setLastReadTs(_currentRoomId, ts);
+                }
+
+                // Continuously refresh the persisted last-read marker
+                // while the user is parked at the bottom of the loaded
+                // history. Called from `onCountChanged` whenever new
+                // rows arrive while atBottom is true: by definition,
+                // the user is reading those rows as they appear, so
+                // the persisted ts should track the model's newest.
+                // This makes the divider on next room re-entry
+                // correspond to "messages that arrived after I left",
+                // not "messages I might have missed because we raced
+                // the model-clear at switch time".
+                function _persistLastReadIfAtBottom() {
+                    if (!atBottom) return;
+                    if (!_currentRoomId) return;
+                    var mm = messageModelRef;   // never the view's `model`
+                    if (!mm) return;
+                    if (mm !== _currentModel) return;   // see above
+                    var ts = mm.newestTimestampMs();
+                    if (ts > 0) _markRead(ts);
+                }
+
+                // ── Room-context entry ────────────────────────────────────
+                //
+                // WHAT IS ON SCREEN IS A (server, room, model) TRIPLE, NOT A
+                // ROOM ID. This is the whole reason "switch server, come back,
+                // land short of the bottom" survived every previous fix.
+                //
+                // The reset below used to hang off a
+                // `Connections { target: activeServer; onActiveRoomIdChanged }`.
+                // Neither half of that fires on a server switch:
+                //
+                //   • ServerManager::setActiveServer emits activeServerChanged
+                //     only — it never touches any connection's activeRoomId, so
+                //     the room id genuinely does not change; each connection
+                //     keeps the room it was last reading.
+                //   • Re-binding a Connections target does not replay its
+                //     handlers for the new object.
+                //
+                // So on a server switch the ONLY thing that reset was
+                // onModelChanged's `initialLoad = true`, and `unreadBoundaryMs`
+                // / `unreadDividerEventId` survived from whichever room last
+                // emitted activeRoomIdChanged. `_recomputeUnreadDivider` then
+                // resolved that stale, frozen boundary against the incoming
+                // model and initial placement anchored on it — parking the view
+                // mid-history and setting atBottom = false, which disables every
+                // subsequent scroll-to-end. Adding more scroll-to-end calls
+                // could never fix that; they were all gated off by the very
+                // state the bad anchor had just set.
+                //
+                // Keying on the triple makes the entry run on BOTH transitions,
+                // and on a connection being replaced in place (reconnect), where
+                // the url and room id are unchanged but the model object is new.
+                readonly property string roomContextKey: {
+                    var s = serverManager.activeServer;
+                    if (!s) return "";
+                    // U+001F (unit separator) cannot occur in either half.
+                    return s.serverUrl + "\u001f" + s.activeRoomId;
+                }
+                property bool _contextEntered: false
+                property string _enteredContextKey: ""
+                property var _currentModel: null
+                // Bindings can evaluate while the object tree is still being
+                // built, and `scrollTimer` is a sibling declared further down —
+                // referencing it from a binding-triggered handler that ran early
+                // would be a ReferenceError. Component.onCompleted opens the
+                // gate and then performs the first entry itself.
+                property bool _ready: false
+
+                onRoomContextKeyChanged: _enterRoomContext()
+
+                function _enterRoomContext() {
+                    if (!_ready) return;
+                    var s = serverManager.activeServer;
+                    var nextModel = s ? s.messageModel : null;
+                    var key = roomContextKey;
+                    if (_contextEntered && key === _enteredContextKey
+                        && nextModel === _currentModel) return;
+
+                    // Persist newest-seen ts for the room we're leaving. No-ops
+                    // when the model has already been re-pointed (server switch).
+                    _persistLastReadForCurrent();
+
+                    _contextEntered = true;
+                    _enteredContextKey = key;
+                    _currentRoomId = s ? s.activeRoomId : "";
+                    _currentModel = nextModel;
+                    // Re-snapshot the read marker from settings on EVERY entry.
+                    // The in-memory boundary is deliberately frozen for the
+                    // duration of a visit so the divider doesn't crawl as
+                    // messages arrive — which means it is stale the moment the
+                    // visit ends, and re-reading here is what makes it a
+                    // per-visit snapshot rather than a per-lifetime one.
+                    unreadBoundaryMs = _currentRoomId
+                        ? appSettings.lastReadTs(_currentRoomId) : 0;
+                    // Defer recompute until the model has repopulated for the
+                    // new room. Trigger via onCountChanged below. Clearing it
+                    // here is what stops another room's anchor from being
+                    // honoured by the initial placement.
+                    unreadDividerEventId = "";
+                    // Reset scroll state so the new context enters its own
+                    // initial-load grace window. Without this, switching reuses
+                    // the previous room's atBottom/initialLoad values — which,
+                    // after a back-paginate or any non-bottom dwell, leaves both
+                    // false and skips the scroll-to-end on re-entry.
+                    initialLoad = true;
+                    // Entering a room is an intent to read its newest message,
+                    // so both flags reset. `_jumpToUnreadDivider` revokes the
+                    // intent again if there is genuinely-unread content to land
+                    // on instead.
+                    followEnd = true;
+                    atBottom = true;
+                    _forceFollow = false;
+                    // In-flight bookkeeping belongs to the room we just left.
+                    _disarmPaginationAnchor();
+                    _jumpPendingEventId = "";
+                    _jumpAttemptsLeft = 10;
+                    settleTimer.stop();
+                    scrollTimer.restart();
+                }
+
+                // Initial-load: pick up whichever room is already active
+                // when the view is constructed, so the divider works on
+                // first app start (not just after a room switch).
+                Component.onCompleted: {
+                    _ready = true;
+                    _enterRoomContext();
+                }
+
+                // ── TWO FLAGS, DELIBERATELY. DO NOT MERGE THEM AGAIN. ─────
+                //
+                // `followEnd` is INTENT: does the user want to be reading the
+                // newest message? Only user input changes it — a drag, a
+                // flick, a wheel tick, a scrollbar-thumb drag, the
+                // jump-to-latest button, an explicit jump-to-event, or
+                // entering a room. Layout never touches it.
+                //
+                // `atBottom` is a SAMPLE: is the viewport, at this instant, at
+                // the end of the content? It drives the jump-to-latest chevron
+                // and the read marker, and it is re-derived on every contentY
+                // tick.
+                //
+                // These used to be one variable, and that was the defect
+                // behind three separate bug reports — server-switch, exiting
+                // fullscreen video, and "the newest message is a video and the
+                // view drifts up on its own". Most contentY ticks come from
+                // LAYOUT, not the user: a video card renders small and grows
+                // when its metadata arrives, an image resolves its intrinsic
+                // size, a link preview appears, the window resizes and every
+                // text delegate re-wraps. Each of those produces samples taken
+                // from a half-updated (contentHeight, contentY, height) triple.
+                // One sample outside the tolerance band used to clear the pin
+                // for good, and because the MODEL never changes in any of those
+                // scenarios, nothing ever restored it.
+                //
+                // That is also why every previous fix failed: they all set the
+                // position once. The position was right when it was set and
+                // stale a frame later, and the flag that would have re-run it
+                // had already been destroyed by the same reflow.
+                //
+                // See bsfchat::client::followEndAfterContentYSample.
+                property bool followEnd: true
+                property bool atBottom: true
+                property bool initialLoad: true
+                // Tolerance for "near the bottom" — wider on mobile so a
+                // touch flick's kinetic overshoot doesn't flap `atBottom`
+                // false and flicker the jump-to-latest button.
+                readonly property int bottomTolerance: Theme.isMobile ? 160 : 80
+
+                // Back-pagination bookkeeping. Record contentHeight AND contentY
+                // just before we request older messages; after they prepend we
+                // use both to figure out whether Qt's ListView auto-shifted
+                // contentY (it does, for inserts at index 0) or we need to
+                // nudge it ourselves. Double-adjusting caused the view to
+                // jump back toward the bottom after pagination.
+                property real paginationAnchorContentHeight: -1
+                property real paginationAnchorContentY: 0
+                readonly property int paginationTriggerPx: 200
+
+                // ── Which growth is the prepend? (U-M1, U-M2) ─────────
+                //
+                // "contentHeight went up and an anchor is armed" is not
+                // the same question as "the page we asked for landed",
+                // and treating them as one is U-M2: a live message
+                // arriving while the /messages request is in flight grows
+                // the content too, gets read as the prepend, and shoves
+                // the reader down by the height of somebody else's
+                // message. These two flags key the anchor on the
+                // REQUEST/RESPONSE transitions instead.
+                //
+                //   _paginationRequested  we asked; nothing has come back
+                //   _paginationLanded     rows were prepended; the height
+                //                         change that follows is ours
+                property bool _paginationRequested: false
+                property bool _paginationLanded: false
+                property int _paginationAnchorCount: 0
+
+                // Record where the reader is, at the moment the request
+                // goes out. jumpToLoadedEvent used to set only the height
+                // half and leave contentY at whatever a previous
+                // pagination had left behind (U-M1), so a paginate-until-
+                // found jump anchored on a stale position.
+                function _armPaginationAnchor() {
+                    paginationAnchorContentHeight = contentHeight;
+                    paginationAnchorContentY = contentY;
+                    _paginationAnchorCount = count;
+                    _paginationRequested = true;
+                    _paginationLanded = false;
+                }
+
+                function _disarmPaginationAnchor() {
+                    paginationAnchorContentHeight = -1;
+                    _paginationRequested = false;
+                    _paginationLanded = false;
+                }
+
+                Connections {
+                    target: serverManager.activeServer
+                    ignoreUnknownSignals: true
+                    function onOlderMessagesLoaded() {
+                        if (!messageListView._paginationRequested) return;
+                        messageListView._paginationRequested = false;
+                        if (messageListView.count
+                            > messageListView._paginationAnchorCount) {
+                            messageListView._paginationLanded = true;
+                        } else {
+                            // The page was empty, or every event in it was
+                            // already loaded. Nothing was prepended, so
+                            // there is no shift to compensate — and the
+                            // anchor must not be left armed for the next
+                            // live message to trip over.
+                            messageListView._disarmPaginationAnchor();
+                        }
                     }
-                });
-            }
+                }
 
-            // If the user has genuinely-unread messages in this
-            // room, position the first-unread row at the top of
-            // the viewport so they can read forward from where
-            // they left off.
-            //
-            // Source of truth is the SERVER's per-room unread
-            // count exposed by RoomListModel.unreadCountFor —
-            // authoritative, not derived from a local last-read
-            // timestamp. The earlier `firstEventIdAfterTs(stored)`
-            // approach raced the model-clear at room-switch time:
-            // if the user left the channel before all newer
-            // messages had loaded, we'd persist a partial-history
-            // timestamp that on every subsequent re-entry resolved
-            // to the same intermediate event, dragging them up.
-            // Server unread counts have no such race — they reset
-            // on read-marker and only grow on actual new events.
-            function _jumpToUnreadDivider() {
-                // Source of truth is `unreadDividerEventId` —
-                // computed by `_recomputeUnreadDivider` from the
-                // local last-read timestamp persisted as the user
-                // dwells at the bottom of the channel (see
-                // _persistLastReadIfAtBottom below). This avoids
-                // depending on the server's `count_unread` which
-                // can lag behind read-marker writes and lead to
-                // phantom-unread positioning. If the user's
-                // last-read ts equals the newest loaded message,
-                // firstEventIdAfterTs returns "" → no divider →
-                // fall through to scroll-to-end.
-                var mm = messageModelRef;   // never the view's `model`
-                if (!mm) return false;
-                // `restoreIndexForDivider` returns -1 for "scroll to the
-                // end" — an empty anchor, an anchor from another room that
-                // isn't in this model, or row 0 (indistinguishable from
-                // "top of the loaded history", so honouring it would park
-                // the user at the top of a back-paginated page pretending
-                // it's the start of the unread run). See
-                // bsfchat::client::chooseRestoreTarget.
-                var idx = mm.restoreIndexForDivider(unreadDividerEventId);
-                if (idx < 0) return false;
-                positionViewAtIndex(idx, ListView.Beginning);
-                // Deliberate: the user is being placed at genuinely-unread
-                // content, so the pin-to-bottom behaviour must not drag
-                // them off it. This is also why the anchor has to be
-                // correct — a wrong one disables every later scroll-to-end.
-                followEnd = false;
-                atBottom = false;
-                settleTimer.stop();
-                return true;
-            }
+                function _maybeLoadOlder() {
+                    if (!serverManager.activeServer) return;
+                    var mm = serverManager.activeServer.messageModel;
+                    if (!mm || !mm.hasMoreHistory || mm.loadingHistory) return;
+                    if (count === 0) return;
+                    _armPaginationAnchor();
+                    serverManager.activeServer.loadOlderMessages(50);
+                }
 
-            Timer {
-                id: scrollTimer
-                interval: 2000
-                onTriggered: {
-                    // Final pass after the 2-second initial-load
-                    // grace window. Same dispatch as _scrollToEndSoon's
-                    // first branch — divider takes priority if one's
-                    // pending; otherwise pin to end.
-                    if (messageListView.initialLoad) {
-                        messageListView.forceLayout();
-                        if (!messageListView._jumpToUnreadDivider()) {
+                // Fires whenever contentY moves, from any source: user drag,
+                // wheel, kinetic flick, ScrollBar drag, positionViewAtEnd().
+                // This is the one chokepoint that catches every way of
+                // scrolling, including ScrollBar drags (which bypass
+                // movementStarted because they poke contentY programmatically).
+                //
+                // Two jobs:
+                //   1. If the new contentY is not near the bottom, drop the
+                //      "pin to end" state so subsequent content growth doesn't
+                //      snap us back. This also ends the 2-second initial-load
+                //      grace window.
+                //   2. Near the top, kick off back-pagination.
+                // Helper: is `contentY` currently within the tight band at
+                // the end of the list? Unlike a one-sided check, this rejects
+                // contentY values PAST the valid end (dist < 0) as "not at
+                // bottom" — those come from transient layout churn, not from
+                // the user intentionally being at the end.
+                function _isAtEnd() {
+                    var mm = messageModelRef;   // never the view's `model`
+                    if (!mm) return true;
+                    return mm.isPinnedToEnd(contentHeight, contentY,
+                                            height, bottomTolerance);
+                }
+
+                // Policy constants — mirror bsfchat::client::PositionPolicy,
+                // returned as ints by MessageModel::scrollPolicy because the
+                // model isn't a registered QML type and can't export an enum.
+                readonly property int kPreserve: 0
+                readonly property int kFollowEnd: 1
+                readonly property int kReenter: 2
+
+                // What the change that just happened means for scroll position.
+                // The decision lives in C++ (util/ScrollAnchor.h) so it can be
+                // tested; the view only routes the answer.
+                function _scrollPolicy(paginating) {
+                    var mm = messageModelRef;   // never the view's `model`
+                    if (!mm) return kPreserve;
+                    // INTENT drives the policy, not the instantaneous sample.
+                    return mm.scrollPolicy(initialLoad, paginating,
+                                           followEnd, _forceFollow);
+                }
+
+                // Is the contentY change we are looking at the user's doing?
+                //
+                // Drags, flicks and wheel ticks all raise movementStarted, which
+                // revokes the intent directly. A scrollbar-thumb drag does NOT —
+                // it pokes contentY programmatically — so it is resolved from the
+                // thumb's own pressed state. Between them these are every way a
+                // user can scroll this list; everything else that moves contentY
+                // is layout, and layout does not get a vote on intent.
+                // `_ready` short-circuits first so the scrollbar id is never
+                // read before the object tree is built (see `_ready` below).
+                function _userDrivenScroll() {
+                    return _ready && verticalScrollBar
+                        && verticalScrollBar.pressed === true;
+                }
+
+                onContentYChanged: {
+                    if (contentHeight <= height) return;
+                    // Don't clear `initialLoad` here. ListView shifts contentY
+                    // on its own during async delegate creation / incremental
+                    // height correction; reading those programmatic shifts as
+                    // "user scrolled away from end" used to clear initialLoad
+                    // before our deferred scroll-to-end could fire, parking
+                    // the user at the top of a freshly opened channel.
+                    // initialLoad is now cleared only by movementStarted
+                    // (real user input) or scrollTimer expiry.
+                    var live = _isAtEnd();
+                    atBottom = live;
+                    var mm = messageModelRef;
+                    if (mm) {
+                        followEnd = mm.followEndAfterContentYSample(
+                            followEnd, _userDrivenScroll(), live);
+                    }
+                    if (!initialLoad && contentY < paginationTriggerPx) {
+                        _maybeLoadOlder();
+                    }
+                }
+
+                // ── Viewport geometry ─────────────────────────────────────
+                //
+                // Window resize, fullscreen enter/exit (the video card sets
+                // Window.visibility = Window.FullScreen), member-list toggle.
+                // The model is untouched, so NONE of the model-change paths
+                // fire — this case simply had no handler at all, which is why
+                // leaving fullscreen video left the list scrolled up.
+                //
+                // Both `height` and `width` matter: width re-wraps every text
+                // delegate, which moves contentHeight just as surely.
+                onHeightChanged: _onViewportGeometryChanged()
+                onWidthChanged: _onViewportGeometryChanged()
+
+                function _onViewportGeometryChanged() {
+                    if (!_ready) return;
+                    var mm = messageModelRef;
+                    if (mm && mm.geometryChangePolicy(followEnd) !== kPreserve)
+                        _scrollToEndSoon();
+                    // A resize is not one event: the viewport changes, then
+                    // delegates re-wrap over the following frames. Re-assert
+                    // once the dust settles rather than trusting any single
+                    // moment during it.
+                    settleTimer.restart();
+                }
+
+                // Event id to pulse-highlight after a reply/link jump. Set by
+                // onJumpToEvent / scrollToEventRequested, cleared by
+                // highlightTimer. Each delegate binds its overlay visibility to
+                // (highlightedEventId === model.eventId).
+                property string highlightedEventId: ""
+                Timer {
+                    id: highlightTimer
+                    interval: 1500
+                    onTriggered: messageListView.highlightedEventId = ""
+                }
+
+                function jumpToLoadedEvent(eventId) {
+                    if (!serverManager.activeServer) return false;
+                    var mm = serverManager.activeServer.messageModel;
+                    if (!mm) return false;
+                    var idx = mm.indexForEventId(eventId);
+                    if (idx < 0) {
+                        // Not in the loaded timeline — try back-paginating up
+                        // to a cap and re-check on each response. The cap
+                        // prevents an unbounded hammer if the target event
+                        // doesn't exist or was redacted.
+                        if (mm.hasMoreHistory && _jumpAttemptsLeft > 0) {
+                            _jumpPendingEventId = eventId;
+                            _jumpAttemptsLeft -= 1;
+                            _armPaginationAnchor();
+                            serverManager.activeServer.loadOlderMessages(100);
+                            return false;
+                        }
+                        console.warn("MessageView: target event not in loaded history:",
+                                     eventId);
+                        return false;
+                    }
+                    // Disable auto-scroll-to-bottom so the jump sticks even if
+                    // content height updates arrive right after. Revoking the
+                    // INTENT is what makes it stick — clearing only the derived
+                    // sample would let the next reflow re-pin them.
+                    messageListView.followEnd = false;
+                    messageListView.atBottom = false;
+                    settleTimer.stop();
+                    messageListView.positionViewAtIndex(idx, ListView.Center);
+                    messageListView.highlightedEventId = eventId;
+                    highlightTimer.restart();
+                    _jumpPendingEventId = "";
+                    _jumpAttemptsLeft = 10;
+                    return true;
+                }
+
+                // Paginate-until-found state for jumpToLoadedEvent. When a
+                // reply-target isn't loaded yet, we kick off back-pagination
+                // and re-try after each batch lands, up to _jumpAttemptsLeft
+                // pages. Fresh jumps reset the counter.
+                property string _jumpPendingEventId: ""
+                property int _jumpAttemptsLeft: 10
+
+                // The model object changes on a SERVER switch (each connection
+                // owns its own MessageModel). Route it through the same entry
+                // point as a room switch — `_enterRoomContext` is idempotent on
+                // the (server, room, model) triple, so whichever of the two
+                // notifications lands first does the work and the other no-ops.
+                onModelChanged: _enterRoomContext()
+
+                // Any user-driven scroll (drag, flick, wheel) cancels the
+                // initial-load grace period and its pending scroll-to-end
+                // timer. Without this, scrolling up in the first ~2s after a
+                // channel loaded got yanked back to the bottom when the timer
+                // fired — or when an inline image loaded and
+                // onContentHeightChanged triggered a forced end-scroll while
+                // initialLoad was still true.
+                // Any user-driven movement cancels the 2-second initial-load
+                // grace window. The `atBottom` state is derived from position
+                // in onContentYChanged now (bidirectional), so we don't
+                // preemptively flip it false here — a short wheel tick that
+                // happens to land inside the end band shouldn't be punished
+                // by having atBottom first set false and then back true.
+                onMovementStarted: {
+                    initialLoad = false;
+                    scrollTimer.stop();
+                    // User dragging / wheeling means they explicitly
+                    // want to leave the bottom — release every pin
+                    // mechanism: the post-send follow lock AND the
+                    // tolerance-band atBottom flag. Without the
+                    // latter, a small upward drag stays inside the
+                    // 80-px tolerance band → atBottom remains true →
+                    // any subsequent contentHeight reflow (link
+                    // preview resolving, an edit, an emoji react) re-
+                    // pins them and they appear to "bounce back" the
+                    // moment they let go.
+                    //
+                    // movementEnded re-evaluates _isAtEnd, so if the
+                    // user lets go while still inside the tolerance
+                    // band, atBottom will correctly snap back to true
+                    // and the normal pin behaviour resumes.
+                    _forceFollow = false;
+                    atBottom = false;
+                    // Revoke the intent. This is the direction that must never
+                    // regress: from here on, nothing — no image load, no video
+                    // card growing, no window resize — may move this user.
+                    followEnd = false;
+                    settleTimer.stop();
+                }
+
+                onMovementEnded: {
+                    // The user let go. Where they landed IS their intent, so
+                    // this is one of the few places allowed to set both.
+                    atBottom = _isAtEnd();
+                    followEnd = atBottom;
+                }
+
+                // When content grows (new message, image loaded), auto-scroll
+                // if we were at the bottom before the growth. Exception:
+                // if a back-pagination just landed, shift contentY by the
+                // growth delta so the user's viewport stays on the same
+                // message instead of being shoved downward by the prepended
+                // batch.
+                //
+                // Which of those applies is `positionPolicyForModelChange` in
+                // util/ScrollAnchor.h — including the invariant that matters
+                // most here: a user who has scrolled away from the end is left
+                // alone, whatever the content does.
+                onContentHeightChanged: {
+                    if (_paginationRequested && !_paginationLanded) {
+                        // Growth while our request is still in flight
+                        // cannot be the prepend: it is a live message, or
+                        // a delegate resolving its real height. Re-baseline
+                        // so the delta we eventually apply is the
+                        // prepend's alone (U-M2).
+                        paginationAnchorContentHeight = contentHeight;
+                        paginationAnchorContentY = contentY;
+                    }
+                    var paginating = _paginationLanded
+                                  && paginationAnchorContentHeight >= 0
+                                  && contentHeight > paginationAnchorContentHeight;
+                    // Content that resolves its real size AFTER being laid out —
+                    // a video card growing when its metadata lands, an image
+                    // resolving its intrinsic dimensions, a link preview
+                    // appearing, an embed — arrives here, and may arrive several
+                    // times. Re-assert on the last one too, not just on the ones
+                    // that happen to be followed by another signal.
+                    if (!paginating && _ready) settleTimer.restart();
+                    if (_scrollPolicy(paginating) !== kPreserve) {
+                        // Reenter (initial placement: divider or end) and
+                        // FollowEnd (chase the growing bottom) share one
+                        // deferred dispatcher, which re-checks the state at
+                        // fire time. _forceFollow is what lets a post-send jump
+                        // catch up when the new delegate's height materialises a
+                        // few frames after the count change.
+                        _scrollToEndSoon();
+                        return;
+                    }
+                    if (!paginating) return;
+                    {
+                        var delta = contentHeight - paginationAnchorContentHeight;
+                        // Has Qt already shifted contentY to compensate for the
+                        // prepend? It does this for inserts at index 0 when
+                        // they're outside the visible area. If the current cY
+                        // is already at/near (anchorCY + delta), we'd be
+                        // double-adjusting by adding delta again — which
+                        // pushed the view back toward the bottom. Only nudge
+                        // contentY if Qt hasn't.
+                        var expectedAuto = paginationAnchorContentY + delta;
+                        var alreadyShifted = Math.abs(contentY - expectedAuto) < 2;
+                        if (!alreadyShifted) {
+                            contentY = paginationAnchorContentY + delta;
+                        }
+                        _disarmPaginationAnchor();
+                    }
+                }
+
+                // Sticky "follow latest" flag. Set when the user sends
+                // a message; cleared the moment they manually scroll
+                // away (movementStarted on the Flickable) or once we
+                // reach the bottom and atBottom takes over.
+                //
+                // Replaces an earlier 5-second `_justSent` window that
+                // had two failure modes: it expired before slow media
+                // finished loading, and (worse) it kept overriding
+                // every contentHeight reflow during those 5s, so users
+                // couldn't scroll up at all if they tried within the
+                // window.
+                property bool _forceFollow: false
+
+                Connections {
+                    target: messageInput
+                    ignoreUnknownSignals: true
+                    function onLastSentAtChanged() {
+                        if (messageInput.lastSentAt > 0) {
+                            messageListView._forceFollow = true;
+                        }
+                    }
+                }
+
+                // Once we successfully reach the bottom, the regular
+                // atBottom pin-to-end behaviour takes over and we no
+                // longer need the post-send override. Also persist
+                // last-read here so a user who scrolls down to catch
+                // up (without any new messages arriving while they
+                // do) still gets their position recorded.
+                onAtBottomChanged: {
+                    // Mirror the sample into the connection so the
+                    // room-switch path, which persists before the model is
+                    // cleared and therefore cannot ask us, knows whether
+                    // the user was caught up when they left (U-M3).
+                    var conn = serverManager.activeServer;
+                    if (conn && conn.setTimelineAtBottom)
+                        conn.setTimelineAtBottom(atBottom);
+                    if (atBottom) {
+                        _forceFollow = false;
+                        _persistLastReadIfAtBottom();
+                    }
+                }
+
+                // ── The re-assertion that makes "pinned" survive ──────────
+                //
+                // A one-shot jump is correct at the instant it runs and stale
+                // the moment anything below the viewport resolves its real
+                // size. The event-driven chase above handles each individual
+                // reflow; this handles the LAST one, which by definition has
+                // no following signal to react to. Restarted by every content
+                // and geometry change, so it fires once the churn stops.
+                //
+                // It re-asserts INTENT and nothing else: with followEnd false
+                // it does not move the view, it only refreshes the derived
+                // sample so the chevron tells the truth.
+                Timer {
+                    id: settleTimer
+                    interval: 160
+                    onTriggered: {
+                        if (messageListView.followEnd) {
+                            messageListView.forceLayout();
+                            messageListView._jumpToEnd();
+                            messageListView.atBottom = true;
+                        } else {
+                            messageListView.atBottom = messageListView._isAtEnd();
+                        }
+                    }
+                }
+
+                onCountChanged: {
+                    // Rows arriving is never a back-pagination as far as this
+                    // handler is concerned — prepends are anchored by
+                    // onContentHeightChanged, which sees the height delta.
+                    if (_scrollPolicy(false) !== kPreserve) {
+                        _scrollToEndSoon();
+                        if (initialLoad) scrollTimer.restart();
+                        // _forceFollow is consumed by `_scrollToEndSoon`
+                        // itself once the deferred jump runs — clearing
+                        // it here would invalidate the deferred lambda's
+                        // own re-check and silently no-op the scroll.
+                    }
+                    _recomputeUnreadDivider();
+                    // Roll the persisted last-read forward if the user
+                    // is at the bottom — they're seeing the newest row
+                    // as it lands, so it's "read".
+                    _persistLastReadIfAtBottom();
+                }
+
+                // Don't try to scroll the moment lastSentAt advances —
+                // the message hasn't landed yet, so jumping immediately
+                // parks us at the bottom of the *old* content, and the
+                // subsequent insert pushes the new row below the
+                // viewport. We rely on onCountChanged + _forceFollow to
+                // pick up the scroll AFTER the row is in the model.
+
+                // Jump to the end. We used to call the builtin
+                // `positionViewAtEnd()`, but during layout flap (async image
+                // loads, delegate recycling) it computed targets from stale
+                // item heights and parked contentY well past the actual end
+                // of content — which then latched atBottom=false because dist
+                // went negative. Doing the arithmetic ourselves against the
+                // live contentHeight/height is both simpler and stable.
+                function _jumpToEnd() {
+                    if (contentHeight <= height) {
+                        contentY = originY;
+                    } else {
+                        contentY = originY + contentHeight - height;
+                    }
+                }
+
+                // Guarded callLater — re-checks the pin state at fire time so
+                // a mid-frame user scroll can abort a pending auto-scroll.
+                // `_forceFollow` opts in even when the user has
+                // scrolled up — the local user explicitly authored
+                // that message and expects to see it land. We DON'T
+                // consume it here: ListView creates the new row's
+                // delegate lazily, so the first jump may run before
+                // the delegate's height is committed and undershoots
+                // by ~1 row. Leaving _forceFollow set means subsequent
+                // contentHeight / count changes (delegate creation,
+                // image-info resolve, etc.) keep chasing the bottom
+                // until atBottom flips true (normal pin takes over)
+                // or the user starts scrolling (movementStarted clears
+                // it).
+                function _scrollToEndSoon() {
+                    Qt.callLater(function() {
+                        if (initialLoad) {
+                            // First positioning after a room switch:
+                            // prefer landing on the unread divider if
+                            // there's one resolved in the loaded
+                            // history, otherwise fall through to the
+                            // bottom. Either way we forceLayout first so
+                            // contentHeight / row indices are real.
+                            forceLayout();
+                            if (!_jumpToUnreadDivider()) _jumpToEnd();
+                            // First successful positioning — reveal the
+                            // list. Subsequent contentHeight / count
+                            // changes (delegate height correction, new
+                            // messages arriving) are handled by the
+                            // atBottom path and produce smooth single-
+                            // step jumps instead of the multi-bounce
+                            // settle the user otherwise sees on room
+                            // switch. scrollTimer is still armed as a
+                            // fallback in case the first jump was a no-op
+                            // (e.g. count was 0).
+                            if (count > 0) {
+                                initialLoad = false;
+                                scrollTimer.stop();
+                            }
+                            return;
+                        }
+                        if (followEnd || _forceFollow) {
+                            // Force the ListView to commit any pending
+                            // delegate heights so contentHeight is the
+                            // real post-insert value instead of a
+                            // pre-creation snapshot. Without this the
+                            // jump consistently lands ~1 row short of
+                            // the actual end.
+                            forceLayout();
+                            _jumpToEnd();
+                        }
+                    });
+                }
+
+                // If the user has genuinely-unread messages in this
+                // room, position the first-unread row at the top of
+                // the viewport so they can read forward from where
+                // they left off.
+                //
+                // Source of truth is the SERVER's per-room unread
+                // count exposed by RoomListModel.unreadCountFor —
+                // authoritative, not derived from a local last-read
+                // timestamp. The earlier `firstEventIdAfterTs(stored)`
+                // approach raced the model-clear at room-switch time:
+                // if the user left the channel before all newer
+                // messages had loaded, we'd persist a partial-history
+                // timestamp that on every subsequent re-entry resolved
+                // to the same intermediate event, dragging them up.
+                // Server unread counts have no such race — they reset
+                // on read-marker and only grow on actual new events.
+                function _jumpToUnreadDivider() {
+                    // Source of truth is `unreadDividerEventId` —
+                    // computed by `_recomputeUnreadDivider` from the
+                    // local last-read timestamp persisted as the user
+                    // dwells at the bottom of the channel (see
+                    // _persistLastReadIfAtBottom below). This avoids
+                    // depending on the server's `count_unread` which
+                    // can lag behind read-marker writes and lead to
+                    // phantom-unread positioning. If the user's
+                    // last-read ts equals the newest loaded message,
+                    // firstEventIdAfterTs returns "" → no divider →
+                    // fall through to scroll-to-end.
+                    var mm = messageModelRef;   // never the view's `model`
+                    if (!mm) return false;
+                    // `restoreIndexForDivider` returns -1 for "scroll to the
+                    // end" — an empty anchor, an anchor from another room that
+                    // isn't in this model, or row 0 (indistinguishable from
+                    // "top of the loaded history", so honouring it would park
+                    // the user at the top of a back-paginated page pretending
+                    // it's the start of the unread run). See
+                    // bsfchat::client::chooseRestoreTarget.
+                    var idx = mm.restoreIndexForDivider(unreadDividerEventId);
+                    if (idx < 0) return false;
+                    positionViewAtIndex(idx, ListView.Beginning);
+                    // Deliberate: the user is being placed at genuinely-unread
+                    // content, so the pin-to-bottom behaviour must not drag
+                    // them off it. This is also why the anchor has to be
+                    // correct — a wrong one disables every later scroll-to-end.
+                    followEnd = false;
+                    atBottom = false;
+                    settleTimer.stop();
+                    return true;
+                }
+
+                Timer {
+                    id: scrollTimer
+                    interval: 2000
+                    onTriggered: {
+                        // Final pass after the 2-second initial-load
+                        // grace window. Same dispatch as _scrollToEndSoon's
+                        // first branch — divider takes priority if one's
+                        // pending; otherwise pin to end.
+                        if (messageListView.initialLoad) {
+                            messageListView.forceLayout();
+                            if (!messageListView._jumpToUnreadDivider()) {
+                                messageListView._jumpToEnd();
+                            }
+                        } else if (messageListView.followEnd) {
                             messageListView._jumpToEnd();
                         }
-                    } else if (messageListView.followEnd) {
-                        messageListView._jumpToEnd();
+                        messageListView.initialLoad = false;
                     }
-                    messageListView.initialLoad = false;
                 }
-            }
 
-            // Date separator helper
-            function formatDateSeparator(timestamp) {
-                var date = new Date(timestamp);
-                var today = new Date();
-                var yesterday = new Date();
-                yesterday.setDate(yesterday.getDate() - 1);
-                if (date.toDateString() === today.toDateString()) return "Today";
-                if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
-                return date.toLocaleDateString(Qt.locale(), "MMMM d, yyyy");
-            }
+                // Date separator helper
+                function formatDateSeparator(timestamp) {
+                    var date = new Date(timestamp);
+                    var today = new Date();
+                    var yesterday = new Date();
+                    yesterday.setDate(yesterday.getDate() - 1);
+                    if (date.toDateString() === today.toDateString()) return "Today";
+                    if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+                    return date.toLocaleDateString(Qt.locale(), "MMMM d, yyyy");
+                }
 
-            delegate: Column {
-                width: messageListView.width
-                spacing: 0
+                delegate: Column {
+                    width: messageListView.width
+                    spacing: 0
 
-                // "New messages" divider — accent-coloured hairline with
-                // a pill on the right, rendered above the first unread
-                // message in the loaded timeline. Computed once per
-                // channel-enter via `_recomputeUnreadDivider` and
-                // frozen there for the visit, so it doesn't jump as
-                // new messages arrive.
-                Item {
-                    width: parent.width
-                    height: visible ? 18 : 0
-                    visible: messageListView.unreadDividerEventId !== ""
-                          && messageListView.unreadDividerEventId === model.eventId
+                    // "New messages" divider — accent-coloured hairline with
+                    // a pill on the right, rendered above the first unread
+                    // message in the loaded timeline. Computed once per
+                    // channel-enter via `_recomputeUnreadDivider` and
+                    // frozen there for the visit, so it doesn't jump as
+                    // new messages arrive.
+                    Item {
+                        width: parent.width
+                        height: visible ? 18 : 0
+                        visible: messageListView.unreadDividerEventId !== ""
+                              && messageListView.unreadDividerEventId === model.eventId
 
-                    Rectangle {
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        height: 1
-                        color: Theme.danger
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            height: 1
+                            color: Theme.danger
+                        }
+
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.right: parent.right
+                            anchors.rightMargin: Theme.sp.s2
+                            width: newPill.implicitWidth + Theme.sp.s3 * 2
+                            height: 14
+                            radius: Theme.r1
+                            color: Theme.danger
+
+                            Text {
+                                id: newPill
+                                anchors.centerIn: parent
+                                text: "NEW"
+                                font.family: Theme.fontSans
+                                font.pixelSize: 9
+                                font.weight: Theme.fontWeight.semibold
+                                font.letterSpacing: Theme.trackWidest.xs
+                                color: "white"
+                            }
+                        }
                     }
 
-                    Rectangle {
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.right: parent.right
-                        anchors.rightMargin: Theme.sp.s2
-                        width: newPill.implicitWidth + Theme.sp.s3 * 2
-                        height: 14
-                        radius: Theme.r1
-                        color: Theme.danger
+                    // Date separator — thin `line` rule spanning the full
+                    // width, with a widest-tracked small-caps pill floating
+                    // on top. Matches the section-header vocabulary used in
+                    // ServerSettings / ChannelSettings.
+                    Item {
+                        width: parent.width
+                        height: visible ? 44 : 0
+                        visible: model.showDateSeparator
 
-                        Text {
-                            id: newPill
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            height: 1
+                            color: Theme.line
+                        }
+
+                        Rectangle {
                             anchors.centerIn: parent
-                            text: "NEW"
-                            font.family: Theme.fontSans
-                            font.pixelSize: 9
-                            font.weight: Theme.fontWeight.semibold
-                            font.letterSpacing: Theme.trackWidest.xs
-                            color: "white"
+                            width: dateSepText.implicitWidth + Theme.sp.s5 * 2
+                            height: 22
+                            color: Theme.bg1
+                            radius: Theme.r4
+                            border.color: Theme.line
+                            border.width: 1
+
+                            Text {
+                                id: dateSepText
+                                anchors.centerIn: parent
+                                text: messageListView.formatDateSeparator(model.timestamp).toUpperCase()
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.xs
+                                font.weight: Theme.fontWeight.semibold
+                                font.letterSpacing: Theme.trackWidest.xs
+                                color: Theme.fg3
+                            }
+                        }
+                    }
+
+                    MessageBubble {
+                        width: parent.width
+                        eventId: model.eventId
+                        highlighted: messageListView.highlightedEventId === model.eventId
+                        sender: model.sender
+                        senderDisplayName: model.senderDisplayName
+                        body: model.body
+                        formattedBody: model.formattedBody
+                        timestamp: model.timestamp
+                        msgtype: model.msgtype
+                        mediaUrl: model.mediaUrl || ""
+                        mediaFileName: model.mediaFileName || ""
+                        mediaFileSize: model.mediaFileSize || 0
+                        mediaWidth: model.mediaWidth || 0
+                        mediaHeight: model.mediaHeight || 0
+                        isOwnMessage: model.isOwnMessage
+                        showSender: model.showSender
+                        edited: model.edited || false
+                        replyToEventId: model.replyToEventId || ""
+                        replyToSender: model.replyToSender || ""
+                        replyPreview: model.replyPreview || ""
+                        reactions: model.reactions || []
+                        threadRootId: model.threadRootId || ""
+                        threadReplyCount: model.threadReplyCount || 0
+                        // Row-level mention highlight, so a message naming you is
+                        // findable while scrolling — the inline anchor alone is
+                        // easy to miss in a busy channel.
+                        mentionsMe: (model.mentionsMe || false)
+                                    || (model.mentionsRoom || false)
+                        onThreadOpenRequested: (rootId) => {
+                            threadPanel.openFor(rootId);
+                        }
+                        onEditHistoryRequested: (eid) => {
+                            editHistoryDialog.openFor(eid);
+                        }
+
+                        onSenderClicked: (userId, displayName) => {
+                            messageProfileCard.userId = userId;
+                            messageProfileCard.profileDisplayName = displayName;
+                            messageProfileCard.open();
+                        }
+                        onEditRequested: (targetId, currentBody) => {
+                            messageInput.beginEditing(targetId, currentBody);
+                        }
+                        onReplyRequested: (targetId, body, senderName) => {
+                            var preview = body.length > 80 ? body.substring(0, 80) + "\u2026" : body;
+                            messageInput.beginReplying(targetId, senderName, preview);
+                        }
+                        onForwardRequested: (targetId, body, senderName) => {
+                            forwardDialog.openFor(targetId, body, senderName);
+                        }
+                        onJumpToEvent: (targetId) => {
+                            messageListView._jumpAttemptsLeft = 10;
+                            messageListView.jumpToLoadedEvent(targetId);
+                        }
+                        // #channel tag clicked inside a message body — switch
+                        // the active server to that channel if one matches.
+                        onChannelLinkClicked: (name) => {
+                            if (serverManager.activeServer)
+                                serverManager.activeServer.activateRoomByName(name);
+                        }
+                        // bsfchat://message/... clicked — ServerManager resolves
+                        // the server URL, switches, opens the room, scrolls.
+                        onMessageLinkClicked: (link) => {
+                            serverManager.openMessageLink(link);
+                        }
+                        // @mention anchor clicked — show the profile card for
+                        // the target user id.
+                        onUserLinkClicked: (userId, displayName) => {
+                            messageProfileCard.userId = userId;
+                            messageProfileCard.profileDisplayName = displayName;
+                            messageProfileCard.open();
+                        }
+                        // Copy-link button — ask the active connection for the
+                        // canonical URL and stuff it on the clipboard.
+                        onCopyLinkRequested: (targetId) => {
+                            if (!serverManager.activeServer) return;
+                            var link = serverManager.activeServer.messageLink(targetId);
+                            if (link) serverManager.copyToClipboard(link);
+                        }
+                        // Reaction chip clicked or emoji picker selection —
+                        // toggle the current user's reaction for that emoji.
+                        onReactionToggled: (targetId, emoji) => {
+                            if (!serverManager.activeServer) return;
+                            serverManager.activeServer.toggleReaction(targetId, emoji);
+                        }
+                        // Inline image left-click — route to the shared
+                        // lightbox. Middle-click bypasses this entirely and
+                        // goes straight to the browser (handled in the bubble).
+                        onImageOpenRequested: (url, filename, size) => {
+                            imageViewer.openFor(url, filename, size);
+                        }
+                        // Context-menu delete → confirm, then redact. The
+                        // server enforces MANAGE_MESSAGES / sender-ownership
+                        // so a spoofed client at worst gets a 403, but the
+                        // confirmation step prevents honest right-click
+                        // slips on your own messages.
+                        onDeleteRequested: (targetId) => {
+                            deleteConfirm.eventId = targetId;
+                            deleteConfirm.preview =
+                                (model.body || "").substring(0, 140);
+                            deleteConfirm.senderName = model.senderDisplayName || "";
+                            deleteConfirm.open();
                         }
                     }
                 }
 
-                // Date separator — thin `line` rule spanning the full
-                // width, with a widest-tracked small-caps pill floating
-                // on top. Matches the section-header vocabulary used in
-                // ServerSettings / ChannelSettings.
-                Item {
-                    width: parent.width
-                    height: visible ? 44 : 0
-                    visible: model.showDateSeparator
+            }
 
-                    Rectangle {
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        height: 1
-                        color: Theme.line
+            // Viewport-anchored, never reparented into contentItem.
+            Item {
+                id: timelineOverlay
+                anchors.fill: messageListView
+
+                // What each overlay shows is decided in
+                // qml/js/TimelineOverlay.js so the rules can be tested
+                // (tests/qml/tst_timelineoverlay.qml); this file only
+                // draws the answers.
+                readonly property bool _hasServer: serverManager.activeServer !== null
+                readonly property string _roomId: serverManager.activeServer
+                    ? serverManager.activeServer.activeRoomId : ""
+                readonly property bool _loadingHistory:
+                    serverManager.activeServer
+                    && serverManager.activeServer.messageModel
+                    ? serverManager.activeServer.messageModel.loadingHistory : false
+                readonly property string _emptyKind: Overlay.emptyStateKind(
+                    _hasServer, _roomId, messageListView.count)
+
+                // Back-pagination loading indicator at the top of the list.
+                // Visible while a /messages request is in flight; stays tiny
+                // so it doesn't crowd the conversation.
+                Rectangle {
+                    id: paginationSpinner
+                    anchors.top: parent.top
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.topMargin: 6
+                    width: 20; height: 20; radius: 10
+                    color: Theme.bg3
+                    opacity: 0.9
+                    visible: Overlay.spinnerVisible(timelineOverlay._loadingHistory)
+                    Text {
+                        anchors.centerIn: parent
+                        text: "\u21BB"
+                        font.pixelSize: 12
+                        color: Theme.fg0
+                        RotationAnimation on rotation {
+                            from: 0; to: 360; duration: 900
+                            loops: Animation.Infinite
+                            running: paginationSpinner.visible
+                        }
+                    }
+                }
+
+                // Scroll-to-bottom button. Desktop: compact bg1/line pill
+                // centred above the composer, hover-tints into accent.
+                // Mobile: 44×44 accent fab in the bottom-right corner so
+                // it sits in the natural reach zone of a one-handed grip.
+                Rectangle {
+                    id: scrollToBottomBtn
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: Theme.sp.s3
+                    anchors.right: Theme.isMobile ? parent.right : undefined
+                    anchors.rightMargin: Theme.isMobile ? Theme.sp.s5 : 0
+                    anchors.horizontalCenter: Theme.isMobile ? undefined : parent.horizontalCenter
+                    width: Theme.isMobile ? 44 : 40
+                    height: Theme.isMobile ? 44 : 32
+                    radius: Theme.isMobile ? 22 : 16
+                    color: Theme.isMobile
+                        ? (scrollBottomMouse.containsMouse ? Theme.accentDim : Theme.accent)
+                        : (scrollBottomMouse.containsMouse ? Theme.accent : Theme.bg1)
+                    border.color: Theme.isMobile
+                        ? Theme.bg0
+                        : (scrollBottomMouse.containsMouse ? Theme.accent : Theme.line)
+                    border.width: Theme.isMobile ? 2 : 1
+                    visible: Overlay.chevronVisible(messageListView.atBottom,
+                                                    messageListView.count)
+
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                    Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                    Icon {
+                        anchors.centerIn: parent
+                        name: "chevron-down"
+                        size: Theme.isMobile ? 20 : 16
+                        color: Theme.isMobile
+                            ? Theme.onAccent
+                            : (scrollBottomMouse.containsMouse ? Theme.onAccent : Theme.fg1)
                     }
 
-                    Rectangle {
-                        anchors.centerIn: parent
-                        width: dateSepText.implicitWidth + Theme.sp.s5 * 2
-                        height: 22
-                        color: Theme.bg1
-                        radius: Theme.r4
-                        border.color: Theme.line
-                        border.width: 1
+                    MouseArea {
+                        id: scrollBottomMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            // The most explicit statement of intent there is:
+                            // set the intent, not just the sample, so content
+                            // that resolves its size a moment later is chased
+                            // rather than lost.
+                            messageListView.followEnd = true;
+                            messageListView.forceLayout();
+                            messageListView._jumpToEnd();
+                            messageListView.atBottom = true;
+                        }
+                    }
+                }
 
-                        Text {
-                            id: dateSepText
+                // Empty state — iconic hash mark above a quiet prompt line.
+                // Separates "no server" (meta problem), "no channel selected"
+                // (user action needed), and "no history yet" (channel is new).
+                ColumnLayout {
+                    anchors.centerIn: parent
+                    visible: timelineOverlay._emptyKind !== ""
+                    spacing: Theme.sp.s5
+
+                    Rectangle {
+                        Layout.alignment: Qt.AlignHCenter
+                        width: 64; height: 64
+                        radius: 32
+                        color: Theme.bg3
+                        Icon {
                             anchors.centerIn: parent
-                            text: messageListView.formatDateSeparator(model.timestamp).toUpperCase()
-                            font.family: Theme.fontSans
-                            font.pixelSize: Theme.fontSize.xs
-                            font.weight: Theme.fontWeight.semibold
-                            font.letterSpacing: Theme.trackWidest.xs
+                            name: Overlay.emptyStateIcon(timelineOverlay._emptyKind)
+                            size: 28
                             color: Theme.fg3
                         }
                     }
-                }
 
-                MessageBubble {
-                    width: parent.width
-                    eventId: model.eventId
-                    highlighted: messageListView.highlightedEventId === model.eventId
-                    sender: model.sender
-                    senderDisplayName: model.senderDisplayName
-                    body: model.body
-                    formattedBody: model.formattedBody
-                    timestamp: model.timestamp
-                    msgtype: model.msgtype
-                    mediaUrl: model.mediaUrl || ""
-                    mediaFileName: model.mediaFileName || ""
-                    mediaFileSize: model.mediaFileSize || 0
-                    mediaWidth: model.mediaWidth || 0
-                    mediaHeight: model.mediaHeight || 0
-                    isOwnMessage: model.isOwnMessage
-                    showSender: model.showSender
-                    edited: model.edited || false
-                    replyToEventId: model.replyToEventId || ""
-                    replyToSender: model.replyToSender || ""
-                    replyPreview: model.replyPreview || ""
-                    reactions: model.reactions || []
-                    threadRootId: model.threadRootId || ""
-                    threadReplyCount: model.threadReplyCount || 0
-                    // Row-level mention highlight, so a message naming you is
-                    // findable while scrolling — the inline anchor alone is
-                    // easy to miss in a busy channel.
-                    mentionsMe: (model.mentionsMe || false)
-                                || (model.mentionsRoom || false)
-                    onThreadOpenRequested: (rootId) => {
-                        threadPanel.openFor(rootId);
-                    }
-                    onEditHistoryRequested: (eid) => {
-                        editHistoryDialog.openFor(eid);
+                    Text {
+                        Layout.alignment: Qt.AlignHCenter
+                        horizontalAlignment: Text.AlignHCenter
+                        text: Overlay.emptyStateTitle(timelineOverlay._emptyKind)
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xl
+                        font.weight: Theme.fontWeight.semibold
+                        color: Theme.fg1
                     }
 
-                    onSenderClicked: (userId, displayName) => {
-                        messageProfileCard.userId = userId;
-                        messageProfileCard.profileDisplayName = displayName;
-                        messageProfileCard.open();
-                    }
-                    onEditRequested: (targetId, currentBody) => {
-                        messageInput.beginEditing(targetId, currentBody);
-                    }
-                    onReplyRequested: (targetId, body, senderName) => {
-                        var preview = body.length > 80 ? body.substring(0, 80) + "\u2026" : body;
-                        messageInput.beginReplying(targetId, senderName, preview);
-                    }
-                    onForwardRequested: (targetId, body, senderName) => {
-                        forwardDialog.openFor(targetId, body, senderName);
-                    }
-                    onJumpToEvent: (targetId) => {
-                        messageListView._jumpAttemptsLeft = 10;
-                        messageListView.jumpToLoadedEvent(targetId);
-                    }
-                    // #channel tag clicked inside a message body — switch
-                    // the active server to that channel if one matches.
-                    onChannelLinkClicked: (name) => {
-                        if (serverManager.activeServer)
-                            serverManager.activeServer.activateRoomByName(name);
-                    }
-                    // bsfchat://message/... clicked — ServerManager resolves
-                    // the server URL, switches, opens the room, scrolls.
-                    onMessageLinkClicked: (link) => {
-                        serverManager.openMessageLink(link);
-                    }
-                    // @mention anchor clicked — show the profile card for
-                    // the target user id.
-                    onUserLinkClicked: (userId, displayName) => {
-                        messageProfileCard.userId = userId;
-                        messageProfileCard.profileDisplayName = displayName;
-                        messageProfileCard.open();
-                    }
-                    // Copy-link button — ask the active connection for the
-                    // canonical URL and stuff it on the clipboard.
-                    onCopyLinkRequested: (targetId) => {
-                        if (!serverManager.activeServer) return;
-                        var link = serverManager.activeServer.messageLink(targetId);
-                        if (link) serverManager.copyToClipboard(link);
-                    }
-                    // Reaction chip clicked or emoji picker selection —
-                    // toggle the current user's reaction for that emoji.
-                    onReactionToggled: (targetId, emoji) => {
-                        if (!serverManager.activeServer) return;
-                        serverManager.activeServer.toggleReaction(targetId, emoji);
-                    }
-                    // Inline image left-click — route to the shared
-                    // lightbox. Middle-click bypasses this entirely and
-                    // goes straight to the browser (handled in the bubble).
-                    onImageOpenRequested: (url, filename, size) => {
-                        imageViewer.openFor(url, filename, size);
-                    }
-                    // Context-menu delete → confirm, then redact. The
-                    // server enforces MANAGE_MESSAGES / sender-ownership
-                    // so a spoofed client at worst gets a 403, but the
-                    // confirmation step prevents honest right-click
-                    // slips on your own messages.
-                    onDeleteRequested: (targetId) => {
-                        deleteConfirm.eventId = targetId;
-                        deleteConfirm.preview =
-                            (model.body || "").substring(0, 140);
-                        deleteConfirm.senderName = model.senderDisplayName || "";
-                        deleteConfirm.open();
-                    }
-                }
-            }
-
-            // Back-pagination loading indicator at the top of the list.
-            // Visible while a /messages request is in flight; stays tiny
-            // so it doesn't crowd the conversation.
-            Rectangle {
-                id: paginationSpinner
-                anchors.top: parent.top
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.topMargin: 6
-                width: 20; height: 20; radius: 10
-                color: Theme.bg3
-                opacity: 0.9
-                visible: serverManager.activeServer
-                         && serverManager.activeServer.messageModel
-                         && serverManager.activeServer.messageModel.loadingHistory
-                Text {
-                    anchors.centerIn: parent
-                    text: "\u21BB"
-                    font.pixelSize: 12
-                    color: Theme.fg0
-                    RotationAnimation on rotation {
-                        from: 0; to: 360; duration: 900
-                        loops: Animation.Infinite
-                        running: paginationSpinner.visible
-                    }
-                }
-            }
-
-            // Scroll-to-bottom button. Desktop: compact bg1/line pill
-            // centred above the composer, hover-tints into accent.
-            // Mobile: 44×44 accent fab in the bottom-right corner so
-            // it sits in the natural reach zone of a one-handed grip.
-            Rectangle {
-                id: scrollToBottomBtn
-                anchors.bottom: parent.bottom
-                anchors.bottomMargin: Theme.sp.s3
-                anchors.right: Theme.isMobile ? parent.right : undefined
-                anchors.rightMargin: Theme.isMobile ? Theme.sp.s5 : 0
-                anchors.horizontalCenter: Theme.isMobile ? undefined : parent.horizontalCenter
-                width: Theme.isMobile ? 44 : 40
-                height: Theme.isMobile ? 44 : 32
-                radius: Theme.isMobile ? 22 : 16
-                color: Theme.isMobile
-                    ? (scrollBottomMouse.containsMouse ? Theme.accentDim : Theme.accent)
-                    : (scrollBottomMouse.containsMouse ? Theme.accent : Theme.bg1)
-                border.color: Theme.isMobile
-                    ? Theme.bg0
-                    : (scrollBottomMouse.containsMouse ? Theme.accent : Theme.line)
-                border.width: Theme.isMobile ? 2 : 1
-                visible: !messageListView.atBottom && messageListView.count > 0
-
-                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
-                Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
-
-                Icon {
-                    anchors.centerIn: parent
-                    name: "chevron-down"
-                    size: Theme.isMobile ? 20 : 16
-                    color: Theme.isMobile
-                        ? Theme.onAccent
-                        : (scrollBottomMouse.containsMouse ? Theme.onAccent : Theme.fg1)
-                }
-
-                MouseArea {
-                    id: scrollBottomMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        // The most explicit statement of intent there is:
-                        // set the intent, not just the sample, so content
-                        // that resolves its size a moment later is chased
-                        // rather than lost.
-                        messageListView.followEnd = true;
-                        messageListView.forceLayout();
-                        messageListView._jumpToEnd();
-                        messageListView.atBottom = true;
-                    }
-                }
-            }
-
-            // Empty state — iconic hash mark above a quiet prompt line.
-            // Separates "no server" (meta problem), "no channel selected"
-            // (user action needed), and "no history yet" (channel is new).
-            ColumnLayout {
-                anchors.centerIn: parent
-                visible: !serverManager.activeServer
-                         || serverManager.activeServer.activeRoomId === ""
-                         || messageListView.count === 0
-                spacing: Theme.sp.s5
-
-                Rectangle {
-                    Layout.alignment: Qt.AlignHCenter
-                    width: 64; height: 64
-                    radius: 32
-                    color: Theme.bg3
-                    Icon {
-                        anchors.centerIn: parent
-                        name: !serverManager.activeServer
-                              ? "at"
-                              : (serverManager.activeServer.activeRoomId === ""
-                                 ? "hash" : "send")
-                        size: 28
+                    Text {
+                        Layout.alignment: Qt.AlignHCenter
+                        horizontalAlignment: Text.AlignHCenter
+                        text: Overlay.emptyStateBody(timelineOverlay._emptyKind)
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
                         color: Theme.fg3
+                        wrapMode: Text.WordWrap
+                        Layout.maximumWidth: 320
                     }
-                }
-
-                Text {
-                    Layout.alignment: Qt.AlignHCenter
-                    horizontalAlignment: Text.AlignHCenter
-                    text: {
-                        if (!serverManager.activeServer) return "No server selected";
-                        if (serverManager.activeServer.activeRoomId === "")
-                            return "Pick a channel";
-                        return "It's quiet in here";
-                    }
-                    font.family: Theme.fontSans
-                    font.pixelSize: Theme.fontSize.xl
-                    font.weight: Theme.fontWeight.semibold
-                    color: Theme.fg1
-                }
-
-                Text {
-                    Layout.alignment: Qt.AlignHCenter
-                    horizontalAlignment: Text.AlignHCenter
-                    text: {
-                        if (!serverManager.activeServer)
-                            return "Sign in to a BSFChat server to start chatting.";
-                        if (serverManager.activeServer.activeRoomId === "")
-                            return "Choose one from the sidebar to join the conversation.";
-                        return "Be the first to say something.";
-                    }
-                    font.family: Theme.fontSans
-                    font.pixelSize: Theme.fontSize.md
-                    color: Theme.fg3
-                    wrapMode: Text.WordWrap
-                    Layout.maximumWidth: 320
                 }
             }
         }
