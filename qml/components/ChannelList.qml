@@ -1515,8 +1515,17 @@ Rectangle {
                                                     // moment the app backgrounds. We chain the two
                                                     // dialogs so the user answers them in sequence.
                                                     var rid = modelData.roomId;
-                                                    var srv = serverManager.activeServer;
+                                                    // Re-resolve the connection at call time
+                                                    // rather than capturing it: the permission
+                                                    // dialogs below are asynchronous and the
+                                                    // user can switch servers — or log out of
+                                                    // one — while a dialog is up, which left
+                                                    // this closure holding a ServerConnection
+                                                    // that removeServer had already deleted
+                                                    // (U-M6).
                                                     var join = function() {
+                                                        var srv = serverManager.activeServer;
+                                                        if (!srv) return;
                                                         if (srv.activeVoiceRoomId === rid) {
                                                             srv.showVoiceRoom();
                                                         } else {
@@ -1619,10 +1628,17 @@ Rectangle {
                 id: voiceStatusCard
                 anchors.fill: parent
                 radius: Theme.r2
-                color: voiceCardHover.containsMouse && !serverManager.activeServer.viewingVoiceRoom
+                // Guarded (U-M6): `visible` on the parent is not a guard —
+                // QML evaluates a child's bindings whether or not its
+                // ancestor is visible, and the removeServer path re-runs
+                // every one of them with activeServer already null.
+                readonly property bool _viewingVoice:
+                    serverManager.activeServer
+                    ? serverManager.activeServer.viewingVoiceRoom : false
+                color: voiceCardHover.containsMouse && !voiceStatusCard._viewingVoice
                        ? Theme.bg3 : Theme.bg2
                 border.width: 1
-                border.color: serverManager.activeServer.viewingVoiceRoom
+                border.color: voiceStatusCard._viewingVoice
                               ? Theme.accent : Theme.line
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                 Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
