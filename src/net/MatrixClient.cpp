@@ -1065,8 +1065,12 @@ void MatrixClient::joinVoice(const QString& roomId)
         }
         try {
             auto doc = QJsonDocument::fromJson(data);
-            QJsonArray members = doc.object().value("members").toArray();
+            const QJsonObject body = doc.object();
+            QJsonArray members = body.value("members").toArray();
             emit voiceJoined(roomId, members);
+            emit voiceJoinedSession(
+                roomId, members, body.value("session_id").toString(),
+                qint64(body.value("joined_at").toDouble(0)));
         } catch (...) {
             emit voiceError("Failed to parse voice join response");
             emit voiceJoinError(roomId,
@@ -1075,12 +1079,19 @@ void MatrixClient::joinVoice(const QString& roomId)
     });
 }
 
-void MatrixClient::leaveVoice(const QString& roomId)
+void MatrixClient::leaveVoice(const QString& roomId, const QString& sessionId)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                    + QUrl::toPercentEncoding(roomId) + "/voice/leave";
 
-    auto* reply = makeRequest("POST", path, "{}");
+    // Echoing the token lets the server ignore a leave that belongs to a
+    // membership it has already replaced (it answers 200 with
+    // {"changed":false,"reason":"stale_session"}), so a late leave cannot
+    // cancel a fresh join. Omitted entirely against older servers.
+    json body = json::object();
+    if (!sessionId.isEmpty()) body["session_id"] = sessionId.toStdString();
+    auto* reply = makeRequest("POST", path,
+                              QByteArray::fromStdString(body.dump()));
     connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
@@ -1113,7 +1124,8 @@ void MatrixClient::getVoiceMembers(const QString& roomId)
     });
 }
 
-void MatrixClient::updateVoiceState(const QString& roomId, bool muted, bool deafened)
+void MatrixClient::updateVoiceState(const QString& roomId, bool muted,
+                                    bool deafened, const QString& sessionId)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                    + QUrl::toPercentEncoding(roomId) + "/voice/state";
@@ -1121,6 +1133,7 @@ void MatrixClient::updateVoiceState(const QString& roomId, bool muted, bool deaf
     json content;
     content["muted"] = muted;
     content["deafened"] = deafened;
+    if (!sessionId.isEmpty()) content["session_id"] = sessionId.toStdString();
     QByteArray body = QByteArray::fromStdString(content.dump());
 
     auto* reply = makeRequest("PUT", path, body);
@@ -1128,7 +1141,14 @@ void MatrixClient::updateVoiceState(const QString& roomId, bool muted, bool deaf
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
             const QString err = QString::fromUtf8(reply->readAll());
+            const int status = reply->attribute(
+                QNetworkRequest::HttpStatusCodeAttribute).toInt();
             emit voiceError(err);
+            // 403 here is not "you may not mute" — the server returns it
+            // when the row it holds has a newer session token than ours,
+            // i.e. we were reaped or replaced. It never re-activates a
+            // reaped row, so the caller must re-POST voice/join.
+            if (status == 403) emit voiceStateSuperseded(roomId);
             // The local toggle was optimistic — the caller rolls it back
             // on this (V-M7).
             emit voiceStateError(roomId, err);
@@ -1138,7 +1158,9 @@ void MatrixClient::updateVoiceState(const QString& roomId, bool muted, bool deaf
     });
 }
 
-void MatrixClient::updateVoiceMediaState(const QString& roomId, bool screenSharing, bool cameraOn)
+void MatrixClient::updateVoiceMediaState(const QString& roomId,
+                                         bool screenSharing, bool cameraOn,
+                                         const QString& sessionId)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                    + QUrl::toPercentEncoding(roomId) + "/voice/state";
@@ -1149,6 +1171,7 @@ void MatrixClient::updateVoiceMediaState(const QString& roomId, bool screenShari
     json content;
     content["screen_sharing"] = screenSharing;
     content["camera_on"] = cameraOn;
+    if (!sessionId.isEmpty()) content["session_id"] = sessionId.toStdString();
     QByteArray body = QByteArray::fromStdString(content.dump());
 
     auto* reply = makeRequest("PUT", path, body);
@@ -1156,7 +1179,14 @@ void MatrixClient::updateVoiceMediaState(const QString& roomId, bool screenShari
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
             const QString err = QString::fromUtf8(reply->readAll());
+            const int status = reply->attribute(
+                QNetworkRequest::HttpStatusCodeAttribute).toInt();
             emit voiceError(err);
+            // 403 here is not "you may not mute" — the server returns it
+            // when the row it holds has a newer session token than ours,
+            // i.e. we were reaped or replaced. It never re-activates a
+            // reaped row, so the caller must re-POST voice/join.
+            if (status == 403) emit voiceStateSuperseded(roomId);
             // The local toggle was optimistic — the caller rolls it back
             // on this (V-M7).
             emit voiceStateError(roomId, err);

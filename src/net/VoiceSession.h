@@ -99,6 +99,13 @@ public:
     bool effectiveMuted() const;
 
     void setLocalUserId(const QString& userId) { m_localUserId = userId; }
+    // The server's opaque token for our CURRENT membership, from the
+    // voice/join response. Echoed on leave and on every state PUT so the
+    // server can refuse a request that belongs to a membership it has
+    // already replaced — the server-side half of V-H1. Empty against a
+    // server that does not issue one, and every rule below degrades to
+    // the old behaviour in that case.
+    QString sessionId() const { return m_sessionId; }
     QString localUserId() const { return m_localUserId; }
 
     // ---- Transport hooks -------------------------------------------
@@ -138,7 +145,8 @@ public:
     void announceMedia(bool screenSharing, bool cameraOn);
 
     // ---- Replies from the server -----------------------------------
-    void onJoinSucceeded(const QString& roomId, const QJsonArray& members);
+    void onJoinSucceeded(const QString& roomId, const QJsonArray& members,
+                         const QString& sessionId = QString());
     void onJoinFailed(const QString& roomId, const QString& error);
     void onLeaveSucceeded(const QString& roomId);
     void onLeaveFailed(const QString& roomId, const QString& error);
@@ -146,6 +154,11 @@ public:
     void onTurnConfigFailed(const QString& error);
     void onStateUpdateSucceeded(const QString& roomId);
     void onStateUpdateFailed(const QString& roomId, const QString& error);
+    // The server refused a state PUT because our token is stale (403).
+    // The membership is gone and no state PUT can bring it back, so this
+    // takes the same recovery path as a retracted self-row: re-POST the
+    // join once, then tear down.
+    void onStateSuperseded(const QString& roomId);
     // The polled roster for the room we are in. Used for nothing here but
     // keeping `m_members` fresh for a re-POSTed join.
     void onMembersPolled(const QString& roomId, const QJsonArray& members);
@@ -153,7 +166,14 @@ public:
     // believe we are in the call means the server has retired us (ghost
     // reaper after sleep, a moderator, or the V-H1 race). Re-POST the
     // join exactly once; if that fails, tear down with an error.
-    void onSelfMembership(const QString& roomId, bool active);
+    // `sessionId` is the token the retraction names. When it differs from
+    // ours, an OLDER membership of ours was cleaned up (the server echoes
+    // the retracted session on every leave/rejoin-reset/reap) and this is
+    // not about the session we are running — ignoring it is what stops a
+    // join-over-active-row's own active=false edge from tearing down the
+    // session it just created.
+    void onSelfMembership(const QString& roomId, bool active,
+                          const QString& sessionId = QString());
 
     // ---- Inbound signalling ----------------------------------------
     // Buffers while the engine does not exist yet (V-C1) and drops
@@ -177,11 +197,12 @@ signals:
     // Outbound requests. ServerConnection connects these to MatrixClient;
     // the test harness records them.
     void joinRequested(const QString& roomId);
-    void leaveRequested(const QString& roomId);
+    void leaveRequested(const QString& roomId, const QString& sessionId);
     void turnConfigRequested();
-    void stateUpdateRequested(const QString& roomId, bool muted, bool deafened);
+    void stateUpdateRequested(const QString& roomId, bool muted, bool deafened,
+                              const QString& sessionId);
     void mediaStateUpdateRequested(const QString& roomId, bool screenSharing,
-                                   bool cameraOn);
+                                   bool cameraOn, const QString& sessionId);
 
     void stateChanged();
     void mutedChanged();
@@ -197,6 +218,9 @@ private:
     struct Op {
         OpKind kind;
         QString roomId;
+        // Snapshot of m_sessionId at the moment the op was ISSUED, so a
+        // reply can be matched even after the token has moved on.
+        QString sessionId;
         bool muted = false;
         bool deafened = false;
         bool screenSharing = false;
@@ -206,6 +230,11 @@ private:
     // Where the queue, once drained, leaves this session: the room we
     // will be in, or empty for "out of voice".
     QString destinationRoom() const;
+    // Builds an op stamped with the CURRENT session token.
+    Op makeOp(OpKind kind, const QString& roomId) const;
+    // A state PUT announcing the EFFECTIVE mic gate plus the deafen
+    // flag, stamped with the current token.
+    Op stateOp(const QString& roomId) const;
     void enqueue(Op op);
     void pump();
     void completeOp();
@@ -222,6 +251,9 @@ private:
     State m_state = State::Idle;
     QString m_roomId;
     QString m_localUserId;
+    // Token for the membership we currently hold; cleared whenever the
+    // session leaves Active/FetchingTurn, so a stale one is never echoed.
+    QString m_sessionId;
     QJsonArray m_members;
     QJsonObject m_turnConfig;
 

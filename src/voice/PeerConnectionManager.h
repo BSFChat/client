@@ -188,6 +188,11 @@ private:
     // emitted synchronously and VoiceEngine reacts by removing (and
     // deleteLater-ing) this peer.
     void failPeer(const char* where, const std::exception& e);
+    // Detach every libdatachannel callback (peer connection, both data
+    // channels, every track) and mark this object dead. Runs first in the
+    // destructor, before any close(). See the definition for why the
+    // order matters — V-C2/S-6.
+    void resetAllCallbacks() noexcept;
     // True when the vscreen/vcamera m-lines already exist in either
     // negotiated description. Guards ensureVideoTracks() against adding
     // a duplicate m-line — see the comment there.
@@ -195,6 +200,12 @@ private:
 
     QString m_peerId;
     QString m_callId;
+    // Cleared by resetAllCallbacks() before this object is destroyed.
+    // Every libdatachannel callback captures a copy and returns
+    // immediately once it is false, so a callback that was already past
+    // the dispatcher's lock cannot touch a freed `this`.
+    std::shared_ptr<std::atomic_bool> m_alive =
+        std::make_shared<std::atomic_bool>(true);
     std::shared_ptr<rtc::PeerConnection> m_pc;
     std::shared_ptr<rtc::DataChannel> m_dc;
     std::vector<std::pair<std::string, std::string>> m_pendingCandidates;

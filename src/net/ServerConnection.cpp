@@ -1413,8 +1413,15 @@ void ServerConnection::applyCallMemberEvent(const QString& roomId,
     // (V-H2). The ghost reaper after a sleep, a moderator, or the V-H1
     // join/leave race can all set it inactive; the old client ignored that
     // entirely and kept the engine, the mic and the poll running forever.
-    if (p.userId == m_userId && m_voiceSession)
-        m_voiceSession->onSelfMembership(roomId, active);
+    if (p.userId == m_userId && m_voiceSession) {
+        // The server names the session each retraction refers to, so a
+        // join over an active row (which emits active=false for the OLD
+        // membership, then active=true) cannot be mistaken for our
+        // current one being reaped.
+        const std::string sid = event.content.data.value("session_id", "");
+        m_voiceSession->onSelfMembership(roomId, active,
+                                         QString::fromStdString(sid));
+    }
 
     // Only the room we're actually in needs the HTTP round trip: its reply
     // drives mesh peer reconciliation and doubles as our liveness heartbeat.
@@ -1449,24 +1456,35 @@ void ServerConnection::setupVoiceSession()
 
     // ---- outbound: session → server -------------------------------
     connect(vs, &VoiceSession::joinRequested, m_client, &MatrixClient::joinVoice);
-    connect(vs, &VoiceSession::leaveRequested, m_client, &MatrixClient::leaveVoice);
+    connect(vs, &VoiceSession::leaveRequested, m_client,
+            [this](const QString& roomId, const QString& sessionId) {
+                m_client->leaveVoice(roomId, sessionId);
+            });
     connect(vs, &VoiceSession::turnConfigRequested,
             m_client, &MatrixClient::getTurnConfig);
     connect(vs, &VoiceSession::stateUpdateRequested, m_client,
-            &MatrixClient::updateVoiceState);
+            [this](const QString& roomId, bool muted, bool deafened,
+                   const QString& sessionId) {
+                m_client->updateVoiceState(roomId, muted, deafened, sessionId);
+            });
     connect(vs, &VoiceSession::mediaStateUpdateRequested, m_client,
-            &MatrixClient::updateVoiceMediaState);
+            [this](const QString& roomId, bool screen, bool camera,
+                   const QString& sessionId) {
+                m_client->updateVoiceMediaState(roomId, screen, camera, sessionId);
+            });
 
     // ---- inbound: server → session --------------------------------
-    connect(m_client, &MatrixClient::voiceJoined, this,
-        [this](const QString& roomId, const QJsonArray& members) {
+    connect(m_client, &MatrixClient::voiceJoinedSession, this,
+        [this](const QString& roomId, const QJsonArray& members,
+               const QString& sessionId, qint64 joinedAt) {
+            Q_UNUSED(joinedAt);
             // Join responses carry the members' screen_sharing/camera_on
             // flags, so seed the announced-sharer sets right away: a share
             // that started before we joined is then visible immediately.
             m_voiceMembers = members;
             reconcileAnnouncedMedia();
             emit voiceMembersChanged();
-            m_voiceSession->onJoinSucceeded(roomId, members);
+            m_voiceSession->onJoinSucceeded(roomId, members, sessionId);
         });
     connect(m_client, &MatrixClient::voiceJoinError, m_voiceSession,
             &VoiceSession::onJoinFailed);
@@ -1482,6 +1500,8 @@ void ServerConnection::setupVoiceSession()
             &VoiceSession::onStateUpdateSucceeded);
     connect(m_client, &MatrixClient::voiceStateError, m_voiceSession,
             &VoiceSession::onStateUpdateFailed);
+    connect(m_client, &MatrixClient::voiceStateSuperseded, m_voiceSession,
+            &VoiceSession::onStateSuperseded);
     // V-L2: a five-second poll against a server we have already lost
     // toasts every five seconds for the whole outage. The reconnect
     // banner is already saying it.

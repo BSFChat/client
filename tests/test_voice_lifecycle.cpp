@@ -79,16 +79,19 @@ public:
             joins.append(room);
         });
         connect(session, &VoiceSession::leaveRequested, this,
-                [this](const QString& room) {
+                [this](const QString& room, const QString& sessionId) {
             requests.append(QStringLiteral("leave:") + room);
             leaves.append(room);
+            leaveTokens.append(sessionId);
         });
         connect(session, &VoiceSession::turnConfigRequested, this, [this]() {
             requests.append(QStringLiteral("turn"));
             ++turnFetches;
         });
         connect(session, &VoiceSession::stateUpdateRequested, this,
-                [this](const QString& room, bool muted, bool deafened) {
+                [this](const QString& room, bool muted, bool deafened,
+                       const QString& sessionId) {
+            stateTokens.append(sessionId);
             requests.append(QStringLiteral("state:%1:%2:%3")
                                 .arg(room)
                                 .arg(muted ? 1 : 0)
@@ -96,15 +99,22 @@ public:
             stateUpdates.append(qMakePair(muted, deafened));
         });
         connect(session, &VoiceSession::mediaStateUpdateRequested, this,
-                [this](const QString& room, bool screen, bool camera) {
+                [this](const QString& room, bool screen, bool camera,
+                       const QString& sessionId) {
+            Q_UNUSED(sessionId);
             requests.append(QStringLiteral("media:%1:%2:%3")
                                 .arg(room).arg(screen ? 1 : 0).arg(camera ? 1 : 0));
         });
     }
 
     // --- replies, driven by the test -------------------------------
+    // Every join reply mints a new session token, exactly as the server
+    // does — the client must never echo a token from a past membership.
     void replyJoinOk(const QString& room, const QStringList& members = {})
-    { m_session->onJoinSucceeded(room, membersOf(members)); }
+    {
+        lastIssuedToken = QStringLiteral("sess-%1").arg(++m_tokenCounter);
+        m_session->onJoinSucceeded(room, membersOf(members), lastIssuedToken);
+    }
     void replyJoinError(const QString& room, const QString& err)
     { m_session->onJoinFailed(room, err); }
     void replyLeaveOk(const QString& room) { m_session->onLeaveSucceeded(room); }
@@ -120,11 +130,15 @@ public:
     QStringList requests;
     QStringList joins;
     QStringList leaves;
+    QStringList leaveTokens;
+    QStringList stateTokens;
+    QString lastIssuedToken;
     QList<QPair<bool, bool>> stateUpdates;
     int turnFetches = 0;
 
 private:
     VoiceSession* m_session;
+    int m_tokenCounter = 0;
 };
 
 // The transport side of the seam.
@@ -203,6 +217,11 @@ private slots:
     // ---- V-H2 -------------------------------------------------------
     void selfRetirementRejoinsOnce();
     void selfRetirementTearsDownWhenRejoinFails();
+
+    // ---- session tokens (server workstream E) ------------------------
+    void requestsCarryTheCurrentSessionToken();
+    void retractionOfASupersededSessionIsIgnored();
+    void supersededStatePutTriggersRecovery();
 
     // ---- V-M1 -------------------------------------------------------
     void staleInviteIsIgnored();
@@ -545,6 +564,110 @@ void TestVoiceLifecycle::selfRetirementTearsDownWhenRejoinFails()
     s2.onSelfMembership("!room:x", false);   // still retired
     QCOMPARE(s2.state(), VoiceSession::State::Idle);
     QCOMPARE(engine2.stops, 1);
+}
+
+void TestVoiceLifecycle::requestsCarryTheCurrentSessionToken()
+{
+    // The server refuses a leave or a state PUT whose token its stored row
+    // has moved past. That is what makes leave-then-join robust even if the
+    // two cross on the wire — but only if we echo the RIGHT token.
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+
+    joinTo(s, net, "!a:x");
+    const QString first = net.lastIssuedToken;
+    QCOMPARE(s.sessionId(), first);
+
+    s.toggleMute();
+    QCOMPARE(net.stateTokens.last(), first);
+    net.replyStateOk("!a:x");
+
+    s.requestJoin("!b:x");
+    QCOMPARE(net.leaveTokens.last(), first);   // leave names the room it leaves
+    net.replyLeaveOk("!a:x");
+    // The join itself carries no token — it is the request that mints one.
+    net.replyJoinOk("!b:x");
+    const QString second = net.lastIssuedToken;
+    QVERIFY(second != first);
+    net.replyTurn(turnConfig());
+    QCOMPARE(s.sessionId(), second);
+
+    // The carried-over mute is announced on the fresh row; let that PUT
+    // finish so the leave is not simply queued behind it.
+    QCOMPARE(net.stateTokens.last(), second);
+    net.replyStateOk("!b:x");
+
+    net.leaveTokens.clear();
+    s.requestLeave();
+    QCOMPARE(net.leaveTokens, QStringList{second});
+    net.replyLeaveOk("!b:x");
+    QVERIFY(s.sessionId().isEmpty());
+}
+
+void TestVoiceLifecycle::retractionOfASupersededSessionIsIgnored()
+{
+    // A join over an active row makes the server emit active=false naming
+    // the OLD session, then active=true — an edge for peers to reset on.
+    // Acting on that retraction would tear down the session it just
+    // created.
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+
+    joinTo(s, net, "!room:x");
+    const QString current = net.lastIssuedToken;
+    net.requests.clear();
+
+    s.onSelfMembership("!room:x", false, QStringLiteral("sess-older"));
+    QVERIFY(net.requests.isEmpty());        // no re-join, no teardown
+    QVERIFY(s.isActive());
+    QCOMPARE(engine.stops, 0);
+
+    // The retraction of OUR session still triggers the V-H2 recovery.
+    s.onSelfMembership("!room:x", false, current);
+    QCOMPARE(net.requests, QStringList{"join:!room:x"});
+
+    // A server that issues no token at all keeps the old behaviour.
+    VoiceSession legacy;
+    legacy.setLocalUserId("@me:x");
+    FakeMatrixClient legacyNet(&legacy);
+    FakeEngine legacyEngine;
+    legacyEngine.install(&legacy);
+    joinTo(legacy, legacyNet, "!room:x");
+    legacyNet.requests.clear();
+    legacy.onSelfMembership("!room:x", false, QString());
+    QCOMPARE(legacyNet.requests, QStringList{"join:!room:x"});
+}
+
+void TestVoiceLifecycle::supersededStatePutTriggersRecovery()
+{
+    // 403 on voice/state means the row carries a newer token than ours.
+    // A reaped row is never re-activated by a state PUT, so the only
+    // recovery is re-POSTing the join.
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+
+    joinTo(s, net, "!room:x");
+    s.toggleMute();
+    net.requests.clear();
+
+    s.onStateSuperseded("!room:x");
+    s.onStateUpdateFailed("!room:x", "Voice session superseded");
+    QCOMPARE(net.joins.last(), QStringLiteral("!room:x"));
+    QVERIFY(s.isActive());          // the engine is not torn down first
+
+    // And if that re-join is refused, the session gives up cleanly.
+    net.replyJoinError("!room:x", "not in channel");
+    QCOMPARE(s.state(), VoiceSession::State::Idle);
+    QCOMPARE(engine.stops, 1);
 }
 
 void TestVoiceLifecycle::staleInviteIsIgnored()
