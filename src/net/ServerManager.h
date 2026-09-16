@@ -3,6 +3,8 @@
 #include <QObject>
 #include <QList>
 
+#include "net/ServerRoster.h"
+
 class ServerConnection;
 class ServerListModel;
 class Settings;
@@ -29,17 +31,15 @@ public:
     ~ServerManager() override;
 
     ServerListModel* servers() const { return m_serverListModel; }
-    ServerConnection* activeServer() const { return m_activeServer; }
-    int activeServerIndex() const { return m_activeServerIndex; }
+    ServerConnection* activeServer() const { return m_roster.active(); }
+    int activeServerIndex() const { return m_roster.activeIndex(); }
     // Count / lookup helpers for the NotificationManager (which needs to
     // wire every existing + future connection for inbound-message signals).
     // connectionAt is also invokable from QML so the server rail's
     // context menu can show per-server connection status.
-    int connectionCount() const { return m_connections.size(); }
-    Q_INVOKABLE ServerConnection* connectionAt(int index) const {
-        return (index >= 0 && index < m_connections.size()) ? m_connections[index] : nullptr;
-    }
-    int indexOfConnection(ServerConnection* conn) const { return m_connections.indexOf(conn); }
+    int connectionCount() const { return m_roster.count(); }
+    Q_INVOKABLE ServerConnection* connectionAt(int index) const { return m_roster.at(index); }
+    int indexOfConnection(ServerConnection* conn) const { return m_roster.indexOf(conn); }
     // The connection currently in a voice channel, or nullptr. Distinct
     // from activeServer(): the user can be in voice on server A while
     // browsing server B, and the screen/camera controllers must keep
@@ -146,9 +146,9 @@ private:
 
     Settings* m_settings;
     ServerListModel* m_serverListModel;
-    QList<ServerConnection*> m_connections;
-    ServerConnection* m_activeServer = nullptr;
-    int m_activeServerIndex = -1;
+    // Connection list + active pointer/index. See ServerRoster.h for why
+    // the bookkeeping lives there rather than inline.
+    ServerRoster<ServerConnection> m_roster;
     bool m_viewingDms = false;
 
     // Identity-first login state. m_identityClient runs the OIDC browser

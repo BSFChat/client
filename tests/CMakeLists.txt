@@ -240,3 +240,11 @@ if(Qt6QuickTest_FOUND AND NOT ANDROID AND NOT IOS)
     set_tests_properties(test_playback_math PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
+
+# ServerManager's connection-list lifecycle (U-C1). Header-only logic
+# (src/net/ServerRoster.h) lifted out of ServerManager precisely so this
+# needs no Settings, no ServerConnection, no event loop and no network.
+qt_add_executable(test_server_roster test_server_roster.cpp)
+target_include_directories(test_server_roster PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_server_roster PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_server_roster COMMAND test_server_roster)
