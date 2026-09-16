@@ -72,7 +72,9 @@ Rectangle {
                     uploaded++;
                 }
             }
-            if (uploaded > 0) messageInput.uploading = true;
+            // One per file, so the composer stays locked until the LAST
+            // of a multi-file drop lands (U-H6).
+            for (var j = 0; j < uploaded; ++j) messageInput.noteUploadStarted();
             drop.accepted = uploaded > 0;
         }
     }
@@ -332,7 +334,13 @@ Rectangle {
                         : "Show member list  (⌃M)"
                     toggled: Window.window.showMemberList
                     visible: serverManager.activeServer !== null
-                    onClicked: Window.window.showMemberList = !Window.window.showMemberList
+                    // Ask the shell to toggle rather than assigning to its
+                    // property (U-M12): on mobile `showMemberList` is a
+                    // BINDING to `rightDrawer.opened`, and writing to it
+                    // destroyed that binding — after which the button
+                    // flipped a now-dead bool and the drawer never moved
+                    // again, in either direction.
+                    onClicked: Window.window.toggleMemberList()
                 }
             }
 
