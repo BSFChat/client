@@ -7,6 +7,7 @@
 #include <QWindow>
 
 #include "core/App.h"
+#include "core/AppProfile.h"
 #include "core/NotificationManager.h"
 #include "core/Settings.h"
 #include "core/UrlHandler.h"
@@ -65,6 +66,13 @@ int main(int argc, char *argv[])
     // silently fail there).
     qputenv("QML_XHR_ALLOW_FILE_READ", "1");
 
+    // Resolve `--profile <name>` / $BSFCHAT_PROFILE before anything else:
+    // the single-instance handoff below already needs the profile-specific
+    // socket name, and it runs before QApplication exists. With no profile
+    // this is a no-op and every name below keeps its historical value.
+    bsfchat::setActiveProfile(
+        bsfchat::profileFromArguments(argc, argv, qgetenv("BSFCHAT_PROFILE")));
+
     // Parse any `bsfchat://…` URL the OS passed on the command line BEFORE
     // constructing QGuiApplication so a forwarded URL doesn't pay the cost
     // of spinning up Qt GUI subsystems in the forwarding process.
@@ -84,8 +92,12 @@ int main(int argc, char *argv[])
     // integration. Everything else continues to use the QGuiApplication
     // API surface via QApplication's inheritance.
     QApplication app(argc, argv);
-    app.setApplicationName("BSFChat");
-    app.setOrganizationName("BSFChat");
+    // Both are "BSFChat" unless --profile/$BSFCHAT_PROFILE was given, in
+    // which case the application name carries a "-<profile>" suffix. That
+    // one suffix namespaces QSettings, QStandardPaths::AppDataLocation
+    // (hence LocalCache) and the macOS log directory together.
+    app.setApplicationName(bsfchat::applicationName());
+    app.setOrganizationName(bsfchat::organizationName());
     QQuickStyle::setStyle("Basic");
 
     // Mirror all logging to a rotating file. A Finder-launched app has
@@ -93,6 +105,9 @@ int main(int argc, char *argv[])
     // from. Installed after setApplicationName so the log dir resolves.
     bsfchat::installFileLogger();
     qInfo() << "BSFChat starting, logging to" << bsfchat::logDirectory();
+    if (!bsfchat::activeProfile().isEmpty())
+        qInfo() << "Profile:" << bsfchat::activeProfile()
+                << "(application name" << bsfchat::applicationName() << ")";
 
     App application;
 
@@ -109,7 +124,12 @@ int main(int argc, char *argv[])
     // Single-instance + scheme registration + macOS QFileOpenEvent filter.
     UrlHandler urlHandler;
     urlHandler.install(&app);
-    urlHandler.registerSchemeHandler();
+    // Only the default profile claims the OS-level bsfchat:// handler. A
+    // secondary `--profile` instance is a second copy of the same app on
+    // one machine; letting it rewrite the system registration would point
+    // every link at whichever test profile was started last.
+    if (bsfchat::activeProfile().isEmpty())
+        urlHandler.registerSchemeHandler();
 
     // Funnel every inbound URL into ServerManager and raise/activate the
     // window so the user sees the navigation happen.

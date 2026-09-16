@@ -92,6 +92,7 @@ endif()
 qt_add_executable(bsfchat-app
     src/main.cpp
     src/core/App.cpp
+    src/core/AppProfile.cpp
     src/core/NotificationManager.cpp
     src/core/Settings.cpp
     src/core/TintedIconProvider.cpp

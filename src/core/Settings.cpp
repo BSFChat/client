@@ -1,4 +1,5 @@
 #include "core/Settings.h"
+#include "core/AppProfile.h"
 #include "core/ReleaseSelection.h"
 #include "util/FileLogger.h"
 
@@ -23,7 +24,11 @@ void applyVerboseVoiceLogging(bool on)
 
 Settings::Settings(QObject* parent)
     : QObject(parent)
-    , m_settings("BSFChat", "BSFChat")
+    // ("BSFChat", "BSFChat") unless --profile/$BSFCHAT_PROFILE is set, in
+    // which case the application name gains a "-<profile>" suffix so two
+    // clients on one machine don't share one settings file. Default
+    // profile keeps the historical domain byte for byte.
+    , m_settings(bsfchat::organizationName(), bsfchat::applicationName())
 {
     if (verboseVoiceLogging())
         applyVerboseVoiceLogging(true);

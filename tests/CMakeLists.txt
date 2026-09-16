@@ -21,6 +21,17 @@ target_link_libraries(test_models PRIVATE
 
 add_test(NAME test_models COMMAND test_models)
 
+# --profile <name> namespace resolution (multi-instance support). Pure
+# logic: no GUI app is constructed, because launching bsfchat-app on a dev
+# Mac sets off macOS permission dialogs.
+qt_add_executable(test_profile
+    test_profile.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
+)
+target_include_directories(test_profile PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_profile PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_profile COMMAND test_profile)
+
 # Startup-cost path: the persisted sync token + room snapshot that lets a
 # launch skip the server's initial /sync, and the retry schedule that keeps a
 # downed server from being dialled every 5s forever. Both are deliberately
