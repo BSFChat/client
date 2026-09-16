@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import BSFChat
+import "../js/LinkPreviewCache.js" as PreviewCache
 
 // Per-link OpenGraph unfurl card. A MessageBubble instantiates one
 // (or two) of these via a Repeater keyed on URLs detected in its body.
@@ -15,8 +16,10 @@ import BSFChat
 // Fetch is client-side — each user's app hits the target URL. Good
 // enough for v1; if fingerprinting or cache duplication becomes an
 // issue we'll route through a server-side unfurler later. Until then
-// the cache is in-process (LinkPreview._cache) keyed by URL so two
-// messages linking the same page don't refetch.
+// the cache is process-wide (js/LinkPreviewCache.js, a `.pragma library`
+// so it is genuinely shared) keyed by URL, so neither two messages
+// linking the same page nor the same message scrolling back into view
+// refetches it.
 Rectangle {
     id: preview
 
@@ -54,9 +57,11 @@ Rectangle {
     readonly property bool hasImage: ogImage.length > 0
     property bool _failed: false
 
-    // Simple module-scoped JS cache. A failed fetch also caches (as
-    // null) so we don't hammer the URL on every re-render.
-    property var _cache: ({})
+    // The unfurl cache lives in js/LinkPreviewCache.js. It used to be a
+    // per-instance `property var` right here, and message delegates are
+    // recycled constantly, so every recreation refetched a URL the app had
+    // already resolved. A failed or empty fetch is cached too (as null) so a
+    // dead link is not re-requested on every repaint.
 
     // Video embeds are visible immediately — we know the full
     // geometry from the URL pattern alone (16:9 thumbnail + reserved
@@ -314,9 +319,11 @@ Rectangle {
             _failed = true;
             return;
         }
-        // Cache hit.
-        if (_cache[u] !== undefined) {
-            var c = _cache[u];
+        // Cache hit. Absent means never fetched; a stored `null` means "known
+        // to have nothing preview-worthy" and must short-circuit to failed
+        // rather than fall through to a refetch, so the two are kept apart.
+        if (PreviewCache.has(u)) {
+            var c = PreviewCache.lookup(u);
             if (!c) { _failed = true; return; }
             _apply(c);
             return;
@@ -348,7 +355,7 @@ Rectangle {
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return;
             if (xhr.status < 200 || xhr.status >= 400) {
-                preview._cache[origUrl] = null;
+                PreviewCache.store(origUrl, null);
                 _failed = true;
                 return;
             }
@@ -361,11 +368,11 @@ Rectangle {
                     image: "",
                     ready: !!j.title
                 };
-                preview._cache[origUrl] = parsed.ready ? parsed : null;
+                PreviewCache.store(origUrl, parsed.ready ? parsed : null);
                 if (parsed.ready) _apply(parsed);
                 else _failed = true;
             } catch (e) {
-                preview._cache[origUrl] = null;
+                PreviewCache.store(origUrl, null);
                 _failed = true;
             }
         };
@@ -403,13 +410,13 @@ Rectangle {
             }
 
             if (xhr.status < 200 || xhr.status >= 400) {
-                preview._cache[origUrl] = null;
+                PreviewCache.store(origUrl, null);
                 _failed = true;
                 return;
             }
             var ct = xhr.getResponseHeader("content-type") || "";
             if (ct.indexOf("text/html") < 0 && ct.indexOf("xhtml") < 0) {
-                preview._cache[origUrl] = null;
+                PreviewCache.store(origUrl, null);
                 _failed = true;
                 return;
             }
@@ -428,13 +435,13 @@ Rectangle {
             // content. Render nothing rather than a misleading card.
             // Fix is a server-side unfurler; this is the interim stop.
             if (_looksLikeChallenge(html)) {
-                preview._cache[origUrl] = null;
+                PreviewCache.store(origUrl, null);
                 _failed = true;
                 return;
             }
 
             var parsed = _parseOg(html, currentUrl);
-            preview._cache[origUrl] = parsed.ready ? parsed : null;
+            PreviewCache.store(origUrl, parsed.ready ? parsed : null);
             if (parsed.ready) _apply(parsed);
             else _failed = true;
         };

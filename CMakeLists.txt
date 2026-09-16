@@ -429,6 +429,10 @@ qt_add_qml_module(bsfchat-app
         # tests/qml/tst_updateformat.qml. Imports PlaybackMath.js for the
         # byte formatter, so both must stay in this resource set.
         qml/js/UpdateFormat.js
+        # Process-wide OpenGraph unfurl cache. Shared by every LinkPreview
+        # delegate — that is the whole point, see the file header — and
+        # tested in tests/qml/tst_linkpreviewcache.qml.
+        qml/js/LinkPreviewCache.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt
