@@ -69,6 +69,12 @@ signals:
 private:
     void pushFrameToPeers();
     void setTransmitting(bool transmitting);
+    // Mirrors ScreenShareController: the one place the active flag
+    // flips, forcing an IDR on the way up (S-11) and announcing the
+    // camera stream's on/off state to peers (S-7).
+    void setActiveState(bool active);
+    void announceStream(bool on);
+    IVoiceTransport* currentVoice() const;
     // Rewires the per-server "voice room changed" subscriptions
     // whenever the server list or active server changes (and at
     // initial setup), so leaving a voice channel reliably stops the

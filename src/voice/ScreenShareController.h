@@ -160,6 +160,15 @@ private:
 
     void pushFrameToPeers();
     void setTransmitting(bool transmitting);
+    // Single place the active flag flips. Forces an IDR on the way up
+    // (S-11 — a restarted share reuses the encoder session, so its
+    // first frame would otherwise be a P-frame referencing a picture no
+    // viewer holds) and announces the stream's on/off state to peers
+    // (S-7) so tiles appear and clear immediately.
+    void setActiveState(bool active);
+    void announceStream(bool on);
+    // The transport of the connection actually in a call, or nullptr.
+    IVoiceTransport* currentVoice() const;
     // Rewires the per-server "voice room changed" subscriptions
     // whenever the server list or active server changes. Stops the
     // screen share when no connection is in voice so share state
