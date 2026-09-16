@@ -8,6 +8,8 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Version.cmake)
 
 project(bsfchat-client VERSION ${BSFCHAT_VERSION_DOTS} LANGUAGES CXX)
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Ccache.cmake)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
