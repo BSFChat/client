@@ -185,8 +185,31 @@ jobs:
       - name: Build
         run: cmake --build build --config Release -j4
 
+      # -j: test fixtures must stay parallel-safe (unique temp dirs and
+      # ephemeral ports). Running serially here would let a fixture that
+      # shares a fixed path back in without anyone noticing.
       - name: Test
-        run: ctest --test-dir build --output-on-failure -C Release
+        run: ctest --test-dir build --output-on-failure -C Release -j4
+
+      # qmllint over the whole QML tree, using the aqt-installed Qt and the
+      # build directory's generated qmldir/qmltypes so C++-registered types
+      # and the BSFChat module resolve.
+      #
+      # continue-on-error for now: .qmllint.ini promotes `unqualified` and
+      # `missing-property` to errors, and the existing tree trips both in
+      # bulk. Workstreams B (QML crash/correctness) and F are clearing that
+      # backlog; REMOVE `continue-on-error` and this comment once the count
+      # reaches zero, so a new unguarded-null TypeError fails the build
+      # instead of shipping green.
+      - name: qmllint
+        if: matrix.platform == 'macos'
+        continue-on-error: true
+        shell: bash
+        run: |
+          QMLLINT="$QT_ROOT_DIR/bin/qmllint"
+          "$QMLLINT" --version
+          # `find` rather than a glob: qml/ is three levels deep in places.
+          "$QMLLINT" -I build $(find qml -name '*.qml' | sort)
 
       # === macOS: Import signing certificate ===
       - name: Import code signing certificate
@@ -751,6 +774,66 @@ jobs:
         with:
           name: BSFChat-Linux
           path: BSFChat-linux-x86_64.tar.gz
+
+  # ASan+UBSan over the client test targets, mirroring the server's
+  # `sanitizers` job. The teardown use-after-free in
+  # ~PeerConnectionManager (V-C2 in PLAN-2026-09.md) is exactly the class
+  # of bug an unsanitized ctest run reports as "all tests passed", and
+  # test_media_loopback exercises that path.
+  #
+  # macOS-only: this is where the voice/video stack is developed and where
+  # the platform capture code lives. Not gated on `build` — a sanitizer
+  # failure should be visible even when packaging is broken, and vice
+  # versa.
+  sanitizers:
+    name: asan+ubsan (macos)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          # Keep in lockstep with the build job above.
+          version: '6.10.3'
+          modules: 'qtmultimedia'
+          cache: true
+
+      - name: Install dependencies
+        run: |
+          brew install openssl@3 nasm
+          pip3 install --break-system-packages cmake==3.30.5
+
+      - name: Build vendored openh264
+        run: bash scripts/build-openh264.sh
+
+      - name: Configure
+        # -O1 + frame pointers: readable stack traces without the
+        # sanitized build taking all afternoon.
+        # -fno-sanitize-recover=undefined makes UB fail the run rather
+        # than print and continue.
+        run: |
+          export PATH="$HOME/Library/Python/3.12/bin:$HOME/Library/Python/3.13/bin:$PATH"
+          cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -Wno-dev \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DGAMECHAT_CLIENT_BUILD_TESTS=ON \
+            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3) \
+            -DCMAKE_CXX_FLAGS="-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build build-asan -j4
+
+      - name: Test
+        env:
+          # No detect_leaks: LeakSanitizer is not available on macOS/arm64.
+          # Qt singletons and QML engine caches are also torn down after
+          # main() returns, which makes leak reports noisy here.
+          ASAN_OPTIONS: abort_on_error=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build-asan --output-on-failure -j4
 
   # Create GitHub Release on tag push
   release:
