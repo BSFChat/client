@@ -429,6 +429,9 @@ qt_add_qml_module(bsfchat-app
         # tests/qml/tst_updateformat.qml. Imports PlaybackMath.js for the
         # byte formatter, so both must stay in this resource set.
         qml/js/UpdateFormat.js
+        # Overlay visibility rules for the message timeline, shared by
+        # MessageView.qml and tests/qml/tst_timelineoverlay.qml (U-H1).
+        qml/js/TimelineOverlay.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt
