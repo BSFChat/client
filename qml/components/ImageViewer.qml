@@ -75,6 +75,26 @@ Popup {
     contentItem: Item {
         id: viewport
         anchors.fill: parent
+        // Focus lives here so the key handler below actually receives events;
+        // `focus: true` on the Popup alone only makes the POPUP the active
+        // focus item within the overlay.
+        focus: true
+
+        // Cmd/Ctrl +/-/0. Esc is handled by closePolicy.
+        Keys.onPressed: (e) => {
+            var mod = (e.modifiers & Qt.ControlModifier)
+                   || (e.modifiers & Qt.MetaModifier);
+            if (mod && (e.key === Qt.Key_Plus || e.key === Qt.Key_Equal)) {
+                viewer.zoom = Math.min(viewer.maxZoom, viewer.zoom * 1.2);
+                e.accepted = true;
+            } else if (mod && e.key === Qt.Key_Minus) {
+                viewer.zoom = Math.max(viewer.minZoom, viewer.zoom / 1.2);
+                e.accepted = true;
+            } else if (mod && e.key === Qt.Key_0) {
+                viewer.resetView();
+                e.accepted = true;
+            }
+        }
 
         // Bottom layer — click-to-close on empty space. Declared FIRST
         // so items declared later (imageContainer) stack on top and
@@ -395,19 +415,10 @@ Popup {
         }
     }
 
-    // ⌘/Ctrl +/−/0 shortcuts. Esc is handled by closePolicy.
-    Keys.onPressed: (e) => {
-        var mod = (e.modifiers & Qt.ControlModifier)
-               || (e.modifiers & Qt.MetaModifier);
-        if (mod && (e.key === Qt.Key_Plus || e.key === Qt.Key_Equal)) {
-            zoom = Math.min(maxZoom, zoom * 1.2);
-            e.accepted = true;
-        } else if (mod && e.key === Qt.Key_Minus) {
-            zoom = Math.max(minZoom, zoom / 1.2);
-            e.accepted = true;
-        } else if (mod && e.key === Qt.Key_0) {
-            resetView();
-            e.accepted = true;
-        }
-    }
+    // D-H3: the Keys attached property used to sit HERE, on the Popup. Keys is
+    // an Item attachment and a Popup is not an Item, so it attached to nothing
+    // and every zoom shortcut was dead — while the shortcuts dialog went on
+    // advertising them. It now lives on the contentItem (below), which is a
+    // real Item, is a focus scope, and is given focus in onOpened.
+    onOpened: viewport.forceActiveFocus()
 }

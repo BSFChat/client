@@ -499,7 +499,7 @@ Rectangle {
                                 color: {
                                     switch (modelData.peerPresence) {
                                     case "online":      return Theme.online;
-                                    case "unavailable": return Theme.warning;
+                                    case "unavailable": return Theme.warn;
                                     default:            return Theme.fg3;
                                     }
                                 }

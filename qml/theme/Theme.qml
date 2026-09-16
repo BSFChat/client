@@ -322,6 +322,22 @@ QtObject {
     readonly property int   buttonHeight:    32
     readonly property int   iconButtonSize:  28
 
+    // Interactive-control heights. The dialogs had grown a scatter of literal
+    // 36 / 40 / 44 / 48 implicitHeights, which is how a "Save" button ends up
+    // 36px on one page and 40px on the next with nothing saying which is
+    // right. Four named steps, so a control's height is a choice from a scale
+    // rather than a number someone typed:
+    //   sm  — dense rows inside a list or a settings row
+    //   md  — the default for buttons, text fields and combo boxes
+    //   lg  — primary actions and the taller search / filter inputs
+    //   xl  — full-width section affordances and dialog footers
+    readonly property QtObject controlHeight: QtObject {
+        readonly property int sm: 32
+        readonly property int md: 36
+        readonly property int lg: 40
+        readonly property int xl: 48
+    }
+
     // ─── Accessibility borders (our extension) ───────────────
     // Accessibility mode draws thick, accent-colored borders between panels
     // so the major regions are unambiguous. Driven from AppSettings.

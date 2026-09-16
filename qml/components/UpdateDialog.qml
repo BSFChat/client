@@ -33,6 +33,16 @@ import "../js/UpdateFormat.js" as UF
 // just changes state) or in the settings pane (suppressed). Opening for
 // it could only ever produce the pop-over-settings bug.
 //
+// NEITHER IS `Failed` (D-C2). Updater sets Failed on ANY network error,
+// including "this laptop has no connection right now", and the six-hourly
+// background check runs regardless. So a machine that is simply offline threw
+// an unsolicited modal over whatever the user was doing, every six hours, to
+// report a check they never asked for and cannot act on. A failure the user DID
+// ask for is still reported, in both places it can be: this dialog is already
+// open when they pressed the button here, and the inline panel in
+// Client Settings -> Updates shows the same state with the same wording when
+// they pressed it there.
+//
 // State numbers come from UF.* (qml/js/UpdateFormat.js), which mirrors
 // Updater::State; the bare integers that used to be written inline here
 // are gone.
@@ -79,9 +89,25 @@ Popup {
                 if (updateDialog._dismissedFor === updater.availableVersion)
                     return;
                 updateDialog.open();
-            } else if (s === UF.ReadyToApply || s === UF.Failed) {
+            } else if (s === UF.ReadyToApply) {
+                // A finished download IS worth interrupting for: the user
+                // asked for it and it is waiting on one click.
                 updateDialog.open();
             }
+        }
+    }
+
+    // D-L. Esc is documented as "Later", but closePolicy dismisses the popup
+    // without going through onDismissRequested, so the skip was never recorded
+    // and the next background check re-offered the same build — every six
+    // hours, all day. Recording it here covers every way out of the dialog at
+    // once, and the state check keeps the meaning intact: only closing on the
+    // OFFER is a skip. Closing while a download runs, or on an error, must not
+    // suppress the next prompt for that version.
+    onClosed: {
+        if (typeof updater !== "undefined" && updater
+            && updater.state === UF.UpdateAvailable) {
+            updateDialog._dismissedFor = updater.availableVersion;
         }
     }
 
@@ -91,15 +117,8 @@ Popup {
         // constant, so the dialog stays inside a short window.
         notesMaxHeight: Math.max(120, Math.min(220,
             (updateDialog.parent ? updateDialog.parent.height : 600) * 0.3))
-        onDismissRequested: {
-            // Only a dismissal of the OFFER is a skip. "Later" on a
-            // finished download or "Close" on an error must not suppress
-            // the next prompt for that version.
-            if (typeof updater !== "undefined" && updater
-                && updater.state === UF.UpdateAvailable) {
-                updateDialog._dismissedFor = updater.availableVersion;
-            }
-            updateDialog.close();
-        }
+        // The skip is recorded in onClosed above, which every dismissal
+        // path — this button, Esc, and a programmatic close — runs through.
+        onDismissRequested: updateDialog.close()
     }
 }

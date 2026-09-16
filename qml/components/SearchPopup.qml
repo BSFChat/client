@@ -257,7 +257,16 @@ Popup {
             ScrollBar.vertical: ThemedScrollBar {}
             boundsBehavior: Flickable.StopAtBounds
             // Pagination: pull the next page as the user reaches the bottom.
-            onAtYEndChanged: if (atYEnd) searchPopup.loadMore()
+            //
+            // The overflow check is the point (D-L). A ListView whose content
+            // is shorter than its viewport reports atYEnd TRUE from the moment
+            // the first page lands — the bottom is already on screen — so this
+            // used to fire the page-2 request immediately, before the user had
+            // looked at page 1, on every single search. "Reached the bottom"
+            // only means anything when there was something to scroll.
+            onAtYEndChanged: {
+                if (atYEnd && contentHeight > height) searchPopup.loadMore();
+            }
 
             footer: Item {
                 width: ListView.view ? ListView.view.width : 0

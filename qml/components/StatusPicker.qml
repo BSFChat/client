@@ -132,7 +132,7 @@ Popup {
             presence: "unavailable"
             title: "Away"
             subtitle: "Idle / busy"
-            dotColor: Theme.warning
+            dotColor: Theme.warn
         }
         PresenceRow {
             presence: "offline"
