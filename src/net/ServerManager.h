@@ -132,7 +132,12 @@ public:
     // whose process just died. The HTTP leave request is fire-and-
     // forget — if the OS kills us mid-flight, the server's ICE
     // timeout will eventually catch the corpse.
+    // Leave every voice channel this process is in AND wait, briefly, for
+    // the server to answer. Called from aboutToQuit; see VoiceQuit.h.
     Q_INVOKABLE void leaveAllVoice();
+    // How long the quit path waits for the leaves to be answered. Long
+    // enough for a LAN round trip, short enough not to be felt.
+    static constexpr int kQuitLeaveTimeoutMs = 500;
 
 signals:
     void activeServerChanged();

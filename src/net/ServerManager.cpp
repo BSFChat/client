@@ -1,4 +1,5 @@
 #include "net/ServerManager.h"
+#include "net/VoiceQuit.h"
 #include "net/ServerConnection.h"
 #include "net/MatrixClient.h"
 #include "model/RoomListModel.h"
@@ -628,12 +629,27 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
 
 void ServerManager::leaveAllVoice()
 {
+    QList<VoiceSession*> sessions;
     for (auto* conn : m_roster.connections()) {
         if (!conn) continue;
-        // leaveVoiceChannel() no-ops when m_activeVoiceRoomId is
-        // empty, so this is safe to fire on every connection even
-        // if only one is actually in voice.
+        // leaveVoiceChannel() no-ops when there is no session, so this is
+        // safe to fire on every connection even if only one is in voice.
+        const bool wasInVoice = conn->isLeavingVoice();
         conn->leaveVoiceChannel();
+        if (wasInVoice) sessions.append(conn->voiceSession());
+    }
+    if (sessions.isEmpty()) return;
+
+    // V-H3. This runs from aboutToQuit: without the wait the POST is
+    // queued on QNetworkAccessManager and the process exits before the
+    // socket is written, so the leave never leaves the machine and the
+    // user lingers in the channel until the server's ghost reaper
+    // catches up 30–40 s later. Bounded, because a hung server must not
+    // stop somebody quitting.
+    if (!voice::waitForSessionsToSettle(sessions, kQuitLeaveTimeoutMs)) {
+        qWarning("[voice] quit: voice leave did not complete within %d ms — "
+                 "the server will reap the membership instead",
+                 kQuitLeaveTimeoutMs);
     }
 }
 

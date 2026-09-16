@@ -15,6 +15,7 @@
 // video codec backends, VideoSendPipeline/VideoReceivePipeline and
 // VideoRateController. Those must keep working.
 
+#include "voice/CallEventOutbox.h"
 #include "voice/IVoiceTransport.h"
 #include "voice/video/DeliveryRatioEstimator.h"
 #include "voice/video/VideoCodec.h"
@@ -74,6 +75,16 @@ public:
     bool hasPeer(const QString& userId) const override { return m_peers.contains(userId); }
     // Offer to `userId` if we don't already hold a peer for them.
     void ensurePeer(const QString& userId) override;
+    // Tear down the peer for `userId` if we hold one. The roster
+    // reconciler calls this for members the server no longer lists —
+    // V-M5, the half that never existed, which is why a crashed peer
+    // rendered as "connected" until ICE timed out on its own.
+    void dropPeer(const QString& userId);
+    // Replace the TURN credentials used for peer connections built from
+    // here on. The ephemeral username/password pair expires after the
+    // server's `ttl`, and this call is mid-session: existing peers keep
+    // their established transports, new ones get live credentials (V-M3).
+    void updateTurnConfig(const QJsonObject& turnConfig);
     // True when at least one peer's data channel is open — i.e.
     // broadcast frames are actually reaching someone.
     bool hasOpenPeers() const override;
@@ -196,6 +207,11 @@ private:
     void dropInboundCandidates(const QString& sender, const QString& callId);
     void pruneInboundCandidates();
     void sendCallEvent(const QString& eventType, const nlohmann::json& content);
+    // Send everything in the outbox whose next attempt is due. Driven by
+    // the 500 ms candidate-batch tick, so there is no second timer.
+    void flushOutbox();
+    // MatrixClient's per-event outcome for a queued signalling PUT.
+    void onCallEventSendResult(quint64 token, bool ok, const QString& error);
     rtc::Configuration buildRtcConfig() const;
     QString generateCallId() const;
     // This client's media capabilities, advertised in every
@@ -228,6 +244,10 @@ private:
     QJsonObject m_turnConfig;
     bool m_running = false;
     bool m_allowP2P = false;
+
+    // Outbound signalling awaiting the server's acknowledgement, with
+    // its retry schedule (V-M2).
+    voice::CallEventOutbox m_outbox;
 
     // ICE candidate batching (OUTBOUND — ours, awaiting the next flush)
     QTimer m_candidateBatchTimer;

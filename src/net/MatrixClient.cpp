@@ -733,6 +733,29 @@ void MatrixClient::sendRoomEvent(const QString& roomId, const QString& eventType
     });
 }
 
+void MatrixClient::sendCallEvent(const QString& roomId, const QString& eventType,
+                                 const QByteArray& content, quint64 token)
+{
+    static int txnCounter = 0;
+    QString txnId = QString("v%1.%2").arg(QDateTime::currentMSecsSinceEpoch())
+                        .arg(++txnCounter);
+
+    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
+                   + QUrl::toPercentEncoding(roomId)
+                   + "/send/" + eventType + "/" + txnId;
+
+    auto* reply = makeRequest("PUT", path, content);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, token]() {
+        reply->deleteLater();
+        const auto data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit callEventSendResult(token, false, QString::fromUtf8(data));
+            return;
+        }
+        emit callEventSendResult(token, true, QString());
+    });
+}
+
 void MatrixClient::uploadMedia(const QByteArray& data, const QString& contentType, const QString& filename)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kMediaUpload);
@@ -1060,28 +1083,44 @@ void MatrixClient::joinVoice(const QString& roomId)
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             emit voiceError(QString::fromUtf8(data));
+            emit voiceJoinError(roomId, QString::fromUtf8(data));
             return;
         }
         try {
             auto doc = QJsonDocument::fromJson(data);
-            QJsonArray members = doc.object().value("members").toArray();
+            const QJsonObject body = doc.object();
+            QJsonArray members = body.value("members").toArray();
             emit voiceJoined(roomId, members);
+            emit voiceJoinedSession(
+                roomId, members, body.value("session_id").toString(),
+                qint64(body.value("joined_at").toDouble(0)));
         } catch (...) {
             emit voiceError("Failed to parse voice join response");
+            emit voiceJoinError(roomId,
+                                QStringLiteral("Failed to parse voice join response"));
         }
     });
 }
 
-void MatrixClient::leaveVoice(const QString& roomId)
+void MatrixClient::leaveVoice(const QString& roomId, const QString& sessionId)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                    + QUrl::toPercentEncoding(roomId) + "/voice/leave";
 
-    auto* reply = makeRequest("POST", path, "{}");
+    // Echoing the token lets the server ignore a leave that belongs to a
+    // membership it has already replaced (it answers 200 with
+    // {"changed":false,"reason":"stale_session"}), so a late leave cannot
+    // cancel a fresh join. Omitted entirely against older servers.
+    json body = json::object();
+    if (!sessionId.isEmpty()) body["session_id"] = sessionId.toStdString();
+    auto* reply = makeRequest("POST", path,
+                              QByteArray::fromStdString(body.dump()));
     connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
-            emit voiceError(QString::fromUtf8(reply->readAll()));
+            const QString body = QString::fromUtf8(reply->readAll());
+            emit voiceError(body);
+            emit voiceLeaveError(roomId, body);
             return;
         }
         emit voiceLeft(roomId);
@@ -1099,6 +1138,7 @@ void MatrixClient::getVoiceMembers(const QString& roomId)
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             emit voiceError(QString::fromUtf8(data));
+            emit voiceMembersError(roomId, QString::fromUtf8(data));
             return;
         }
         auto doc = QJsonDocument::fromJson(data);
@@ -1107,7 +1147,8 @@ void MatrixClient::getVoiceMembers(const QString& roomId)
     });
 }
 
-void MatrixClient::updateVoiceState(const QString& roomId, bool muted, bool deafened)
+void MatrixClient::updateVoiceState(const QString& roomId, bool muted,
+                                    bool deafened, const QString& sessionId)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                    + QUrl::toPercentEncoding(roomId) + "/voice/state";
@@ -1115,18 +1156,34 @@ void MatrixClient::updateVoiceState(const QString& roomId, bool muted, bool deaf
     json content;
     content["muted"] = muted;
     content["deafened"] = deafened;
+    if (!sessionId.isEmpty()) content["session_id"] = sessionId.toStdString();
     QByteArray body = QByteArray::fromStdString(content.dump());
 
     auto* reply = makeRequest("PUT", path, body);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
-            emit voiceError(QString::fromUtf8(reply->readAll()));
+            const QString err = QString::fromUtf8(reply->readAll());
+            const int status = reply->attribute(
+                QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            emit voiceError(err);
+            // 403 here is not "you may not mute" — the server returns it
+            // when the row it holds has a newer session token than ours,
+            // i.e. we were reaped or replaced. It never re-activates a
+            // reaped row, so the caller must re-POST voice/join.
+            if (status == 403) emit voiceStateSuperseded(roomId);
+            // The local toggle was optimistic — the caller rolls it back
+            // on this (V-M7).
+            emit voiceStateError(roomId, err);
+            return;
         }
+        emit voiceStateUpdated(roomId);
     });
 }
 
-void MatrixClient::updateVoiceMediaState(const QString& roomId, bool screenSharing, bool cameraOn)
+void MatrixClient::updateVoiceMediaState(const QString& roomId,
+                                         bool screenSharing, bool cameraOn,
+                                         const QString& sessionId)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                    + QUrl::toPercentEncoding(roomId) + "/voice/state";
@@ -1137,14 +1194,28 @@ void MatrixClient::updateVoiceMediaState(const QString& roomId, bool screenShari
     json content;
     content["screen_sharing"] = screenSharing;
     content["camera_on"] = cameraOn;
+    if (!sessionId.isEmpty()) content["session_id"] = sessionId.toStdString();
     QByteArray body = QByteArray::fromStdString(content.dump());
 
     auto* reply = makeRequest("PUT", path, body);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
-            emit voiceError(QString::fromUtf8(reply->readAll()));
+            const QString err = QString::fromUtf8(reply->readAll());
+            const int status = reply->attribute(
+                QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            emit voiceError(err);
+            // 403 here is not "you may not mute" — the server returns it
+            // when the row it holds has a newer session token than ours,
+            // i.e. we were reaped or replaced. It never re-activates a
+            // reaped row, so the caller must re-POST voice/join.
+            if (status == 403) emit voiceStateSuperseded(roomId);
+            // The local toggle was optimistic — the caller rolls it back
+            // on this (V-M7).
+            emit voiceStateError(roomId, err);
+            return;
         }
+        emit voiceStateUpdated(roomId);
     });
 }
 
@@ -1235,6 +1306,7 @@ void MatrixClient::getTurnConfig()
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             emit voiceError(QString::fromUtf8(data));
+            emit turnConfigError(QString::fromUtf8(data));
             return;
         }
         auto doc = QJsonDocument::fromJson(data);

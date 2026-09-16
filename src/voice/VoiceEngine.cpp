@@ -1,5 +1,6 @@
 #include "voice/VoiceEngine.h"
 #include "voice/AudioEngine.h"
+#include "voice/VoiceStartPolicy.h"
 #include "voice/PeerCaps.h"
 #include "voice/PeerConnectionManager.h"
 #include "voice/video/VideoDecoder.h"
@@ -24,6 +25,11 @@ VoiceEngine::VoiceEngine(MatrixClient* client, QObject* parent)
 
     m_rrTimer.setInterval(500);
     connect(&m_rrTimer, &QTimer::timeout, this, &VoiceEngine::sendReceiverReports);
+
+    // V-M2: per-event send outcomes, so a lost invite/answer/candidate
+    // batch is retried rather than costing a 30 s watchdog cycle.
+    connect(m_client, &MatrixClient::callEventSendResult,
+            this, &VoiceEngine::onCallEventSendResult);
 }
 
 VoiceEngine::~VoiceEngine() {
@@ -69,10 +75,8 @@ bool VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
             qCWarning(logVoice, "refusing join: relay-only policy but no TURN "
                      "server in the config (%lld ICE servers)",
                      static_cast<long long>(probe.iceServers.size()));
-            emit error(QStringLiteral(
-                "Voice is unavailable: this server requires relayed connections "
-                "but has no TURN server configured. Ask the server administrator "
-                "to configure TURN, or to allow peer-to-peer voice."));
+            emit error(voice::refusalMessage(
+                voice::StartRefusal::RelayOnlyNoTurn));
             m_roomId.clear();
             m_turnConfig = QJsonObject();
             return false;
@@ -91,11 +95,24 @@ bool VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
     connect(m_audioEngine, &AudioEngine::peerLevelChanged,
             this, &VoiceEngine::peerLevelChanged);
     if (!m_audioEngine->start()) {
-        qCWarning(logVoice) << "AudioEngine::start failed";
-        emit error("Failed to initialize audio");
-    } else {
-        qCInfo(logVoice, "AudioEngine started OK");
+        // V-H4: this used to be a warning and a toast, and start()
+        // returned true anyway — the user joined the channel deaf and
+        // mute, the member poll kept their server-side heartbeat alive,
+        // and the ghost reaper therefore never removed them. There is no
+        // way back from that state, so refuse the session and let the
+        // caller unwind the join.
+        qCWarning(logVoice) << "AudioEngine::start failed — refusing the "
+                               "voice session";
+        emit error(voice::refusalMessage(voice::StartRefusal::AudioUnavailable));
+        m_audioEngine->stop();
+        delete m_audioEngine;
+        m_audioEngine = nullptr;
+        m_running = false;
+        m_roomId.clear();
+        m_turnConfig = QJsonObject();
+        return false;
     }
+    qCInfo(logVoice, "AudioEngine started OK");
 
     m_candidateBatchTimer.start();
     m_rrTimer.start();
@@ -166,6 +183,12 @@ void VoiceEngine::stop() {
     m_callIds.clear();
     m_pendingCandidates.clear();
     m_inboundCandidates.clear();
+    // Nothing queued is worth sending into a call that no longer exists —
+    // except the hangups just enqueued above, which went out immediately.
+    m_outbox.clear();
+    // A stopped engine has announced nothing; a later engine must re-announce
+    // any live stream to its (new) peers rather than believe it already did.
+    for (auto& a : m_streamAnnounced) a = false;
     qDeleteAll(m_disconnectTimers);
     m_disconnectTimers.clear();
     qDeleteAll(m_connectWatchdogs);
@@ -211,6 +234,22 @@ void VoiceEngine::addPeer(const QString& userId, bool isOfferer) {
     if (isOfferer) {
         peer->createOffer();
     }
+}
+
+void VoiceEngine::dropPeer(const QString& userId) {
+    if (!m_peers.contains(userId)) return;
+    qCInfo(logVoice, "reconcile: %s left the roster — dropping peer",
+          qPrintable(userId));
+    removePeer(userId);
+}
+
+void VoiceEngine::updateTurnConfig(const QJsonObject& turnConfig) {
+    if (turnConfig.isEmpty()) return;
+    m_turnConfig = turnConfig;
+    // allow_p2p is server policy, not a credential; it can legitimately
+    // change between fetches, and buildRtcConfig reads m_allowP2P.
+    m_allowP2P = turnConfig.value("allow_p2p").toBool(m_allowP2P);
+    qCInfo(logVoice, "TURN credentials refreshed");
 }
 
 void VoiceEngine::ensurePeer(const QString& userId) {
@@ -971,8 +1010,10 @@ void VoiceEngine::onLocalCandidate(const QString& peerId, const std::string& can
 
 void VoiceEngine::flushCandidateBatch() {
     // Cheap piggy-back: this ticks every 500 ms for the whole call, so
-    // it is the natural place to age out parked inbound candidates.
+    // it is the natural place to age out parked inbound candidates and to
+    // drive the outbound retry schedule (V-M2) — no second timer.
     pruneInboundCandidates();
+    flushOutbox();
 
     for (auto it = m_pendingCandidates.begin(); it != m_pendingCandidates.end(); ) {
         if (it.value().empty()) {
@@ -996,16 +1037,51 @@ void VoiceEngine::flushCandidateBatch() {
             {"candidates", candidates},
             {"version", 1}
         };
-        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallCandidates), content);
-
+        // V-M2: the batch is handed to the outbox, which keeps it until
+        // the server has actually taken it and re-sends it on backoff if
+        // not. Candidates are sent exactly ONCE on this path, so before
+        // the outbox a single failed PUT lost them permanently and the
+        // peer never learned a route — a 30 s stall ending in the setup
+        // watchdog. Clearing the local batch here is safe precisely
+        // because the outbox now owns a copy.
+        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallCandidates),
+                      content);
         it.value().clear();
         ++it;
     }
 }
 
 void VoiceEngine::sendCallEvent(const QString& eventType, const nlohmann::json& content) {
-    m_client->sendRoomEvent(m_roomId, eventType,
-                            QByteArray::fromStdString(content.dump()));
+    // V-M2: queued rather than fired and forgotten. A lost invite/answer/
+    // hangup used to cost a full 30 s — the peer sat in Connecting until
+    // the setup watchdog reaped it.
+    const quint64 token = m_outbox.add(
+        eventType, QByteArray::fromStdString(content.dump()),
+        QDateTime::currentMSecsSinceEpoch());
+    Q_UNUSED(token);
+    flushOutbox();
+}
+
+void VoiceEngine::flushOutbox() {
+    if (!m_running || m_roomId.isEmpty()) return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (const auto& entry : m_outbox.due(now)) {
+        m_client->sendCallEvent(m_roomId, entry.type, entry.payload, entry.token);
+    }
+}
+
+void VoiceEngine::onCallEventSendResult(quint64 token, bool ok,
+                                        const QString& error) {
+    if (ok) { m_outbox.onSent(token); return; }
+    const bool willRetry =
+        m_outbox.onFailed(token, QDateTime::currentMSecsSinceEpoch());
+    if (willRetry) {
+        qCInfo(logVoice, "call event send failed (%s) — retrying",
+              qPrintable(error));
+    } else {
+        qCWarning(logVoice, "call event dropped after %d attempts: %s",
+                 voice::CallEventOutbox::kMaxAttempts, qPrintable(error));
+    }
 }
 
 rtc::Configuration VoiceEngine::buildRtcConfig() const {

@@ -49,6 +49,24 @@ target_link_libraries(test_sync_resume PRIVATE
 )
 add_test(NAME test_sync_resume COMMAND test_sync_resume)
 
+# Voice join/leave lifecycle — the VoiceSession state machine plus the two
+# pure helpers the join path leans on (roster reconciliation, start
+# refusal) and the transport selector call joinVoiceChannel now makes.
+#
+# This is the seam Phase 0 of the September plan calls for: no server, no
+# libdatachannel, no audio device, no GUI. VoiceSession reaches the network
+# through signals and the transport through std::function hooks, so the
+# test substitutes a recording fake for both. Before it, the entire join
+# path had zero coverage.
+qt_add_executable(test_voice_lifecycle
+    test_voice_lifecycle.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
+    ${CMAKE_SOURCE_DIR}/src/voice/VoiceTransportSelector.cpp
+)
+target_include_directories(test_voice_lifecycle PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_voice_lifecycle PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_voice_lifecycle COMMAND test_voice_lifecycle)
+
 # Codec round-trip tests — only meaningful where a software H.264
 # backend exists (openh264: macOS/Linux desktop).
 if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
@@ -277,6 +295,30 @@ if(BSFCHAT_ENABLE_VOICE)
     if(NOT WIN32)
         add_test(NAME test_media_loopback COMMAND test_media_loopback)
         set_tests_properties(test_media_loopback PROPERTIES TIMEOUT 60)
+    endif()
+endif()
+
+# Teardown safety for PeerConnectionManager (V-C2 / S-6): two real
+# managers over an in-process loopback, destroyed while audio, JPEG and
+# RTP video are in flight. Meant to be run under ASan+UBSan, where a late
+# libdatachannel callback into the freed object is a hard failure rather
+# than a coin flip — see the header of the test for the build line.
+# Registered as a plain ctest too, where it still catches a teardown that
+# crashes or hangs outright.
+if(BSFCHAT_ENABLE_VOICE)
+    qt_add_executable(test_voice_teardown
+        test_voice_teardown.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/PeerConnectionManager.cpp
+    )
+    target_include_directories(test_voice_teardown PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_voice_teardown PRIVATE
+        bsfchat_protocol
+        Qt6::Core Qt6::Test LibDataChannel::LibDataChannel)
+    # Same reason test_media_loopback is not registered on Windows: the
+    # runners stall loopback UDP host-candidate binds behind Defender.
+    if(NOT WIN32)
+        add_test(NAME test_voice_teardown COMMAND test_voice_teardown)
+        set_tests_properties(test_voice_teardown PROPERTIES TIMEOUT 180)
     endif()
 endif()
 

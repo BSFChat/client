@@ -241,21 +241,61 @@ PeerConnectionManager::PeerConnectionManager(const QString& peerId, const QStrin
     setupCallbacks();
 }
 
+void PeerConnectionManager::resetAllCallbacks() noexcept {
+    // V-C2/S-6. Every libdatachannel callback this class installs captures
+    // raw `this`, and close() is ASYNCHRONOUS while VoiceEngine::stop()
+    // does a synchronous qDeleteAll(m_peers) — so between "close() called"
+    // and "object freed" libdatachannel could still deliver a frame, a
+    // state change or a message into freed memory. Leave / switch / quit /
+    // peer drop all hit this window, and it is widest while video is
+    // flowing, because onFrame fires per reassembled access unit.
+    //
+    // resetCallbacks() is the fix: it takes the same lock the dispatcher
+    // holds, so it waits for any callback already running and guarantees
+    // no new one starts. It must therefore run BEFORE close(), on every
+    // rtc object this class owns — a track left with an onFrame handler is
+    // the one that actually fires.
+    //
+    // m_alive is the second line of defence, for the handful of callbacks
+    // that were already past their own dispatch when this ran.
+    m_alive->store(false);
+    forEachRtcHandle([](const auto& handle) {
+        try { handle->resetCallbacks(); } catch (...) {}
+        if constexpr (std::is_same_v<std::decay_t<decltype(*handle)>, rtc::Track>) {
+            // Drop the media-handler chain too, before the track is
+            // released. libdatachannel v0.24.5's PacingHandler schedules
+            // itself on the global thread pool via weak_bind, which
+            // protects the handler but not the `send` callback it holds
+            // BY REFERENCE — and that reference belongs to the chain the
+            // track owns. Clearing the chain here expires the weak_bind
+            // rather than leaving a tick to fire into it.
+            try { handle->setMediaHandler(nullptr); } catch (...) {}
+        }
+    });
+}
+
+void PeerConnectionManager::closeAllHandles() noexcept {
+    // A throwing destructor is an immediate std::terminate — close()
+    // touches the transport and can raise on a teardown race.
+    forEachRtcHandle([this](const auto& handle) {
+        try {
+            handle->close();
+        } catch (const std::exception& e) {
+            qCWarning(logVoicePc, " [%s] close failed during teardown: %s",
+                     qPrintable(m_peerId), e.what());
+        } catch (...) {
+            qCWarning(logVoicePc, " [%s] close failed during teardown",
+                     qPrintable(m_peerId));
+        }
+    });
+}
+
 PeerConnectionManager::~PeerConnectionManager() {
     qCInfo(logVoicePc, " Destroying peer connection → %s (sent=%d recv=%d)",
           qPrintable(m_peerId), m_framesSent, m_framesReceived);
-    // A throwing destructor is an immediate std::terminate — close()
-    // touches the transport and can raise on a teardown race.
-    try {
-        if (m_dc) m_dc->close();
-        if (m_pc) m_pc->close();
-    } catch (const std::exception& e) {
-        qCWarning(logVoicePc, " [%s] close failed during teardown: %s",
-                 qPrintable(m_peerId), e.what());
-    } catch (...) {
-        qCWarning(logVoicePc, " [%s] close failed during teardown",
-                 qPrintable(m_peerId));
-    }
+    // Order is load-bearing: detach every callback FIRST, only then close.
+    resetAllCallbacks();
+    closeAllHandles();
 }
 
 void PeerConnectionManager::failPeer(const char* where,
@@ -270,7 +310,8 @@ void PeerConnectionManager::failPeer(const char* where,
 }
 
 void PeerConnectionManager::setupCallbacks() {
-    m_pc->onLocalDescription([this](rtc::Description desc) {
+    m_pc->onLocalDescription([this, alive = m_alive](rtc::Description desc) {
+        if (!alive->load()) return;
         std::string type = desc.typeString();
         std::string sdp = std::string(desc);
         QMetaObject::invokeMethod(this, [this, type, sdp]() {
@@ -303,7 +344,8 @@ void PeerConnectionManager::setupCallbacks() {
         }, Qt::QueuedConnection);
     });
 
-    m_pc->onLocalCandidate([this](rtc::Candidate candidate) {
+    m_pc->onLocalCandidate([this, alive = m_alive](rtc::Candidate candidate) {
+        if (!alive->load()) return;
         std::string cand = std::string(candidate);
         std::string mid = candidate.mid();
         QMetaObject::invokeMethod(this, [this, cand, mid]() {
@@ -311,7 +353,8 @@ void PeerConnectionManager::setupCallbacks() {
         }, Qt::QueuedConnection);
     });
 
-    m_pc->onStateChange([this](rtc::PeerConnection::State state) {
+    m_pc->onStateChange([this, alive = m_alive](rtc::PeerConnection::State state) {
+        if (!alive->load()) return;
         QMetaObject::invokeMethod(this, [this, state]() {
             qCInfo(logVoicePc, " [%s] PeerConnection state: %s",
                   qPrintable(m_peerId), stateStr(state));
@@ -346,21 +389,24 @@ void PeerConnectionManager::setupCallbacks() {
         }, Qt::QueuedConnection);
     });
 
-    m_pc->onIceStateChange([this](rtc::PeerConnection::IceState state) {
+    m_pc->onIceStateChange([this, alive = m_alive](rtc::PeerConnection::IceState state) {
+        if (!alive->load()) return;
         QMetaObject::invokeMethod(this, [this, state]() {
             qCInfo(logVoicePc, " [%s] ICE state: %s",
                   qPrintable(m_peerId), iceStr(state));
         }, Qt::QueuedConnection);
     });
 
-    m_pc->onGatheringStateChange([this](rtc::PeerConnection::GatheringState state) {
+    m_pc->onGatheringStateChange([this, alive = m_alive](rtc::PeerConnection::GatheringState state) {
+        if (!alive->load()) return;
         QMetaObject::invokeMethod(this, [this, state]() {
             qCInfo(logVoicePc, " [%s] ICE gathering: %s",
                   qPrintable(m_peerId), gatherStr(state));
         }, Qt::QueuedConnection);
     });
 
-    m_pc->onDataChannel([this](std::shared_ptr<rtc::DataChannel> dc) {
+    m_pc->onDataChannel([this, alive = m_alive](std::shared_ptr<rtc::DataChannel> dc) {
+        if (!alive->load()) return;
         QMetaObject::invokeMethod(this, [this, dc]() {
             qCInfo(logVoicePc, " [%s] Incoming data channel \"%s\"",
                   qPrintable(m_peerId), dc->label().c_str());
@@ -379,7 +425,8 @@ void PeerConnectionManager::setupCallbacks() {
     // answerer side of the video upgrade) — adopt the tracks; the
     // m-lines are SendRecv so this same track carries our outgoing
     // video without another renegotiation.
-    m_pc->onTrack([this](std::shared_ptr<rtc::Track> track) {
+    m_pc->onTrack([this, alive = m_alive](std::shared_ptr<rtc::Track> track) {
+        if (!alive->load()) return;
         QMetaObject::invokeMethod(this, [this, track]() {
             const int idx = streamIndexForMid(track->mid());
             qCInfo(logVoicePc, " [%s] Incoming track mid=%s",
@@ -394,21 +441,24 @@ void PeerConnectionManager::setupCallbacks() {
 void PeerConnectionManager::setupDataChannel(std::shared_ptr<rtc::DataChannel> dc) {
     m_dc = dc;
 
-    m_dc->onOpen([this]() {
+    m_dc->onOpen([this, alive = m_alive]() {
+        if (!alive->load()) return;
         QMetaObject::invokeMethod(this, [this]() {
             qCInfo(logVoicePc, " [%s] DataChannel open — audio can flow",
                   qPrintable(m_peerId));
         }, Qt::QueuedConnection);
     });
 
-    m_dc->onClosed([this]() {
+    m_dc->onClosed([this, alive = m_alive]() {
+        if (!alive->load()) return;
         QMetaObject::invokeMethod(this, [this]() {
             qCInfo(logVoicePc, " [%s] DataChannel closed",
                   qPrintable(m_peerId));
         }, Qt::QueuedConnection);
     });
 
-    m_dc->onMessage([this](rtc::message_variant msg) {
+    m_dc->onMessage([this, alive = m_alive](rtc::message_variant msg) {
+        if (!alive->load()) return;
         if (!std::holds_alternative<rtc::binary>(msg)) return;
         auto& data = std::get<rtc::binary>(msg);
         if (data.empty()) return;
@@ -497,13 +547,15 @@ void PeerConnectionManager::ensureControlChannel() {
 
 void PeerConnectionManager::setupControlChannel(std::shared_ptr<rtc::DataChannel> dc) {
     m_controlDc = dc;
-    dc->onOpen([this]() {
+    dc->onOpen([this, alive = m_alive]() {
+        if (!alive->load()) return;
         QMetaObject::invokeMethod(this, [this]() {
             qCInfo(logVoicePc, " [%s] control channel open (reliable)",
                   qPrintable(m_peerId));
         }, Qt::QueuedConnection);
     });
-    dc->onMessage([this](rtc::message_variant msg) {
+    dc->onMessage([this, alive = m_alive](rtc::message_variant msg) {
+        if (!alive->load()) return;
         if (!std::holds_alternative<rtc::binary>(msg)) return;
         auto& data = std::get<rtc::binary>(msg);
         if (data.empty()) return;
@@ -822,7 +874,8 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
     packetizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
     track->setMediaHandler(packetizer);
 
-    track->onFrame([this, idx](rtc::binary data, rtc::FrameInfo) {
+    track->onFrame([this, idx, alive = m_alive](rtc::binary data, rtc::FrameInfo) {
+        if (!alive->load()) return;
         QByteArray au(reinterpret_cast<const char*>(data.data()),
                       int(data.size()));
         if (!m_video[idx].rxLogged.exchange(true)) {
@@ -838,7 +891,8 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
             emit videoFrameReceived(idx, au, loss);
         }, Qt::QueuedConnection);
     });
-    track->onOpen([this, idx]() {
+    track->onOpen([this, idx, alive = m_alive]() {
+        if (!alive->load()) return;
         QMetaObject::invokeMethod(this, [this, idx]() {
             qCInfo(logVoicePc, " [%s] Video track %s open",
                   qPrintable(m_peerId), kVideoSpecs[idx].mid);
@@ -846,7 +900,8 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
             emit videoTrackOpen(idx);
         }, Qt::QueuedConnection);
     });
-    track->onClosed([this, idx]() {
+    track->onClosed([this, idx, alive = m_alive]() {
+        if (!alive->load()) return;
         QMetaObject::invokeMethod(this, [this, idx]() {
             m_video[idx].open = false;
         }, Qt::QueuedConnection);
@@ -941,7 +996,8 @@ void PeerConnectionManager::requestPeerKeyframe(VideoStreamId stream) {
 
 void PeerConnectionManager::setupLosslessChannel(std::shared_ptr<rtc::DataChannel> dc) {
     m_losslessDc = dc;
-    dc->onMessage([this](rtc::message_variant msg) {
+    dc->onMessage([this, alive = m_alive](rtc::message_variant msg) {
+        if (!alive->load()) return;
         if (!std::holds_alternative<rtc::binary>(msg)) return;
         auto& data = std::get<rtc::binary>(msg);
         if (data.size() < 10) return;  // [stream][flags][seq][tsMs]

@@ -65,6 +65,12 @@ public:
                           const QString& formattedBody,
                           const QStringList& mentionedUserIds);
     void sendRoomEvent(const QString& roomId, const QString& eventType, const QByteArray& content);
+    // Same PUT, but the outcome is reported against `token` through
+    // callEventSendResult instead of the shared messageSent/
+    // sendMessageError pair. Voice signalling needs to know whether ITS
+    // event landed so it can retry (V-M2); the chat signals cannot say.
+    void sendCallEvent(const QString& roomId, const QString& eventType,
+                       const QByteArray& content, quint64 token);
     void getRoomMessages(const QString& roomId, const QString& from, const QString& dir = "b", int limit = 50);
     // Edit a previously-sent m.room.message by the current user. Sends a
     // new m.room.message with m.relates_to {rel_type: m.replace,
@@ -201,14 +207,22 @@ public:
 
     // Voice
     void joinVoice(const QString& roomId);
-    void leaveVoice(const QString& roomId);
+    // `sessionId` is the opaque token the join response returned for this
+    // membership (empty against a server that does not issue one). The
+    // server refuses to act on a token its stored row has moved past, so
+    // echoing it is what stops a late leave from cancelling a FRESH join
+    // — the server half of V-H1.
+    void leaveVoice(const QString& roomId, const QString& sessionId = QString());
     void getVoiceMembers(const QString& roomId);
-    void updateVoiceState(const QString& roomId, bool muted, bool deafened);
+    void updateVoiceState(const QString& roomId, bool muted, bool deafened,
+                          const QString& sessionId = QString());
     // Media-flag-only PUT to the same voice/state endpoint. The server
     // leaves any omitted key unchanged, so sending just the two media
     // flags can't clobber a mute/deafen toggle racing in from
     // updateVoiceState().
-    void updateVoiceMediaState(const QString& roomId, bool screenSharing, bool cameraOn);
+    void updateVoiceMediaState(const QString& roomId, bool screenSharing,
+                               bool cameraOn,
+                               const QString& sessionId = QString());
     void createVoiceChannel(const QString& name);
     void getTurnConfig();
 
@@ -287,12 +301,41 @@ signals:
     void mediaUploadError(const QString& error);
 
     void voiceJoined(const QString& roomId, const QJsonArray& members);
+    // Same reply, with the server's session token for this membership.
+    // Emitted immediately after voiceJoined. `sessionId` is empty against
+    // a server that predates the token.
+    void voiceJoinedSession(const QString& roomId, const QJsonArray& members,
+                            const QString& sessionId, qint64 joinedAt);
     void voiceLeft(const QString& roomId);
     void voiceMembersResult(const QString& roomId, const QJsonArray& members);
+    // Generic voice failure, kept for the user-facing toast: every voice
+    // endpoint still reports through it. It is deliberately NOT the input
+    // to the join/leave state machine — attributing failures by "a voice
+    // request failed while a join was in flight" is precisely V-M4, where
+    // the previous room's leave error unwound the new room's join.
     void voiceError(const QString& error);
+    // Per-endpoint outcomes. Each carries the room it concerns so
+    // VoiceSession can match a reply to the request it issued and ignore
+    // replies to superseded ones. Emitted ALONGSIDE voiceError on
+    // failure, never instead of it.
+    void voiceJoinError(const QString& roomId, const QString& error);
+    void voiceLeaveError(const QString& roomId, const QString& error);
+    void voiceStateUpdated(const QString& roomId);
+    void voiceStateError(const QString& roomId, const QString& error);
+    // The server rejected a state PUT because our token is not the one it
+    // holds (HTTP 403, "Voice session superseded") — our membership was
+    // reaped or replaced. Recovery is re-POSTing voice/join, never
+    // another state PUT: a reaped row is never re-activated by one.
+    void voiceStateSuperseded(const QString& roomId);
+    void voiceMembersError(const QString& roomId, const QString& error);
     void voiceChannelCreated(const QString& roomId);
 
+    void callEventSendResult(quint64 token, bool ok, const QString& error);
+
     void turnConfigResult(const QJsonObject& config);
+    // V-M4: TURN has its own failure channel, so an unrelated voice error
+    // landing inside the TURN round trip can no longer unwind a join.
+    void turnConfigError(const QString& error);
 
     // Canonical user id for our token, from GET /account/whoami.
     // Never fired on error (older servers 404 the endpoint).
