@@ -11,6 +11,7 @@
 
 #include <rtc/rtc.hpp>
 #include <atomic>
+#include <type_traits>
 #include <memory>
 #include <vector>
 #include <string>
@@ -188,11 +189,25 @@ private:
     // emitted synchronously and VoiceEngine reacts by removing (and
     // deleteLater-ing) this peer.
     void failPeer(const char* where, const std::exception& e);
-    // Detach every libdatachannel callback (peer connection, both data
-    // channels, every track) and mark this object dead. Runs first in the
-    // destructor, before any close(). See the definition for why the
-    // order matters — V-C2/S-6.
+    // THE list of libdatachannel objects this class owns. Every teardown
+    // step walks it, so a new channel or track is added in ONE place and
+    // is then covered by both the callback detach and the close. If you
+    // add an rtc handle member, add it here — that is the whole contract.
+    template <typename Fn>
+    void forEachRtcHandle(Fn&& fn)
+    {
+        for (auto& ctx : m_video) if (ctx.track) fn(ctx.track);
+        if (m_losslessDc) fn(m_losslessDc);
+        if (m_dc) fn(m_dc);
+        if (m_pc) fn(m_pc);
+    }
+    // Detach every libdatachannel callback and mark this object dead.
+    // Runs FIRST in the destructor, before any close(). See the definition
+    // for why the order matters — V-C2/S-6.
     void resetAllCallbacks() noexcept;
+    // close() every handle, swallowing the exceptions close() can raise on
+    // a teardown race (a throwing destructor is std::terminate).
+    void closeAllHandles() noexcept;
     // True when the vscreen/vcamera m-lines already exist in either
     // negotiated description. Guards ensureVideoTracks() against adding
     // a duplicate m-line — see the comment there.

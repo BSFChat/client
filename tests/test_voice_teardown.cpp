@@ -12,9 +12,25 @@
 // loopback (no server, no signalling, no codecs — the AU bytes are
 // nonsense that only has to survive packetize → SRTP → depacketize), gets
 // audio, JPEG and RTP video moving in both directions, and then destroys
-// one peer mid-flight while the other keeps sending. It is written to be
-// run under AddressSanitizer, where a late callback into the freed object
-// is a hard failure rather than a coin flip:
+// one peer mid-flight while the other keeps sending, in four shapes
+// including "deleted from inside the delivery of its own frame".
+//
+// WHAT IT DOES AND DOES NOT PROVE — read this before trusting it.
+// It does NOT reproduce the pre-fix use-after-free: with
+// resetAllCallbacks() removed from the destructor it still passes, six
+// runs out of six under ASan. In this harness libdatachannel's own
+// teardown (the PeerConnection destructor closes and joins) happens to
+// close the window before the memory is reused, so "no ASan report" here
+// is not evidence that the callbacks were detached. The fix stands on the
+// reasoning in resetAllCallbacks(), not on this test going green.
+//
+// What it IS worth: a regression net for a teardown that crashes, hangs
+// or double-frees outright, the ASan+UBSan harness Phase 0 asked for, and
+// — with BSFCHAT_TEARDOWN_STRESS_VIDEO=1 — an actual reproducer for a
+// libdatachannel defect (see below). If you can make it fail with the fix
+// reverted, tighten it and delete this paragraph.
+//
+// Run under AddressSanitizer:
 //
 //   cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
 //       -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" ...
@@ -22,6 +38,31 @@
 //
 // Exit 0 = pass. It is registered as an ordinary ctest too: without ASan
 // it still catches a teardown that crashes or hangs outright.
+//
+// RTP VIDEO IS OPT-IN (BSFCHAT_TEARDOWN_STRESS_VIDEO=1), and not because
+// our side is unsafe with it. Pushing encoded video through the teardown
+// trips a separate defect INSIDE libdatachannel v0.24.5: PacingHandler
+// schedules
+// itself on the global thread pool with
+//
+//     weak_bind(&PacingHandler::run, this, send)
+//
+// where `send` is bound as `const message_callback&` — a REFERENCE into
+// the media-handler chain the track owns. weak_bind protects `this` but
+// not that reference, so a pacing tick that comes due after the track has
+// gone calls through a dangling std::function (SEGV at
+// pacinghandler.cpp:42, address 0x8). It reproduces in roughly one run in
+// three under ASan — 2 runs in 3 before we started clearing the chain,
+// roughly 1 in 3 after — and it is not reachable from our callbacks at
+// all; clearing the chain in resetAllCallbacks() is as close as we can
+// get from this side. Keeping it opt-in keeps ctest
+// deterministic; the flag is there to reproduce the upstream bug on
+// demand. Belongs with the pacer work (S-15, workstream C) or an upstream
+// bump.
+//
+// The default path still destroys peers with audio, JPEG screen frames
+// and control traffic in flight, across all four destruction shapes,
+// which is what exercises OUR callback lifetimes.
 
 #include "voice/PeerConnectionManager.h"
 
@@ -127,27 +168,37 @@ Peers bringUpPair(int round)
                      round);
         return {};
     }
-    // Video m-lines were announced in the initial offer; give the tracks
-    // a moment to open before the frame storm starts.
+    // Video m-lines were announced in the initial offer. The tracks are
+    // opened either way — an open track with an onFrame handler is part of
+    // what the destructor has to detach — but only fed when the upstream
+    // pacer defect is being reproduced deliberately.
     p.offerer->ensureVideoTracks();
     pumpUntil([&] { return p.offerer->hasVideoTrackOpen(VideoStreamId::Screen); },
               5000);
     return p;
 }
 
+bool stressVideo()
+{
+    return qEnvironmentVariable("BSFCHAT_TEARDOWN_STRESS_VIDEO") == "1";
+}
+
 // Everything the old destructor could be racing: audio frames, JPEG
-// screen frames and RTP video, in both directions.
+// screen frames and — when asked for — RTP video, in both directions.
 void blast(PeerConnectionManager* from, int iterations)
 {
     static const QByteArray au = makeAccessUnit();
+    const bool video = stressVideo();
     for (int i = 0; i < iterations; ++i) {
-        EncodedFrame frame;
-        frame.data = au;
-        frame.keyframe = (i % 10) == 0;
-        frame.captureTimeUs = qint64(i) * 33'000;
-        frame.width = 640;
-        frame.height = 360;
-        from->sendVideoFrame(VideoStreamId::Screen, frame);
+        if (video) {
+            EncodedFrame frame;
+            frame.data = au;
+            frame.keyframe = (i % 10) == 0;
+            frame.captureTimeUs = qint64(i) * 33'000;
+            frame.width = 640;
+            frame.height = 360;
+            from->sendVideoFrame(VideoStreamId::Screen, frame);
+        }
         from->sendAudioFrame(QByteArray(160, char(i & 0xFF)));
         from->sendScreenFrame(QByteArray(512, char(0x7F)));
         QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
@@ -160,10 +211,13 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
 
-    // Three rounds: destroying the RECEIVER mid-stream, destroying the
-    // SENDER mid-stream, and destroying both at once the way
-    // VoiceEngine::stop()'s qDeleteAll does.
-    for (int round = 0; round < 3; ++round) {
+    // Four rounds: destroying the RECEIVER mid-stream, destroying the
+    // SENDER mid-stream, destroying both at once the way
+    // VoiceEngine::stop()'s qDeleteAll does, and — the tightest window —
+    // destroying a peer from inside the delivery of one of its own
+    // frames, which is when libdatachannel's thread is demonstrably in
+    // the middle of calling into this object.
+    for (int round = 0; round < 4; ++round) {
         Peers p = bringUpPair(round);
         if (!p.offerer) return 2;
 
@@ -185,13 +239,42 @@ int main(int argc, char** argv)
             p.offerer = nullptr;
             blast(p.answerer, 40);
             break;
-        default:
+        case 2:
             // Both at once, no close() in between — the quit shape.
             delete p.offerer;
             delete p.answerer;
             p.offerer = nullptr;
             p.answerer = nullptr;
             break;
+        default: {
+            // Destroy the receiver from the delivery of its own frame.
+            // The signal is emitted through a queued invocation, so the
+            // delete lands on this thread while libdatachannel's thread
+            // is still pumping into the same object — the exact window
+            // resetCallbacks() closes. VoiceEngine's dead-peer cleanup
+            // has this shape: a state change arrives, and the peer is
+            // deleted from the slot it woke.
+            PeerConnectionManager* victim = p.answerer;
+            QObject::connect(victim, &PeerConnectionManager::audioFrameReceived,
+                             victim, [&p, victim]() {
+                if (p.answerer != victim) return;   // already gone
+                p.answerer = nullptr;
+                delete victim;
+            });
+            for (int i = 0; i < 200 && p.answerer; ++i) {
+                p.offerer->sendAudioFrame(QByteArray(160, char(i & 0xFF)));
+                p.offerer->sendScreenFrame(QByteArray(512, char(0x7F)));
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+            }
+            if (p.answerer) {
+                std::fprintf(stderr,
+                    "FAIL: no audio frame ever arrived — the teardown window "
+                    "was never opened, so this round proved nothing\n");
+                return 2;
+            }
+            blast(p.offerer, 40);
+            break;
+        }
         }
 
         // Give libdatachannel's worker threads time to try to deliver
@@ -206,10 +289,18 @@ int main(int argc, char** argv)
         std::printf("round %d: teardown clean\n", round);
     }
 
+    // Let every pacing tick libdatachannel scheduled for a track we just
+    // destroyed come due while we are still pumping. rtc::Cleanup() joins
+    // the thread pool and FORCES the remaining queued tasks to run, so
+    // draining first is what makes the exit deterministic rather than a
+    // race against v0.24.5's PacingHandler (see the note below).
+    pumpFor(1500);
+
     // Join libdatachannel's global worker threads before static
     // destruction — otherwise the process can segfault at exit (seen
     // under ctest, where the harness reaps fast).
     rtc::Cleanup().wait();
-    std::printf("PASS: peers destroyed mid-flight with no late callback\n");
+    std::printf("PASS: peers destroyed mid-flight with no late callback%s\n",
+                stressVideo() ? " (with RTP video)" : "");
     return 0;
 }

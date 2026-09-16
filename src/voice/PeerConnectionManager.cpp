@@ -145,45 +145,54 @@ void PeerConnectionManager::resetAllCallbacks() noexcept {
     // and "object freed" libdatachannel could still deliver a frame, a
     // state change or a message into freed memory. Leave / switch / quit /
     // peer drop all hit this window, and it is widest while video is
-    // flowing, because onFrame fires per RTP packet.
+    // flowing, because onFrame fires per reassembled access unit.
     //
     // resetCallbacks() is the fix: it takes the same lock the dispatcher
     // holds, so it waits for any callback already running and guarantees
-    // no new one starts. It must therefore run BEFORE close(), on the
-    // peer connection, BOTH data channels and every media track — a track
-    // left with an onFrame handler is the one that actually fires.
+    // no new one starts. It must therefore run BEFORE close(), on every
+    // rtc object this class owns — a track left with an onFrame handler is
+    // the one that actually fires.
     //
     // m_alive is the second line of defence, for the handful of callbacks
     // that were already past their own dispatch when this ran.
     m_alive->store(false);
-    auto reset = [](auto& handle) {
-        if (!handle) return;
+    forEachRtcHandle([](const auto& handle) {
         try { handle->resetCallbacks(); } catch (...) {}
-    };
-    for (auto& ctx : m_video) reset(ctx.track);
-    reset(m_losslessDc);
-    reset(m_dc);
-    reset(m_pc);
+        if constexpr (std::is_same_v<std::decay_t<decltype(*handle)>, rtc::Track>) {
+            // Drop the media-handler chain too, before the track is
+            // released. libdatachannel v0.24.5's PacingHandler schedules
+            // itself on the global thread pool via weak_bind, which
+            // protects the handler but not the `send` callback it holds
+            // BY REFERENCE — and that reference belongs to the chain the
+            // track owns. Clearing the chain here expires the weak_bind
+            // rather than leaving a tick to fire into it.
+            try { handle->setMediaHandler(nullptr); } catch (...) {}
+        }
+    });
+}
+
+void PeerConnectionManager::closeAllHandles() noexcept {
+    // A throwing destructor is an immediate std::terminate — close()
+    // touches the transport and can raise on a teardown race.
+    forEachRtcHandle([this](const auto& handle) {
+        try {
+            handle->close();
+        } catch (const std::exception& e) {
+            qCWarning(logVoicePc, " [%s] close failed during teardown: %s",
+                     qPrintable(m_peerId), e.what());
+        } catch (...) {
+            qCWarning(logVoicePc, " [%s] close failed during teardown",
+                     qPrintable(m_peerId));
+        }
+    });
 }
 
 PeerConnectionManager::~PeerConnectionManager() {
     qCInfo(logVoicePc, " Destroying peer connection → %s (sent=%d recv=%d)",
           qPrintable(m_peerId), m_framesSent, m_framesReceived);
+    // Order is load-bearing: detach every callback FIRST, only then close.
     resetAllCallbacks();
-    // A throwing destructor is an immediate std::terminate — close()
-    // touches the transport and can raise on a teardown race.
-    try {
-        for (auto& ctx : m_video) if (ctx.track) ctx.track->close();
-        if (m_losslessDc) m_losslessDc->close();
-        if (m_dc) m_dc->close();
-        if (m_pc) m_pc->close();
-    } catch (const std::exception& e) {
-        qCWarning(logVoicePc, " [%s] close failed during teardown: %s",
-                 qPrintable(m_peerId), e.what());
-    } catch (...) {
-        qCWarning(logVoicePc, " [%s] close failed during teardown",
-                 qPrintable(m_peerId));
-    }
+    closeAllHandles();
 }
 
 void PeerConnectionManager::failPeer(const char* where,
