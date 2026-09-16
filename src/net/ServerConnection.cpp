@@ -1194,6 +1194,13 @@ void ServerConnection::joinVoiceChannel(const QString& roomId)
 
     requestMicrophonePermission();
 
+    // Refreshed here rather than once at construction: m_userId is filled
+    // in by whichever of the four login paths ran (password, register,
+    // OIDC, restored credentials) long after the session object exists,
+    // and a stale one would make the session mistake a peer's signalling
+    // for its own echo.
+    m_voiceSession->setLocalUserId(m_userId);
+
     // Everything about ordering (leave-before-join on a switch, a join
     // queued behind an in-flight leave) lives in the session.
     m_voiceSession->requestJoin(roomId);
