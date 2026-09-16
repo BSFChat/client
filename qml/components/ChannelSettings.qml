@@ -129,7 +129,7 @@ Popup {
     component SectionHeader: Item {
         property alias text: label.text
         Layout.fillWidth: true
-        Layout.preferredHeight: 32
+        Layout.preferredHeight: Theme.controlHeight.sm
         Text {
             id: label
             anchors.left: parent.left
@@ -411,7 +411,7 @@ Popup {
                                      : (saveNameBtn.hovered ? Theme.accentDim : Theme.accent)
                                 radius: Theme.r2
                                 implicitWidth: 80
-                                implicitHeight: 36
+                                implicitHeight: Theme.controlHeight.md
                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                             }
                             onClicked: {
@@ -493,7 +493,7 @@ Popup {
                                      : (saveTopicBtn.hovered ? Theme.accentDim : Theme.accent)
                                 radius: Theme.r2
                                 implicitWidth: 80
-                                implicitHeight: 36
+                                implicitHeight: Theme.controlHeight.md
                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                             }
                             onClicked: {
@@ -734,7 +734,7 @@ Popup {
                 Rectangle {
                     id: doneBtn
                     Layout.preferredWidth: 120
-                    Layout.preferredHeight: 36
+                    Layout.preferredHeight: Theme.controlHeight.md
                     radius: Theme.r2
                     color: doneBtnMouse.containsMouse ? Theme.accentDim : Theme.accent
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }

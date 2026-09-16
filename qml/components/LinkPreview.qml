@@ -120,7 +120,10 @@ Rectangle {
             Layout.preferredHeight: width * 9 / 16
             Layout.maximumHeight: 270
             radius: Theme.r1
-            color: "black"
+            // Letterbox behind a 16:9 thumbnail: a scrim, not a panel, so it
+            // stays black in light mode rather than flashing a pale frame
+            // around the image while it loads.
+            color: Theme.scrim
             clip: true
 
             Image {
@@ -154,15 +157,18 @@ Rectangle {
                 anchors.centerIn: parent
                 width: 72; height: 72; radius: 36
                 color: videoMouse.containsMouse
-                    ? Qt.rgba(1, 0, 0, 0.95) : Qt.rgba(0, 0, 0, 0.7)
-                border.color: "white"; border.width: 2
+                    ? Qt.rgba(1, 0, 0, 0.95)
+                    : Qt.rgba(Theme.scrim.r, Theme.scrim.g, Theme.scrim.b, 0.7)
+                // Sits on the video thumbnail, so it is on a scrim in both
+                // themes — see Theme.onScrim.
+                border.color: Theme.onScrim; border.width: 2
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                 Icon {
                     anchors.centerIn: parent
                     anchors.horizontalCenterOffset: 3
                     name: "play"
                     size: 28
-                    color: "white"
+                    color: Theme.onScrim
                 }
             }
 

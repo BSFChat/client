@@ -32,10 +32,14 @@ ColumnLayout {
     readonly property bool _onBeta:
         typeof appSettings !== "undefined"
         && appSettings.updateChannel === "beta"
-    // Updater::State::AheadOfChannel — running a build newer than
-    // anything the selected channel publishes.
+    // Running a build newer than anything the selected channel publishes.
+    // Named, not the bare 8 this used to compare against: Updater::State is
+    // documented as append-only precisely so these numbers stay stable, which
+    // is exactly the kind of guarantee that makes a magic number survive long
+    // enough to be wrong. UF mirrors the enum and is what every other update
+    // surface compares to.
     readonly property bool _aheadOfChannel:
-        root._hasUpdater && updater.state === 8
+        root._hasUpdater && updater.state === UF.AheadOfChannel
 
     // ---- Channel toggle -------------------------------------------
     RowLayout {

@@ -33,7 +33,11 @@ Popup {
             anchors.margins: -1
             z: -1
             radius: Theme.r3 + 1
-            color: "#40000000"
+            // Was a literal #40000000, which is a black shadow at 25% — fine in
+            // dark mode and a smudge in light, where the theme's shadow is both
+            // a different colour and far softer.
+            color: Qt.rgba(Theme.shadowColor.r, Theme.shadowColor.g,
+                           Theme.shadowColor.b, Theme.shadowAlpha2)
         }
     }
 
@@ -43,7 +47,7 @@ Popup {
         // Search bar
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 40
+            Layout.preferredHeight: Theme.controlHeight.lg
             Layout.margins: Theme.sp.s3
             Layout.bottomMargin: 0
             color: Theme.bg2
@@ -116,7 +120,7 @@ Popup {
         // Category tabs
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 36
+            Layout.preferredHeight: Theme.controlHeight.md
             Layout.leftMargin: Theme.sp.s3
             Layout.rightMargin: Theme.sp.s3
             Layout.topMargin: Theme.sp.s1
@@ -132,7 +136,7 @@ Popup {
 
                     Rectangle {
                         Layout.preferredWidth: 34
-                        Layout.preferredHeight: 32
+                        Layout.preferredHeight: Theme.controlHeight.sm
                         radius: Theme.r1
                         readonly property bool isSelected:
                             emojiPicker.currentCategory === modelData.id

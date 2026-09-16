@@ -70,7 +70,12 @@ Popup {
                           easing.type: Easing.InCubic }
     }
 
-    background: Rectangle { color: Qt.rgba(0, 0, 0, 0.88) }
+    // The backdrop is a scrim over the app, not a themed panel: it stays dark
+    // in light mode because the point is to make the image the only lit thing
+    // on screen. Hence Theme.scrim / Theme.onScrim throughout this file.
+    background: Rectangle {
+        color: Qt.rgba(Theme.scrim.r, Theme.scrim.g, Theme.scrim.b, 0.88)
+    }
 
     contentItem: Item {
         id: viewport
@@ -295,14 +300,14 @@ Popup {
                 property string tooltip: ""
                 signal clicked()
                 Layout.preferredWidth: 36
-                Layout.preferredHeight: 36
+                Layout.preferredHeight: Theme.controlHeight.md
                 radius: Theme.r2
                 color: gbtnMouse.containsMouse
                     ? Qt.rgba(1, 1, 1, 0.18) : Qt.rgba(1, 1, 1, 0.08)
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                 Icon {
                     anchors.centerIn: parent
-                    name: gbtn.icon; size: 16; color: "#ffffff"
+                    name: gbtn.icon; size: 16; color: Theme.onScrim
                 }
                 MouseArea {
                     id: gbtnMouse
@@ -350,7 +355,7 @@ Popup {
                 Text {
                     visible: viewer.filename.length > 0
                     text: viewer.filename
-                    color: "#ffffff"
+                    color: Theme.onScrim
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.sm
                     font.weight: Theme.fontWeight.semibold
@@ -398,7 +403,7 @@ Popup {
                         id: resetText
                         anchors.centerIn: parent
                         text: "Reset"
-                        color: "#ffffff"
+                        color: Theme.onScrim
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
                         font.weight: Theme.fontWeight.semibold

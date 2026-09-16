@@ -153,7 +153,7 @@ Popup {
 
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 44
+            Layout.preferredHeight: Theme.controlHeight.xl
             radius: Theme.r2
             color: Theme.bg0
             border.color: statusField.activeFocus ? Theme.accent : Theme.line
@@ -202,7 +202,7 @@ Popup {
                     border.width: 1
                     radius: Theme.r2
                     implicitWidth: 88
-                    implicitHeight: 40
+                    implicitHeight: Theme.controlHeight.lg
                 }
             }
             Button {
@@ -221,7 +221,7 @@ Popup {
                     color: parent.hovered ? Theme.accentDim : Theme.accent
                     radius: Theme.r2
                     implicitWidth: 88
-                    implicitHeight: 40
+                    implicitHeight: Theme.controlHeight.lg
                 }
             }
         }

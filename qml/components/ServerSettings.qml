@@ -121,6 +121,21 @@ Popup {
     // The id fields are what make this safe: if the row being edited is gone
     // (role deleted elsewhere, member left), the scratch simply no longer
     // matches anything and is seeded afresh on the next edit.
+    // Role colours are SERVER data: they are written to the server and rendered
+    // by every other member, whose theme and accent may be nothing like this
+    // one. So these two are deliberately NOT theme tokens — binding them to
+    // Theme.accent would persist one user's local accent as a shared value.
+    // They are named here only so the hex stops being a magic number repeated
+    // at the two places a role's colour can come into being.
+    readonly property color defaultRoleColor: "#36d6c7"   // Designer cyan
+    // Swatches offered in the role editor: the four Designer accents first,
+    // then a wider gamut of classic chat role colours.
+    readonly property var roleColorSwatches: [
+        "#36d6c7", "#a28bff", "#ec6dd6", "#ffa34a",
+        "#57f287", "#fee75c", "#ed4245", "#f47067",
+        "#39c5cf", "#dcbdfb", "#f69d50", "#768390"
+    ]
+
     property string roleScratchId: ""
     property string roleScratchName: ""
     property string roleScratchColor: ""
@@ -152,7 +167,7 @@ Popup {
         editingRoleId = rid;
         roleScratchId = rid;
         roleScratchName = (role && role.name) || "";
-        roleScratchColor = (role && role.color) || "#5865f2";
+        roleScratchColor = (role && role.color) || defaultRoleColor;
         roleScratchPos = (role && role.position !== undefined) ? role.position : 0;
         roleScratchPerms = _permsToNumber(role && role.permissions);
     }
@@ -589,7 +604,7 @@ Popup {
                                         border.width: 1
                                         radius: Theme.r2
                                         implicitWidth: 120
-                                        implicitHeight: 32
+                                        implicitHeight: Theme.controlHeight.sm
                                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                     }
                                     onClicked: serverIconFileDialog.open()
@@ -666,7 +681,7 @@ Popup {
                                        : (saveServerNameBtn.hovered ? Theme.accentDim : Theme.accent)
                                 radius: Theme.r2
                                 implicitWidth: 140
-                                implicitHeight: 36
+                                implicitHeight: Theme.controlHeight.md
                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                             }
                             onClicked: {
@@ -1162,7 +1177,7 @@ Popup {
                                                 border.color: Theme.line
                                                 border.width: 1
                                                 implicitWidth: 100
-                                                implicitHeight: 36
+                                                implicitHeight: Theme.controlHeight.md
                                             }
                                         }
                                     }
@@ -1173,11 +1188,7 @@ Popup {
                                     Row {
                                         spacing: Theme.sp.s2
                                         Repeater {
-                                            model: [
-                                                "#36d6c7", "#a28bff", "#ec6dd6", "#ffa34a",
-                                                "#57f287", "#fee75c", "#ed4245", "#f47067",
-                                                "#39c5cf", "#dcbdfb", "#f69d50", "#768390"
-                                            ]
+                                            model: serverSettingsPopup.roleColorSwatches
                                             delegate: Rectangle {
                                                 width: 22; height: 22; radius: 11
                                                 color: modelData
@@ -1270,7 +1281,7 @@ Popup {
                                             background: Rectangle {
                                                 color: roleSaveBtn.hovered ? Theme.accentDim : Theme.accent
                                                 radius: Theme.r2
-                                                implicitHeight: 36
+                                                implicitHeight: Theme.controlHeight.md
                                                 implicitWidth: 120
                                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                             }
@@ -1322,7 +1333,7 @@ Popup {
                                                 radius: Theme.r2
                                                 border.color: Theme.danger
                                                 border.width: 1
-                                                implicitHeight: 36
+                                                implicitHeight: Theme.controlHeight.md
                                                 implicitWidth: 120
                                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                             }
@@ -1377,7 +1388,7 @@ Popup {
                         background: Rectangle {
                             color: addRoleBtn.hovered ? Theme.accentDim : Theme.accent
                             radius: Theme.r2
-                            implicitHeight: 36
+                            implicitHeight: Theme.controlHeight.md
                             implicitWidth: 140
                             Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                         }
@@ -1397,7 +1408,7 @@ Popup {
                                 // Default new-role swatch — Designer cyan.
                                 // (Was Discord blurple; swapped for
                                 // visual continuity with our accent.)
-                                color: "#36d6c7",
+                                color: serverSettingsPopup.defaultRoleColor,
                                 position: maxPos + 1,
                                 // Same as kEveryoneDefault in Permissions.h:
                                 // view + send + attach + embed (0x000f) plus
@@ -1729,7 +1740,7 @@ Popup {
                                             readonly property string roleId: modelData.id || modelData.name
                                             visible: roleId !== "everyone"
                                             Layout.fillWidth: true
-                                            implicitHeight: 32
+                                            implicitHeight: Theme.controlHeight.sm
                                             radius: Theme.r1
                                             color: assignHover.containsMouse ? Theme.bg2 : "transparent"
                                             Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
@@ -1828,7 +1839,7 @@ Popup {
                                             background: Rectangle {
                                                 color: roleAssignSaveBtn.hovered ? Theme.accentDim : Theme.accent
                                                 radius: Theme.r2
-                                                implicitHeight: 36
+                                                implicitHeight: Theme.controlHeight.md
                                                 implicitWidth: 160
                                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                             }
@@ -1867,7 +1878,7 @@ Popup {
                                                 radius: Theme.r2
                                                 border.color: Theme.danger
                                                 border.width: 1
-                                                implicitHeight: 36
+                                                implicitHeight: Theme.controlHeight.md
                                                 implicitWidth: 80
                                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                             }
@@ -1900,7 +1911,7 @@ Popup {
                                                        ? Qt.lighter(Theme.danger, 1.1)
                                                        : Theme.danger
                                                 radius: Theme.r2
-                                                implicitHeight: 36
+                                                implicitHeight: Theme.controlHeight.md
                                                 implicitWidth: 80
                                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                             }
@@ -1953,7 +1964,7 @@ Popup {
                             background: Rectangle {
                                 color: addCategoryBtn.hovered ? Theme.accentDim : Theme.accent
                                 radius: Theme.r2
-                                implicitHeight: 36
+                                implicitHeight: Theme.controlHeight.md
                                 implicitWidth: 150
                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                             }
@@ -2363,7 +2374,7 @@ Popup {
                                         radius: Theme.r2
                                         border.color: Theme.line
                                         border.width: 1
-                                        implicitHeight: 32
+                                        implicitHeight: Theme.controlHeight.sm
                                         implicitWidth: 88
                                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                     }
@@ -2476,7 +2487,7 @@ Popup {
                 spacing: Theme.sp.s3
                 Rectangle {
                     Layout.preferredWidth: 32
-                    Layout.preferredHeight: 32
+                    Layout.preferredHeight: Theme.controlHeight.sm
                     radius: Theme.r2
                     color: _confirmModDialog.isDestructive
                         ? Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.15)
@@ -2568,7 +2579,7 @@ Popup {
                         border.width: 1
                         radius: Theme.r2
                         implicitWidth: 100
-                        implicitHeight: 36
+                        implicitHeight: Theme.controlHeight.md
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                     }
                     onClicked: _confirmModDialog.close()
@@ -2602,7 +2613,7 @@ Popup {
                                : base
                         radius: Theme.r2
                         implicitWidth: 160
-                        implicitHeight: 36
+                        implicitHeight: Theme.controlHeight.md
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                     }
                     onClicked: {

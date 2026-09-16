@@ -248,7 +248,7 @@ Popup {
                                 delegate: Rectangle {
                                     required property var modelData
                                     implicitWidth: 96
-                                    implicitHeight: 36
+                                    implicitHeight: Theme.controlHeight.md
                                     radius: Theme.r2
                                     readonly property bool selected: appSettings.theme === modelData.key
                                     color: selected ? Theme.accent
@@ -288,18 +288,17 @@ Popup {
                         RowLayout {
                             spacing: Theme.sp.s3
                             Repeater {
-                                model: [
-                                    { hue: 180, label: "Cyan",    color: "#36d6c7" },
-                                    { hue: 260, label: "Violet",  color: "#a28bff" },
-                                    { hue: 320, label: "Magenta", color: "#ec6dd6" },
-                                    { hue:  30, label: "Amber",   color: "#ffa34a" }
-                                ]
+                                // From Theme, not a second copy of the four
+                                // hex values: written out here they drifted
+                                // from the light-mode palette, so every swatch
+                                // showed its DARK colour in light mode.
+                                model: Theme.accentHues
                                 delegate: Rectangle {
                                     required property var modelData
                                     implicitWidth: 32
-                                    implicitHeight: 32
+                                    implicitHeight: Theme.controlHeight.sm
                                     radius: Theme.r3
-                                    color: modelData.color
+                                    color: Theme.accentFor(modelData.hue)
                                     readonly property bool selected:
                                         appSettings.accentHue === modelData.hue
                                     border.color: selected ? Theme.fg0 : Theme.line
@@ -338,7 +337,7 @@ Popup {
                                 delegate: Rectangle {
                                     required property var modelData
                                     implicitWidth: 96
-                                    implicitHeight: 36
+                                    implicitHeight: Theme.controlHeight.md
                                     radius: Theme.r2
                                     readonly property bool selected:
                                         appSettings.layoutVariant === modelData.key
@@ -1111,7 +1110,7 @@ Popup {
                                 border.width: 1
                                 radius: Theme.r2
                                 implicitWidth: 140
-                                implicitHeight: 36
+                                implicitHeight: Theme.controlHeight.md
                             }
                         }
                     }

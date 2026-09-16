@@ -175,7 +175,7 @@ Popup {
         // "focus ring" prototype for the accessibility pass).
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 44
+            Layout.preferredHeight: Theme.controlHeight.xl
             radius: Theme.r2
             color: Theme.bg2
             border.width: 1

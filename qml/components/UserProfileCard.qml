@@ -185,7 +185,7 @@ Popup {
 
         // Spacer for avatar overlap (half of avatar height).
         Item {
-            Layout.preferredHeight: 36
+            Layout.preferredHeight: Theme.controlHeight.md
         }
 
         // Display name — Geist semibold, tight tracking. Shows the EFFECTIVE
@@ -282,7 +282,7 @@ Popup {
                     id: editNickBtn
                     visible: profileCard.mayEditNickname
                     Layout.preferredWidth: 44
-                    Layout.preferredHeight: 32
+                    Layout.preferredHeight: Theme.controlHeight.sm
                     contentItem: Icon {
                         anchors.centerIn: parent
                         name: "edit"
@@ -435,7 +435,7 @@ Popup {
             Button {
                 id: messageBtn
                 Layout.fillWidth: true
-                Layout.preferredHeight: 40
+                Layout.preferredHeight: Theme.controlHeight.lg
                 contentItem: Text {
                     text: "Send message"
                     font.family: Theme.fontSans
@@ -481,7 +481,7 @@ Popup {
                 id: manageRolesBtn
                 visible: parent.canManageRoles
                 Layout.preferredWidth: 44
-                Layout.preferredHeight: 40
+                Layout.preferredHeight: Theme.controlHeight.lg
                 contentItem: Icon {
                     anchors.centerIn: parent
                     name: "shield"

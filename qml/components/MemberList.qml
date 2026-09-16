@@ -79,7 +79,9 @@ Rectangle {
         Item {
             id: headerItem
             Layout.fillWidth: true
-            Layout.preferredHeight: 48
+            // A header bar, not a control — Theme.headerHeight is the token
+            // for these and is what every other pane header uses.
+            Layout.preferredHeight: Theme.headerHeight
 
             // memberListView.count tracks model.rowCount reactively —
                 // rowCount() as a direct call wouldn't re-evaluate when
