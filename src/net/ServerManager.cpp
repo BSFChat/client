@@ -8,6 +8,11 @@
 #include "identity/IdentityApiClient.h"
 
 #include <QClipboard>
+#include <QDateTime>
+#include <QDir>
+#include <QImage>
+#include <QMimeData>
+#include <QStandardPaths>
 #include <QDesktopServices>
 #include <QGuiApplication>
 #include <QJsonArray>
@@ -608,6 +613,38 @@ void ServerManager::leaveAllVoice()
         // if only one is actually in voice.
         conn->leaveVoiceChannel();
     }
+}
+
+QStringList ServerManager::clipboardFileUrls() const
+{
+    QStringList out;
+    auto* cb = QGuiApplication::clipboard();
+    if (!cb) return out;
+    const QMimeData* mime = cb->mimeData();
+    if (!mime) return out;
+
+    if (mime->hasUrls()) {
+        const auto urls = mime->urls();
+        for (const QUrl& u : urls) {
+            // Remote URLs would need a fetch-and-reupload path we do not
+            // have; the media upload reads bytes off disk.
+            if (u.isLocalFile()) out.append(u.toString());
+        }
+        if (!out.isEmpty()) return out;
+    }
+
+    if (mime->hasImage()) {
+        const QImage img = qvariant_cast<QImage>(mime->imageData());
+        if (!img.isNull()) {
+            const QString path =
+                QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                    .filePath(QStringLiteral("bsfchat-paste-%1.png")
+                                  .arg(QDateTime::currentMSecsSinceEpoch()));
+            if (img.save(path, "PNG"))
+                out.append(QUrl::fromLocalFile(path).toString());
+        }
+    }
+    return out;
 }
 
 void ServerManager::copyToClipboard(const QString& text)

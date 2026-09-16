@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QList>
+#include <QStringList>
 
 #include "net/ServerRoster.h"
 
@@ -100,6 +101,19 @@ public:
     // fetch the user's server list and auto-connect each one via OIDC.
     // identityUrl defaults to https://id.bsfchat.com when empty.
     Q_INVOKABLE void loginWithIdentityAndSync(const QString& identityUrl);
+
+    // Local files currently on the system clipboard, as file:// URLs, so
+    // the composer can paste an image or a file into the channel (U-M14).
+    //
+    // Two sources, in order: URLs the source app put on the clipboard
+    // (a Finder / Explorer copy), and — when the clipboard holds raw
+    // image data with no URL, which is what a screenshot or a
+    // copy-image-from-browser gives you — a PNG spilled to a temp file so
+    // the existing sendMediaMessage path, which reads bytes off disk, can
+    // take it unchanged. Empty when the clipboard holds nothing
+    // pasteable (e.g. plain text), which is the composer's signal to let
+    // the normal text paste happen.
+    Q_INVOKABLE QStringList clipboardFileUrls() const;
 
     // Copy arbitrary text to the system clipboard. Exposed on ServerManager
     // (rather than a separate helper) because QML already has it injected
