@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import BSFChat
 
 // Member list (SPEC §3 — "memberListW 220"). Quiet bg1 surface, widely-
@@ -28,11 +29,20 @@ Rectangle {
         ignoreUnknownSignals: true
         function onPresenceChanged() { memberListRoot._presenceGen++; }
     }
-    // Also tick every minute so the 5-minute online window decays
-    // naturally — a user who went silent 4 minutes ago shouldn't still
-    // show green forever.
-    Timer { running: true; repeat: true; interval: 60 * 1000
-        onTriggered: memberListRoot._presenceGen++ }
+    // The 5-minute "seen recently" window is a function of wall-clock time,
+    // so nothing but a tick can expire it — but it only has to tick while
+    // someone is looking. Gated on visibility and on the app being active, so
+    // a backgrounded or hidden member list costs nothing (U-M4). Both
+    // transitions re-run the bindings on the way back in via the bump below,
+    // so no decay is missed while it was stopped.
+    Timer {
+        id: presenceDecayTimer
+        running: memberListRoot.visible && memberListRoot.Window.active
+        repeat: true
+        interval: 60 * 1000
+        onTriggered: memberListRoot._presenceGen++
+        onRunningChanged: if (running) memberListRoot._presenceGen++
+    }
 
     // Resolve a user's highest-position hoisted role (Discord-style: the
     // most senior role with `hoist` flag determines the name colour +
@@ -229,6 +239,14 @@ Rectangle {
                             // authored copy from the role label.
                             Text {
                                 text: {
+                                    // statusMessageFor is a Q_INVOKABLE: calling
+                                    // it subscribes to nothing, so a status set
+                                    // after the row was built never repainted.
+                                    // presenceChanged is emitted whenever a
+                                    // status message moves (sync presence block
+                                    // and setSelfStatusMessage both do), and
+                                    // _presenceGen tracks it (U-M10).
+                                    memberListRoot._presenceGen;
                                     var s = serverManager.activeServer;
                                     return s ? s.statusMessageFor(model.userId)
                                              : "";
@@ -252,6 +270,7 @@ Rectangle {
                                 // shown above — keeps the row from
                                 // stacking two subtitle lines.
                                 readonly property bool _hasStatus: {
+                                    memberListRoot._presenceGen;  // see above
                                     var s = serverManager.activeServer;
                                     if (!s) return false;
                                     return s.statusMessageFor(model.userId).length > 0;

@@ -18,6 +18,7 @@
 #include "util/ChannelRestore.h"
 #include "util/SearchParser.h"
 #include "util/VoiceRoster.h"
+#include "util/MemberCache.h"
 
 #include <bsfchat/MatrixTypes.h>
 #include <bsfchat/Constants.h>
@@ -2736,6 +2737,143 @@ private slots:
                                QStringLiteral("!space:t")});
         QCOMPARE(model.restoreChoice(QStringLiteral("!secret:t"), true),
                  (ChannelRestoreChoice{Outcome::Fallback, QStringLiteral("!general:t")}));
+    }
+
+    // ---- U-M16: the per-room member cache is bounded ------------------
+
+    // The defect: m_roomMembers appended every m.room.member event forever, so
+    // a room whose members change avatars all afternoon grew without limit
+    // while every reader only ever wanted the current state.
+    void testMemberCacheKeepsOnlyTheLatestEventPerUser()
+    {
+        QVector<bsfchat::RoomEvent> bucket;
+        for (int i = 0; i < 50; ++i) {
+            QCOMPARE(bsfchat::client::upsertMemberEvent(
+                         bucket, makeMemberEvent("@alice:server",
+                                                 "Alice " + std::to_string(i),
+                                                 "join")),
+                     i > 0);  // first is an append, the rest replace
+        }
+        QCOMPARE(bucket.size(), 1);
+        QCOMPARE(QString::fromStdString(
+                     bucket[0].content.data.value("displayname", "")),
+                 QStringLiteral("Alice 49"));
+    }
+
+    // Bounded by the ROSTER, not by one entry: distinct users still each get a
+    // slot, or the member list would show one person per room.
+    void testMemberCacheKeepsOneEntryPerDistinctUser()
+    {
+        QVector<bsfchat::RoomEvent> bucket;
+        bsfchat::client::upsertMemberEvent(
+            bucket, makeMemberEvent("@alice:server", "Alice", "join"));
+        bsfchat::client::upsertMemberEvent(
+            bucket, makeMemberEvent("@bob:server", "Bob", "join"));
+        bsfchat::client::upsertMemberEvent(
+            bucket, makeMemberEvent("@alice:server", "Alice", "leave"));
+        QCOMPARE(bucket.size(), 2);
+
+        // The readers' rule — latest event per user — must survive the
+        // collapse: alice's newest state is "leave", so she is not joined.
+        QMap<QString, QString> membership;
+        for (const auto& ev : bucket) {
+            membership.insert(QString::fromStdString(*ev.state_key),
+                              QString::fromStdString(
+                                  ev.content.data.value("membership", "")));
+        }
+        QCOMPARE(membership.value(QStringLiteral("@alice:server")),
+                 QStringLiteral("leave"));
+        QCOMPARE(membership.value(QStringLiteral("@bob:server")),
+                 QStringLiteral("join"));
+    }
+
+    // A member event without a state key names nobody. Storing it would be
+    // pure growth: every reader keys on the state key and skips it.
+    void testMemberCacheDropsEventsWithNoStateKey()
+    {
+        QVector<bsfchat::RoomEvent> bucket;
+        bsfchat::RoomEvent anonymous;
+        anonymous.type = std::string(bsfchat::event_type::kRoomMember);
+        QCOMPARE(bsfchat::client::upsertMemberEvent(bucket, anonymous), false);
+        QCOMPARE(bucket.size(), 0);
+    }
+
+    // ---- U-H2: the categorized-rooms snapshot compares by value ---------
+
+    // rebuildCategorizedRooms() now returns early when the freshly built
+    // QVariantList equals the one it last published, which is what stops the
+    // whole sidebar delegate tree being destroyed and recreated once per sync.
+    // That early return is only correct if QVariantList::operator== is a deep,
+    // value-wise comparison of the nested maps and lists — an identity
+    // comparison would never match two separately-built snapshots and the
+    // guard would silently do nothing. Pin that assumption here.
+    void testCategorizedRoomsSnapshotComparesByValue()
+    {
+        auto snapshot = [](const QString& voiceMemberName) {
+            QVariantMap voiceRow{{QStringLiteral("user_id"), QStringLiteral("@alice:s")},
+                                 {QStringLiteral("displayName"), voiceMemberName}};
+            QVariantMap channel{{QStringLiteral("roomId"), QStringLiteral("!general:s")},
+                                {QStringLiteral("lastMessageTime"), 1234},
+                                {QStringLiteral("isVoice"), true},
+                                {QStringLiteral("voiceMembers"), QVariantList{voiceRow}}};
+            QVariantMap category{{QStringLiteral("categoryId"), QStringLiteral("!cat:s")},
+                                 {QStringLiteral("channels"), QVariantList{channel}}};
+            return QVariantList{category};
+        };
+
+        // Two independently built but structurally identical snapshots: this
+        // is the sync-pass-that-changed-nothing case, and it must compare
+        // equal all the way down through map → list → map.
+        QVERIFY(snapshot(QStringLiteral("Alice")) == snapshot(QStringLiteral("Alice")));
+
+        // A change buried three levels down — a voice participant's resolved
+        // display name — must still register, or the sidebar would stop
+        // repainting renames.
+        QVERIFY(snapshot(QStringLiteral("Alice")) != snapshot(QStringLiteral("Alicia")));
+    }
+
+    // ---- U-M15: dataChanged carries the roles that moved ----------------
+
+    // An empty role vector means "assume every role changed", which makes every
+    // binding on the row re-evaluate. The update path only ever writes four
+    // fields, so it must say so.
+    void testMemberListUpdateNamesTheRolesItChanged()
+    {
+        MemberListModel model;
+        model.processEvent(makeMemberEvent("@alice:server", "Alice", "join"));
+
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        model.processEvent(makeMemberEvent("@alice:server", "Alicia", "join"));
+        QCOMPARE(spy.count(), 1);
+
+        const auto roles = spy.at(0).at(2).value<QList<int>>();
+        QVERIFY(!roles.isEmpty());
+        QVERIFY(roles.contains(MemberListModel::DisplayNameRole));
+        QVERIFY(roles.contains(MemberListModel::AvatarUrlRole));
+        QVERIFY(roles.contains(MemberListModel::MembershipRole));
+        QVERIFY(roles.contains(MemberListModel::NicknameRole));
+        // UserIdRole is the row's identity — it cannot change here, and
+        // claiming it did would rebuild bindings keyed on it.
+        QVERIFY(!roles.contains(MemberListModel::UserIdRole));
+    }
+
+    void testServerListUpdateNamesTheRolesItChanged()
+    {
+        ServerListModel model;
+        model.addServer(QStringLiteral("Home"), QStringLiteral("https://a.example"));
+
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        model.updateServer(0, QStringLiteral("Home 2"), QStringLiteral("https://b.example"));
+        QCOMPARE(spy.count(), 1);
+
+        const auto roles = spy.at(0).at(2).value<QList<int>>();
+        QCOMPARE(roles.size(), 2);
+        QVERIFY(roles.contains(ServerListModel::DisplayNameRole));
+        QVERIFY(roles.contains(ServerListModel::ServerUrlRole));
+        // The unread badge and the icon are not touched by a rename, so a
+        // binding on either must not be torn down with it.
+        QVERIFY(!roles.contains(ServerListModel::UnreadCountRole));
+        QVERIFY(!roles.contains(ServerListModel::IconUrlRole));
     }
 };
 

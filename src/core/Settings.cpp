@@ -372,6 +372,11 @@ QVariantList Settings::audioOutputDevices() const {
     return devicesToList(QMediaDevices::audioOutputs());
 }
 
+void Settings::refreshAudioDevices()
+{
+    emit audioDevicesChanged();
+}
+
 QStringList Settings::collapsedCategories() const
 {
     return m_settings.value("collapsedCategories").toStringList();
@@ -391,7 +396,13 @@ qint64 Settings::lastReadTs(const QString& roomId) const
 void Settings::setLastReadTs(const QString& roomId, qint64 tsMs)
 {
     if (roomId.isEmpty()) return;
-    m_settings.setValue(QStringLiteral("unread/") + roomId, tsMs);
+    const QString key = QStringLiteral("unread/") + roomId;
+    // Only notify on a real move. Writers call this on every room switch,
+    // frequently with the value already stored, and a signal per no-op write
+    // would reintroduce exactly the churn the 800 ms poll was replaced to fix.
+    if (m_settings.value(key, 0).toLongLong() == tsMs) return;
+    m_settings.setValue(key, tsMs);
+    emit lastReadTsChanged(roomId);
 }
 
 bool Settings::isRoomMuted(const QString& roomId) const

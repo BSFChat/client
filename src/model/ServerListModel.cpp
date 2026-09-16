@@ -56,7 +56,10 @@ void ServerListModel::updateServer(int index, const QString& displayName, const 
     if (index < 0 || index >= m_servers.size()) return;
     m_servers[index].displayName = displayName;
     m_servers[index].serverUrl = serverUrl;
-    emit dataChanged(this->index(index), this->index(index));
+    // U-M15: scope the notification to the two fields this writes, so an
+    // unrelated binding (unread badge, icon) is not torn down with them.
+    emit dataChanged(this->index(index), this->index(index),
+                     {DisplayNameRole, ServerUrlRole});
 }
 
 void ServerListModel::setUnreadCount(int index, int count)
