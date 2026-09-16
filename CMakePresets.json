@@ -1,0 +1,62 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "macos-dev",
+      "displayName": "macOS dev (Release, Ninja, ccache)",
+      "description": "The everyday macOS configure. Release because a Debug client drops frames while sharing a screen; ccache because third-party sources dominate a rebuild.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
+        "Qt6_DIR": "/opt/homebrew/lib/cmake/Qt6"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "warnings": { "dev": false }
+    },
+    {
+      "name": "macos-asan",
+      "inherits": "macos-dev",
+      "displayName": "macOS ASan+UBSan (matches the CI sanitizer job)",
+      "description": "Debug + address/undefined sanitizers, same flags as the `sanitizers` job in .github/workflows/ci.yml. Separate build dir so it never clobbers the dev build.",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "macos-dev",
+      "configurePreset": "macos-dev",
+      "jobs": 3
+    },
+    {
+      "name": "macos-asan",
+      "configurePreset": "macos-asan",
+      "jobs": 3
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "macos-dev",
+      "configurePreset": "macos-dev",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 4 }
+    },
+    {
+      "name": "macos-asan",
+      "configurePreset": "macos-asan",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 4 }
+    }
+  ]
+}

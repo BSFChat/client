@@ -1,5 +1,7 @@
 #include "core/UrlHandler.h"
 
+#include "core/AppProfile.h"
+
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QDebug>
@@ -38,6 +40,11 @@ QString UrlHandler::socketName()
                                                       ? qgetenv("USERNAME")
                                                       : qgetenv("USER")));
     if (base.endsWith('-')) base.chop(1);
+    // Per-profile socket as well as per-user: the QLocalServer below is the
+    // single-instance lock, so without this a second `--profile` client
+    // would hand its URL to the first one and exit instead of starting.
+    // Empty for the default profile, so the historical name is unchanged.
+    base += bsfchat::socketSuffixForProfile(bsfchat::activeProfile());
     return base;
 }
 
