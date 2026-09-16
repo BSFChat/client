@@ -8,6 +8,10 @@
 #include <QPointer>
 #include <QVariantList>
 
+#include "voice/video/LatestWinsWorker.h"
+
+#include <memory>
+
 #ifdef Q_OS_MACOS
 class MacScreenCapturer;
 #else
@@ -154,6 +158,11 @@ private:
     // server).
     QList<QMetaObject::Connection> m_voiceRoomConns;
     QVideoFrame m_pendingFrame;
+    // Off-GUI-thread helpers (S-10): the capture QImage -> QVideoFrame
+    // copy and the legacy JPEG encode. Declared after everything they
+    // touch so destruction joins their threads first.
+    std::unique_ptr<LatestWinsWorker> m_frameWorker;
+    std::unique_ptr<LatestWinsWorker> m_jpegWorker;
     bool m_active = false;
     bool m_transmitting = false;
     QString m_lastError;
