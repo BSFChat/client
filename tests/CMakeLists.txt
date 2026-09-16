@@ -233,6 +233,30 @@ if(BSFCHAT_ENABLE_VOICE)
     endif()
 endif()
 
+# Teardown safety for PeerConnectionManager (V-C2 / S-6): two real
+# managers over an in-process loopback, destroyed while audio, JPEG and
+# RTP video are in flight. Meant to be run under ASan+UBSan, where a late
+# libdatachannel callback into the freed object is a hard failure rather
+# than a coin flip — see the header of the test for the build line.
+# Registered as a plain ctest too, where it still catches a teardown that
+# crashes or hangs outright.
+if(BSFCHAT_ENABLE_VOICE)
+    qt_add_executable(test_voice_teardown
+        test_voice_teardown.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/PeerConnectionManager.cpp
+    )
+    target_include_directories(test_voice_teardown PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_voice_teardown PRIVATE
+        bsfchat_protocol
+        Qt6::Core Qt6::Test LibDataChannel::LibDataChannel)
+    # Same reason test_media_loopback is not registered on Windows: the
+    # runners stall loopback UDP host-candidate binds behind Defender.
+    if(NOT WIN32)
+        add_test(NAME test_voice_teardown COMMAND test_voice_teardown)
+        set_tests_properties(test_voice_teardown PROPERTIES TIMEOUT 180)
+    endif()
+endif()
+
 # Video-player playback maths (qml/js/PlaybackMath.js), driven through a
 # QML test runner because that is where the code lives and where the app
 # calls it — a C++ copy of the same arithmetic would prove nothing about
