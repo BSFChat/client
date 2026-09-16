@@ -115,9 +115,16 @@ ApplicationWindow {
 
     // Toast host for every subsystem — reachable via Window.window.toast().
     ToastHost { id: toastHostGlobal; parent: Overlay.overlay }
-    function toast(t, kind) { toastHostGlobal.show(t, kind || "info"); }
-    function toastError(t)   { toast(t, "error"); }
-    function toastSuccess(t) { toast(t, "success"); }
+    // ToastHost's API is toast()/info()/success()/warn()/error(). This
+    // called a `show()` that has never existed, so EVERY toast on mobile
+    // threw a TypeError and nothing was ever shown (U-C2). Kept
+    // name-for-name in step with main.qml:471-475 so a call site written
+    // against one shell works in the other.
+    function toast(t, kind)  { toastHostGlobal.toast(t, kind || "info"); }
+    function toastInfo(t)    { toastHostGlobal.info(t); }
+    function toastSuccess(t) { toastHostGlobal.success(t); }
+    function toastWarn(t)    { toastHostGlobal.warn(t); }
+    function toastError(t)   { toastHostGlobal.error(t); }
 
     // ── Top bar ──────────────────────────────────────────────────
     // Minimal: channel name + burger (drawers). Title taps open the
@@ -530,7 +537,15 @@ ApplicationWindow {
 
     // showMemberList on mobile is always "the right drawer"; shim
     // the desktop-level property for components that peek at it.
+    //
+    // It is a BINDING, so it is read-only from the outside: assigning to
+    // it (which MessageView's header button used to do) replaces the
+    // binding with a static value and the drawer stops tracking it
+    // forever after (U-M12). toggleMemberList drives the drawer itself.
     property bool showMemberList: rightDrawer.opened
+    function toggleMemberList() {
+        if (rightDrawer.opened) rightDrawer.close(); else rightDrawer.open();
+    }
 
     // Login dialog when not authenticated to any server. Mobile
     // builds hit the same LoginDialog — OIDC flow works in-process
@@ -596,6 +611,10 @@ ApplicationWindow {
     // messages; files go through the media-upload pipeline.
     Connections {
         target: typeof urlHandler !== "undefined" ? urlHandler : null
+        // The target is null on every build without the Android share
+        // intent, and non-null builds may not carry this signal — either
+        // way an unguarded Connections is a hard QML error at load (U-M6).
+        ignoreUnknownSignals: true
         function onSharedPayloadReceived(payload, mimeType, isFile) {
             var s = serverManager.activeServer;
             if (!s || !s.activeRoomId || s.activeRoomId.length === 0) {

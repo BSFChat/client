@@ -89,8 +89,10 @@ ApplicationWindow {
         target: serverManager ? serverManager.activeServer : null
         ignoreUnknownSignals: true
         function onSendFeedback(text, kind) {
-            if (toastHostGlobal && toastHostGlobal.show)
-                toastHostGlobal.show(text, kind || "error");
+            // `toastHostGlobal.show` has never existed — the guard meant
+            // every rate-limit and permission error was silently dropped
+            // instead of toasted (U-C2). The API is toast()/toastInfo()/… .
+            root.toast(text, kind || "error");
         }
     }
     // (The "remember this channel" write used to live here. It moved into
@@ -250,10 +252,17 @@ ApplicationWindow {
         }
     }
 
+    // The one way to flip the member list. MessageView's header button
+    // used to assign to `showMemberList` directly, which is fine here but
+    // destroys the binding the mobile shell gives that property (U-M12) —
+    // so both shells expose this function and nothing writes the property
+    // from outside.
+    function toggleMemberList() { root.showMemberList = !root.showMemberList; }
+
     // Keyboard shortcut to toggle member list
     Shortcut {
         sequence: "Ctrl+M"
-        onActivated: root.showMemberList = !root.showMemberList
+        onActivated: root.toggleMemberList()
     }
 
     // Cmd+1..9 (Ctrl+1..9 on Win/Linux) selects servers 0..8.
