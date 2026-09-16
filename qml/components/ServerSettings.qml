@@ -1230,10 +1230,14 @@ Popup {
                                                 spacing: 6
                                                 ThemedCheckBox {
                                                     id: cb
-                                                    // Reading roleScratchPerms through the
-                                                    // helper registers the dependency, so the
-                                                    // boxes stay in step with toggles and with
-                                                    // switching to another role.
+                                                    // The bare read of roleScratchPerms is
+                                                    // the dependency, and is deliberate: a
+                                                    // property only read INSIDE the helper can
+                                                    // be dead-code-eliminated on QML's
+                                                    // AOT-compiled path, after which the box
+                                                    // would never re-evaluate on a toggle or on
+                                                    // switching to another role. Same defence,
+                                                    // and same reason, as MessageInput's.
                                                     checked: serverSettingsPopup.roleScratchPerms >= 0
                                                         && serverSettingsPopup.roleScratchHasPerm(modelData.flag)
                                                     onToggled: serverSettingsPopup.toggleRoleScratchPerm(modelData.flag)

@@ -400,9 +400,11 @@ Popup {
 
             // ---- Audio ----
             Item {
-                // D-H4: the Audio page is taller than the dialog's 640 px cap: two device rows, the protection rows and the whole Voice Activity block. With a bare ColumnLayout the overflow simply painted
-                // past the dialog's edge — no clip, no scroll, no way to reach
-                // it. Same Flickable wrapper as the Screen Share page.
+                // D-H4: the Audio page is taller than the dialog's 640 px
+                // cap — two device rows, the protection rows and the whole
+                // Voice Activity block. With a bare ColumnLayout the overflow
+                // simply painted past the dialog's edge: no clip, no scroll,
+                // no way to reach it. Same Flickable wrapper as Screen Share.
                 Flickable {
                     id: audioColFlick
                     anchors.fill: parent
@@ -934,9 +936,11 @@ Popup {
             // on desktop builds. Mobile sees an empty placeholder
             // since the OS store owns updates there.
             Item {
-                // D-H4: the Updates page overflows once the release notes expand, and the channel picker and the banner sit below them. With a bare ColumnLayout the overflow simply painted
-                // past the dialog's edge — no clip, no scroll, no way to reach
-                // it. Same Flickable wrapper as the Screen Share page.
+                // D-H4: the Updates page overflows once the release notes
+                // expand, with the channel picker and the banner below them.
+                // With a bare ColumnLayout the overflow simply painted past
+                // the dialog's edge: no clip, no scroll, no way to reach it.
+                // Same Flickable wrapper as the Screen Share page.
                 Flickable {
                     id: updatesColFlick
                     anchors.fill: parent
