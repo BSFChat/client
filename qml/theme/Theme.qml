@@ -359,12 +359,21 @@ QtObject {
     //   lg — primary actions and the taller inputs that anchor a pane
     //   xl — full-width search / filter bars, which want a comfortable target
     // Header BARS are not controls and keep their own `headerHeight` above.
-    readonly property QtObject controlHeight: QtObject {
+    // Declared as a NAMED inline component rather than the anonymous
+    // `QtObject { ... }` the older groups use. It is the same object at
+    // runtime, but qmllint can only see the members of a group whose type it
+    // knows: an anonymous QtObject is typed as bare QObject, so every
+    // `Theme.sp.s3` in the tree is reported as MissingProperty — which
+    // .qmllint.ini promotes to an error. This shape resolves cleanly, so the
+    // new token adds nothing to that backlog, and it is the pattern the older
+    // groups can be converted to for the same benefit.
+    component ControlHeights: QtObject {
         readonly property int sm: 32
         readonly property int md: 36
         readonly property int lg: 40
         readonly property int xl: 44
     }
+    readonly property ControlHeights controlHeight: ControlHeights {}
 
     // ─── Accessibility borders (our extension) ───────────────
     // Accessibility mode draws thick, accent-colored borders between panels
