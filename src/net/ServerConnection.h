@@ -732,6 +732,9 @@ public:
     bool viewingVoiceRoom() const { return m_viewingVoiceRoom; }
 
     // Per-room member cache: roomId -> list of member events
+    // Per-room member cache, collapsed to the latest event per user by
+    // bsfchat::client::upsertMemberEvent() (util/MemberCache.h) so it stays
+    // bounded by the roster size rather than growing per event (U-M16).
     QMap<QString, QVector<bsfchat::RoomEvent>> m_roomMembers;
     QMap<QString, QStringList> m_roomPinnedEvents;
     QMap<QString, qint64> m_userLastActivityMs; // for activity-based presence
@@ -861,6 +864,16 @@ private:
     QJsonArray m_serverRoles;
     QVariantList m_categorizedRooms;
     void rebuildCategorizedRooms();
+
+    // Build the QML-facing voice roster snapshot (display names + media
+    // flags + per-peer connection state stamped onto m_voiceMembers).
+    QJsonArray buildVoiceMembers() const;
+    // Publish that snapshot, emitting voiceMembersChanged() only when it
+    // differs from the last published one (U-M9). `force` emits regardless,
+    // for the join/leave transitions where the UI must resync either way.
+    void emitVoiceMembersIfChanged(bool force = false);
+    // The snapshot as of the last voiceMembersChanged() we emitted.
+    QJsonArray m_lastEmittedVoiceMembers;
 
     // Typed permission caches, populated from sync state events.
     struct RoleInfo {

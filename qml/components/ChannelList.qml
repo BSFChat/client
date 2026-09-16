@@ -28,13 +28,17 @@ Rectangle {
     property int muteGeneration: 0
     property int unreadGeneration: 0
 
-    // Poll for external lastReadTs updates (e.g. MessageView
-    // persisting on room-switch). Cheap — only drives bindings.
-    Timer {
-        interval: 800
-        running: true
-        repeat: true
-        onTriggered: channelListRoot.unreadGeneration++
+    // External lastReadTs updates (e.g. MessageView persisting on
+    // room-switch) used to be picked up by an 800 ms forever-timer, which
+    // re-evaluated every channel row four times a minute — including while
+    // the window was in the background. Settings now reports the write
+    // directly, and only when the stored value actually moved.
+    Connections {
+        target: appSettings
+        ignoreUnknownSignals: true
+        function onLastReadTsChanged(roomId) {
+            channelListRoot.unreadGeneration++;
+        }
     }
 
     // The server is the authority on per-room notify level now, so its answer
@@ -495,7 +499,7 @@ Rectangle {
                                 color: {
                                     switch (modelData.peerPresence) {
                                     case "online":      return Theme.online;
-                                    case "unavailable": return Theme.warning;
+                                    case "unavailable": return Theme.warn;
                                     default:            return Theme.fg3;
                                     }
                                 }
@@ -752,11 +756,18 @@ Rectangle {
             visible: serverManager.activeServer !== null
                   && dmRepeater.count > 0
 
-            readonly property int _dmGen: {
-                if (!serverManager.activeServer) return 0;
-                // Tick on every DM mutation so the Repeater rebuilds.
-                serverManager.activeServer.directRoomsChanged;
-                return 0;
+            // directRooms() is a Q_INVOKABLE, so reading it creates no
+            // binding dependency and a new DM never appeared until something
+            // else forced a rebuild (in practice, a server switch). Naming the
+            // signal in an expression does not subscribe to it either — that
+            // reads a property called "directRoomsChanged", which does not
+            // exist. A Connections handler is the dependency; the repeater's
+            // model binding reads the counter it bumps.
+            property int _dmGen: 0
+            Connections {
+                target: serverManager.activeServer
+                ignoreUnknownSignals: true
+                function onDirectRoomsChanged() { dmSection._dmGen++; }
             }
 
             ColumnLayout {
@@ -799,8 +810,11 @@ Rectangle {
 
                 Repeater {
                     id: dmRepeater
-                    model: serverManager.activeServer
-                        ? serverManager.activeServer.directRooms() : []
+                    model: {
+                        dmSection._dmGen;  // dependency — see _dmGen above
+                        return serverManager.activeServer
+                            ? serverManager.activeServer.directRooms() : [];
+                    }
 
                     delegate: Item {
                         width: channelListRoot.width
@@ -2258,9 +2272,9 @@ Rectangle {
                 return false;
             }
             onTriggered: {
-                var rid = roomContextMenu.roomId;
-                appSettings.setLastReadTs(rid, Date.now());
-                channelListRoot.unreadGeneration++;
+                // setLastReadTs emits lastReadTsChanged, which bumps
+                // unreadGeneration through the Connections above.
+                appSettings.setLastReadTs(roomContextMenu.roomId, Date.now());
             }
         }
 

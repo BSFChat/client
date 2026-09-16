@@ -4,6 +4,7 @@
 #include "model/RoomListModel.h"
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
+#include "util/MemberCache.h"
 #include "util/MentionBadge.h"
 #include "util/ModerationScope.h"
 #include "util/PermissionMath.h"
@@ -353,7 +354,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         m_voicePollTimer->start();
         clearVoiceError();
         emit activeVoiceRoomIdChanged();
-        emit voiceMembersChanged();
+        emitVoiceMembersIfChanged(/*force=*/true);
         emit voiceMutedChanged();
         emit voiceDeafenedChanged();
 #ifdef BSFCHAT_VOICE_ENABLED
@@ -491,7 +492,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             // When any peer's connection state changes, re-emit
             // voiceMembersChanged so the UI refreshes the per-peer dot.
             connect(m_voiceEngine, &VoiceEngine::peerStateChanged,
-                    this, [this]() { emit voiceMembersChanged(); });
+                    this, [this]() { emitVoiceMembersIfChanged(); });
 
             // Dead peer — blank their video surfaces so the UI doesn't
             // keep rendering a frozen last frame.
@@ -500,7 +501,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
                 m_videoRegistry->dropUser(userId);
                 if (m_peerLevels.remove(userId))
                     emit peerLevelChanged(userId);
-                emit voiceMembersChanged();
+                emitVoiceMembersIfChanged();
             });
 
             connect(m_voiceEngine, &VoiceEngine::error,
@@ -562,7 +563,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         if (roomId == m_activeVoiceRoomId) {
             m_voiceMembers = members;
             reconcileAnnouncedMedia();
-            emit voiceMembersChanged();
+            emitVoiceMembersIfChanged();
 #ifdef BSFCHAT_VOICE_ENABLED
             // Mesh reconciliation: any polled member we hold no peer
             // for (their invite got lost, or their peer was reaped by
@@ -625,7 +626,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             m_userDisplayNames[userId] = displayName;
             m_messageModel->refreshDisplayNames();
             m_memberListModel->refreshDisplayNames();
-            emit voiceMembersChanged();
+            emitVoiceMembersIfChanged();
             // Sidebar voice rows carry a stamped display name, so they only
             // rename when the snapshot is rebuilt.
             rebuildCategorizedRooms();
@@ -651,7 +652,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             m_userDisplayNames[userId] = nickname;
             m_messageModel->refreshDisplayNames();
             m_memberListModel->refreshDisplayNames();
-            emit voiceMembersChanged();
+            emitVoiceMembersIfChanged();
             rebuildCategorizedRooms();
         }
         emit nicknameChanged(userId, nickname);
@@ -1400,6 +1401,24 @@ void ServerConnection::refreshRoomNotifyLevel(const QString& roomId)
 
 QJsonArray ServerConnection::voiceMembers() const
 {
+    return buildVoiceMembers();
+}
+
+// U-M9: the 5 s roster poll re-emitted voiceMembersChanged unconditionally,
+// which rebuilt every voice tile mid-call. Compare the snapshot we are about
+// to publish against the last one we published and stay quiet when they are
+// equal. `force` is for the join/leave transitions, where the UI has to be
+// told even if the roster happens to look the same as the previous room's.
+void ServerConnection::emitVoiceMembersIfChanged(bool force)
+{
+    QJsonArray next = buildVoiceMembers();
+    if (!force && next == m_lastEmittedVoiceMembers) return;
+    m_lastEmittedVoiceMembers = next;
+    emit voiceMembersChanged();
+}
+
+QJsonArray ServerConnection::buildVoiceMembers() const
+{
     // Resolve @localpart:host → displayname for rendering. Falls back to
     // localpart if we don't have a cached name yet.
     auto displayFor = [this](const QString& uid) -> QString {
@@ -1568,7 +1587,7 @@ void ServerConnection::teardownVoiceSession()
     m_voiceMuted = false;
     m_voiceDeafened = false;
     emit activeVoiceRoomIdChanged();
-    emit voiceMembersChanged();
+    emitVoiceMembersIfChanged(/*force=*/true);
     emit voiceMutedChanged();
     emit voiceDeafenedChanged();
     // Ensure UI drops the transmit indicator immediately, bypassing the
@@ -1930,6 +1949,12 @@ void ServerConnection::rebuildCategorizedRooms()
         }
         groups = filtered;
     }
+    // U-H2: the sidebar delegate tree is destroyed and rebuilt on every
+    // categorizedRoomsChanged, so a sync pass that changed nothing outside
+    // this snapshot must not emit. QVariantList compares element-wise, and
+    // every leaf here is a string/number/bool/list/map, so operator== is a
+    // true value comparison rather than an identity one.
+    if (groups == m_categorizedRooms) return;
     m_categorizedRooms = groups;
     emit categorizedRoomsChanged();
 }
@@ -2136,6 +2161,12 @@ QString ServerConnection::resolveMediaUrl(const QString& mxcUri) const
 
 void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response)
 {
+    // U-H8: the per-message presence heuristic below used to emit
+    // presenceChanged once per timeline message, so the member list rebound
+    // N x M times on the first sync. Collect the intent here and emit once,
+    // at the end of the pass, and only when a value actually moved.
+    bool presenceDirty = false;
+
     // Clear sync error on successful sync
     if (m_connectionStatus != 1) {
         m_connectionStatus = 1;
@@ -2180,7 +2211,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 m_selfStatusMessage = msg;
             }
         }
-        if (anyChanged) emit presenceChanged();
+        if (anyChanged) presenceDirty = true;
     }
 
     for (const auto& [roomIdStr, joinedRoom] : response.rooms.join) {
@@ -2236,7 +2267,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomMember)) {
                 // Cache member events for all rooms + populate global
                 // display-name map that MessageModel reads from.
-                m_roomMembers[roomId].append(event);
+                bsfchat::client::upsertMemberEvent(m_roomMembers[roomId], event);
                 if (event.state_key.has_value()) {
                     QString uid = QString::fromStdString(*event.state_key);
                     QString dn = QString::fromStdString(event.content.data.value("displayname", ""));
@@ -2248,7 +2279,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                         // panel.
                         m_messageModel->refreshDisplayNames();
                         m_memberListModel->refreshDisplayNames();
-                        emit voiceMembersChanged();
+                        emitVoiceMembersIfChanged();
                     }
                 }
                 if (roomId == m_activeRoomId) {
@@ -2335,7 +2366,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 QString name = QString::fromStdString(event.content.data.value("name", ""));
                 m_roomListModel->updateRoomName(roomId, name);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomMember)) {
-                m_roomMembers[roomId].append(event);
+                bsfchat::client::upsertMemberEvent(m_roomMembers[roomId], event);
                 if (roomId == m_activeRoomId) {
                     m_memberListModel->processEvent(event);
                 }
@@ -2403,9 +2434,14 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 // online at origin_server_ts. Later lookups compare
                 // against now() vs the window.
                 if (!sender.isEmpty()) {
-                    m_userLastActivityMs[sender] =
-                        static_cast<qint64>(event.origin_server_ts);
-                    emit presenceChanged();
+                    // Only a value that actually moved counts as dirty: a
+                    // re-delivered or out-of-order event whose timestamp is
+                    // no newer than what we hold changes nothing visible.
+                    const qint64 ts = static_cast<qint64>(event.origin_server_ts);
+                    if (m_userLastActivityMs.value(sender, 0) != ts) {
+                        m_userLastActivityMs[sender] = ts;
+                        presenceDirty = true;
+                    }
                 }
                 if (roomId == m_activeRoomId && sender != m_userId) {
                     activeRoomHadNewMessage = true;
@@ -2720,6 +2756,9 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
     // so anything that mutates RoomListModel outside a sync pass has to
     // rebuild it or the sidebar keeps rendering the previous batch's numbers.
     rebuildCategorizedRooms();
+
+    // One presence tick for the whole sync pass (U-H8).
+    if (presenceDirty) emit presenceChanged();
 
     // Let any Bans-tab binding re-evaluate. This fires once per sync
     // regardless of whether membership actually changed — cheap enough

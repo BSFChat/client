@@ -54,8 +54,18 @@ class Settings : public QObject {
     // List of {description, id} maps for audio devices; populated live from
     // QMediaDevices. The id isn't persistent across reboots on every OS, so
     // selection is stored by description and resolved on startup.
-    Q_PROPERTY(QVariantList audioInputDevices READ audioInputDevices CONSTANT)
-    Q_PROPERTY(QVariantList audioOutputDevices READ audioOutputDevices CONSTANT)
+    // NOTIFY, not CONSTANT: the lists are enumerated fresh on every read, so
+    // a headset plugged in after startup does show up — but with CONSTANT no
+    // binding ever re-read them, so the combo boxes were frozen at the set of
+    // devices present when the dialog first loaded. refreshAudioDevices() is
+    // called from the settings dialog's onOpened, which is when a user who
+    // just plugged something in looks for it. (A live QMediaDevices hot-plug
+    // subscription would be strictly better but belongs in the constructor,
+    // which is being edited elsewhere this cycle.)
+    Q_PROPERTY(QVariantList audioInputDevices READ audioInputDevices NOTIFY audioDevicesChanged)
+    Q_PROPERTY(QVariantList audioOutputDevices READ audioOutputDevices NOTIFY audioDevicesChanged)
+    // Re-publish the device lists. Cheap (a QMediaDevices enumeration).
+    Q_INVOKABLE void refreshAudioDevices();
 
 public:
     explicit Settings(QObject* parent = nullptr);
@@ -147,6 +157,8 @@ public:
     // messages divider. Returns 0 if never seen (caller treats as "no
     // boundary — don't show a divider"). Stored under unread/<roomId>.
     Q_INVOKABLE qint64 lastReadTs(const QString& roomId) const;
+    // Emits lastReadTsChanged(roomId) when the stored value actually moves,
+    // so the channel list can drop its 800 ms unread poll (U-M4).
     Q_INVOKABLE void setLastReadTs(const QString& roomId, qint64 tsMs);
 
     // Muted rooms — the channel list dims them and suppresses their
@@ -272,6 +284,12 @@ signals:
 public:
 
 signals:
+    // Per-room read marker moved. Carries the room so a listener can decide
+    // whether it cares; the channel list simply bumps its generation counter.
+    void lastReadTsChanged(const QString& roomId);
+    // The available audio input/output device sets may have changed.
+    void audioDevicesChanged();
+
     void fontSizeChanged();
     void themeChanged();
     void accentChanged();

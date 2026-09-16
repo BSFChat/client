@@ -97,7 +97,12 @@ void MemberListModel::processEvent(const bsfchat::RoomEvent& event)
             m_members[idx].avatarUrl = avatarUrl;
             m_members[idx].membership = membership;
             m_members[idx].nickname = nickname;
-            emit dataChanged(index(idx), index(idx));
+            // U-M15: an empty role vector means "every role changed", which
+            // makes every delegate binding on this row re-evaluate. Name the
+            // four fields this branch can actually move.
+            emit dataChanged(index(idx), index(idx),
+                             {DisplayNameRole, AvatarUrlRole,
+                              MembershipRole, NicknameRole});
         } else {
             // Add new member
             beginInsertRows(QModelIndex(), m_members.size(), m_members.size());

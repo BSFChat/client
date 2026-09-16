@@ -185,7 +185,7 @@ Popup {
 
         // Spacer for avatar overlap (half of avatar height).
         Item {
-            Layout.preferredHeight: 36
+            Layout.preferredHeight: Theme.controlHeight.md
         }
 
         // Display name — Geist semibold, tight tracking. Shows the EFFECTIVE
@@ -282,7 +282,7 @@ Popup {
                     id: editNickBtn
                     visible: profileCard.mayEditNickname
                     Layout.preferredWidth: 44
-                    Layout.preferredHeight: 32
+                    Layout.preferredHeight: Theme.controlHeight.sm
                     contentItem: Icon {
                         anchors.centerIn: parent
                         name: "edit"
@@ -435,7 +435,7 @@ Popup {
             Button {
                 id: messageBtn
                 Layout.fillWidth: true
-                Layout.preferredHeight: 40
+                Layout.preferredHeight: Theme.controlHeight.lg
                 contentItem: Text {
                     text: "Send message"
                     font.family: Theme.fontSans
@@ -451,7 +451,28 @@ Popup {
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                 }
                 onClicked: {
-                    // TODO: Open DM with user
+                    // D-M6: this was a dead primary button with a TODO behind
+                    // it, even though createDirectMessage has existed all along.
+                    var s = serverManager.activeServer;
+                    if (!s) { profileCard.close(); return; }
+
+                    // An existing 1:1 room with this user is the one to open.
+                    // createDirectMessage always CREATES, so calling it blind
+                    // would add a second room with the same peer every time the
+                    // button is pressed and fill the DM section with
+                    // duplicates that all show the same name.
+                    var rooms = s.directRooms();
+                    for (var i = 0; i < rooms.length; ++i) {
+                        if (rooms[i].peerId === profileCard.userId) {
+                            s.setActiveRoom(rooms[i].roomId);
+                            profileCard.close();
+                            return;
+                        }
+                    }
+                    // No room yet. createDirectMessage jumps to the new one
+                    // itself once the server confirms it was created, so there
+                    // is nothing to do here but close.
+                    s.createDirectMessage(profileCard.userId);
                     profileCard.close();
                 }
             }
@@ -460,7 +481,7 @@ Popup {
                 id: manageRolesBtn
                 visible: parent.canManageRoles
                 Layout.preferredWidth: 44
-                Layout.preferredHeight: 40
+                Layout.preferredHeight: Theme.controlHeight.lg
                 contentItem: Icon {
                     anchors.centerIn: parent
                     name: "shield"

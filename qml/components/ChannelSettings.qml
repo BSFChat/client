@@ -12,10 +12,50 @@ Popup {
     width: Math.min(parent ? parent.width * 0.9 : 780, 780)
     height: Math.min(parent ? parent.height * 0.88 : 720, 720)
     modal: true
+    focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     property string roomId: ""
+    // The name as of the moment the opener pushed it in. It is a snapshot and
+    // cannot be anything else — the opener assigns it imperatively — so do not
+    // read it directly for display. Use `liveRoomName`.
     property string roomName: ""
+
+    // D-M5. A rename that arrives from another device, or from another admin,
+    // never reached this dialog: `roomName` is written once by whoever opened
+    // it and there was no change handler, so the header and the name field
+    // went on showing the old name — and saving an unrelated setting from a
+    // dialog captioned with a stale name is how an admin ends up believing a
+    // rename failed.
+    //
+    // The room model is the authority, so ask it. roomDisplayName is a
+    // Q_INVOKABLE and therefore not a binding dependency on its own, hence the
+    // generation counter: categorizedRoomsChanged is emitted (since U-H2, only
+    // on a real change) whenever the channel tree moves, which includes a
+    // rename landing.
+    property int _nameGen: 0
+    Connections {
+        target: serverManager.activeServer
+        ignoreUnknownSignals: true
+        function onCategorizedRoomsChanged() { channelSettings._nameGen++; }
+    }
+
+    readonly property string liveRoomName: {
+        channelSettings._nameGen;
+        var s = serverManager.activeServer;
+        if (!s || !s.roomListModel || !channelSettings.roomId)
+            return channelSettings.roomName;
+        var resolved = s.roomListModel.roomDisplayName(channelSettings.roomId);
+        // Fall back to the pushed-in name rather than blanking the header
+        // during the window where the room is not in the model yet.
+        return resolved ? resolved : channelSettings.roomName;
+    }
+
+    onOpened: {
+        // D-L: the dialog opened with nothing focused, so the first keypress
+        // went nowhere.
+        contentItem.forceActiveFocus();
+    }
 
     // Flags that actually make sense per-channel. Members / role-admin flags
     // (MANAGE_ROLES, MANAGE_SERVER, ADMINISTRATOR) are intentionally omitted —
@@ -89,7 +129,7 @@ Popup {
     component SectionHeader: Item {
         property alias text: label.text
         Layout.fillWidth: true
-        Layout.preferredHeight: 32
+        Layout.preferredHeight: Theme.controlHeight.sm
         Text {
             id: label
             anchors.left: parent.left
@@ -231,8 +271,8 @@ Popup {
                 anchors.rightMargin: Theme.sp.s7
                 Text {
                     Layout.fillWidth: true
-                    text: channelSettings.roomName
-                        ? ("Channel settings — #" + channelSettings.roomName)
+                    text: channelSettings.liveRoomName
+                        ? ("Channel settings — #" + channelSettings.liveRoomName)
                         : "Channel settings"
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.xl
@@ -330,8 +370,24 @@ Popup {
                             // revert on Esc.
                             property string _original: ""
                             function _resync() {
-                                _original = channelSettings.roomName;
+                                _original = channelSettings.liveRoomName;
                                 text = _original;
+                            }
+
+                            // A rename that landed while this dialog is open.
+                            // The saved baseline always moves, so the Save
+                            // button stops offering to re-send a name the
+                            // server already has — but the visible text is only
+                            // replaced when the user has not typed anything,
+                            // because silently overwriting an in-progress edit
+                            // is worse than showing a name that is one beat
+                            // behind.
+                            function _adoptRemote() {
+                                var incoming = channelSettings.liveRoomName;
+                                if (incoming === _original) return;
+                                var untouched = (text === _original);
+                                _original = incoming;
+                                if (untouched) text = incoming;
                             }
 
                             Keys.onEscapePressed: _resync()
@@ -355,7 +411,7 @@ Popup {
                                      : (saveNameBtn.hovered ? Theme.accentDim : Theme.accent)
                                 radius: Theme.r2
                                 implicitWidth: 80
-                                implicitHeight: 36
+                                implicitHeight: Theme.controlHeight.md
                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                             }
                             onClicked: {
@@ -437,7 +493,7 @@ Popup {
                                      : (saveTopicBtn.hovered ? Theme.accentDim : Theme.accent)
                                 radius: Theme.r2
                                 implicitWidth: 80
-                                implicitHeight: 36
+                                implicitHeight: Theme.controlHeight.md
                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                             }
                             onClicked: {
@@ -450,14 +506,28 @@ Popup {
                     }
                 }
 
-                // Re-sync the editable fields whenever the popup opens
-                // so the user sees the freshest server-side values
-                // (not stale text from a previous edit session).
+                // Re-sync the editable fields whenever the popup is about to
+                // show, so the user sees the freshest server-side values and
+                // never the stale text from a previous edit session — and,
+                // unlike onOpened, never paints that stale text first. These
+                // two fields are written imperatively (the user types in them),
+                // which is exactly the case D-C1 is about.
                 Connections {
                     target: channelSettings
-                    function onOpened() {
+                    function onAboutToShow() {
                         nameField._resync();
                         topicField._resync();
+                    }
+                    // Reopened for a DIFFERENT channel without closing in
+                    // between: the fields would otherwise still hold the
+                    // previous channel's values.
+                    function onRoomIdChanged() {
+                        nameField._resync();
+                        topicField._resync();
+                    }
+                    // D-M5: a rename arriving from elsewhere.
+                    function onLiveRoomNameChanged() {
+                        nameField._adoptRemote();
                     }
                 }
 
@@ -664,7 +734,7 @@ Popup {
                 Rectangle {
                     id: doneBtn
                     Layout.preferredWidth: 120
-                    Layout.preferredHeight: 36
+                    Layout.preferredHeight: Theme.controlHeight.md
                     radius: Theme.r2
                     color: doneBtnMouse.containsMouse ? Theme.accentDim : Theme.accent
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }

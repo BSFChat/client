@@ -570,6 +570,28 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
                         addedUrls.append(serverUrl);
                         addServerWithOidc(serverUrl);
                     }
+
+                    // D-M8: an identity account that belongs to NO server used
+                    // to reach here with an empty list, and identityLoginComplete
+                    // closes the login dialog — so the sign-in appeared to
+                    // succeed, the dialog vanished, and the user was left
+                    // looking at an empty app with nothing said. Report it on
+                    // the error channel instead, which the dialog already
+                    // surfaces inline while staying open, so the "add a server
+                    // by URL" path is still in front of them.
+                    //
+                    // Note the condition is on the SERVER LIST, not on
+                    // addedUrls: adding nothing because every server is already
+                    // connected is an ordinary success (the user re-ran the
+                    // sync), and must not be reported as a failure.
+                    if (servers.isEmpty()) {
+                        emit identityLoginFailed(
+                            tr("your account isn't a member of any server yet "
+                               "— ask a server admin for an invite, or add a "
+                               "server by URL below."));
+                        return;
+                    }
+
                     emit identityLoginComplete(addedUrls);
                 });
 

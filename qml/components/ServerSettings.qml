@@ -10,6 +10,7 @@ Popup {
     width: parent ? parent.width * 0.85 : 800
     height: parent ? parent.height * 0.85 : 600
     modal: true
+    focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     property int selectedSection: 0
@@ -104,6 +105,117 @@ Popup {
 
     property string editingRoleId: ""
     property string editingMemberId: ""
+
+    // ---- In-progress admin edit state (D-M4) -------------------------------
+    //
+    // These used to live on the Roles / Members ListView delegates
+    // (roleEditCard.scratchColor et al., memberRow.assignedSet). `serverRoles`
+    // and `serverMembers` are snapshot QVariantLists rebuilt on every sync, so
+    // every sync pass replaced the model, destroyed the delegates and threw
+    // away whatever the admin was halfway through typing — a permission grid
+    // they had spent a minute on could vanish between two keystrokes. Holding
+    // the state on the popup, keyed by the id being edited, makes it survive
+    // any number of model refreshes; U-H2/U-H8 make those refreshes rarer but
+    // cannot make them impossible, because a real change must still land.
+    //
+    // The id fields are what make this safe: if the row being edited is gone
+    // (role deleted elsewhere, member left), the scratch simply no longer
+    // matches anything and is seeded afresh on the next edit.
+    // Role colours are SERVER data: they are written to the server and rendered
+    // by every other member, whose theme and accent may be nothing like this
+    // one. So these two are deliberately NOT theme tokens — binding them to
+    // Theme.accent would persist one user's local accent as a shared value.
+    // They are named here only so the hex stops being a magic number repeated
+    // at the two places a role's colour can come into being.
+    readonly property color defaultRoleColor: "#36d6c7"   // Designer cyan
+    // Swatches offered in the role editor: the four Designer accents first,
+    // then a wider gamut of classic chat role colours.
+    readonly property var roleColorSwatches: [
+        "#36d6c7", "#a28bff", "#ec6dd6", "#ffa34a",
+        "#57f287", "#fee75c", "#ed4245", "#f47067",
+        "#39c5cf", "#dcbdfb", "#f69d50", "#768390"
+    ]
+
+    property string roleScratchId: ""
+    property string roleScratchName: ""
+    property string roleScratchColor: ""
+    property int roleScratchPos: 0
+    property double roleScratchPerms: 0
+
+    property string memberScratchId: ""
+    // Set of assigned role ids: { roleId: true }. Written by replacement
+    // rather than mutation so QML notices the change.
+    property var memberScratchRoles: ({})
+
+    // A role's permission bitfield arrives as a hex string ("0x1f") from the
+    // server and as a number from our own optimistic writes. Normalise.
+    function _permsToNumber(p) {
+        if (typeof p === "string") {
+            var str = p;
+            if (str.indexOf("0x") === 0 || str.indexOf("0X") === 0) str = str.substr(2);
+            return parseInt(str, 16) || 0;
+        }
+        return p || 0;
+    }
+
+    // Open the inline editor for `role` and seed the scratch from it. Seeding
+    // happens ONCE, here, rather than through a binding on the model row —
+    // a binding would re-seed (and so discard the edit) on every sync.
+    function beginRoleEdit(role) {
+        var rid = (role && (role.id || role.name)) || "";
+        if (!rid) return;
+        editingRoleId = rid;
+        roleScratchId = rid;
+        roleScratchName = (role && role.name) || "";
+        roleScratchColor = (role && role.color) || defaultRoleColor;
+        roleScratchPos = (role && role.position !== undefined) ? role.position : 0;
+        roleScratchPerms = _permsToNumber(role && role.permissions);
+    }
+
+    function endRoleEdit() {
+        editingRoleId = "";
+        roleScratchId = "";
+    }
+
+    function toggleRoleScratchPerm(flag) {
+        roleScratchPerms = (Number(roleScratchPerms) ^ flag);
+    }
+
+    function roleScratchHasPerm(flag) {
+        return (Number(roleScratchPerms) & flag) !== 0;
+    }
+
+    // Same contract for the member role-assignment card.
+    function beginMemberEdit(userId) {
+        if (!userId) return;
+        editingMemberId = userId;
+        memberScratchId = userId;
+        var m = {};
+        if (serverManager.activeServer) {
+            var list = serverManager.activeServer.memberRoles(userId);
+            for (var i = 0; i < list.length; i++) m[list[i]] = true;
+        }
+        memberScratchRoles = m;
+    }
+
+    function endMemberEdit() {
+        editingMemberId = "";
+        memberScratchId = "";
+        memberScratchRoles = ({});
+    }
+
+    function toggleMemberScratchRole(roleId) {
+        if (!roleId) return;
+        var m = {};
+        for (var k in memberScratchRoles) m[k] = memberScratchRoles[k];
+        if (m[roleId]) delete m[roleId];
+        else m[roleId] = true;
+        memberScratchRoles = m;
+    }
+
+    function memberScratchHasRole(roleId) {
+        return memberScratchRoles[roleId] === true;
+    }
 
     // Swap the role at `index` with its neighbour in the given
     // direction (-1 = up, +1 = down). We swap BOTH array order and
@@ -373,13 +485,30 @@ Popup {
 
             // ---- Overview (index 0) ----
             Item {
+                // D-H4. This page is taller than the popup at the default
+                // window size — server icon, name field, the five screen-share
+                // cap rows and the banner — so with a bare ColumnLayout the
+                // bottom of it simply painted past the popup's edge with no way
+                // to reach it. Same Flickable wrapper as the Screen Share page.
+                Flickable {
+                    id: overviewFlick
+                    anchors.fill: parent
+                    anchors.margins: Theme.sp.s7 * 2
+                    contentHeight: overviewPane.implicitHeight
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ThemedScrollBar {}
+
                 ColumnLayout {
                     // id needed so the PolicyRow inline component can be
                     // handed policyEditorEnabled — inline components
                     // don't capture the enclosing item's scope.
                     id: overviewPane
-                    anchors.fill: parent
-                    anchors.margins: Theme.sp.s7 * 2
+                    // Bind to the Flickable itself, NOT parent (the
+                    // contentItem): with contentWidth unset the contentItem's
+                    // width follows its children, so parent.width is circular
+                    // and the column blows out past the right edge.
+                    width: overviewFlick.width
                     spacing: Theme.sp.s7
 
                     TabHeader { title: "Server Overview" }
@@ -475,7 +604,7 @@ Popup {
                                         border.width: 1
                                         radius: Theme.r2
                                         implicitWidth: 120
-                                        implicitHeight: 32
+                                        implicitHeight: Theme.controlHeight.sm
                                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                     }
                                     onClicked: serverIconFileDialog.open()
@@ -552,7 +681,7 @@ Popup {
                                        : (saveServerNameBtn.hovered ? Theme.accentDim : Theme.accent)
                                 radius: Theme.r2
                                 implicitWidth: 140
-                                implicitHeight: 36
+                                implicitHeight: Theme.controlHeight.md
                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                             }
                             onClicked: {
@@ -648,21 +777,47 @@ Popup {
                         }
                     }
 
+                    // D-M7. These caps are SERVER-wide, so with no channel
+                    // selected the question has to be asked at server scope
+                    // rather than answered "no": an admin who opens Settings
+                    // straight from the server rail, before clicking into any
+                    // channel, otherwise finds every control here greyed out
+                    // with nothing on screen explaining why.
+                    // ServerConnection::myPermissions treats an empty room id
+                    // as exactly that question — evaluated without channel
+                    // overrides, matching what the server does.
                     readonly property bool policyEditorEnabled: {
                         var s = serverManager.activeServer;
                         if (!s) return false;
                         if (s.permissionsGeneration < 0) return false;
+                        if (!s.activeRoomId) return s.canManageChannel("");
                         return s.canManageChannel(s.activeRoomId);
                     }
-                    function _commitPolicy() {
+
+                    // D-M2. The rows used to write `value` imperatively in
+                    // onCommit, and again from a remote-change handler, which
+                    // destroyed the binding on the server property each time.
+                    // After that a row showed whatever was last written to it,
+                    // so switching servers left the PREVIOUS server's caps on
+                    // screen — and a commit then sent them.
+                    //
+                    // Nothing is written imperatively now. setScreenSharePolicy
+                    // updates the cached policy optimistically and emits
+                    // maxScreenSharePolicyChanged, which is the NOTIFY signal
+                    // for all five properties, so the rows repaint from their
+                    // own bindings: immediately on commit, and again when the
+                    // sync echo confirms or reverts it. `axis`/`v` carry the
+                    // value being changed because the row's own property has
+                    // deliberately not been written at commit time.
+                    function _commitPolicy(axis, v) {
                         var s = serverManager.activeServer;
                         if (!s) return;
                         s.setScreenSharePolicy(
-                            fpsPolicyRow.value,
-                            widthPolicyRow.value,
-                            jpegPolicyRow.value,
-                            bitratePolicyRow.value,
-                            losslessSwitch.checked);
+                            axis === "fps"      ? v : s.maxScreenShareFps,
+                            axis === "width"    ? v : s.maxScreenShareWidth,
+                            axis === "jpeg"     ? v : s.maxScreenShareJpeg,
+                            axis === "bitrate"  ? v : s.maxScreenShareBitrate,
+                            axis === "lossless" ? v : s.allowLossless);
                     }
 
                     PolicyRow {
@@ -672,7 +827,7 @@ Popup {
                         minVal: 1; maxVal: 60; stepVal: 1; suffix: " fps"
                         value: serverManager.activeServer
                             ? serverManager.activeServer.maxScreenShareFps : -1
-                        onCommit: (v) => { value = v; _commitPolicy(); }
+                        onCommit: (v) => overviewPane._commitPolicy("fps", v)
                     }
                     PolicyRow {
                         id: widthPolicyRow
@@ -681,7 +836,7 @@ Popup {
                         minVal: 480; maxVal: 3840; stepVal: 80; suffix: " px"
                         value: serverManager.activeServer
                             ? serverManager.activeServer.maxScreenShareWidth : -1
-                        onCommit: (v) => { value = v; _commitPolicy(); }
+                        onCommit: (v) => overviewPane._commitPolicy("width", v)
                     }
                     PolicyRow {
                         id: jpegPolicyRow
@@ -690,7 +845,7 @@ Popup {
                         minVal: 1; maxVal: 100; stepVal: 1; suffix: ""
                         value: serverManager.activeServer
                             ? serverManager.activeServer.maxScreenShareJpeg : -1
-                        onCommit: (v) => { value = v; _commitPolicy(); }
+                        onCommit: (v) => overviewPane._commitPolicy("jpeg", v)
                     }
                     PolicyRow {
                         id: bitratePolicyRow
@@ -699,7 +854,7 @@ Popup {
                         minVal: 250; maxVal: 50000; stepVal: 250; suffix: " kbps"
                         value: serverManager.activeServer
                             ? serverManager.activeServer.maxScreenShareBitrate : -1
-                        onCommit: (v) => { value = v; _commitPolicy(); }
+                        onCommit: (v) => overviewPane._commitPolicy("bitrate", v)
                     }
                     RowLayout {
                         spacing: Theme.sp.s3
@@ -715,7 +870,17 @@ Popup {
                             enabled: overviewPane.policyEditorEnabled
                             checked: serverManager.activeServer
                                 ? serverManager.activeServer.allowLossless : true
-                            onToggled: _commitPolicy()
+                            // A user toggle writes `checked` itself, replacing
+                            // the binding above — so it has to be put back, or
+                            // this switch stops tracking the server exactly the
+                            // way the numeric rows used to.
+                            onToggled: {
+                                overviewPane._commitPolicy("lossless", checked);
+                                checked = Qt.binding(function() {
+                                    return serverManager.activeServer
+                                        ? serverManager.activeServer.allowLossless : true;
+                                });
+                            }
                         }
                         Text {
                             text: "AV1 mathematically-lossless mode (very high "
@@ -725,21 +890,12 @@ Popup {
                             font.pixelSize: Theme.fontSize.xs
                         }
                     }
-                    // Live-refresh the rows when an admin on another
-                    // device changes the policy.
-                    Connections {
-                        target: serverManager.activeServer
-                        ignoreUnknownSignals: true
-                        function onMaxScreenSharePolicyChanged() {
-                            var s = serverManager.activeServer;
-                            if (!s) return;
-                            fpsPolicyRow.value   = s.maxScreenShareFps;
-                            widthPolicyRow.value = s.maxScreenShareWidth;
-                            jpegPolicyRow.value  = s.maxScreenShareJpeg;
-                            bitratePolicyRow.value = s.maxScreenShareBitrate;
-                            losslessSwitch.checked = s.allowLossless;
-                        }
-                    }
+                    // No Connections handler here any more: an admin on
+                    // another device changing the policy emits
+                    // maxScreenSharePolicyChanged, which is the NOTIFY signal
+                    // the five bindings above already depend on. The handler
+                    // that used to copy the values across by hand was the
+                    // thing breaking them.
 
                     InfoBanner {
                         Layout.maximumWidth: 540
@@ -749,8 +905,10 @@ Popup {
                             + "\"no cap\" to honour the user's setting on that axis. "
                             + "Effective stream params are min(user, cap)."
                     }
-
-                    Item { Layout.fillHeight: true }
+                    // No trailing fillHeight spacer: inside a Flickable the
+                    // column is sized by its content, and a greedy spacer would
+                    // either do nothing or fight contentHeight.
+                }
                 }
             }
 
@@ -918,9 +1076,13 @@ Popup {
                                     // their clicks.
                                     z: -1
                                     onClicked: {
-                                        var rid = roleDelegate.role.id || roleDelegate.role.name;
-                                        serverSettingsPopup.editingRoleId =
-                                            roleDelegate.isEditing ? "" : rid;
+                                        if (roleDelegate.isEditing) {
+                                            serverSettingsPopup.endRoleEdit();
+                                        } else {
+                                            // Seeds the scratch from this role
+                                            // exactly once — see beginRoleEdit.
+                                            serverSettingsPopup.beginRoleEdit(roleDelegate.role);
+                                        }
                                     }
                                 }
                             }
@@ -958,27 +1120,11 @@ Popup {
                                 // nothing to fall back to and saves looked
                                 // like they silently cleared the name.
                                 readonly property var editRole: roleDelegate.role || ({})
-                                property string scratchColor: editRole.color || "#5865f2"
-                                property int scratchPos: editRole.position !== undefined
-                                    ? editRole.position : 0
-                                // Permissions as a raw bitfield (QML number).
-                                // Parsed from the role's hex string.
-                                property double scratchPerms: {
-                                    var p = editRole.permissions;
-                                    if (typeof p === "string") {
-                                        var s = p;
-                                        if (s.indexOf("0x") === 0 || s.indexOf("0X") === 0) s = s.substr(2);
-                                        return parseInt(s, 16) || 0;
-                                    }
-                                    return p || 0;
-                                }
-                                function togglePerm(flag) {
-                                    // XOR the flag in/out of the bitfield.
-                                    scratchPerms = (Number(scratchPerms) ^ flag);
-                                }
-                                function hasPerm(flag) {
-                                    return (Number(scratchPerms) & flag) !== 0;
-                                }
+                                // The edit-in-progress values live on the popup
+                                // (serverSettingsPopup.roleScratch*), not here:
+                                // this card is a ListView delegate and is
+                                // destroyed whenever a sync republishes
+                                // serverRoles. See D-M4 at the top of the file.
 
                                 ColumnLayout {
                                     id: roleEditCol
@@ -993,7 +1139,13 @@ Popup {
                                         TextField {
                                             id: editRoleName
                                             Layout.fillWidth: true
-                                            text: roleEditCard.editRole.name || ""
+                                            // Bound to the popup-level scratch, and
+                                            // written back on edit rather than left
+                                            // to accumulate in the field: a TextField
+                                            // that owns its own text loses it with
+                                            // the delegate.
+                                            text: serverSettingsPopup.roleScratchName
+                                            onTextEdited: serverSettingsPopup.roleScratchName = text
                                             color: Theme.fg0
                                             font.family: Theme.fontSans
                                             font.pixelSize: Theme.fontSize.md
@@ -1015,8 +1167,8 @@ Popup {
                                         SpinBox {
                                             id: editRolePosition
                                             from: 0; to: 1000
-                                            value: roleEditCard.scratchPos
-                                            onValueModified: roleEditCard.scratchPos = value
+                                            value: serverSettingsPopup.roleScratchPos
+                                            onValueModified: serverSettingsPopup.roleScratchPos = value
                                             font.family: Theme.fontMono
                                             font.pixelSize: Theme.fontSize.md
                                             background: Rectangle {
@@ -1025,7 +1177,7 @@ Popup {
                                                 border.color: Theme.line
                                                 border.width: 1
                                                 implicitWidth: 100
-                                                implicitHeight: 36
+                                                implicitHeight: Theme.controlHeight.md
                                             }
                                         }
                                     }
@@ -1036,16 +1188,12 @@ Popup {
                                     Row {
                                         spacing: Theme.sp.s2
                                         Repeater {
-                                            model: [
-                                                "#36d6c7", "#a28bff", "#ec6dd6", "#ffa34a",
-                                                "#57f287", "#fee75c", "#ed4245", "#f47067",
-                                                "#39c5cf", "#dcbdfb", "#f69d50", "#768390"
-                                            ]
+                                            model: serverSettingsPopup.roleColorSwatches
                                             delegate: Rectangle {
                                                 width: 22; height: 22; radius: 11
                                                 color: modelData
                                                 readonly property bool selected:
-                                                    roleEditCard.scratchColor === modelData
+                                                    serverSettingsPopup.roleScratchColor === modelData
                                                 border.color: selected ? Theme.fg0 : Theme.line
                                                 border.width: selected ? 3 : 1
                                                 Behavior on border.width {
@@ -1054,7 +1202,7 @@ Popup {
                                                 MouseArea {
                                                     anchors.fill: parent
                                                     cursorShape: Qt.PointingHandCursor
-                                                    onClicked: roleEditCard.scratchColor = modelData
+                                                    onClicked: serverSettingsPopup.roleScratchColor = modelData
                                                 }
                                             }
                                         }
@@ -1082,12 +1230,17 @@ Popup {
                                                 spacing: 6
                                                 ThemedCheckBox {
                                                     id: cb
-                                                    // Bind directly to the bitfield. The .scratchPerms
-                                                    // access registers the dep so checkbox state stays
-                                                    // in sync with togglePerm() mutations and role
-                                                    // switches.
-                                                    checked: roleEditCard.hasPerm(modelData.flag)
-                                                    onToggled: roleEditCard.togglePerm(modelData.flag)
+                                                    // The bare read of roleScratchPerms is
+                                                    // the dependency, and is deliberate: a
+                                                    // property only read INSIDE the helper can
+                                                    // be dead-code-eliminated on QML's
+                                                    // AOT-compiled path, after which the box
+                                                    // would never re-evaluate on a toggle or on
+                                                    // switching to another role. Same defence,
+                                                    // and same reason, as MessageInput's.
+                                                    checked: serverSettingsPopup.roleScratchPerms >= 0
+                                                        && serverSettingsPopup.roleScratchHasPerm(modelData.flag)
+                                                    onToggled: serverSettingsPopup.toggleRoleScratchPerm(modelData.flag)
                                                 }
                                                 Text {
                                                     id: permLabel
@@ -1132,13 +1285,13 @@ Popup {
                                             background: Rectangle {
                                                 color: roleSaveBtn.hovered ? Theme.accentDim : Theme.accent
                                                 radius: Theme.r2
-                                                implicitHeight: 36
+                                                implicitHeight: Theme.controlHeight.md
                                                 implicitWidth: 120
                                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                             }
                                             onClicked: {
                                                 if (!serverManager.activeServer) return;
-                                                var permsVal = Number(roleEditCard.scratchPerms) | 0;
+                                                var permsVal = Number(serverSettingsPopup.roleScratchPerms) | 0;
                                                 var existing = serverManager.activeServer.serverRoles;
                                                 var out = [];
                                                 var myId = roleEditCard.editRole.id || roleEditCard.editRole.name;
@@ -1148,9 +1301,9 @@ Popup {
                                                     if (rid === myId) {
                                                         out.push({
                                                             id: myId,
-                                                            name: editRoleName.text.trim() || r.name,
-                                                            color: roleEditCard.scratchColor || r.color,
-                                                            position: roleEditCard.scratchPos,
+                                                            name: serverSettingsPopup.roleScratchName.trim() || r.name,
+                                                            color: serverSettingsPopup.roleScratchColor || r.color,
+                                                            position: serverSettingsPopup.roleScratchPos,
                                                             permissions: "0x" + permsVal.toString(16),
                                                             mentionable: r.mentionable || false,
                                                             hoist: r.hoist || false
@@ -1160,7 +1313,7 @@ Popup {
                                                     }
                                                 }
                                                 serverManager.activeServer.updateServerRoles(out);
-                                                serverSettingsPopup.editingRoleId = "";
+                                                serverSettingsPopup.endRoleEdit();
                                             }
                                         }
 
@@ -1184,7 +1337,7 @@ Popup {
                                                 radius: Theme.r2
                                                 border.color: Theme.danger
                                                 border.width: 1
-                                                implicitHeight: 36
+                                                implicitHeight: Theme.controlHeight.md
                                                 implicitWidth: 120
                                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                             }
@@ -1199,7 +1352,7 @@ Popup {
                                                     if (rid !== myId) out.push(r);
                                                 }
                                                 serverManager.activeServer.updateServerRoles(out);
-                                                serverSettingsPopup.editingRoleId = "";
+                                                serverSettingsPopup.endRoleEdit();
                                             }
                                         }
 
@@ -1239,7 +1392,7 @@ Popup {
                         background: Rectangle {
                             color: addRoleBtn.hovered ? Theme.accentDim : Theme.accent
                             radius: Theme.r2
-                            implicitHeight: 36
+                            implicitHeight: Theme.controlHeight.md
                             implicitWidth: 140
                             Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                         }
@@ -1259,7 +1412,7 @@ Popup {
                                 // Default new-role swatch — Designer cyan.
                                 // (Was Discord blurple; swapped for
                                 // visual continuity with our accent.)
-                                color: "#36d6c7",
+                                color: serverSettingsPopup.defaultRoleColor,
                                 position: maxPos + 1,
                                 // Same as kEveryoneDefault in Permissions.h:
                                 // view + send + attach + embed (0x000f) plus
@@ -1369,6 +1522,10 @@ Popup {
                         delegate: Column {
                             id: memberRow
                             width: ListView.view ? ListView.view.width : 400
+                            // D-M3: a Column delegate keeps its implicit height
+                            // when hidden, so filtering the list left a run of
+                            // blank gaps where the non-matching rows used to be.
+                            height: visible ? implicitHeight : 0
                             visible: {
                                 var search = memberSearchField.text.toLowerCase();
                                 if (search.length === 0) return true;
@@ -1378,21 +1535,11 @@ Popup {
                             }
                             readonly property string memberUserId: modelData.userId || ""
                             readonly property bool expanded: serverSettingsPopup.editingMemberId === memberUserId
-                            // Set of assigned role ids. Rebuilt when the row
-                            // expands; mutated by checkbox clicks; read by
-                            // the Save button. Explicit object ref so QML
-                            // tracks writes.
-                            property var assignedSet: ({})
-
-                            function rebuildAssignedSet() {
-                                var m = {};
-                                if (serverManager.activeServer && memberUserId) {
-                                    var list = serverManager.activeServer.memberRoles(memberUserId);
-                                    for (var i = 0; i < list.length; i++) m[list[i]] = true;
-                                }
-                                assignedSet = m;
-                            }
-                            onExpandedChanged: if (expanded) rebuildAssignedSet()
+                            // The set of assigned role ids lives on the popup
+                            // (serverSettingsPopup.memberScratchRoles), seeded
+                            // once by beginMemberEdit. It used to be a property
+                            // on this delegate, which a sync-driven refresh of
+                            // serverMembers destroyed mid-edit. See D-M4.
 
                             Rectangle {
                                 width: parent.width
@@ -1549,8 +1696,11 @@ Popup {
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: {
-                                        serverSettingsPopup.editingMemberId =
-                                            memberRow.expanded ? "" : memberRow.memberUserId;
+                                        if (memberRow.expanded) {
+                                            serverSettingsPopup.endMemberEdit();
+                                        } else {
+                                            serverSettingsPopup.beginMemberEdit(memberRow.memberUserId);
+                                        }
                                     }
                                 }
                             }
@@ -1594,7 +1744,7 @@ Popup {
                                             readonly property string roleId: modelData.id || modelData.name
                                             visible: roleId !== "everyone"
                                             Layout.fillWidth: true
-                                            implicitHeight: 32
+                                            implicitHeight: Theme.controlHeight.sm
                                             radius: Theme.r1
                                             color: assignHover.containsMouse ? Theme.bg2 : "transparent"
                                             Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
@@ -1607,14 +1757,10 @@ Popup {
 
                                                 ThemedCheckBox {
                                                     id: rolecb
-                                                    checked: memberRow.assignedSet[parent.parent.roleId] === true
-                                                    onToggled: {
-                                                        var m = {};
-                                                        for (var k in memberRow.assignedSet) m[k] = memberRow.assignedSet[k];
-                                                        if (checked) m[parent.parent.roleId] = true;
-                                                        else delete m[parent.parent.roleId];
-                                                        memberRow.assignedSet = m;
-                                                    }
+                                                    checked: serverSettingsPopup.memberScratchHasRole(
+                                                        parent.parent.roleId)
+                                                    onToggled: serverSettingsPopup.toggleMemberScratchRole(
+                                                        parent.parent.roleId)
                                                 }
                                                 Rectangle {
                                                     Layout.alignment: Qt.AlignVCenter
@@ -1641,10 +1787,10 @@ Popup {
                                                 hoverEnabled: true
                                                 cursorShape: Qt.PointingHandCursor
                                                 // Click anywhere on the row
-                                                // toggles the role in/out of
-                                                // assignedSet. The checkbox's
-                                                // `checked: assignedSet[roleId]`
-                                                // binding then flips visually.
+                                                // toggles the role in/out of the
+                                                // popup-level scratch set; the
+                                                // checkbox's `checked` binding
+                                                // then flips visually.
                                                 //
                                                 // We used to call rolecb.toggle()
                                                 // here, but Qt Controls only
@@ -1660,16 +1806,8 @@ Popup {
                                                 // reached onToggled, and the
                                                 // save path sent the unchanged
                                                 // role list.
-                                                onClicked: {
-                                                    var m = {};
-                                                    for (var k in memberRow.assignedSet) {
-                                                        m[k] = memberRow.assignedSet[k];
-                                                    }
-                                                    var rid = parent.roleId;
-                                                    if (m[rid]) delete m[rid];
-                                                    else m[rid] = true;
-                                                    memberRow.assignedSet = m;
-                                                }
+                                                onClicked: serverSettingsPopup.toggleMemberScratchRole(
+                                                    parent.roleId)
                                             }
                                         }
                                     }
@@ -1705,19 +1843,20 @@ Popup {
                                             background: Rectangle {
                                                 color: roleAssignSaveBtn.hovered ? Theme.accentDim : Theme.accent
                                                 radius: Theme.r2
-                                                implicitHeight: 36
+                                                implicitHeight: Theme.controlHeight.md
                                                 implicitWidth: 160
                                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                             }
                                             onClicked: {
                                                 if (!serverManager.activeServer) return;
                                                 var ids = [];
-                                                for (var k in memberRow.assignedSet) {
-                                                    if (memberRow.assignedSet[k]) ids.push(k);
+                                                var scratch = serverSettingsPopup.memberScratchRoles;
+                                                for (var k in scratch) {
+                                                    if (scratch[k]) ids.push(k);
                                                 }
                                                 serverManager.activeServer.setMemberRoles(
                                                     memberRow.memberUserId, ids);
-                                                serverSettingsPopup.editingMemberId = "";
+                                                serverSettingsPopup.endMemberEdit();
                                             }
                                         }
 
@@ -1743,7 +1882,7 @@ Popup {
                                                 radius: Theme.r2
                                                 border.color: Theme.danger
                                                 border.width: 1
-                                                implicitHeight: 36
+                                                implicitHeight: Theme.controlHeight.md
                                                 implicitWidth: 80
                                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                             }
@@ -1776,7 +1915,7 @@ Popup {
                                                        ? Qt.lighter(Theme.danger, 1.1)
                                                        : Theme.danger
                                                 radius: Theme.r2
-                                                implicitHeight: 36
+                                                implicitHeight: Theme.controlHeight.md
                                                 implicitWidth: 80
                                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                             }
@@ -1829,7 +1968,7 @@ Popup {
                             background: Rectangle {
                                 color: addCategoryBtn.hovered ? Theme.accentDim : Theme.accent
                                 radius: Theme.r2
-                                implicitHeight: 36
+                                implicitHeight: Theme.controlHeight.md
                                 implicitWidth: 150
                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                             }
@@ -2239,7 +2378,7 @@ Popup {
                                         radius: Theme.r2
                                         border.color: Theme.line
                                         border.width: 1
-                                        implicitHeight: 32
+                                        implicitHeight: Theme.controlHeight.sm
                                         implicitWidth: 88
                                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                     }
@@ -2263,7 +2402,42 @@ Popup {
     // (Legacy top-right close-X removed; the new one lives in `background`
     // so it floats above content regardless of the current pane.)
 
-    onOpened: selectedSection = 0
+    // D-C1. The bug this fixes renamed the WRONG SERVER: `serverNameField.text`
+    // is declared as a binding on activeServer.serverName, but typing into a
+    // TextField REPLACES that binding with the typed string — permanently, and
+    // silently. Type a new name on server A, press Esc (which closes without
+    // saving), switch to server B, reopen this dialog and press Save: the field
+    // still holds A's half-typed name, the binding that would have refreshed it
+    // is gone, and B gets renamed to it.
+    //
+    // So every field in this dialog whose value comes from a property and can
+    // be written imperatively has to have its binding RE-ESTABLISHED when the
+    // dialog is shown, with Qt.binding — reassigning the plain value would
+    // simply install another one-shot string. `onAboutToShow` runs before the
+    // popup is visible, so the field never paints the stale value.
+    //
+    // This is the rule for ClientSettings and ChannelSettings too, and it is
+    // the shared cause behind D-M2 and D-M5.
+    onAboutToShow: {
+        selectedSection = 0;
+        serverNameField.text = Qt.binding(function() {
+            return serverManager.activeServer ? serverManager.activeServer.serverName : "";
+        });
+        // An expanded role or member editor from a previous visit would
+        // otherwise still be open, pointing at whatever id was last touched —
+        // possibly on a different server entirely.
+        endRoleEdit();
+        endMemberEdit();
+        memberSearchField.text = "";
+    }
+
+    onOpened: {
+        // D-L: the dialog opened with nothing focused, so the first keypress
+        // went nowhere — including Esc, which is the documented way out.
+        // `focus: true` (above) hands the popup focus on open; this makes the
+        // content item the actual focus scope so Tab starts inside the dialog.
+        contentItem.forceActiveFocus();
+    }
 
     // Shared confirm dialog for kick / ban / unban. Reuses the delete-channel
     // popup vocabulary — bg1 + r3 + line, danger-tinted icon tile for
@@ -2317,7 +2491,7 @@ Popup {
                 spacing: Theme.sp.s3
                 Rectangle {
                     Layout.preferredWidth: 32
-                    Layout.preferredHeight: 32
+                    Layout.preferredHeight: Theme.controlHeight.sm
                     radius: Theme.r2
                     color: _confirmModDialog.isDestructive
                         ? Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.15)
@@ -2409,7 +2583,7 @@ Popup {
                         border.width: 1
                         radius: Theme.r2
                         implicitWidth: 100
-                        implicitHeight: 36
+                        implicitHeight: Theme.controlHeight.md
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                     }
                     onClicked: _confirmModDialog.close()
@@ -2443,7 +2617,7 @@ Popup {
                                : base
                         radius: Theme.r2
                         implicitWidth: 160
-                        implicitHeight: 36
+                        implicitHeight: Theme.controlHeight.md
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                     }
                     onClicked: {
@@ -2464,7 +2638,7 @@ Popup {
                                 serverManager.activeServer.unbanFromServer(m.userId);
                                 break;
                         }
-                        serverSettingsPopup.editingMemberId = "";
+                        serverSettingsPopup.endMemberEdit();
                         _confirmModDialog.close();
                     }
                 }

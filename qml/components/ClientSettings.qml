@@ -17,9 +17,36 @@ Popup {
     width: Math.min(parent ? parent.width * 0.9 : 720, 900)
     height: Math.min(parent ? parent.height * 0.85 : 600, 640)
     modal: true
+    focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     property int section: 0
+
+    // D-C1's rule, applied here. This popup is created once with the window and
+    // reused, so anything a control wrote over its own binding — or resolved
+    // once in Component.onCompleted — stays wrong for the rest of the session
+    // unless it is re-established when the dialog is shown. onAboutToShow runs
+    // before the dialog is visible, so nothing paints the stale value first.
+    onAboutToShow: {
+        // Re-enumerate audio devices. This used to be a CONSTANT property, so a
+        // headset plugged in after launch never appeared in either box, however
+        // many times the dialog was reopened. The enumeration is cheap and the
+        // moment the dialog opens is exactly when a user who just plugged
+        // something in comes looking for it (D-L).
+        appSettings.refreshAudioDevices();
+        inputCombo.selectByDescription(appSettings.audioInputDevice);
+        outputCombo.selectByDescription(appSettings.audioOutputDevice);
+        voiceModeCombo.syncFromSettings();
+        pttKeyField.text = Qt.binding(function() {
+            return appSettings.pttKeySequence;
+        });
+    }
+
+    onOpened: {
+        // D-L: the dialog opened with nothing focused, so the first keypress
+        // went nowhere.
+        contentItem.forceActiveFocus();
+    }
 
     background: Rectangle {
         color: Theme.bg1
@@ -221,7 +248,7 @@ Popup {
                                 delegate: Rectangle {
                                     required property var modelData
                                     implicitWidth: 96
-                                    implicitHeight: 36
+                                    implicitHeight: Theme.controlHeight.md
                                     radius: Theme.r2
                                     readonly property bool selected: appSettings.theme === modelData.key
                                     color: selected ? Theme.accent
@@ -261,18 +288,17 @@ Popup {
                         RowLayout {
                             spacing: Theme.sp.s3
                             Repeater {
-                                model: [
-                                    { hue: 180, label: "Cyan",    color: "#36d6c7" },
-                                    { hue: 260, label: "Violet",  color: "#a28bff" },
-                                    { hue: 320, label: "Magenta", color: "#ec6dd6" },
-                                    { hue:  30, label: "Amber",   color: "#ffa34a" }
-                                ]
+                                // From Theme, not a second copy of the four
+                                // hex values: written out here they drifted
+                                // from the light-mode palette, so every swatch
+                                // showed its DARK colour in light mode.
+                                model: Theme.accentHues
                                 delegate: Rectangle {
                                     required property var modelData
                                     implicitWidth: 32
-                                    implicitHeight: 32
+                                    implicitHeight: Theme.controlHeight.sm
                                     radius: Theme.r3
-                                    color: modelData.color
+                                    color: Theme.accentFor(modelData.hue)
                                     readonly property bool selected:
                                         appSettings.accentHue === modelData.hue
                                     border.color: selected ? Theme.fg0 : Theme.line
@@ -311,7 +337,7 @@ Popup {
                                 delegate: Rectangle {
                                     required property var modelData
                                     implicitWidth: 96
-                                    implicitHeight: 36
+                                    implicitHeight: Theme.controlHeight.md
                                     radius: Theme.r2
                                     readonly property bool selected:
                                         appSettings.layoutVariant === modelData.key
@@ -348,7 +374,18 @@ Popup {
                         description: "Draws thick, high-contrast borders between the server sidebar, channel list, chat, and member list so panel boundaries are unambiguous."
                         ThemedSwitch {
                             checked: appSettings.accessibilityMode
-                            onToggled: appSettings.accessibilityMode = checked
+                            // A user toggle writes `checked` itself, which
+                            // replaces the binding above — so put it back, or
+                            // this switch stops tracking the setting the moment
+                            // it is first touched (D-C1's rule, applied to
+                            // every control in this dialog that can be written
+                            // imperatively).
+                            onToggled: {
+                                appSettings.accessibilityMode = checked;
+                                checked = Qt.binding(function() {
+                                    return appSettings.accessibilityMode;
+                                });
+                            }
                         }
                     }
 
@@ -363,9 +400,26 @@ Popup {
 
             // ---- Audio ----
             Item {
-                ColumnLayout {
+                // D-H4: the Audio page is taller than the dialog's 640 px
+                // cap — two device rows, the protection rows and the whole
+                // Voice Activity block. With a bare ColumnLayout the overflow
+                // simply painted past the dialog's edge: no clip, no scroll,
+                // no way to reach it. Same Flickable wrapper as Screen Share.
+                Flickable {
+                    id: audioColFlick
                     anchors.fill: parent
                     anchors.margins: Theme.sp.s7 * 2
+                    contentHeight: audioCol.implicitHeight
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ThemedScrollBar {}
+
+                ColumnLayout {
+                    id: audioCol
+                    // Bind to the Flickable, NOT parent (the contentItem):
+                    // with contentWidth unset the contentItem's width follows
+                    // its children, so parent.width is circular.
+                    width: audioColFlick.width
                     spacing: Theme.sp.s7
 
                     SectionHeader { text: "Audio" }
@@ -379,6 +433,12 @@ Popup {
                             model: appSettings.audioInputDevices
                             textRole: "description"
                             Component.onCompleted: selectByDescription(appSettings.audioInputDevice)
+                            // The device list is re-enumerated on every dialog
+                            // open (and was CONSTANT before, so it never
+                            // changed at all). When it does change, currentIndex
+                            // points into the OLD list and would silently select
+                            // a different device, so re-resolve by name.
+                            onModelChanged: selectByDescription(appSettings.audioInputDevice)
                             onActivated: {
                                 var item = model[currentIndex];
                                 appSettings.audioInputDevice = item.description === "System default" ? "" : item.description;
@@ -396,7 +456,21 @@ Popup {
                         }
                     }
 
+                    // HIDDEN, DELIBERATELY. `inputVolume` is persisted and has
+                    // no consumer anywhere in the app: no gain is applied to the
+                    // captured audio, so dragging this changed a number in
+                    // QSettings and nothing else. A control that does nothing is
+                    // worse than an absent one — the user turns it down, is
+                    // still too loud, and now distrusts the rest of the page.
+                    //
+                    // The row is kept (not deleted) because the setting itself
+                    // is sound and the UI is the finished half: applying it is a
+                    // gain multiplier in the audio worker (src/voice/), which
+                    // this workstream does not own. The value is already exposed
+                    // as Settings::inputVolume with a NOTIFY signal, so wiring it
+                    // up is a read on that side and flipping `visible` here.
                     SettingRow {
+                        visible: false
                         title: "Input volume"
                         description: "Gain applied to your microphone before encoding."
                         ThemedSlider {
@@ -417,6 +491,12 @@ Popup {
                             model: appSettings.audioOutputDevices
                             textRole: "description"
                             Component.onCompleted: selectByDescription(appSettings.audioOutputDevice)
+                            // The device list is re-enumerated on every dialog
+                            // open (and was CONSTANT before, so it never
+                            // changed at all). When it does change, currentIndex
+                            // points into the OLD list and would silently select
+                            // a different device, so re-resolve by name.
+                            onModelChanged: selectByDescription(appSettings.audioOutputDevice)
                             onActivated: {
                                 var item = model[currentIndex];
                                 appSettings.audioOutputDevice = item.description === "System default" ? "" : item.description;
@@ -434,7 +514,11 @@ Popup {
                         }
                     }
 
+                    // Hidden for the same reason as "Input volume" above:
+                    // Settings::outputVolume has no consumer, so this slider
+                    // moved a stored number and no audio.
                     SettingRow {
+                        visible: false
                         title: "Output volume"
                         description: "Applied on top of your OS volume."
                         ThemedSlider {
@@ -449,7 +533,7 @@ Popup {
                     InfoBanner {
                         icon: "signal"
                         tint: Theme.warn
-                        text: "Device changes apply the next time you join a voice channel — leave and rejoin to pick up a new selection mid-call. Volume sliders aren't applied yet."
+                        text: "Device changes apply the next time you join a voice channel — leave and rejoin to pick up a new selection mid-call."
                     }
 
                     SectionHeader {
@@ -461,14 +545,21 @@ Popup {
                         title: "Input mode"
                         description: "Open mic sends whenever you speak. Push-to-talk only transmits while you hold the shortcut key."
                         ThemedComboBox {
+                            id: voiceModeCombo
                             implicitWidth: 220
                             textRole: "label"
                             model: [
                                 { label: "Open mic",     value: "open" },
                                 { label: "Push to talk", value: "ptt"  }
                             ]
-                            Component.onCompleted:
-                                currentIndex = appSettings.voiceMode === "ptt" ? 1 : 0
+                            function syncFromSettings() {
+                                currentIndex = appSettings.voiceMode === "ptt" ? 1 : 0;
+                            }
+                            // Component.onCompleted runs once, ever: this popup
+                            // is created with the window and reused, so without
+                            // the re-sync on show (see onAboutToShow) a value
+                            // changed anywhere else never reached the box.
+                            Component.onCompleted: syncFromSettings()
                             onActivated: appSettings.voiceMode = model[currentIndex].value
                         }
                     }
@@ -478,6 +569,7 @@ Popup {
                         description: "Hold this shortcut (application-wide) to transmit while push-to-talk is enabled."
                         visible: appSettings.voiceMode === "ptt"
                         TextField {
+                            id: pttKeyField
                             implicitWidth: 220
                             text: appSettings.pttKeySequence
                             color: Theme.fg0
@@ -532,7 +624,9 @@ Popup {
                             : "You're not in a voice call. Join one and this row describes that call."
                     }
 
-                    Item { Layout.fillHeight: true }
+                    // No trailing fillHeight spacer: inside a Flickable the
+                    // column is sized by its content.
+                }
                 }
             }
 
@@ -578,7 +672,7 @@ Popup {
                         // was the first casualty of tight width.
                         text: cap < 0 ? " · uncapped"
                                       : " · cap " + cap + suffix
-                        color: cap < 0 ? Theme.fg3 : Theme.warning
+                        color: cap < 0 ? Theme.fg3 : Theme.warn
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
                     }
@@ -736,7 +830,7 @@ Popup {
                                 text: "disabled by server policy"
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.xs
-                                color: Theme.warning
+                                color: Theme.warn
                             }
                         }
                     }
@@ -798,7 +892,18 @@ Popup {
                         description: "Show an OS notification when a new message arrives in a channel you're not currently viewing."
                         ThemedSwitch {
                             checked: appSettings.notificationsEnabled
-                            onToggled: appSettings.notificationsEnabled = checked
+                            // A user toggle writes `checked` itself, which
+                            // replaces the binding above — so put it back, or
+                            // this switch stops tracking the setting the moment
+                            // it is first touched (D-C1's rule, applied to
+                            // every control in this dialog that can be written
+                            // imperatively).
+                            onToggled: {
+                                appSettings.notificationsEnabled = checked;
+                                checked = Qt.binding(function() {
+                                    return appSettings.notificationsEnabled;
+                                });
+                            }
                         }
                     }
 
@@ -808,7 +913,18 @@ Popup {
                         ThemedSwitch {
                             enabled: appSettings.notificationsEnabled
                             checked: appSettings.notificationSound
-                            onToggled: appSettings.notificationSound = checked
+                            // A user toggle writes `checked` itself, which
+                            // replaces the binding above — so put it back, or
+                            // this switch stops tracking the setting the moment
+                            // it is first touched (D-C1's rule, applied to
+                            // every control in this dialog that can be written
+                            // imperatively).
+                            onToggled: {
+                                appSettings.notificationSound = checked;
+                                checked = Qt.binding(function() {
+                                    return appSettings.notificationSound;
+                                });
+                            }
                         }
                     }
 
@@ -827,9 +943,26 @@ Popup {
             // on desktop builds. Mobile sees an empty placeholder
             // since the OS store owns updates there.
             Item {
-                ColumnLayout {
+                // D-H4: the Updates page overflows once the release notes
+                // expand, with the channel picker and the banner below them.
+                // With a bare ColumnLayout the overflow simply painted past
+                // the dialog's edge: no clip, no scroll, no way to reach it.
+                // Same Flickable wrapper as the Screen Share page.
+                Flickable {
+                    id: updatesColFlick
                     anchors.fill: parent
                     anchors.margins: Theme.sp.s7 * 2
+                    contentHeight: updatesCol.implicitHeight
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ThemedScrollBar {}
+
+                ColumnLayout {
+                    id: updatesCol
+                    // Bind to the Flickable, NOT parent (the contentItem):
+                    // with contentWidth unset the contentItem's width follows
+                    // its children, so parent.width is circular.
+                    width: updatesColFlick.width
                     spacing: Theme.sp.s7
 
                     SectionHeader { text: "Updates" }
@@ -866,7 +999,18 @@ Popup {
                                    + "here and look."
                         ThemedSwitch {
                             checked: appSettings.autoUpdateCheck
-                            onToggled: appSettings.autoUpdateCheck = checked
+                            // A user toggle writes `checked` itself, which
+                            // replaces the binding above — so put it back, or
+                            // this switch stops tracking the setting the moment
+                            // it is first touched (D-C1's rule, applied to
+                            // every control in this dialog that can be written
+                            // imperatively).
+                            onToggled: {
+                                appSettings.autoUpdateCheck = checked;
+                                checked = Qt.binding(function() {
+                                    return appSettings.autoUpdateCheck;
+                                });
+                            }
                         }
                     }
 
@@ -887,7 +1031,9 @@ Popup {
                             + "in-place upgrade."
                     }
 
-                    Item { Layout.fillHeight: true }
+                    // No trailing fillHeight spacer: inside a Flickable the
+                    // column is sized by its content.
+                }
                 }
             }
 
@@ -909,7 +1055,18 @@ Popup {
                                    + "when reporting quality issues."
                         ThemedSwitch {
                             checked: appSettings.showVideoDiagnostics
-                            onToggled: appSettings.showVideoDiagnostics = checked
+                            // A user toggle writes `checked` itself, which
+                            // replaces the binding above — so put it back, or
+                            // this switch stops tracking the setting the moment
+                            // it is first touched (D-C1's rule, applied to
+                            // every control in this dialog that can be written
+                            // imperatively).
+                            onToggled: {
+                                appSettings.showVideoDiagnostics = checked;
+                                checked = Qt.binding(function() {
+                                    return appSettings.showVideoDiagnostics;
+                                });
+                            }
                         }
                     }
 
@@ -923,7 +1080,18 @@ Popup {
                                    + "grows quickly."
                         ThemedSwitch {
                             checked: appSettings.verboseVoiceLogging
-                            onToggled: appSettings.verboseVoiceLogging = checked
+                            // A user toggle writes `checked` itself, which
+                            // replaces the binding above — so put it back, or
+                            // this switch stops tracking the setting the moment
+                            // it is first touched (D-C1's rule, applied to
+                            // every control in this dialog that can be written
+                            // imperatively).
+                            onToggled: {
+                                appSettings.verboseVoiceLogging = checked;
+                                checked = Qt.binding(function() {
+                                    return appSettings.verboseVoiceLogging;
+                                });
+                            }
                         }
                     }
 
@@ -953,7 +1121,7 @@ Popup {
                                 border.width: 1
                                 radius: Theme.r2
                                 implicitWidth: 140
-                                implicitHeight: 36
+                                implicitHeight: Theme.controlHeight.md
                             }
                         }
                     }

@@ -110,6 +110,33 @@ QtObject {
     // White on the light-mode accent; near-black on the dark-mode accent.
     readonly property color onAccent: isDark ? "#0a0a0a" : "#ffffff"
 
+    // The four accent hues, in picker order, for any surface that offers the
+    // CHOICE of accent rather than using the current one. Client Settings'
+    // Appearance swatches had these four hex values written out again, which is
+    // how a fifth accent gets added in one place and not the other.
+    readonly property var accentHues: [
+        { hue: 180, label: "Cyan"    },
+        { hue: 260, label: "Violet"  },
+        { hue: 320, label: "Magenta" },
+        { hue:  30, label: "Amber"   }
+    ]
+    // The swatch colour for one of those hues, resolved for the current
+    // light/dark mode exactly as `accent` is.
+    function accentFor(hue) {
+        var table = isDark ? _accentDark : _accentLight;
+        return (table[hue] || table[180]).accent;
+    }
+
+    // ON A SCRIM. Some surfaces are always dark regardless of theme — the
+    // image viewer's 88%-black backdrop, a video thumbnail, a letterboxed
+    // frame — because the content behind them is a photo, not a panel. Text and
+    // glyphs there are white in both themes, and `onAccent`/`fg0` are the wrong
+    // tokens for it: both flip with the theme and would turn near-black on a
+    // black backdrop. Named so the next person can tell "white because it sits
+    // on a scrim" from "white because someone typed white".
+    readonly property color scrim:   "#000000"
+    readonly property color onScrim: "#ffffff"
+
     // ─── State colors ────────────────────────────────────────
     readonly property color danger:  isDark ? "#f04a5a" : "#d23040"
     readonly property color warn:    isDark ? "#e7c156" : "#b8842a"
@@ -321,6 +348,32 @@ QtObject {
     readonly property int   headerHeight:    48
     readonly property int   buttonHeight:    32
     readonly property int   iconButtonSize:  28
+
+    // Interactive-control heights. The dialogs had grown a scatter of literal
+    // 32 / 36 / 40 / 44 pixel heights, which is how a "Save" button ends up
+    // 36px on one page and 40px on the next with nothing recording which was
+    // the decision and which was the typo. Four named steps, so a control's
+    // height is a choice from a scale rather than a number someone typed:
+    //   sm — compact controls: icon buttons, chips, category tabs
+    //   md — the default for buttons, text fields and combo boxes
+    //   lg — primary actions and the taller inputs that anchor a pane
+    //   xl — full-width search / filter bars, which want a comfortable target
+    // Header BARS are not controls and keep their own `headerHeight` above.
+    // Declared as a NAMED inline component rather than the anonymous
+    // `QtObject { ... }` the older groups use. It is the same object at
+    // runtime, but qmllint can only see the members of a group whose type it
+    // knows: an anonymous QtObject is typed as bare QObject, so every
+    // `Theme.sp.s3` in the tree is reported as MissingProperty — which
+    // .qmllint.ini promotes to an error. This shape resolves cleanly, so the
+    // new token adds nothing to that backlog, and it is the pattern the older
+    // groups can be converted to for the same benefit.
+    component ControlHeights: QtObject {
+        readonly property int sm: 32
+        readonly property int md: 36
+        readonly property int lg: 40
+        readonly property int xl: 44
+    }
+    readonly property ControlHeights controlHeight: ControlHeights {}
 
     // ─── Accessibility borders (our extension) ───────────────
     // Accessibility mode draws thick, accent-colored borders between panels
