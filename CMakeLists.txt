@@ -105,6 +105,7 @@ qt_add_executable(bsfchat-app
     src/net/SyncBackoff.cpp
     src/net/SyncLoop.cpp
     src/net/ServerConnection.cpp
+    src/net/VoiceSession.cpp
     src/net/ServerManager.cpp
     src/model/ServerListModel.cpp
     src/model/RoomListModel.cpp

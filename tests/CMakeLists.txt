@@ -37,6 +37,24 @@ target_link_libraries(test_sync_resume PRIVATE
 )
 add_test(NAME test_sync_resume COMMAND test_sync_resume)
 
+# Voice join/leave lifecycle — the VoiceSession state machine plus the two
+# pure helpers the join path leans on (roster reconciliation, start
+# refusal) and the transport selector call joinVoiceChannel now makes.
+#
+# This is the seam Phase 0 of the September plan calls for: no server, no
+# libdatachannel, no audio device, no GUI. VoiceSession reaches the network
+# through signals and the transport through std::function hooks, so the
+# test substitutes a recording fake for both. Before it, the entire join
+# path had zero coverage.
+qt_add_executable(test_voice_lifecycle
+    test_voice_lifecycle.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
+    ${CMAKE_SOURCE_DIR}/src/voice/VoiceTransportSelector.cpp
+)
+target_include_directories(test_voice_lifecycle PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_voice_lifecycle PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_voice_lifecycle COMMAND test_voice_lifecycle)
+
 # Codec round-trip tests — only meaningful where a software H.264
 # backend exists (openh264: macOS/Linux desktop).
 if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)

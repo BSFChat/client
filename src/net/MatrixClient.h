@@ -289,10 +289,27 @@ signals:
     void voiceJoined(const QString& roomId, const QJsonArray& members);
     void voiceLeft(const QString& roomId);
     void voiceMembersResult(const QString& roomId, const QJsonArray& members);
+    // Generic voice failure, kept for the user-facing toast: every voice
+    // endpoint still reports through it. It is deliberately NOT the input
+    // to the join/leave state machine — attributing failures by "a voice
+    // request failed while a join was in flight" is precisely V-M4, where
+    // the previous room's leave error unwound the new room's join.
     void voiceError(const QString& error);
+    // Per-endpoint outcomes. Each carries the room it concerns so
+    // VoiceSession can match a reply to the request it issued and ignore
+    // replies to superseded ones. Emitted ALONGSIDE voiceError on
+    // failure, never instead of it.
+    void voiceJoinError(const QString& roomId, const QString& error);
+    void voiceLeaveError(const QString& roomId, const QString& error);
+    void voiceStateUpdated(const QString& roomId);
+    void voiceStateError(const QString& roomId, const QString& error);
+    void voiceMembersError(const QString& roomId, const QString& error);
     void voiceChannelCreated(const QString& roomId);
 
     void turnConfigResult(const QJsonObject& config);
+    // V-M4: TURN has its own failure channel, so an unrelated voice error
+    // landing inside the TURN round trip can no longer unwind a join.
+    void turnConfigError(const QString& error);
 
     // Canonical user id for our token, from GET /account/whoami.
     // Never fired on error (older servers 404 the endpoint).

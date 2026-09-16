@@ -1,5 +1,6 @@
 #include "voice/VoiceEngine.h"
 #include "voice/AudioEngine.h"
+#include "voice/VoiceStartPolicy.h"
 #include "voice/PeerCaps.h"
 #include "voice/PeerConnectionManager.h"
 #include "voice/video/VideoDecoder.h"
@@ -69,10 +70,8 @@ bool VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
             qCWarning(logVoice, "refusing join: relay-only policy but no TURN "
                      "server in the config (%lld ICE servers)",
                      static_cast<long long>(probe.iceServers.size()));
-            emit error(QStringLiteral(
-                "Voice is unavailable: this server requires relayed connections "
-                "but has no TURN server configured. Ask the server administrator "
-                "to configure TURN, or to allow peer-to-peer voice."));
+            emit error(voice::refusalMessage(
+                voice::StartRefusal::RelayOnlyNoTurn));
             m_roomId.clear();
             m_turnConfig = QJsonObject();
             return false;
@@ -91,11 +90,24 @@ bool VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
     connect(m_audioEngine, &AudioEngine::peerLevelChanged,
             this, &VoiceEngine::peerLevelChanged);
     if (!m_audioEngine->start()) {
-        qCWarning(logVoice) << "AudioEngine::start failed";
-        emit error("Failed to initialize audio");
-    } else {
-        qCInfo(logVoice, "AudioEngine started OK");
+        // V-H4: this used to be a warning and a toast, and start()
+        // returned true anyway — the user joined the channel deaf and
+        // mute, the member poll kept their server-side heartbeat alive,
+        // and the ghost reaper therefore never removed them. There is no
+        // way back from that state, so refuse the session and let the
+        // caller unwind the join.
+        qCWarning(logVoice) << "AudioEngine::start failed — refusing the "
+                               "voice session";
+        emit error(voice::refusalMessage(voice::StartRefusal::AudioUnavailable));
+        m_audioEngine->stop();
+        delete m_audioEngine;
+        m_audioEngine = nullptr;
+        m_running = false;
+        m_roomId.clear();
+        m_turnConfig = QJsonObject();
+        return false;
     }
+    qCInfo(logVoice, "AudioEngine started OK");
 
     m_candidateBatchTimer.start();
     m_rrTimer.start();
@@ -211,6 +223,22 @@ void VoiceEngine::addPeer(const QString& userId, bool isOfferer) {
     if (isOfferer) {
         peer->createOffer();
     }
+}
+
+void VoiceEngine::dropPeer(const QString& userId) {
+    if (!m_peers.contains(userId)) return;
+    qCInfo(logVoice, "reconcile: %s left the roster — dropping peer",
+          qPrintable(userId));
+    removePeer(userId);
+}
+
+void VoiceEngine::updateTurnConfig(const QJsonObject& turnConfig) {
+    if (turnConfig.isEmpty()) return;
+    m_turnConfig = turnConfig;
+    // allow_p2p is server policy, not a credential; it can legitimately
+    // change between fetches, and buildRtcConfig reads m_allowP2P.
+    m_allowP2P = turnConfig.value("allow_p2p").toBool(m_allowP2P);
+    qCInfo(logVoice, "TURN credentials refreshed");
 }
 
 void VoiceEngine::ensurePeer(const QString& userId) {

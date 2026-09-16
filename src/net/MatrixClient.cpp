@@ -1060,6 +1060,7 @@ void MatrixClient::joinVoice(const QString& roomId)
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             emit voiceError(QString::fromUtf8(data));
+            emit voiceJoinError(roomId, QString::fromUtf8(data));
             return;
         }
         try {
@@ -1068,6 +1069,8 @@ void MatrixClient::joinVoice(const QString& roomId)
             emit voiceJoined(roomId, members);
         } catch (...) {
             emit voiceError("Failed to parse voice join response");
+            emit voiceJoinError(roomId,
+                                QStringLiteral("Failed to parse voice join response"));
         }
     });
 }
@@ -1081,7 +1084,9 @@ void MatrixClient::leaveVoice(const QString& roomId)
     connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
-            emit voiceError(QString::fromUtf8(reply->readAll()));
+            const QString body = QString::fromUtf8(reply->readAll());
+            emit voiceError(body);
+            emit voiceLeaveError(roomId, body);
             return;
         }
         emit voiceLeft(roomId);
@@ -1099,6 +1104,7 @@ void MatrixClient::getVoiceMembers(const QString& roomId)
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             emit voiceError(QString::fromUtf8(data));
+            emit voiceMembersError(roomId, QString::fromUtf8(data));
             return;
         }
         auto doc = QJsonDocument::fromJson(data);
@@ -1118,11 +1124,17 @@ void MatrixClient::updateVoiceState(const QString& roomId, bool muted, bool deaf
     QByteArray body = QByteArray::fromStdString(content.dump());
 
     auto* reply = makeRequest("PUT", path, body);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
-            emit voiceError(QString::fromUtf8(reply->readAll()));
+            const QString err = QString::fromUtf8(reply->readAll());
+            emit voiceError(err);
+            // The local toggle was optimistic — the caller rolls it back
+            // on this (V-M7).
+            emit voiceStateError(roomId, err);
+            return;
         }
+        emit voiceStateUpdated(roomId);
     });
 }
 
@@ -1140,11 +1152,17 @@ void MatrixClient::updateVoiceMediaState(const QString& roomId, bool screenShari
     QByteArray body = QByteArray::fromStdString(content.dump());
 
     auto* reply = makeRequest("PUT", path, body);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
-            emit voiceError(QString::fromUtf8(reply->readAll()));
+            const QString err = QString::fromUtf8(reply->readAll());
+            emit voiceError(err);
+            // The local toggle was optimistic — the caller rolls it back
+            // on this (V-M7).
+            emit voiceStateError(roomId, err);
+            return;
         }
+        emit voiceStateUpdated(roomId);
     });
 }
 
@@ -1235,6 +1253,7 @@ void MatrixClient::getTurnConfig()
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             emit voiceError(QString::fromUtf8(data));
+            emit turnConfigError(QString::fromUtf8(data));
             return;
         }
         auto doc = QJsonDocument::fromJson(data);

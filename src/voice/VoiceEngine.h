@@ -73,6 +73,16 @@ public:
     bool hasPeer(const QString& userId) const override { return m_peers.contains(userId); }
     // Offer to `userId` if we don't already hold a peer for them.
     void ensurePeer(const QString& userId) override;
+    // Tear down the peer for `userId` if we hold one. The roster
+    // reconciler calls this for members the server no longer lists —
+    // V-M5, the half that never existed, which is why a crashed peer
+    // rendered as "connected" until ICE timed out on its own.
+    void dropPeer(const QString& userId);
+    // Replace the TURN credentials used for peer connections built from
+    // here on. The ephemeral username/password pair expires after the
+    // server's `ttl`, and this call is mid-session: existing peers keep
+    // their established transports, new ones get live credentials (V-M3).
+    void updateTurnConfig(const QJsonObject& turnConfig);
     // True when at least one peer's data channel is open — i.e.
     // broadcast frames are actually reaching someone.
     bool hasOpenPeers() const override;

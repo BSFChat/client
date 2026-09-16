@@ -10,6 +10,8 @@
 #include "identity/IdentityClient.h"
 #include "core/Settings.h"
 #include "store/LocalCache.h"
+#include "voice/VoiceRosterReconcile.h"
+#include "voice/VoiceTransportSelector.h"
 #ifdef BSFCHAT_VOICE_ENABLED
 #include "voice/VoiceEngine.h"
 #include "voice/NotificationSounds.h"
@@ -30,6 +32,17 @@
 
 #include <bsfchat/Constants.h>
 #include <nlohmann/json.hpp>
+
+// V-H4's other half: on macOS/iOS (and Android) the FIRST QAudioSource
+// open is what triggers the OS microphone prompt, and until the user
+// answers it the device produces silence. Asking BEFORE voice/join means
+// the answer is in by the time AudioEngine::start runs, so a denial fails
+// the start (and unwinds the join) instead of joining the user in
+// silently. QPermission is Qt 6.5+; older Qt just skips this.
+#if QT_CONFIG(permissions)
+#include <QCoreApplication>
+#include <QPermissions>
+#endif
 
 ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     : QObject(parent)
@@ -340,207 +353,16 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     connect(m_voiceErrorTimer, &QTimer::timeout,
             this, &ServerConnection::clearVoiceError);
 
-    // Voice signal connections
-    connect(m_client, &MatrixClient::voiceJoined, this, [this](const QString& roomId, const QJsonArray& members) {
-        m_activeVoiceRoomId = roomId;
-        m_voiceMembers = members;
-        // Join responses carry the members' screen_sharing/camera_on
-        // flags too — seed the announced-sharer sets right away so a
-        // share that started before we joined is visible immediately.
-        reconcileAnnouncedMedia();
-        m_voiceMuted = false;
-        m_voiceDeafened = false;
-        m_voicePollTimer->start();
-        clearVoiceError();
-        emit activeVoiceRoomIdChanged();
-        emit voiceMembersChanged();
-        emit voiceMutedChanged();
-        emit voiceDeafenedChanged();
-#ifdef BSFCHAT_VOICE_ENABLED
-        m_sounds->playJoin();
-#endif
-        // Fetch TURN config to start WebRTC. Flagged so the generic
-        // voiceError handler below can tell a failed TURN fetch (which
-        // must unwind the whole join) apart from the many other things
-        // that emit voiceError.
-        m_voiceTurnFetchPending = true;
-        m_client->getTurnConfig();
-    });
-
-    connect(m_client, &MatrixClient::voiceError, this, [this](const QString& raw) {
-        // Matrix-style JSON error bodies carry a human string in
-        // "error"; fall back to the raw body for anything else.
-        QString msg = raw;
-        try {
-            auto j = nlohmann::json::parse(raw.toStdString());
-            std::string human = j.value("error", "");
-            if (!human.empty()) msg = QString::fromStdString(human);
-        } catch (...) {
-            // Leave msg = raw.
-        }
-        if (msg.trimmed().isEmpty()) msg = QStringLiteral("Voice request failed");
-        // A failed voice/join leaves the optimistically-flipped
-        // VoiceRoom view pointing at nothing — flip back to text.
-        // (activeVoiceRoomId is only set once the join succeeds, so
-        // empty-room + viewing-voice can only mean a join in flight.)
-        if (m_activeVoiceRoomId.isEmpty() && m_viewingVoiceRoom) {
-            m_viewingVoiceRoom = false;
-            emit viewingVoiceRoomChanged();
-        }
-        setVoiceError(msg);
-
-        // A failed TURN fetch used to stop here: activeVoiceRoomId was
-        // already set, m.call.member was active=true, and the 5 s member
-        // poll kept refreshing the server-side heartbeat — so the ghost
-        // reaper never removed the user. They sat in the channel with no
-        // VoiceEngine, and every inbound signaling event for them was
-        // dropped by the `m_voiceEngine` guard in processSyncResponse.
-        // There is no way back from that state, so unwind the join
-        // completely and tell the server to drop the membership.
-        //
-        // The flag narrows this to the one HTTP round trip between join
-        // and turnConfigResult. It is not surgical — any voiceError that
-        // lands inside that window (e.g. an unluckily-timed member poll
-        // failure) also unwinds — but in that window the server is
-        // failing voice requests anyway, so aborting is the right call.
-        if (m_voiceTurnFetchPending && !m_activeVoiceRoomId.isEmpty()) {
-            m_voiceTurnFetchPending = false;
-            qWarning("[voice] TURN configuration unavailable — unwinding join "
-                     "for %s", qPrintable(m_activeVoiceRoomId));
-            const QString roomId = m_activeVoiceRoomId;
-            if (m_viewingVoiceRoom) {
-                m_viewingVoiceRoom = false;
-                emit viewingVoiceRoomChanged();
-            }
-            teardownVoiceSession();   // clears activeVoiceRoomId, stops the poll
-            m_client->leaveVoice(roomId);
-        }
-    });
-
-    connect(m_client, &MatrixClient::turnConfigResult, this, [this](const QJsonObject& config) {
-        m_voiceTurnFetchPending = false;
-#ifdef BSFCHAT_VOICE_ENABLED
-        if (!m_activeVoiceRoomId.isEmpty()) {
-            // VoiceEngine::start() is one-shot per instance — a stale
-            // engine from a previous session must never be reused.
-            if (m_voiceEngine) {
-                m_voiceEngine->stop();
-                delete m_voiceEngine;
-                m_voiceEngine = nullptr;
-            }
-            m_voiceEngine = new VoiceEngine(m_client, this);
-            m_voiceEngine->setLocalUserId(m_userId);
-
-            // All remote video — decoded RTP frames and legacy JPEG
-            // stills — lands on the registry's per-peer sinks; QML
-            // VideoOutputs attach to those. (The old path re-bound an
-            // Image to a fresh base64 data URL per frame, which loads
-            // asynchronously and blanked the tile between frames —
-            // the screen-share flicker bug.)
-            connect(m_voiceEngine, &VoiceEngine::peerVideoFrameDecoded,
-                    m_videoRegistry, &VideoStreamRegistry::deliverFrame);
-            connect(m_voiceEngine, &VoiceEngine::peerScreenFrameReceived,
-                this, [this](const QString& userId, const QByteArray& jpeg) {
-                    QImage img;
-                    if (img.loadFromData(jpeg, "JPEG"))
-                        m_videoRegistry->deliverImage(
-                            userId, int(VideoStreamId::Screen), img);
-                });
-            connect(m_voiceEngine, &VoiceEngine::peerCameraFrameReceived,
-                this, [this](const QString& userId, const QByteArray& jpeg) {
-                    QImage img;
-                    if (img.loadFromData(jpeg, "JPEG"))
-                        m_videoRegistry->deliverImage(
-                            userId, int(VideoStreamId::Camera), img);
-                });
-            connect(m_voiceEngine, &VoiceEngine::peerLevelChanged, this,
-                [this](const QString& userId, float level) {
-                    m_peerLevels[userId] = level;
-                    emit peerLevelChanged(userId);
-                });
-
-            // Mic level → transmit indicator + silence detection.
-            m_zeroLevelFrames = 0;
-            m_micSilent = false;
-            connect(m_voiceEngine, &VoiceEngine::micLevelChanged, this, [this](float level) {
-                if (qAbs(level - m_micLevel) < 0.005f) return;
-                m_micLevel = level;
-                emit micLevelChanged();
-                // Sustained silence = ~3 seconds of near-zero signal (150 frames × 20ms).
-                if (level < 0.005f) {
-                    if (++m_zeroLevelFrames >= 150 && !m_micSilent) {
-                        m_micSilent = true;
-                        emit micSilentChanged();
-                        qWarning("[voice] Mic appears silent — device may not be "
-                                 "capturing or permission not granted");
-                    }
-                } else {
-                    m_zeroLevelFrames = 0;
-                    if (m_micSilent) {
-                        m_micSilent = false;
-                        emit micSilentChanged();
-                    }
-                }
-            });
-
-            // When any peer's connection state changes, re-emit
-            // voiceMembersChanged so the UI refreshes the per-peer dot.
-            connect(m_voiceEngine, &VoiceEngine::peerStateChanged,
-                    this, [this]() { emit voiceMembersChanged(); });
-
-            // Dead peer — blank their video surfaces so the UI doesn't
-            // keep rendering a frozen last frame.
-            connect(m_voiceEngine, &VoiceEngine::peerDisconnected,
-                    this, [this](const QString& userId) {
-                m_videoRegistry->dropUser(userId);
-                if (m_peerLevels.remove(userId))
-                    emit peerLevelChanged(userId);
-                emit voiceMembersChanged();
-            });
-
-            connect(m_voiceEngine, &VoiceEngine::error,
-                    this, [this](const QString& message) {
-                setVoiceError(message);
-            });
-
-            // start() refuses sessions that cannot possibly connect
-            // (currently: relay-only policy with no TURN server). It has
-            // already emitted a human-readable error() → setVoiceError,
-            // and started nothing. Unwind exactly as the failed-TURN-
-            // fetch path does, so the user isn't left as a ghost in the
-            // channel with no engine behind them.
-            if (!m_voiceEngine->start(m_activeVoiceRoomId, m_voiceMembers, config)) {
-                const QString roomId = m_activeVoiceRoomId;
-                if (m_viewingVoiceRoom) {
-                    m_viewingVoiceRoom = false;
-                    emit viewingVoiceRoomChanged();
-                }
-                teardownVoiceSession();
-                m_client->leaveVoice(roomId);
-                return;
-            }
-
-            // The transport is up — only now does the UI get to say how
-            // this call is protected. Derived from the transport that
-            // actually started rather than assumed, so the LiveKit
-            // branch (when it lands here) cannot inherit the mesh label:
-            // it must call setVoiceProtection with
-            // protectionForSession(SessionTransport::Sfu,
-            // joinConfig.hasKey()), or MediaProtection::Failed if
-            // encryption was expected and could not be set up.
-            setVoiceProtection(voice::protectionForSession(
-                m_voiceEngine->kind() == IVoiceTransport::Kind::LiveKit
-                    ? voice::SessionTransport::Sfu
-                    : voice::SessionTransport::Mesh,
-                /*sfuHasSharedKey=*/false));
-
-            // Apply PTT mute immediately on join so an open-mic user
-            // switching to PTT before a call starts silent rather
-            // than live.
-            applyMicGate();
-        }
-#endif
-    });
+    // Voice lifecycle.
+    //
+    // The join/leave state machine itself lives in VoiceSession — read
+    // src/net/VoiceSession.h for why it is not inline here any more. What
+    // remains below is wiring: MatrixClient's replies go IN, requests come
+    // OUT, and the QML-facing mirrors (activeVoiceRoomId, voiceMuted,
+    // voiceDeafened) follow the session rather than being written by six
+    // different handlers.
+    m_voiceSession = new VoiceSession(this);
+    setupVoiceSession();
 
     connect(m_client, &MatrixClient::voiceLeft, this, [](const QString& roomId) {
         // voiceLeft is only ever the HTTP reply to a leave WE initiated
@@ -554,6 +376,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     });
 
     connect(m_client, &MatrixClient::voiceMembersResult, this, [this](const QString& roomId, const QJsonArray& members) {
+        m_voiceSession->onMembersPolled(roomId, members);
         if (roomId == m_activeVoiceRoomId) {
             m_voiceMembers = members;
             reconcileAnnouncedMedia();
@@ -567,11 +390,20 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             // whose id is greater than ours, so both sides can't
             // re-offer into a fresh glare.
             if (m_voiceEngine) {
-                for (const auto& memberVal : members) {
-                    QString uid = memberVal.toObject().value("user_id").toString();
-                    if (uid.isEmpty() || uid == m_userId) continue;
-                    if (uid > m_userId && !m_voiceEngine->hasPeer(uid))
-                        m_voiceEngine->ensurePeer(uid);
+                // Both directions of the comparison, computed together in
+                // voice::reconcileRoster: offer to roster members we hold
+                // no peer for (and whose id outranks ours, so only one
+                // side of each pair offers), and DROP peers the roster no
+                // longer lists. The drop side is V-M5 — without it a peer
+                // that crashed or was reaped kept rendering as connected
+                // until ICE timed out on its own.
+                const auto plan = voice::reconcileRoster(
+                    members, m_voiceEngine->connectedPeerIds(), m_userId);
+                for (const auto& uid : plan.toOffer) m_voiceEngine->ensurePeer(uid);
+                for (const auto& uid : plan.toDrop) {
+                    qWarning("[voice] peer %s is no longer on the roster — "
+                             "dropping", qPrintable(uid));
+                    m_voiceEngine->dropPeer(uid);
                 }
             }
 #endif
@@ -717,6 +549,15 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
                 m_displayName = canonicalId;
                 emit displayNameChanged();
             }
+            // V-L1: the glare window. setLocalUserId was already handed
+            // the stored id — to the session (offer-direction tie-break)
+            // and, if a call is somehow already up, to the engine. A
+            // stale id there makes this client stop recognising itself,
+            // up to offering a WebRTC connection to its own user.
+            if (m_voiceSession) m_voiceSession->setLocalUserId(canonicalId);
+#ifdef BSFCHAT_VOICE_ENABLED
+            if (m_voiceEngine) m_voiceEngine->setLocalUserId(canonicalId);
+#endif
             emit userIdChanged();
             emit identityCorrected();
         }, Qt::SingleShotConnection);
@@ -1284,16 +1125,79 @@ void ServerConnection::resetUnreadForRoom(const QString& roomId)
     if (m_hasUnread != hadUnread) emit hasUnreadChanged();
 }
 
+void ServerConnection::requestMicrophonePermission()
+{
+#if QT_CONFIG(permissions)
+    QMicrophonePermission permission;
+    switch (qApp->checkPermission(permission)) {
+    case Qt::PermissionStatus::Undetermined:
+        // Asynchronous by construction — the prompt is modal to the OS,
+        // not to us. The join continues; if the user denies it,
+        // AudioEngine::start fails and VoiceSession unwinds the join.
+        qApp->requestPermission(permission, this,
+            [](const QPermission& granted) {
+                if (granted.status() != Qt::PermissionStatus::Granted) {
+                    qWarning("[voice] microphone permission denied — voice "
+                             "will not capture");
+                }
+            });
+        break;
+    case Qt::PermissionStatus::Denied:
+        qWarning("[voice] microphone permission is denied in system settings");
+        break;
+    case Qt::PermissionStatus::Granted:
+        break;
+    }
+#endif
+}
+
 void ServerConnection::joinVoiceChannel(const QString& roomId)
 {
-    // If already in a voice channel, leave it first — full local
-    // teardown (engine included), then tell the server.
-    if (!m_activeVoiceRoomId.isEmpty() && m_activeVoiceRoomId != roomId) {
-        const QString oldRoomId = m_activeVoiceRoomId;
-        teardownVoiceSession();
-        m_client->leaveVoice(oldRoomId);
+    // V-L4: the mesh/SFU refusal rule existed, was tested, and was never
+    // called from here — so a mesh client would happily join a channel
+    // full of SFU participants and simply be deaf to them, with nothing
+    // erroring. `clientSupportsLiveKit` is false because there is no
+    // client LiveKit transport yet (BSFCHAT_HAVE_LIVEKIT only vendors the
+    // SDK); when one lands, flip it there and this stays correct.
+    voice::TransportInputs transportInputs;
+#ifdef BSFCHAT_CLIENT_HAS_LIVEKIT_TRANSPORT
+    transportInputs.clientSupportsLiveKit = true;
+#else
+    transportInputs.clientSupportsLiveKit = false;
+#endif
+    // No token probe on this path yet: without a client transport the
+    // answer cannot change the outcome for us, only the wording of a
+    // refusal.
+    transportInputs.serverOfferedLiveKitToken = false;
+    transportInputs.localUserId = m_userId;
+    // The best roster we have for a channel we are not in yet: the
+    // sidebar's, folded from m.call.member room state. Rows carry no
+    // `transport` field today (the server does not write one yet), which
+    // classifyRoster treats as mesh — the correct answer for every client
+    // that currently exists, and the reason this call changes no
+    // behaviour until both halves land.
+    if (m_roomListModel) {
+        QJsonArray rows;
+        for (const auto& p : m_roomListModel->voiceMembers(roomId)) {
+            QJsonObject row;
+            row["user_id"] = p.userId;
+            row["active"] = true;
+            rows.append(row);
+        }
+        transportInputs.voiceMembers = rows;
     }
-    m_client->joinVoice(roomId);
+    const auto decision = voice::chooseTransport(transportInputs);
+    if (decision.refused()) {
+        setVoiceError(decision.refusalReason);
+        return;
+    }
+
+    requestMicrophonePermission();
+
+    // Everything about ordering (leave-before-join on a switch, a join
+    // queued behind an in-flight leave) lives in the session.
+    m_voiceSession->requestJoin(roomId);
+
     // Clicking a voice channel always flips the main area to the
     // VoiceRoom view — even if the join request is still in flight.
     if (!m_viewingVoiceRoom) {
@@ -1465,18 +1369,22 @@ QVariantMap ServerConnection::videoReceiveStats(const QString& userId,
 
 void ServerConnection::leaveVoiceChannel()
 {
-    if (m_activeVoiceRoomId.isEmpty()) return;
+    if (!m_voiceSession || m_voiceSession->state() == VoiceSession::State::Idle)
+        return;
     // Once the user leaves voice the VoiceRoom view has nothing to
     // show — flip back to text so they land on the active channel.
     if (m_viewingVoiceRoom) {
         m_viewingVoiceRoom = false;
         emit viewingVoiceRoomChanged();
     }
-    // Tear down locally first — the REST leave is fire-and-forget
-    // and its reply must not be load-bearing for engine cleanup.
-    const QString roomId = m_activeVoiceRoomId;
-    teardownVoiceSession();
-    m_client->leaveVoice(roomId);
+    // Local teardown still precedes the wire — the session does it when
+    // it ISSUES the leave, so a lost reply cannot leave the mic live.
+    m_voiceSession->requestLeave();
+}
+
+bool ServerConnection::isLeavingVoice() const
+{
+    return m_voiceSession && m_voiceSession->state() != VoiceSession::State::Idle;
 }
 
 void ServerConnection::applyCallMemberEvent(const QString& roomId,
@@ -1500,6 +1408,13 @@ void ServerConnection::applyCallMemberEvent(const QString& roomId,
     if (active) m_roomListModel->updateVoiceState(roomId, true);
 
     if (!m_roomListModel->applyCallMember(roomId, p, active)) return;
+
+    // Our OWN row is authoritative about whether we are still in the call
+    // (V-H2). The ghost reaper after a sleep, a moderator, or the V-H1
+    // join/leave race can all set it inactive; the old client ignored that
+    // entirely and kept the engine, the mic and the poll running forever.
+    if (p.userId == m_userId && m_voiceSession)
+        m_voiceSession->onSelfMembership(roomId, active);
 
     // Only the room we're actually in needs the HTTP round trip: its reply
     // drives mesh peer reconciliation and doubles as our liveness heartbeat.
@@ -1525,6 +1440,308 @@ void ServerConnection::restoreLastTextRoom()
     m_pendingRoomRestore = false;
     if (choice.roomId.isEmpty()) return;
     setActiveRoom(choice.roomId);
+}
+
+void ServerConnection::setupVoiceSession()
+{
+    auto* vs = m_voiceSession;
+    vs->setLocalUserId(m_userId);
+
+    // ---- outbound: session → server -------------------------------
+    connect(vs, &VoiceSession::joinRequested, m_client, &MatrixClient::joinVoice);
+    connect(vs, &VoiceSession::leaveRequested, m_client, &MatrixClient::leaveVoice);
+    connect(vs, &VoiceSession::turnConfigRequested,
+            m_client, &MatrixClient::getTurnConfig);
+    connect(vs, &VoiceSession::stateUpdateRequested, m_client,
+            &MatrixClient::updateVoiceState);
+    connect(vs, &VoiceSession::mediaStateUpdateRequested, m_client,
+            &MatrixClient::updateVoiceMediaState);
+
+    // ---- inbound: server → session --------------------------------
+    connect(m_client, &MatrixClient::voiceJoined, this,
+        [this](const QString& roomId, const QJsonArray& members) {
+            // Join responses carry the members' screen_sharing/camera_on
+            // flags, so seed the announced-sharer sets right away: a share
+            // that started before we joined is then visible immediately.
+            m_voiceMembers = members;
+            reconcileAnnouncedMedia();
+            emit voiceMembersChanged();
+            m_voiceSession->onJoinSucceeded(roomId, members);
+        });
+    connect(m_client, &MatrixClient::voiceJoinError, m_voiceSession,
+            &VoiceSession::onJoinFailed);
+    connect(m_client, &MatrixClient::voiceLeft, m_voiceSession,
+            &VoiceSession::onLeaveSucceeded);
+    connect(m_client, &MatrixClient::voiceLeaveError, m_voiceSession,
+            &VoiceSession::onLeaveFailed);
+    connect(m_client, &MatrixClient::turnConfigResult, m_voiceSession,
+            &VoiceSession::onTurnConfig);
+    connect(m_client, &MatrixClient::turnConfigError, m_voiceSession,
+            &VoiceSession::onTurnConfigFailed);
+    connect(m_client, &MatrixClient::voiceStateUpdated, m_voiceSession,
+            &VoiceSession::onStateUpdateSucceeded);
+    connect(m_client, &MatrixClient::voiceStateError, m_voiceSession,
+            &VoiceSession::onStateUpdateFailed);
+    // V-L2: a five-second poll against a server we have already lost
+    // toasts every five seconds for the whole outage. The reconnect
+    // banner is already saying it.
+    connect(m_client, &MatrixClient::voiceMembersError, this,
+        [this](const QString& roomId, const QString& error) {
+            Q_UNUSED(roomId);
+            if (m_connectionStatus == 2) return;  // reconnecting
+            qWarning("[voice] member poll failed: %s", qPrintable(error));
+        });
+
+    // ---- transport hooks ------------------------------------------
+    vs->setEngineStarter([this](const QString& roomId, const QJsonArray& members,
+                                const QJsonObject& turnConfig) {
+        return startVoiceEngine(roomId, members, turnConfig);
+    });
+    vs->setEngineStopper([this]() { teardownVoiceSession(); });
+    vs->setSignalSink([this](const CallSignal& signal) {
+        dispatchCallSignal(signal);
+    });
+    vs->setTurnUpdater([this](const QJsonObject& config) {
+#ifdef BSFCHAT_VOICE_ENABLED
+        // V-M3: peer connections built from here on (the mesh reconciler
+        // re-offers for the whole life of the call) get live credentials.
+        if (m_voiceEngine) m_voiceEngine->updateTurnConfig(config);
+#else
+        Q_UNUSED(config);
+#endif
+    });
+    vs->setMicGate([this](bool effectiveMuted) {
+#ifdef BSFCHAT_VOICE_ENABLED
+        if (m_voiceEngine) m_voiceEngine->setMuted(effectiveMuted);
+#else
+        Q_UNUSED(effectiveMuted);
+#endif
+    });
+
+    // ---- QML-facing mirrors ---------------------------------------
+    connect(vs, &VoiceSession::stateChanged, this, [this]() {
+        using State = VoiceSession::State;
+        const State st = m_voiceSession->state();
+        // activeVoiceRoomId flips exactly where it used to: when the
+        // server has accepted the join, not when the user clicked.
+        const QString room =
+            (st == State::FetchingTurn || st == State::Active)
+                ? m_voiceSession->roomId() : QString();
+        if (room != m_activeVoiceRoomId) {
+            const bool joined = m_activeVoiceRoomId.isEmpty() && !room.isEmpty();
+            m_activeVoiceRoomId = room;
+            if (joined) {
+                m_voicePollTimer->start();
+                clearVoiceError();
+#ifdef BSFCHAT_VOICE_ENABLED
+                m_sounds->playJoin();
+#endif
+            } else if (room.isEmpty()) {
+                m_voicePollTimer->stop();
+            }
+            emit activeVoiceRoomIdChanged();
+        }
+        // A join that never landed leaves the optimistically-flipped
+        // VoiceRoom view pointing at nothing — flip back to text.
+        if (st == State::Idle && m_viewingVoiceRoom) {
+            m_viewingVoiceRoom = false;
+            emit viewingVoiceRoomChanged();
+        }
+    });
+    connect(vs, &VoiceSession::mutedChanged, this, [this]() {
+        m_voiceMuted = m_voiceSession->muted();
+        emit voiceMutedChanged();
+    });
+    connect(vs, &VoiceSession::deafenedChanged, this, [this]() {
+        m_voiceDeafened = m_voiceSession->deafened();
+#ifdef BSFCHAT_VOICE_ENABLED
+        if (m_voiceEngine) m_voiceEngine->setDeafened(m_voiceDeafened);
+#endif
+        emit voiceDeafenedChanged();
+    });
+    connect(vs, &VoiceSession::errorOccurred, this,
+            [this](const QString& message) { setVoiceError(message); });
+}
+
+bool ServerConnection::startVoiceEngine(const QString& roomId,
+                                        const QJsonArray& members,
+                                        const QJsonObject& config)
+{
+#ifdef BSFCHAT_VOICE_ENABLED
+    // VoiceEngine::start() is one-shot per instance — a stale engine from
+    // a previous session must never be reused.
+    if (m_voiceEngine) {
+        m_voiceEngine->stop();
+        delete m_voiceEngine;
+        m_voiceEngine = nullptr;
+    }
+    m_voiceEngine = new VoiceEngine(m_client, this);
+    m_voiceEngine->setLocalUserId(m_userId);
+
+    // All remote video — decoded RTP frames and legacy JPEG stills —
+    // lands on the registry's per-peer sinks; QML VideoOutputs attach to
+    // those. (The old path re-bound an Image to a fresh base64 data URL
+    // per frame, which loads asynchronously and blanked the tile between
+    // frames — the screen-share flicker bug.)
+    connect(m_voiceEngine, &VoiceEngine::peerVideoFrameDecoded,
+            m_videoRegistry, &VideoStreamRegistry::deliverFrame);
+    connect(m_voiceEngine, &VoiceEngine::peerScreenFrameReceived,
+        this, [this](const QString& userId, const QByteArray& jpeg) {
+            QImage img;
+            if (img.loadFromData(jpeg, "JPEG"))
+                m_videoRegistry->deliverImage(
+                    userId, int(VideoStreamId::Screen), img);
+        });
+    connect(m_voiceEngine, &VoiceEngine::peerCameraFrameReceived,
+        this, [this](const QString& userId, const QByteArray& jpeg) {
+            QImage img;
+            if (img.loadFromData(jpeg, "JPEG"))
+                m_videoRegistry->deliverImage(
+                    userId, int(VideoStreamId::Camera), img);
+        });
+    connect(m_voiceEngine, &VoiceEngine::peerLevelChanged, this,
+        [this](const QString& userId, float level) {
+            m_peerLevels[userId] = level;
+            emit peerLevelChanged(userId);
+        });
+
+    // Mic level → transmit indicator + silence detection.
+    m_zeroLevelFrames = 0;
+    m_micSilent = false;
+    connect(m_voiceEngine, &VoiceEngine::micLevelChanged, this, [this](float level) {
+        if (qAbs(level - m_micLevel) < 0.005f) return;
+        m_micLevel = level;
+        emit micLevelChanged();
+        // Sustained silence = ~3 seconds of near-zero signal (150 frames × 20ms).
+        if (level < 0.005f) {
+            if (++m_zeroLevelFrames >= 150 && !m_micSilent) {
+                m_micSilent = true;
+                emit micSilentChanged();
+                qWarning("[voice] Mic appears silent — device may not be "
+                         "capturing or permission not granted");
+            }
+        } else {
+            m_zeroLevelFrames = 0;
+            if (m_micSilent) {
+                m_micSilent = false;
+                emit micSilentChanged();
+            }
+        }
+    });
+
+    // When any peer's connection state changes, re-emit
+    // voiceMembersChanged so the UI refreshes the per-peer dot.
+    connect(m_voiceEngine, &VoiceEngine::peerStateChanged,
+            this, [this]() { emit voiceMembersChanged(); });
+
+    // Dead peer — blank their video surfaces so the UI doesn't keep
+    // rendering a frozen last frame.
+    connect(m_voiceEngine, &VoiceEngine::peerDisconnected,
+            this, [this](const QString& userId) {
+        m_videoRegistry->dropUser(userId);
+        if (m_peerLevels.remove(userId))
+            emit peerLevelChanged(userId);
+        emit voiceMembersChanged();
+    });
+
+    connect(m_voiceEngine, &VoiceEngine::error,
+            this, [this](const QString& message) { setVoiceError(message); });
+
+    // start() refuses sessions that cannot possibly connect (relay-only
+    // policy with no TURN server; no usable audio device — V-H4). It has
+    // already emitted a human-readable error() → setVoiceError, and
+    // started nothing. Returning false here makes VoiceSession unwind the
+    // join and drop the server-side membership, so the user is not left a
+    // ghost in the channel with no engine behind them.
+    if (!m_voiceEngine->start(roomId, members, config)) {
+        m_voiceEngine->deleteLater();
+        m_voiceEngine = nullptr;
+        return false;
+    }
+
+    // The transport is up — only now does the UI get to say how this call
+    // is protected. Derived from the transport that actually started
+    // rather than assumed, so the LiveKit branch (when it lands here)
+    // cannot inherit the mesh label: it must call setVoiceProtection with
+    // protectionForSession(SessionTransport::Sfu, joinConfig.hasKey()), or
+    // MediaProtection::Failed if encryption was expected and could not be
+    // set up.
+    setVoiceProtection(voice::protectionForSession(
+        m_voiceEngine->kind() == IVoiceTransport::Kind::LiveKit
+            ? voice::SessionTransport::Sfu
+            : voice::SessionTransport::Mesh,
+        /*sfuHasSharedKey=*/false));
+    return true;
+#else
+    Q_UNUSED(roomId);
+    Q_UNUSED(members);
+    Q_UNUSED(config);
+    // Without a voice build there is no transport to start, but the
+    // session must still reach Active so the roster and the member poll
+    // behave — exactly as before this refactor.
+    return true;
+#endif
+}
+
+void ServerConnection::dispatchCallSignal(const CallSignal& signal)
+{
+#ifdef BSFCHAT_VOICE_ENABLED
+    if (!m_voiceEngine) return;
+    nlohmann::json c;
+    try {
+        c = nlohmann::json::parse(signal.payload.toStdString());
+    } catch (const std::exception& e) {
+        qWarning("[voice] unparseable %s from %s: %s", qPrintable(signal.type),
+                 qPrintable(signal.sender), e.what());
+        return;
+    }
+    if (!c.is_object()) return;
+
+    // Call signalling rides the shared room timeline, so every
+    // participant sees every other participant's invites/answers/
+    // candidates. Dispatching on `sender` alone made C apply an offer A
+    // addressed to B; since each peer gets its own call id, the mismatch
+    // then looked like "peer restarted" and tore down a healthy
+    // connection — voice worked 1:1 and fell apart at 3+.
+    //
+    // Newer clients stamp the recipient in "to". Absent (older client) we
+    // keep the old sender-only behaviour rather than dropping the event,
+    // so a mixed fleet still connects.
+    std::string toUser;
+    if (auto toIt = c.find("to"); toIt != c.end() && toIt->is_string())
+        toUser = toIt->get<std::string>();
+    if (!toUser.empty() && toUser != m_userId.toStdString()) return;
+
+    const QString& sender = signal.sender;
+    const QString& type = signal.type;
+    if (type == QString::fromUtf8(bsfchat::event_type::kCallInvite)) {
+        m_voiceEngine->handleCallInvite(sender,
+            QString::fromStdString(c.value("call_id", "")),
+            c.value("offer", nlohmann::json::object()).value("sdp", ""),
+            c.value("bsfchat_caps", nlohmann::json::object()));
+    } else if (type == QString::fromUtf8(bsfchat::event_type::kCallAnswer)) {
+        m_voiceEngine->handleCallAnswer(sender,
+            QString::fromStdString(c.value("call_id", "")),
+            c.value("answer", nlohmann::json::object()).value("sdp", ""),
+            c.value("bsfchat_caps", nlohmann::json::object()));
+    } else if (type == QString::fromUtf8(bsfchat::event_type::kCallNegotiate)) {
+        const auto desc = c.value("description", nlohmann::json::object());
+        m_voiceEngine->handleCallNegotiate(sender,
+            QString::fromStdString(c.value("call_id", "")),
+            desc.value("type", ""), desc.value("sdp", ""));
+    } else if (type == QString::fromUtf8(bsfchat::event_type::kCallCandidates)) {
+        std::vector<std::pair<std::string, std::string>> cands;
+        for (const auto& ic : c.value("candidates", nlohmann::json::array()))
+            cands.emplace_back(ic.value("candidate", ""), ic.value("sdpMid", ""));
+        m_voiceEngine->handleCallCandidates(sender,
+            QString::fromStdString(c.value("call_id", "")), cands);
+    } else if (type == QString::fromUtf8(bsfchat::event_type::kCallHangup)) {
+        m_voiceEngine->handleCallHangup(sender,
+            QString::fromStdString(c.value("call_id", "")));
+    }
+#else
+    Q_UNUSED(signal);
+#endif
 }
 
 void ServerConnection::teardownVoiceSession()
@@ -1734,48 +1951,37 @@ void ServerConnection::setSettings(Settings* settings)
 
 void ServerConnection::applyMicGate()
 {
-#ifdef BSFCHAT_VOICE_ENABLED
-    if (!m_voiceEngine) return;
-    // In PTT mode the mic is muted unless the key is held AND the
-    // user hasn't manually muted. In open-mic mode only the manual
-    // mute matters.
-    bool pttMode = m_settings && m_settings->voiceMode() == QStringLiteral("ptt");
-    bool effective = m_voiceMuted || (pttMode && !m_pttPressed);
-    m_voiceEngine->setMuted(effective);
-#endif
+    // The gate itself (manual mute OR PTT-not-held) and its announcement
+    // live in VoiceSession — V-M7: the old code applied the gate locally
+    // but told the roster `muted=false`, so a PTT user showed as unmuted
+    // while being inaudible.
+    if (!m_voiceSession) return;
+    const bool pttMode =
+        m_settings && m_settings->voiceMode() == QStringLiteral("ptt");
+    m_voiceSession->setPttMode(pttMode);
 }
 
 void ServerConnection::setPttPressed(bool pressed)
 {
     if (m_pttPressed == pressed) return;
     m_pttPressed = pressed;
-    applyMicGate();
+    if (m_voiceSession) m_voiceSession->setPttPressed(pressed);
     emit pttPressedChanged();
 }
 
 void ServerConnection::toggleMute()
 {
-    m_voiceMuted = !m_voiceMuted;
 #ifdef BSFCHAT_VOICE_ENABLED
     m_sounds->playMute();
 #endif
-    applyMicGate();
-    emit voiceMutedChanged();
-    if (!m_activeVoiceRoomId.isEmpty()) {
-        m_client->updateVoiceState(m_activeVoiceRoomId, m_voiceMuted, m_voiceDeafened);
-    }
+    // The mirror (m_voiceMuted) and the state PUT both follow from the
+    // session's mutedChanged.
+    m_voiceSession->toggleMute();
 }
 
 void ServerConnection::toggleDeafen()
 {
-    m_voiceDeafened = !m_voiceDeafened;
-#ifdef BSFCHAT_VOICE_ENABLED
-    if (m_voiceEngine) m_voiceEngine->setDeafened(m_voiceDeafened);
-#endif
-    emit voiceDeafenedChanged();
-    if (!m_activeVoiceRoomId.isEmpty()) {
-        m_client->updateVoiceState(m_activeVoiceRoomId, m_voiceMuted, m_voiceDeafened);
-    }
+    m_voiceSession->toggleDeafen();
 }
 
 void ServerConnection::createVoiceChannel(const QString& name)
@@ -2519,63 +2725,31 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 }
             }
 
-#ifdef BSFCHAT_VOICE_ENABLED
-            // Route call signaling events to VoiceEngine
-            if (roomId == m_activeVoiceRoomId && m_voiceEngine) {
-                QString sender = QString::fromStdString(event.sender);
-                if (sender != m_userId) {
-                    const auto& c = event.content.data;
-                    // Call signaling rides the shared room timeline, so
-                    // every participant sees every other participant's
-                    // invites/answers/candidates. Dispatching on
-                    // `sender` alone made C apply an offer A addressed
-                    // to B; since each peer gets its own call id, the
-                    // mismatch then looked like "peer restarted" and
-                    // tore down a healthy connection — voice worked 1:1
-                    // and fell apart at 3+.
-                    //
-                    // Newer clients stamp the recipient in "to". Absent
-                    // (older client) we keep the old sender-only
-                    // behaviour rather than dropping the event, so a
-                    // mixed fleet still connects.
-                    std::string toUser;
-                    if (auto toIt = c.find("to");
-                        toIt != c.end() && toIt->is_string()) {
-                        toUser = toIt->get<std::string>();
-                    }
-                    const bool addressedToUs =
-                        toUser.empty() || toUser == m_userId.toStdString();
-                    if (!addressedToUs) {
-                        // Someone else's signaling — not ours to touch.
-                    } else if (type == QString::fromUtf8(bsfchat::event_type::kCallInvite)) {
-                        m_voiceEngine->handleCallInvite(sender,
-                            QString::fromStdString(c.value("call_id", "")),
-                            c.value("offer", nlohmann::json::object()).value("sdp", ""),
-                            c.value("bsfchat_caps", nlohmann::json::object()));
-                    } else if (type == QString::fromUtf8(bsfchat::event_type::kCallAnswer)) {
-                        m_voiceEngine->handleCallAnswer(sender,
-                            QString::fromStdString(c.value("call_id", "")),
-                            c.value("answer", nlohmann::json::object()).value("sdp", ""),
-                            c.value("bsfchat_caps", nlohmann::json::object()));
-                    } else if (type == QString::fromUtf8(bsfchat::event_type::kCallNegotiate)) {
-                        const auto desc = c.value("description", nlohmann::json::object());
-                        m_voiceEngine->handleCallNegotiate(sender,
-                            QString::fromStdString(c.value("call_id", "")),
-                            desc.value("type", ""), desc.value("sdp", ""));
-                    } else if (type == QString::fromUtf8(bsfchat::event_type::kCallCandidates)) {
-                        std::vector<std::pair<std::string, std::string>> cands;
-                        for (const auto& ic : c.value("candidates", nlohmann::json::array())) {
-                            cands.emplace_back(ic.value("candidate", ""), ic.value("sdpMid", ""));
-                        }
-                        m_voiceEngine->handleCallCandidates(sender,
-                            QString::fromStdString(c.value("call_id", "")), cands);
-                    } else if (type == QString::fromUtf8(bsfchat::event_type::kCallHangup)) {
-                        m_voiceEngine->handleCallHangup(sender,
-                            QString::fromStdString(c.value("call_id", "")));
-                    }
+            // Inbound call signalling. It goes to the SESSION, not
+            // straight to the engine: for the whole TURN round trip of a
+            // join there is no engine yet, and the old
+            // `m_voiceEngine != nullptr` gate here silently dropped
+            // everything that arrived in that window — V-C1, ~35 s of
+            // silence for every pair where the joiner has the greater
+            // user id. The session buffers those and replays them the
+            // moment the engine exists, drops invites older than the
+            // session (V-M1), and passes everything else straight
+            // through.
+            if (m_voiceSession && roomId == m_voiceSession->roomId()) {
+                const QString sender = QString::fromStdString(event.sender);
+                const bool isSignalling =
+                    type.startsWith(QLatin1String("m.call."))
+                    || type == QString::fromUtf8(bsfchat::event_type::kCallNegotiate);
+                if (sender != m_userId && isSignalling) {
+                    CallSignal signal;
+                    signal.type = type;
+                    signal.sender = sender;
+                    signal.roomId = roomId;
+                    signal.originServerTs = static_cast<qint64>(event.origin_server_ts);
+                    signal.payload = QByteArray::fromStdString(event.content.data.dump());
+                    m_voiceSession->routeInboundSignal(signal);
                 }
             }
-#endif
 
             // Add messages to active room's message model
             if (roomId == m_activeRoomId) {

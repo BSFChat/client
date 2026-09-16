@@ -15,6 +15,11 @@
 // builds. The .cpp side of it is voice-gated, so every CALL into
 // voice:: below sits behind BSFCHAT_VOICE_ENABLED.
 #include "voice/VoiceEncryption.h"
+// The join/leave state machine. Header-only dependency on QObject/QJson
+// (CallSignal is a plain value type), so it is safe in non-voice builds
+// too — the session runs there as well; it simply has no transport to
+// start. See src/net/VoiceSession.h.
+#include "net/VoiceSession.h"
 
 class MatrixClient;
 class SyncLoop;
@@ -345,6 +350,12 @@ public:
 
     Q_INVOKABLE void joinVoiceChannel(const QString& roomId);
     Q_INVOKABLE void leaveVoiceChannel();
+    // True while this connection still holds, or is winding down, a voice
+    // session. The quit path uses it to decide whether to wait (V-H3).
+    bool isLeavingVoice() const;
+    // The session object, so ServerManager can wait on its `settled`
+    // signal at quit. Never null.
+    VoiceSession* voiceSession() const { return m_voiceSession; }
     // Swap the main content to the VoiceRoom view without touching the
     // voice connection itself. Called when the user clicks an already-
     // joined voice channel, the VoiceDock, or the VoiceStatusCard. No-op
@@ -798,14 +809,28 @@ public:
     QMap<QString, QString> m_pendingNotifyLevelRollback;
 
     // Voice state
+    // Mirrors of VoiceSession state, kept for the Q_PROPERTYs QML binds
+    // to. The session is the authority; these follow it.
     QString m_activeVoiceRoomId;
     QString m_voiceError;
-    // True between voice/join succeeding and the TURN-config reply
-    // landing. MatrixClient reports every voice failure through the one
-    // generic voiceError signal, and a failed TURN fetch is the only one
-    // that must unwind the whole join (otherwise the user is a ghost in
-    // the channel with no engine) — this flag disambiguates it.
-    bool m_voiceTurnFetchPending = false;
+    // The join/leave state machine (V-C1/V-H1/V-H2/V-M4). Replaced the
+    // `m_voiceTurnFetchPending` bool that used to be the join's only
+    // guard; read src/net/VoiceSession.h for what that bool could not do.
+    VoiceSession* m_voiceSession = nullptr;
+    // Wire the session to MatrixClient, to the engine, and to the mirrors
+    // above. Called once from the constructor.
+    void setupVoiceSession();
+    // The session's engine-start hook. Builds a VoiceEngine, wires it and
+    // starts it; false means the session must unwind the join (V-H4).
+    bool startVoiceEngine(const QString& roomId, const QJsonArray& members,
+                          const QJsonObject& config);
+    // Hand one inbound m.call.* event to the running engine. Called by
+    // the session, both live and when replaying what it buffered during
+    // the join (V-C1).
+    void dispatchCallSignal(const CallSignal& signal);
+    // Ask for the microphone before voice/join on platforms that gate it
+    // (macOS/iOS/Android, Qt 6.5+). No-op elsewhere. V-H4.
+    void requestMicrophonePermission();
     QTimer* m_voiceErrorTimer = nullptr;
     float m_micLevel = 0.0f;
     bool m_micSilent = false;
