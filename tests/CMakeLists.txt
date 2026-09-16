@@ -3,6 +3,7 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 qt_add_executable(test_models
     test_models.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ServerListModel.cpp

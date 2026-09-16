@@ -109,6 +109,7 @@ qt_add_executable(bsfchat-app
     src/model/ServerListModel.cpp
     src/model/RoomListModel.cpp
     src/model/MessageModel.cpp
+    src/model/ThreadFilterModel.cpp
     src/model/MemberListModel.cpp
     src/store/LocalCache.cpp
     src/util/FileLogger.cpp

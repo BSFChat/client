@@ -1,4 +1,5 @@
 #include "model/MessageModel.h"
+#include "model/ThreadFilterModel.h"
 
 #include <QDateTime>
 #include <QSet>
@@ -881,6 +882,17 @@ bool MessageModel::removeMessage(const QString& eventId)
         emit dataChanged(idx, idx, {ShowSenderRole, ShowDateSeparator});
     }
     return true;
+}
+
+QAbstractItemModel* MessageModel::threadModel(const QString& rootEventId)
+{
+    if (rootEventId.isEmpty()) return nullptr;
+    if (!m_threadProxy) {
+        m_threadProxy = new ThreadFilterModel(this);
+        m_threadProxy->setSourceModel(this);
+    }
+    m_threadProxy->setRootEventId(rootEventId);
+    return m_threadProxy;
 }
 
 void MessageModel::setPrevBatchToken(const QString& token)

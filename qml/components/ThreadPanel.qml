@@ -26,15 +26,22 @@ Item {
     // it already owns.
     signal userLinkClicked(string userId, string displayName)
 
-    // Trigger a re-fetch of thread replies when the MessageModel
-    // ticks count. threadMessages is a function call, not a signal,
-    // so we drive re-eval via this counter.
-    property int _replyGen: 0
-    Connections {
-        target: serverManager.activeServer
-            ? serverManager.activeServer.messageModel : null
-        ignoreUnknownSignals: true
-        function onCountChanged() { threadPanel._replyGen++; }
+    // Live view of this thread over the room's MessageModel (U-M8).
+    //
+    // This used to be a plain JS array rebuilt from eventPreview() +
+    // threadReplies() every time the room's message count ticked, which
+    // meant an edit or a reaction inside a thread never appeared (neither
+    // changes the count), and every rebuild handed the ListView a new
+    // model object — destroying every delegate and throwing the drawer's
+    // scroll position back to the top mid-conversation.
+    //
+    // A QSortFilterProxyModel is the same rows with the same roles, kept
+    // in step by the source model's own dataChanged / rowsInserted /
+    // rowsRemoved. An edit repaints one delegate and nothing moves.
+    readonly property var threadModel: {
+        var s = serverManager.activeServer;
+        if (!s || !s.messageModel || threadPanel.rootEventId === "") return null;
+        return s.messageModel.threadModel(threadPanel.rootEventId);
     }
 
     function openFor(eventId) {
@@ -160,41 +167,37 @@ Item {
                 ScrollBar.vertical: ThemedScrollBar {}
                 boundsBehavior: Flickable.StopAtBounds
 
-                // Build [parent, ...replies] as a plain JS array.
-                model: {
-                    threadPanel._replyGen; // dependency
-                    var s = serverManager.activeServer;
-                    if (!s || !s.messageModel || !threadPanel.rootEventId)
-                        return [];
-                    var out = [];
-                    var parent = s.messageModel.eventPreview(threadPanel.rootEventId);
-                    if (parent && parent.sender !== undefined) {
-                        parent.eventId = threadPanel.rootEventId;
-                        parent._isParent = true;
-                        out.push(parent);
-                    }
-                    var replies = s.messageModel.threadReplies(threadPanel.rootEventId);
-                    for (var i = 0; i < replies.length; i++) {
-                        replies[i]._isParent = false;
-                        out.push(replies[i]);
-                    }
-                    return out;
-                }
+                // [root, ...replies], oldest-first, straight off the
+                // model — the proxy accepts the thread's root message as
+                // well as its children, so the ordering that used to be
+                // assembled by hand falls out of the source order.
+                model: threadPanel.threadModel
 
                 delegate: Item {
                     id: threadRow
                     width: ListView.view.width
                     height: row.implicitHeight + Theme.sp.s3 * 2
 
+                    required property string eventId
+                    required property string senderDisplayName
+                    required property string sender
+                    required property string body
+                    required property string formattedBody
+                    required property double timestamp
+                    required property bool mentionsMe
+                    required property bool mentionsRoom
+
+                    readonly property bool isParent:
+                        threadRow.eventId === threadPanel.rootEventId
+
                     // Same rule the timeline uses (see MessageView.qml's
                     // MessageBubble): a reply naming you or the room is
-                    // worth spotting at a glance. The parent preview comes
-                    // from eventPreview(), which carries no mention data,
-                    // hence the undefined-safe reads.
-                    readonly property bool mentionsMe:
-                        !modelData._isParent
-                        && ((modelData.mentionsMe || false)
-                            || (modelData.mentionsRoom || false))
+                    // worth spotting at a glance. The root is the message
+                    // the thread hangs off, not a reply, so it never gets
+                    // the marker even when it does name you.
+                    readonly property bool highlight:
+                        !threadRow.isParent
+                        && (threadRow.mentionsMe || threadRow.mentionsRoom)
 
                     Rectangle {
                         anchors.fill: parent
@@ -203,19 +206,19 @@ Item {
                         anchors.topMargin: Theme.sp.s2
                         anchors.bottomMargin: Theme.sp.s2
                         radius: Theme.r1
-                        color: modelData._isParent ? Qt.rgba(Theme.accent.r,
+                        color: threadRow.isParent ? Qt.rgba(Theme.accent.r,
                                    Theme.accent.g, Theme.accent.b, 0.06)
-                                : threadRow.mentionsMe
+                                : threadRow.highlight
                                   ? Qt.rgba(Theme.warn.r, Theme.warn.g,
                                             Theme.warn.b, 0.10)
                                   : "transparent"
-                        border.width: modelData._isParent ? 1 : 0
+                        border.width: threadRow.isParent ? 1 : 0
                         border.color: Qt.rgba(Theme.accent.r, Theme.accent.g,
                                               Theme.accent.b, 0.5)
 
                         // Left bar, matching the timeline's mention marker.
                         Rectangle {
-                            visible: threadRow.mentionsMe
+                            visible: threadRow.highlight
                             anchors.left: parent.left
                             anchors.top: parent.top
                             anchors.bottom: parent.bottom
@@ -234,9 +237,9 @@ Item {
                                 spacing: Theme.sp.s3
                                 Layout.fillWidth: true
                                 Text {
-                                    text: modelData.sender
-                                          || modelData.senderDisplayName
-                                          || modelData.eventId || ""
+                                    text: threadRow.senderDisplayName
+                                          || threadRow.sender
+                                          || threadRow.eventId
                                     font.family: Theme.fontSans
                                     font.pixelSize: Theme.fontSize.base
                                     font.weight: Theme.fontWeight.semibold
@@ -246,7 +249,7 @@ Item {
                                 }
                                 Text {
                                     text: {
-                                        var d = new Date(modelData.timestamp);
+                                        var d = new Date(threadRow.timestamp);
                                         return d.toLocaleString(Qt.locale(), "h:mm ap");
                                     }
                                     font.family: Theme.fontSans
@@ -263,8 +266,8 @@ Item {
                                 // timeline shows. The parent preview carries
                                 // no markup, so it stays PlainText.
                                 readonly property string html:
-                                    modelData.formattedBody || ""
-                                text: html !== "" ? html : (modelData.body || "")
+                                    threadRow.formattedBody
+                                text: html !== "" ? html : threadRow.body
                                 textFormat: html !== "" ? Text.RichText
                                                         : Text.PlainText
                                 font.family: Theme.fontSans

@@ -12,6 +12,8 @@
 
 #include <bsfchat/MatrixTypes.h>
 
+class ThreadFilterModel;
+
 class MessageModel : public QAbstractListModel {
     Q_OBJECT
     Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
@@ -51,6 +53,17 @@ public:
         MentionsMeRole,     // m.mentions.user_ids contains the local user
         MentionsRoomRole    // m.mentions.room — an @room broadcast
     };
+
+    // A live, role-preserving view of one thread over this model (U-M8),
+    // for the thread drawer to bind its ListView to. One proxy per model,
+    // re-pointed as the user opens different threads; owned by this object
+    // and valid for its lifetime, which is what makes it safe to hand to
+    // QML. Returns nullptr for an empty root.
+    //
+    // Prefer this over threadReplies() anywhere the answer drives a view:
+    // the snapshot list below cannot see an edit or a reaction, because
+    // neither changes the row count that was the only thing re-running it.
+    Q_INVOKABLE QAbstractItemModel* threadModel(const QString& rootEventId);
 
     // Thread helpers. `threadReplies` returns the messages whose
     // threadRootId == rootEventId, oldest-first, as {eventId, sender,
@@ -355,6 +368,7 @@ private:
     // Empty => no more history (or never populated). The exact format is
     // server-defined; we pass it back verbatim as the `from` param on
     // /rooms/{id}/messages.
+    ThreadFilterModel* m_threadProxy = nullptr;
     QString m_prevBatchToken;
     bool m_loadingHistory = false;
     const QMap<QString, QString>* m_dnCache = nullptr;
