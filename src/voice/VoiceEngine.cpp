@@ -454,6 +454,34 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
         const int stream = doc.value("stream", 0);
         if (stream >= 0 && stream < kVideoStreamCount)
             emit videoKeyframeRequested(stream);
+    } else if (t == "stream") {
+        // S-7: explicit stream lifecycle. Before this existed a stopped
+        // share left the viewer on a frozen frame until the 4 s
+        // liveness timeout, and then on "Starting share…" until the
+        // roster poll cleared the announced flag — up to ~9 s of lying
+        // UI after the sender stopped.
+        const int stream = doc.value("stream", 0);
+        if (stream < 0 || stream >= kVideoStreamCount) return;
+        // "on" may arrive as a bool or a 0/1 number depending on the
+        // sender's json library; nlohmann's value<int>() would throw on
+        // the bool form, and this runs inside a slot.
+        bool on = true;
+        if (doc.contains("on")) {
+            const auto& v = doc.at("on");
+            if (v.is_boolean()) on = v.get<bool>();
+            else if (v.is_number()) on = v.get<double>() != 0.0;
+        }
+        if (!on) {
+            // Drop the decode worker too: whatever restarts the stream
+            // starts at a keyframe, so nothing about the old session is
+            // worth keeping, and its queued AUs would decode into the
+            // cleared tile.
+            if (auto* p = m_recvPipelines.take({userId, stream}))
+                p->deleteLater();
+        }
+        qCInfo(logVoice, "peer %s stream %d %s", qPrintable(userId), stream,
+              on ? "started" : "stopped");
+        emit peerVideoStreamState(userId, stream, on);
     } else if (t == "rr") {
         // Receiver report for OUR outgoing stream toward `userId`:
         // cumulative received bytes. Windowed against our cumulative
@@ -493,10 +521,49 @@ void VoiceEngine::sendReceiverReports() {
     }
 }
 
+namespace {
+QByteArray streamControlJson(int stream, bool on) {
+    return QByteArrayLiteral("{\"t\":\"stream\",\"stream\":")
+        + QByteArray::number(stream) + QByteArrayLiteral(",\"on\":")
+        + (on ? "1" : "0") + "}";
+}
+} // namespace
+
+void VoiceEngine::announceVideoStreamState(VideoStreamId stream, bool on) {
+    const int idx = int(stream);
+    if (idx < 0 || idx >= kVideoStreamCount) return;
+    m_streamAnnounced[idx] = on;
+    if (!m_running) return;
+    const QByteArray json = streamControlJson(idx, on);
+    for (auto* peer : m_peers) {
+        if (peer) peer->sendControl(json);
+    }
+}
+
+void VoiceEngine::setVideoSendCeiling(VideoStreamId stream, int maxKbps) {
+    const int idx = int(stream);
+    if (idx < 0 || idx >= kVideoStreamCount) return;
+    if (m_pacerCeilingKbps[idx] == maxKbps) return;
+    m_pacerCeilingKbps[idx] = maxKbps;
+    for (auto* peer : m_peers) {
+        if (peer) peer->setVideoPacingCeilingKbps(stream, maxKbps);
+    }
+}
+
 void VoiceEngine::maybeSetupVideoFor(const QString& userId) {
     if (!m_videoSendActive) return;
     auto* peer = m_peers.value(userId);
-    if (peer && peer->remoteSupportsVideoRtp()) peer->ensureVideoTracks();
+    if (!peer || !peer->remoteSupportsVideoRtp()) return;
+    peer->ensureVideoTracks();
+    // A peer that joined mid-share inherits the current pacer ceiling
+    // and hears that the stream is already running, rather than only
+    // learning either on the next change.
+    for (int s = 0; s < kVideoStreamCount; ++s) {
+        if (m_pacerCeilingKbps[s] > 0)
+            peer->setVideoPacingCeilingKbps(VideoStreamId(s), m_pacerCeilingKbps[s]);
+        if (m_streamAnnounced[s])
+            peer->sendControl(streamControlJson(s, true));
+    }
 }
 
 void VoiceEngine::prepareVideoSend() {
@@ -511,7 +578,11 @@ void VoiceEngine::prepareVideoSend() {
 void VoiceEngine::broadcastEncodedVideo(VideoStreamId stream, const EncodedFrame& frame) {
     if (!m_running) return;
     for (auto* peer : m_peers) {
-        if (peer) peer->sendVideoFrame(stream, frame);
+        // S-1: decode capability, not track state. A peer whose caps
+        // carry no h264 gets the JPEG fan-out instead — pushing RTP at
+        // it burns uplink to paint nothing.
+        if (peer && peer->remoteCanReceiveRtpVideo())
+            peer->sendVideoFrame(stream, frame);
     }
 }
 
@@ -528,8 +599,10 @@ bool VoiceEngine::allPeersSupportLossless() const {
     static const QString kAv1Dc = QStringLiteral("av1-dc");
     bool any = false;
     for (auto* peer : m_peers) {
-        if (!peer || !peer->remoteSupportsVideoRtp()) continue;
-        if (peer->remoteCaps().videoCodecs.isEmpty()) continue;
+        // Same capability predicate as every other fan-out decision
+        // (S-1): a peer that cannot decode our video is not a viewer
+        // whose opinion on lossless matters.
+        if (!peer || !peer->remoteCanReceiveRtpVideo()) continue;
         if (!peer->remoteCaps().lossless.contains(kAv1Dc)) return false;
         any = true;
     }
@@ -544,12 +617,12 @@ bool VoiceEngine::losslessBackpressure(qint64 budgetBytes) const {
 }
 
 bool VoiceEngine::hasLegacyOpenPeers(VideoStreamId stream) const {
-    // "Needs the JPEG path": open data channel but no open video
-    // track for this stream — covers legacy clients AND capable peers
-    // still mid-renegotiation (the broadcast transition-gap rule).
+    // "Needs the JPEG path" (S-1): an open data channel plus either no
+    // advertised h264 decode at all (legacy client, Android without a
+    // decoder) or a capable peer whose track is still renegotiating
+    // (the broadcast transition-gap rule).
     for (auto* peer : m_peers) {
-        if (peer && peer->isChannelOpen()
-            && !peer->hasVideoTrackOpen(stream))
+        if (peer && peer->isChannelOpen() && peer->needsLegacyJpeg(stream))
             return true;
     }
     return false;
@@ -557,9 +630,7 @@ bool VoiceEngine::hasLegacyOpenPeers(VideoStreamId stream) const {
 
 bool VoiceEngine::hasVideoCapablePeers() const {
     for (auto* peer : m_peers) {
-        if (peer && peer->remoteSupportsVideoRtp()
-            && !peer->remoteCaps().videoCodecs.isEmpty())
-            return true;
+        if (peer && peer->remoteCanReceiveRtpVideo()) return true;
     }
     return false;
 }
@@ -569,8 +640,7 @@ H264Profile VoiceEngine::negotiatedH264Profile() const {
     if (!VideoEncoder::h264EncodeProfiles().contains(kHigh))
         return H264Profile::ConstrainedBaseline;
     for (auto* peer : m_peers) {
-        if (!peer || !peer->remoteSupportsVideoRtp()) continue;
-        if (peer->remoteCaps().videoCodecs.isEmpty()) continue;
+        if (!peer || !peer->remoteCanReceiveRtpVideo()) continue;
         if (!peer->remoteCaps().h264ProfilesDecode.contains(kHigh))
             return H264Profile::ConstrainedBaseline;
     }
@@ -987,11 +1057,12 @@ void VoiceEngine::broadcastScreenFrame(const QByteArray& jpegData) {
     }
     for (auto* peer : m_peers) {
         if (!peer) continue;
-        // Peers with an open video track get real video instead; the
-        // JPEG keeps flowing to legacy peers AND capable peers whose
-        // track is still renegotiating (long-poll signaling can take
-        // seconds), so nobody stares at a placeholder in between.
-        if (peer->hasVideoTrackOpen(VideoStreamId::Screen)) continue;
+        // Peers that can decode our RTP video AND have an open track
+        // get real video instead; the JPEG keeps flowing to peers with
+        // no h264 decode at all AND to capable peers whose track is
+        // still renegotiating (long-poll signaling can take seconds),
+        // so nobody stares at a placeholder in between (S-1).
+        if (!peer->needsLegacyJpeg(VideoStreamId::Screen)) continue;
         peer->sendScreenFrame(jpegData);
     }
 }
@@ -1005,9 +1076,10 @@ void VoiceEngine::broadcastCameraFrame(const QByteArray& jpegData) {
     }
     for (auto* peer : m_peers) {
         if (!peer) continue;
-        // Same transition-gap rule as the screen stream: JPEG flows
-        // until the peer's camera track opens, then RTP takes over.
-        if (peer->hasVideoTrackOpen(VideoStreamId::Camera)) continue;
+        // Same rule as the screen stream: JPEG flows until the peer
+        // both advertises h264 decode and has its camera track open,
+        // then RTP takes over (S-1).
+        if (!peer->needsLegacyJpeg(VideoStreamId::Camera)) continue;
         peer->sendCameraFrame(jpegData);
     }
 }

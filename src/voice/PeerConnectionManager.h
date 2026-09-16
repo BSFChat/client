@@ -57,12 +57,39 @@ public:
     const PeerCaps& remoteCaps() const { return m_remoteCaps; }
     bool remoteCapsKnown() const { return m_remoteCapsKnown; }
     bool remoteSupportsVideoRtp() const { return m_remoteCapsKnown && m_remoteCaps.videoRtp; }
+    // S-1: can this peer actually DECODE the H.264 we would send it?
+    // remoteSupportsVideoRtp() only says it understands the protocol —
+    // a build with no H.264 decoder (Android without openh264) answers
+    // true there and still cannot show a single frame.
+    bool remoteCanReceiveRtpVideo() const {
+        return peerCanReceiveRtpVideo(m_remoteCaps, m_remoteCapsKnown,
+                                      videoCodecIdH264());
+    }
+    // S-1: must this peer be served the legacy JPEG stills for `stream`
+    // (no decoder, or decoder but the track hasn't opened yet)?
+    bool needsLegacyJpeg(VideoStreamId stream) const {
+        return peerNeedsLegacyJpeg(m_remoteCaps, m_remoteCapsKnown,
+                                   hasVideoTrackOpen(stream),
+                                   videoCodecIdH264());
+    }
 
-    // JSON control message over the data channel, tag 0x04
-    // ({"t":"caps"|"kf"|"rr", ...}). MUST only be called once the
-    // peer's caps prove it's a new client — old clients misparse
+    // JSON control message, tag 0x04
+    // ({"t":"caps"|"kf"|"rr"|"stream", ...}). MUST only be called once
+    // the peer's caps prove it's a new client — old clients misparse
     // unknown tags as audio (see onMessage's legacy fallback).
+    //
+    // Prefers the RELIABLE, ORDERED "control" channel and falls back to
+    // the audio channel when the peer never opened one (S-2). The audio
+    // channel is unordered with maxRetransmits=0, so a keyframe request
+    // or an end-of-stream notice sent on it is simply gone if its one
+    // datagram is lost — which is how a viewer stayed frozen until the
+    // next periodic IDR, 10-30 s later.
     void sendControl(const QByteArray& json);
+    // True when the peer negotiated the reliable control channel, i.e.
+    // control messages are not riding the lossy audio channel.
+    bool hasReliableControl() const {
+        return m_controlDc && m_controlDc->isOpen();
+    }
 
     // ---- RTP video tracks ----
     // Add the vscreen/vcamera SendRecv tracks and renegotiate.
@@ -75,6 +102,9 @@ public:
     // Packetize + send one encoded access unit. No-op while the track
     // isn't open. RTP timestamps derive from EncodedFrame::captureTimeUs.
     void sendVideoFrame(VideoStreamId stream, const EncodedFrame& frame);
+    // Raise/lower the RTP pacer's ceiling for `stream` so it always
+    // sits above what the encoder may emit (S-15). Thread-safe.
+    void setVideoPacingCeilingKbps(VideoStreamId stream, int maxKbps);
     // Ask the remote sender for an IDR on `stream` (0x04 "kf" control
     // message — the guaranteed path; RTCP PLI in v0.24.5 can't be
     // triggered app-side on the receive direction of our chain).
@@ -160,6 +190,8 @@ signals:
 private:
     void setupCallbacks();
     void setupDataChannel(std::shared_ptr<rtc::DataChannel> dc);
+    // Reliable+ordered channel carrying only 0x04 control JSON.
+    void setupControlChannel(std::shared_ptr<rtc::DataChannel> dc);
     void flushPendingCandidates();
     // Fires a queued renegotiation once the signaling state is stable.
     void maybeRenegotiateAgain();
@@ -225,6 +257,8 @@ private:
         std::shared_ptr<rtc::Track> track;
         std::shared_ptr<rtc::RtpPacketizationConfig> rtpConfig;
         std::shared_ptr<rtc::RtcpSrReporter> srReporter;
+        // PacedRtpSender (file-local type, so held as the base).
+        std::shared_ptr<rtc::MediaHandler> pacer;
         qint64 startTimeUs = -1;
         bool open = false;
         // Set by the RtpGapDetector (libdatachannel network thread),
@@ -239,9 +273,26 @@ private:
         qint64 txSkipLogMs = 0;
     };
     VideoTrackCtx m_video[kVideoStreamCount];
+    // Pacer ceiling per stream, remembered so a track attached later
+    // (onTrack on the answerer side) starts at the right budget.
+    int m_pacerCeilingKbps[kVideoStreamCount] = {};
+    // Matches the old fixed rtc::PacingHandler budget, used until the
+    // share controller reports the encoder's real ceiling.
+    static constexpr int kDefaultPacerCeilingKbps = 20000;
     QTimer* m_srTimer = nullptr;   // 1 s sender-report tick, lazily created
     quint64 m_txFrames[kVideoStreamCount] = {};
     quint64 m_txBytes[kVideoStreamCount] = {};
+
+    // Reliable, ordered control channel ("control"). Created by the
+    // offerer in createOffer(); the answerer adopts it via the
+    // onDataChannel label match. Null against a peer running a build
+    // that predates it — sendControl() then falls back to m_dc.
+    //
+    // NOTE for the teardown work (S-6/V-C2): this channel's onMessage
+    // callback captures `this` exactly like m_dc's, so whatever
+    // ~PeerConnectionManager ends up doing to m_dc (close +
+    // resetCallbacks) MUST also be done to m_controlDc.
+    std::shared_ptr<rtc::DataChannel> m_controlDc;
 
     // Lossless channel (created lazily by the sending side; adopted
     // via onDataChannel label match on the receiving side).

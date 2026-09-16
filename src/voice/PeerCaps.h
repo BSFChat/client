@@ -26,6 +26,12 @@ struct PeerCaps {
     QStringList h264ProfilesEncode;    // e.g. {"high"}
     QStringList lossless;              // e.g. {"av1-dc"} — AV1 over reliable data channel
 
+    // True when the peer advertises `codec` as one it can DECODE.
+    // Case-insensitive: the field is free-form JSON from another build.
+    bool decodes(const QString& codec) const {
+        return videoCodecs.contains(codec, Qt::CaseInsensitive);
+    }
+
     static PeerCaps fromJson(const nlohmann::json& j) {
         PeerCaps c;
         if (!j.is_object()) return c;
@@ -59,3 +65,41 @@ struct PeerCaps {
         };
     }
 };
+
+// The codec identifier the RTP video path advertises and sends.
+inline QString videoCodecIdH264() { return QStringLiteral("h264"); }
+
+// ---------------------------------------------------------------------
+// Who gets which video path (S-1)
+// ---------------------------------------------------------------------
+// These two predicates are the whole legacy/RTP routing decision, kept
+// here as free functions so they can be unit-tested without a live
+// peer connection — the bug they encode was a one-line misjudgement
+// that made Android receive NOTHING once a desktop shared.
+//
+// The old rule keyed "legacy" on whether the RTP TRACK was open. That
+// is not the same question:
+//   * a peer with video_rtp:1 but no decoder (Android without openh264
+//     or libaom) still gets a NEGOTIATED, OPEN track — the m-lines are
+//     in the initial offer regardless — so it was classified capable,
+//     skipped by the JPEG fan-out, and pushed H.264 it cannot decode;
+//   * a peer whose track has not opened yet is genuinely in the
+//     transition gap and does need JPEG for those few seconds.
+// Decode capability answers the first; track state answers the second;
+// both are needed.
+
+// True when `codec` video over RTP will actually be decodable by this
+// peer. Unknown caps ⇒ false: before the handshake we assume nothing.
+inline bool peerCanReceiveRtpVideo(const PeerCaps& caps, bool capsKnown,
+                                   const QString& codec) {
+    return capsKnown && caps.videoRtp && caps.decodes(codec);
+}
+
+// True when the peer must be served the legacy JPEG stills path:
+// either it cannot decode our RTP codec at all, or it can but its
+// track for this stream has not opened yet.
+inline bool peerNeedsLegacyJpeg(const PeerCaps& caps, bool capsKnown,
+                                bool videoTrackOpen, const QString& codec) {
+    if (!peerCanReceiveRtpVideo(caps, capsKnown, codec)) return true;
+    return !videoTrackOpen;
+}

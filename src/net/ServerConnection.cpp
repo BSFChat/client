@@ -439,20 +439,25 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             // the screen-share flicker bug.)
             connect(m_voiceEngine, &VoiceEngine::peerVideoFrameDecoded,
                     m_videoRegistry, &VideoStreamRegistry::deliverFrame);
+            // Legacy JPEG stills: hand the COMPRESSED bytes to the
+            // registry, which decodes them on its own thread (S-10).
+            // Decoding here put a multi-millisecond decode in the GUI
+            // thread for every frame of every sharing peer.
             connect(m_voiceEngine, &VoiceEngine::peerScreenFrameReceived,
                 this, [this](const QString& userId, const QByteArray& jpeg) {
-                    QImage img;
-                    if (img.loadFromData(jpeg, "JPEG"))
-                        m_videoRegistry->deliverImage(
-                            userId, int(VideoStreamId::Screen), img);
+                    m_videoRegistry->deliverJpeg(
+                        userId, int(VideoStreamId::Screen), jpeg);
                 });
             connect(m_voiceEngine, &VoiceEngine::peerCameraFrameReceived,
                 this, [this](const QString& userId, const QByteArray& jpeg) {
-                    QImage img;
-                    if (img.loadFromData(jpeg, "JPEG"))
-                        m_videoRegistry->deliverImage(
-                            userId, int(VideoStreamId::Camera), img);
+                    m_videoRegistry->deliverJpeg(
+                        userId, int(VideoStreamId::Camera), jpeg);
                 });
+            // Explicit stream start/stop from the sender (S-7) — clears
+            // the tile the moment a share ends instead of after the
+            // frame-liveness timeout plus the roster poll.
+            connect(m_voiceEngine, &VoiceEngine::peerVideoStreamState,
+                    m_videoRegistry, &VideoStreamRegistry::setStreamAnnounced);
             connect(m_voiceEngine, &VoiceEngine::peerLevelChanged, this,
                 [this](const QString& userId, float level) {
                     m_peerLevels[userId] = level;

@@ -185,6 +185,28 @@ public:
     virtual void prepareVideoSend() = 0;
     virtual void broadcastEncodedVideo(VideoStreamId stream, const EncodedFrame& frame) = 0;
 
+    // Explicit stream lifecycle (S-7). Announce that this client's
+    // `stream` started (on=true) or stopped (on=false), so viewers can
+    // clear a tile the instant a share ends instead of waiting out the
+    // 4 s frame-liveness timeout AND the ~5 s roster poll behind it.
+    //
+    // Non-pure with an empty default: a transport that has no per-peer
+    // control path (an SFU knows participants' track state natively)
+    // simply does not implement it, and the sender does not care.
+    virtual void announceVideoStreamState(VideoStreamId stream, bool on) {
+        Q_UNUSED(stream); Q_UNUSED(on);
+    }
+
+    // Pacer ceiling (S-15). Tells the transport the highest rate the
+    // encoder may produce for `stream`, so its RTP pacer can be set
+    // above it. A pacer budget BELOW the encoder ceiling silently turns
+    // into an unbounded send queue: every frame the encoder emits above
+    // the budget is buffered, never dropped, and latency grows without
+    // limit. Default no-op for transports that pace internally.
+    virtual void setVideoSendCeiling(VideoStreamId stream, int maxKbps) {
+        Q_UNUSED(stream); Q_UNUSED(maxKbps);
+    }
+
     // Legacy JPEG fan-out, for peers with no video_rtp capability.
     // NOT removable: AndroidScreenShareController has ONLY this path,
     // and Android stays on mesh, so deleting it deletes Android screen
@@ -257,6 +279,11 @@ signals:
     // One JPEG-encoded frame from a legacy peer.
     void peerScreenFrameReceived(const QString& userId, const QByteArray& jpegData);
     void peerCameraFrameReceived(const QString& userId, const QByteArray& jpegData);
+    // A peer explicitly started (on=true) or stopped (on=false) one of
+    // its streams (S-7). Routed into VideoStreamRegistry, which blanks
+    // the surface immediately on a stop — the frozen-last-frame then
+    // "Starting share…" sequence was this signal not existing.
+    void peerVideoStreamState(const QString& userId, int streamId, bool on);
 
     // ---- Video send feedback ----
     // Someone needs a keyframe on our outgoing `streamId`.
