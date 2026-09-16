@@ -38,10 +38,37 @@ Item {
     }
 
     function openFor(eventId) {
+        threadPanel._lastRoomKey = threadPanel.roomKey;
         rootEventId = eventId;
         composerField.forceActiveFocus();
     }
-    function closePanel() { rootEventId = ""; }
+    function closePanel() {
+        rootEventId = "";
+        composerField.text = "";
+    }
+
+    // ── Close on room AND server change (U-H4) ───────────────────────
+    //
+    // The panel used to stay open across both. `_send()` posts through
+    // whatever `serverManager.activeServer` is at the time, tagged with a
+    // rootEventId from the room the thread was opened in — so switching
+    // channel with the drawer open and hitting Enter filed the reply into
+    // the new room, threaded onto an event that is not in it.
+    //
+    // Keyed on (server, room): a server switch leaves every connection's
+    // activeRoomId untouched, so watching the room id alone misses it
+    // entirely (same reasoning as MessageView's roomContextKey).
+    readonly property string roomKey: {
+        var s = serverManager.activeServer;
+        if (!s) return "";
+        return s.serverUrl + "\u001f" + s.activeRoomId;
+    }
+    property string _lastRoomKey: ""
+    onRoomKeyChanged: {
+        if (threadPanel.roomKey === threadPanel._lastRoomKey) return;
+        threadPanel._lastRoomKey = threadPanel.roomKey;
+        if (threadPanel.rootEventId !== "") threadPanel.closePanel();
+    }
 
     // Click backdrop to dismiss (like a drawer).
     Rectangle {
@@ -321,6 +348,14 @@ Item {
     function _send() {
         var body = composerField.text.trim();
         if (body.length === 0) return;
+        if (rootEventId === "") return;
+        // Belt and braces alongside onRoomKeyChanged: if anything ever
+        // re-opens the panel without going through openFor, a reply still
+        // cannot be posted from a context the thread does not belong to.
+        if (threadPanel.roomKey !== threadPanel._lastRoomKey) {
+            threadPanel.closePanel();
+            return;
+        }
         if (!serverManager.activeServer) return;
         serverManager.activeServer.sendThreadReply(rootEventId, body);
         composerField.text = "";
