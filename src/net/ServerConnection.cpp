@@ -3087,6 +3087,16 @@ void ServerConnection::setRoomTopic(const QString& roomId, const QString& topic)
 void ServerConnection::redactEvent(const QString& roomId, const QString& eventId,
                                     const QString& reason) {
     m_client->redactEvent(roomId, eventId, reason);
+    // Optimistic removal (U-H5): take the row out now rather than leaving
+    // the author staring at a message they just deleted until the
+    // redaction comes back around over sync. removeMessage is a no-op for
+    // anything that isn't a loaded message row — notably the reaction
+    // event ids this same method redacts when a chip is toggled off — and
+    // is idempotent against the sync-side removal that follows.
+    //
+    // Scoped to the active room because m_messageModel only ever holds it.
+    if (roomId == m_activeRoomId && m_messageModel)
+        m_messageModel->removeMessage(eventId);
 }
 
 QStringList ServerConnection::pinnedEventIds(const QString& roomId) const

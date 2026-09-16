@@ -117,6 +117,20 @@ private:
         return event;
     }
 
+    bsfchat::RoomEvent makeRedactionEvent(const std::string& eventId,
+                                           const std::string& sender,
+                                           const std::string& targetId,
+                                           int64_t timestamp = 9000)
+    {
+        bsfchat::RoomEvent event;
+        event.event_id = eventId;
+        event.sender = sender;
+        event.type = std::string(bsfchat::event_type::kRoomRedaction);
+        event.origin_server_ts = timestamp;
+        event.content.data = {{"redacts", targetId}};
+        return event;
+    }
+
     bsfchat::RoomEvent makeThreadReply(const std::string& eventId,
                                          const std::string& sender,
                                          const std::string& rootId,
@@ -704,6 +718,203 @@ private slots:
         QCOMPARE(spy.count(), 1);
         QCOMPARE(spy.at(0).at(0).value<QModelIndex>().row(), 1);
         QVERIFY(model.ownReactionEventId("$ev1", "👍", "@carol:server").isEmpty());
+    }
+
+    // ── U-H5: a redacted message leaves the timeline ─────────────────
+    //
+    // The redaction branch used to say message redactions were "handled
+    // elsewhere" and elsewhere did not exist, so a deleted message sat in
+    // the view until the room was re-entered.
+
+    void testRedactionRemovesTheMessageRow()
+    {
+        MessageModel model;
+        for (int i = 0; i < 4; ++i) {
+            model.appendEvent(makeMessageEvent("$ev" + std::to_string(i),
+                                               "@alice:server", "m", 1000 + i * 1000),
+                              "@bob:server");
+        }
+        QCOMPARE(model.rowCount(), 4);
+
+        QSignalSpy removed(&model, &QAbstractItemModel::rowsRemoved);
+        QSignalSpy counted(&model, &MessageModel::countChanged);
+        model.appendEvent(makeRedactionEvent("$red", "@alice:server", "$ev1"),
+                          "@bob:server");
+
+        QCOMPARE(model.rowCount(), 3);
+        QCOMPARE(removed.count(), 1);
+        QCOMPARE(removed.at(0).at(1).toInt(), 1);   // first
+        QCOMPARE(removed.at(0).at(2).toInt(), 1);   // last
+        QCOMPARE(counted.count(), 1);
+
+        // The survivors closed up, and the index followed them.
+        QCOMPARE(model.indexForEventId("$ev1"), -1);
+        QCOMPARE(model.indexForEventId("$ev2"), 1);
+        QCOMPARE(model.indexForEventId("$ev3"), 2);
+        QCOMPARE(model.data(model.index(1), MessageModel::EventIdRole).toString(),
+                 "$ev2");
+    }
+
+    // The row that inherits the deleted one's slot has a new predecessor,
+    // so its sender header and date separator may have flipped.
+    void testRedactionRepaintsTheRowThatSlidUp()
+    {
+        MessageModel model;
+        model.appendEvent(makeMessageEvent("$a", "@alice:server", "one", 1000),
+                          "@bob:server");
+        model.appendEvent(makeMessageEvent("$b", "@alice:server", "two", 2000),
+                          "@bob:server");
+        model.appendEvent(makeMessageEvent("$c", "@carol:server", "three", 3000),
+                          "@bob:server");
+
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        model.appendEvent(makeRedactionEvent("$red", "@alice:server", "$b"),
+                          "@bob:server");
+
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.at(0).at(0).value<QModelIndex>().row(), 1);
+        const auto roles = spy.at(0).at(2).value<QList<int>>();
+        QVERIFY(roles.contains(MessageModel::ShowSenderRole));
+        QVERIFY(roles.contains(MessageModel::ShowDateSeparator));
+    }
+
+    // Reaction redactions must keep working — they share the branch.
+    void testRedactionOfAReactionDoesNotRemoveARow()
+    {
+        MessageModel model;
+        model.appendEvent(makeMessageEvent("$ev0", "@alice:server", "m", 1000),
+                          "@bob:server");
+        model.appendEvent(makeReactionEvent("$r1", "@carol:server", "$ev0", "\xf0\x9f\x91\x8d"),
+                          "@bob:server");
+
+        QSignalSpy removed(&model, &QAbstractItemModel::rowsRemoved);
+        model.appendEvent(makeRedactionEvent("$red", "@carol:server", "$r1"),
+                          "@bob:server");
+
+        QCOMPARE(removed.count(), 0);
+        QCOMPARE(model.rowCount(), 1);
+    }
+
+    // Reaching us twice — once optimistically from redactEvent, once from
+    // /sync — must not remove a second, innocent row.
+    void testRedactionIsIdempotentAndIgnoresUnknownTargets()
+    {
+        MessageModel model;
+        model.appendEvent(makeMessageEvent("$a", "@alice:server", "one", 1000),
+                          "@bob:server");
+        model.appendEvent(makeMessageEvent("$b", "@alice:server", "two", 2000),
+                          "@bob:server");
+
+        QVERIFY(model.removeMessage("$a"));
+        QCOMPARE(model.rowCount(), 1);
+        // Second delivery of the same redaction.
+        QVERIFY(!model.removeMessage("$a"));
+        model.appendEvent(makeRedactionEvent("$red", "@alice:server", "$a"),
+                          "@bob:server");
+        QCOMPARE(model.rowCount(), 1);
+        // Never-loaded target.
+        model.appendEvent(makeRedactionEvent("$red2", "@alice:server", "$gone"),
+                          "@bob:server");
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.data(model.index(0), MessageModel::EventIdRole).toString(), "$b");
+    }
+
+    // Deleting a thread reply shrinks its root's badge.
+    void testRedactionOfAThreadReplyUpdatesTheRootCount()
+    {
+        MessageModel model;
+        model.appendEvent(makeMessageEvent("$root", "@alice:server", "topic", 1000),
+                          "@bob:server");
+        model.appendEvent(makeThreadReply("$t1", "@carol:server", "$root", "a", 2000),
+                          "@bob:server");
+        model.appendEvent(makeThreadReply("$t2", "@carol:server", "$root", "b", 3000),
+                          "@bob:server");
+        QCOMPARE(model.threadReplyCount("$root"), 2);
+
+        model.appendEvent(makeRedactionEvent("$red", "@carol:server", "$t1"),
+                          "@bob:server");
+        QCOMPARE(model.threadReplyCount("$root"), 1);
+        QCOMPARE(model.data(model.index(0), MessageModel::ThreadReplyCountRole).toInt(), 1);
+    }
+
+    // The reaction bookkeeping for a deleted message has to go with it, or
+    // a later reaction redaction resolves an event id with no row.
+    void testRedactionDropsTheDeletedMessagesReactionIndex()
+    {
+        MessageModel model;
+        model.appendEvent(makeMessageEvent("$a", "@alice:server", "one", 1000),
+                          "@bob:server");
+        model.appendEvent(makeMessageEvent("$b", "@alice:server", "two", 2000),
+                          "@bob:server");
+        model.appendEvent(makeReactionEvent("$r1", "@carol:server", "$a", "\xf0\x9f\x91\x8d"),
+                          "@bob:server");
+        QCOMPARE(model.ownReactionEventId("$a", "\xf0\x9f\x91\x8d", "@carol:server"), "$r1");
+
+        model.appendEvent(makeRedactionEvent("$red", "@alice:server", "$a"),
+                          "@bob:server");
+        QCOMPARE(model.rowCount(), 1);
+
+        // The reaction's redaction now names nothing. It must be a no-op,
+        // not a removal of the row that took $a's place.
+        QSignalSpy removed(&model, &QAbstractItemModel::rowsRemoved);
+        model.appendEvent(makeRedactionEvent("$red2", "@carol:server", "$r1"),
+                          "@bob:server");
+        QCOMPARE(removed.count(), 0);
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.data(model.index(0), MessageModel::EventIdRole).toString(), "$b");
+    }
+
+    // ── U-M7: the former row 0 is repainted on prepend ───────────────
+    //
+    // ShowSenderRole and ShowDateSeparator both special-case row 0 as
+    // "always true" and otherwise compare against the previous row. After
+    // a back-pagination the old row 0 is no longer row 0, but the view had
+    // no reason to re-query it — so it kept a sender header and a date
+    // separator it no longer earns, at every page boundary.
+
+    void testPrependRepaintsTheFormerFirstRow()
+    {
+        MessageModel model;
+        // One message from alice, then two older ones from alice on the
+        // same day: after the prepend the former row 0 is a continuation.
+        model.appendEvent(makeMessageEvent("$new", "@alice:server", "new", 300000),
+                          "@bob:server");
+        QCOMPARE(model.data(model.index(0), MessageModel::ShowSenderRole).toBool(), true);
+        QCOMPARE(model.data(model.index(0), MessageModel::ShowDateSeparator).toBool(), true);
+
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        QVector<bsfchat::RoomEvent> older{
+            makeMessageEvent("$old1", "@alice:server", "old", 100000),
+            makeMessageEvent("$old2", "@alice:server", "older", 200000),
+        };
+        model.prependEvents(older, "@bob:server");
+
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.at(0).at(0).value<QModelIndex>().row(), 2);
+        QCOMPARE(spy.at(0).at(1).value<QModelIndex>().row(), 2);
+        const auto roles = spy.at(0).at(2).value<QList<int>>();
+        QVERIFY(roles.contains(MessageModel::ShowSenderRole));
+        QVERIFY(roles.contains(MessageModel::ShowDateSeparator));
+
+        // And the value the repaint exists to correct.
+        QCOMPARE(model.data(model.index(2), MessageModel::ShowSenderRole).toBool(), false);
+        QCOMPARE(model.data(model.index(2), MessageModel::ShowDateSeparator).toBool(), false);
+    }
+
+    void testPrependOfNothingEmitsNothing()
+    {
+        MessageModel model;
+        model.appendEvent(makeMessageEvent("$a", "@alice:server", "one", 1000),
+                          "@bob:server");
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        QSignalSpy inserted(&model, &QAbstractItemModel::rowsInserted);
+        // Already loaded — the whole batch dedupes away.
+        QVector<bsfchat::RoomEvent> page{
+            makeMessageEvent("$a", "@alice:server", "one", 1000),
+        };
+        model.prependEvents(page, "@bob:server");
+        QCOMPARE(inserted.count(), 0);
+        QCOMPARE(spy.count(), 0);
     }
 
     void testMessageModelThreadReplyCountIsIndexed()

@@ -229,6 +229,23 @@ public:
     void prependEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);
     void clear();
 
+    // Take a message out of the timeline (U-H5). Returns true if a row was
+    // actually removed.
+    //
+    // Two callers: the m.room.redaction branch of appendEvent, which is how
+    // somebody *else's* deletion reaches us, and ServerConnection::redactEvent,
+    // which removes optimistically so the author doesn't watch their own
+    // deleted message sit there until the next sync. Both go through here so
+    // the second one is idempotent against the first.
+    //
+    // Does the whole job, not just the rows: the reaction index entries that
+    // pointed into this message are dropped (otherwise a later reaction
+    // redaction resolves a row that has since moved), the thread reply count
+    // on its root is decremented, and the row that inherits this slot is
+    // repainted because its sender header / date separator is computed from
+    // its predecessor.
+    bool removeMessage(const QString& eventId);
+
     // Back-pagination state. ServerConnection writes these as sync+messages
     // responses come in; MessageView reads them to drive the scroll-to-top
     // trigger and the reply-jump paginate-until-found loop.
