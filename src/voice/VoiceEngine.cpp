@@ -25,6 +25,11 @@ VoiceEngine::VoiceEngine(MatrixClient* client, QObject* parent)
 
     m_rrTimer.setInterval(500);
     connect(&m_rrTimer, &QTimer::timeout, this, &VoiceEngine::sendReceiverReports);
+
+    // V-M2: per-event send outcomes, so a lost invite/answer/candidate
+    // batch is retried rather than costing a 30 s watchdog cycle.
+    connect(m_client, &MatrixClient::callEventSendResult,
+            this, &VoiceEngine::onCallEventSendResult);
 }
 
 VoiceEngine::~VoiceEngine() {
@@ -178,6 +183,9 @@ void VoiceEngine::stop() {
     m_callIds.clear();
     m_pendingCandidates.clear();
     m_inboundCandidates.clear();
+    // Nothing queued is worth sending into a call that no longer exists —
+    // except the hangups just enqueued above, which went out immediately.
+    m_outbox.clear();
     qDeleteAll(m_disconnectTimers);
     m_disconnectTimers.clear();
     qDeleteAll(m_connectWatchdogs);
@@ -928,8 +936,10 @@ void VoiceEngine::onLocalCandidate(const QString& peerId, const std::string& can
 
 void VoiceEngine::flushCandidateBatch() {
     // Cheap piggy-back: this ticks every 500 ms for the whole call, so
-    // it is the natural place to age out parked inbound candidates.
+    // it is the natural place to age out parked inbound candidates and to
+    // drive the outbound retry schedule (V-M2) — no second timer.
     pruneInboundCandidates();
+    flushOutbox();
 
     for (auto it = m_pendingCandidates.begin(); it != m_pendingCandidates.end(); ) {
         if (it.value().empty()) {
@@ -953,16 +963,51 @@ void VoiceEngine::flushCandidateBatch() {
             {"candidates", candidates},
             {"version", 1}
         };
-        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallCandidates), content);
-
+        // V-M2: the batch is handed to the outbox, which keeps it until
+        // the server has actually taken it and re-sends it on backoff if
+        // not. Candidates are sent exactly ONCE on this path, so before
+        // the outbox a single failed PUT lost them permanently and the
+        // peer never learned a route — a 30 s stall ending in the setup
+        // watchdog. Clearing the local batch here is safe precisely
+        // because the outbox now owns a copy.
+        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallCandidates),
+                      content);
         it.value().clear();
         ++it;
     }
 }
 
 void VoiceEngine::sendCallEvent(const QString& eventType, const nlohmann::json& content) {
-    m_client->sendRoomEvent(m_roomId, eventType,
-                            QByteArray::fromStdString(content.dump()));
+    // V-M2: queued rather than fired and forgotten. A lost invite/answer/
+    // hangup used to cost a full 30 s — the peer sat in Connecting until
+    // the setup watchdog reaped it.
+    const quint64 token = m_outbox.add(
+        eventType, QByteArray::fromStdString(content.dump()),
+        QDateTime::currentMSecsSinceEpoch());
+    Q_UNUSED(token);
+    flushOutbox();
+}
+
+void VoiceEngine::flushOutbox() {
+    if (!m_running || m_roomId.isEmpty()) return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (const auto& entry : m_outbox.due(now)) {
+        m_client->sendCallEvent(m_roomId, entry.type, entry.payload, entry.token);
+    }
+}
+
+void VoiceEngine::onCallEventSendResult(quint64 token, bool ok,
+                                        const QString& error) {
+    if (ok) { m_outbox.onSent(token); return; }
+    const bool willRetry =
+        m_outbox.onFailed(token, QDateTime::currentMSecsSinceEpoch());
+    if (willRetry) {
+        qCInfo(logVoice, "call event send failed (%s) — retrying",
+              qPrintable(error));
+    } else {
+        qCWarning(logVoice, "call event dropped after %d attempts: %s",
+                 voice::CallEventOutbox::kMaxAttempts, qPrintable(error));
+    }
 }
 
 rtc::Configuration VoiceEngine::buildRtcConfig() const {

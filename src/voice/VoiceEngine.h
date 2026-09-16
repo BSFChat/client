@@ -15,6 +15,7 @@
 // video codec backends, VideoSendPipeline/VideoReceivePipeline and
 // VideoRateController. Those must keep working.
 
+#include "voice/CallEventOutbox.h"
 #include "voice/IVoiceTransport.h"
 #include "voice/video/VideoCodec.h"
 
@@ -199,6 +200,11 @@ private:
     void dropInboundCandidates(const QString& sender, const QString& callId);
     void pruneInboundCandidates();
     void sendCallEvent(const QString& eventType, const nlohmann::json& content);
+    // Send everything in the outbox whose next attempt is due. Driven by
+    // the 500 ms candidate-batch tick, so there is no second timer.
+    void flushOutbox();
+    // MatrixClient's per-event outcome for a queued signalling PUT.
+    void onCallEventSendResult(quint64 token, bool ok, const QString& error);
     rtc::Configuration buildRtcConfig() const;
     QString generateCallId() const;
     // This client's media capabilities, advertised in every
@@ -231,6 +237,10 @@ private:
     QJsonObject m_turnConfig;
     bool m_running = false;
     bool m_allowP2P = false;
+
+    // Outbound signalling awaiting the server's acknowledgement, with
+    // its retry schedule (V-M2).
+    voice::CallEventOutbox m_outbox;
 
     // ICE candidate batching (OUTBOUND — ours, awaiting the next flush)
     QTimer m_candidateBatchTimer;

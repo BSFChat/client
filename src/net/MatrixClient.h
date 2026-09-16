@@ -65,6 +65,12 @@ public:
                           const QString& formattedBody,
                           const QStringList& mentionedUserIds);
     void sendRoomEvent(const QString& roomId, const QString& eventType, const QByteArray& content);
+    // Same PUT, but the outcome is reported against `token` through
+    // callEventSendResult instead of the shared messageSent/
+    // sendMessageError pair. Voice signalling needs to know whether ITS
+    // event landed so it can retry (V-M2); the chat signals cannot say.
+    void sendCallEvent(const QString& roomId, const QString& eventType,
+                       const QByteArray& content, quint64 token);
     void getRoomMessages(const QString& roomId, const QString& from, const QString& dir = "b", int limit = 50);
     // Edit a previously-sent m.room.message by the current user. Sends a
     // new m.room.message with m.relates_to {rel_type: m.replace,
@@ -323,6 +329,8 @@ signals:
     void voiceStateSuperseded(const QString& roomId);
     void voiceMembersError(const QString& roomId, const QString& error);
     void voiceChannelCreated(const QString& roomId);
+
+    void callEventSendResult(quint64 token, bool ok, const QString& error);
 
     void turnConfigResult(const QJsonObject& config);
     // V-M4: TURN has its own failure channel, so an unrelated voice error

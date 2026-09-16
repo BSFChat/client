@@ -733,6 +733,29 @@ void MatrixClient::sendRoomEvent(const QString& roomId, const QString& eventType
     });
 }
 
+void MatrixClient::sendCallEvent(const QString& roomId, const QString& eventType,
+                                 const QByteArray& content, quint64 token)
+{
+    static int txnCounter = 0;
+    QString txnId = QString("v%1.%2").arg(QDateTime::currentMSecsSinceEpoch())
+                        .arg(++txnCounter);
+
+    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
+                   + QUrl::toPercentEncoding(roomId)
+                   + "/send/" + eventType + "/" + txnId;
+
+    auto* reply = makeRequest("PUT", path, content);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, token]() {
+        reply->deleteLater();
+        const auto data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit callEventSendResult(token, false, QString::fromUtf8(data));
+            return;
+        }
+        emit callEventSendResult(token, true, QString());
+    });
+}
+
 void MatrixClient::uploadMedia(const QByteArray& data, const QString& contentType, const QString& filename)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kMediaUpload);

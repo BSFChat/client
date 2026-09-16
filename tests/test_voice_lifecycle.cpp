@@ -11,11 +11,14 @@
 //
 // Each test names the audit item it pins down.
 
+#include "net/VoiceQuit.h"
 #include "net/VoiceSession.h"
+#include "voice/CallEventOutbox.h"
 #include "voice/VoiceRosterReconcile.h"
 #include "voice/VoiceStartPolicy.h"
 #include "voice/VoiceTransportSelector.h"
 
+#include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -242,6 +245,11 @@ private slots:
 
     // ---- V-H3 -------------------------------------------------------
     void settledFiresOnceEveryLeaveIsAnswered();
+    void quitWaitsForLeavesButIsBounded();
+
+    // ---- V-M2 -------------------------------------------------------
+    void outboxRetriesWithBackoffThenGivesUp();
+    void outboxKeepsTheCandidateBatchUntilItIsAccepted();
 
     // ---- V-L4 -------------------------------------------------------
     void transportSelectorRefusesMixedRoster();
@@ -905,6 +913,135 @@ void TestVoiceLifecycle::settledFiresOnceEveryLeaveIsAnswered()
     idle.requestLeave();
     QCOMPARE(idle.state(), VoiceSession::State::Idle);
     QCOMPARE(idleSettled.size(), 1);
+}
+
+void TestVoiceLifecycle::quitWaitsForLeavesButIsBounded()
+{
+    // V-H3. aboutToQuit used to queue the leave POST on QNAM and then let
+    // the process exit before the socket was written, so nothing ever
+    // left the machine and the roster row lingered 30-40 s.
+    VoiceSession a;
+    VoiceSession b;
+    a.setLocalUserId("@me:x");
+    b.setLocalUserId("@me:y");
+    FakeMatrixClient netA(&a);
+    FakeMatrixClient netB(&b);
+    FakeEngine engineA;
+    FakeEngine engineB;
+    engineA.install(&a);
+    engineB.install(&b);
+    joinTo(a, netA, "!a:x");
+    joinTo(b, netB, "!b:y");
+
+    a.requestLeave();
+    b.requestLeave();
+    // Both replies land shortly after the wait begins, as they would from
+    // a server that is up.
+    QTimer::singleShot(30, [&]() { netA.replyLeaveOk("!a:x"); });
+    QTimer::singleShot(60, [&]() { netB.replyLeaveOk("!b:y"); });
+
+    QElapsedTimer clock;
+    clock.start();
+    QVERIFY(voice::waitForSessionsToSettle({&a, &b}, 2000));
+    QVERIFY(clock.elapsed() < 1500);          // returned on the replies…
+    QVERIFY(a.state() == VoiceSession::State::Idle);
+    QVERIFY(b.state() == VoiceSession::State::Idle);
+
+    // …and a server that never answers does not stop the user quitting.
+    joinTo(a, netA, "!a:x");
+    a.requestLeave();
+    clock.restart();
+    QVERIFY(!voice::waitForSessionsToSettle({&a}, 250));
+    QVERIFY(clock.elapsed() >= 200);
+    QVERIFY(clock.elapsed() < 2000);
+
+    // Nothing to wait for returns immediately without entering a loop.
+    VoiceSession idle;
+    QVERIFY(voice::waitForSessionsToSettle({&idle}, 5000));
+    QVERIFY(voice::waitForSessionsToSettle({}, 5000));
+    QVERIFY(voice::waitForSessionsToSettle({nullptr}, 5000));
+}
+
+void TestVoiceLifecycle::outboxRetriesWithBackoffThenGivesUp()
+{
+    // V-M2. Outbound signalling was fire-and-forget, so one lost invite,
+    // answer or hangup cost a full 30 s: the peer sat in Connecting until
+    // the setup watchdog reaped it and the reconciler tried again.
+    voice::CallEventOutbox outbox;
+    const qint64 t0 = 1'000'000;
+
+    const quint64 token = outbox.add("m.call.invite", QByteArray("{}"), t0);
+    QCOMPARE(outbox.pendingCount(), 1);
+
+    auto due = outbox.due(t0);
+    QCOMPARE(due.size(), 1);
+    QCOMPARE(due.first().token, token);
+    QCOMPARE(due.first().attempt, 1);
+    // In flight: a second tick must not send it again while we wait.
+    QVERIFY(outbox.due(t0 + 5000).isEmpty());
+
+    QVERIFY(outbox.onFailed(token, t0));       // will retry
+    QVERIFY(outbox.due(t0 + 499).isEmpty());   // …after the backoff
+    due = outbox.due(t0 + 500);
+    QCOMPARE(due.size(), 1);
+    QCOMPARE(due.first().attempt, 2);
+    QCOMPARE(due.first().payload, QByteArray("{}"));
+
+    // Backoff grows and is capped.
+    QCOMPARE(voice::CallEventOutbox::backoffMs(1), qint64(500));
+    QCOMPARE(voice::CallEventOutbox::backoffMs(2), qint64(1000));
+    QCOMPARE(voice::CallEventOutbox::backoffMs(3), qint64(2000));
+    QCOMPARE(voice::CallEventOutbox::backoffMs(9),
+             qint64(voice::CallEventOutbox::kMaxBackoffMs));
+
+    // Bounded: a peer that is genuinely gone must not queue forever —
+    // the setup watchdog is the better answer.
+    qint64 now = t0 + 500;
+    for (int attempt = 2; attempt < voice::CallEventOutbox::kMaxAttempts;
+         ++attempt) {
+        QVERIFY(outbox.onFailed(token, now));
+        now += voice::CallEventOutbox::backoffMs(attempt);
+        QCOMPARE(outbox.due(now).size(), 1);
+    }
+    QVERIFY(!outbox.onFailed(token, now));     // gave up
+    QVERIFY(outbox.isEmpty());
+
+    // Success forgets it, and an unknown token is harmless.
+    const quint64 second = outbox.add("m.call.answer", QByteArray("{}"), now);
+    outbox.due(now);
+    outbox.onSent(second);
+    QVERIFY(outbox.isEmpty());
+    QVERIFY(!outbox.onFailed(second, now));
+}
+
+void TestVoiceLifecycle::outboxKeepsTheCandidateBatchUntilItIsAccepted()
+{
+    // Candidates are sent exactly ONCE by flushCandidateBatch, so before
+    // the outbox a single failed PUT lost them permanently and the peer
+    // never learned a route. The payload has to survive the failure.
+    voice::CallEventOutbox outbox;
+    const QByteArray batch("{\"candidates\":[{\"candidate\":\"a\"}]}");
+    const qint64 t0 = 5'000;
+
+    const quint64 token = outbox.add("m.call.candidates", batch, t0);
+    QCOMPARE(outbox.due(t0).first().payload, batch);
+    QVERIFY(outbox.onFailed(token, t0));
+    // Same bytes, not a truncated or empty re-send.
+    QCOMPARE(outbox.due(t0 + 500).first().payload, batch);
+
+    // A later batch queues behind it rather than replacing it: both sets
+    // of candidates are needed, and ICE has no way to ask again.
+    const quint64 later = outbox.add("m.call.candidates",
+                                     QByteArray("{\"candidates\":[]}"),
+                                     t0 + 600);
+    QCOMPARE(outbox.pendingCount(), 2);
+    outbox.onSent(later);
+    QCOMPARE(outbox.pendingCount(), 1);
+
+    // The session ending drops whatever is left — there is no call to
+    // send it into.
+    outbox.clear();
+    QVERIFY(outbox.isEmpty());
 }
 
 void TestVoiceLifecycle::transportSelectorRefusesMixedRoster()
