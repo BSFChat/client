@@ -706,15 +706,22 @@ Popup {
                         }
                     }
 
+                    // S-8: demoted to experimental rather than removed.
+                    // The tier works — it is mathematically lossless —
+                    // but only inside an envelope most calls are not in,
+                    // and it was previously presented as an ordinary
+                    // quality setting. The description states the
+                    // envelope instead of the capability.
                     SettingRow {
-                        title: "Lossless mode"
-                        description: "Mathematically lossless AV1 — every "
-                                   + "pixel arrives exactly as captured. "
-                                   + "Bandwidth is whatever the content "
-                                   + "costs (LAN-class links); frames drop "
-                                   + "rather than delay when it can't keep "
-                                   + "up. Used only when everyone in the "
-                                   + "call supports it."
+                        title: "Lossless mode (experimental)"
+                        description: "Experimental: pixel-exact AV1, "
+                                   + "realistic only on a LAN, with at "
+                                   + "most two viewers, on static content "
+                                   + "— it needs far more bandwidth than "
+                                   + "H.264 and drops frames rather than "
+                                   + "delay them. Off unless you turn it "
+                                   + "on, and used only when everyone in "
+                                   + "the call supports it."
                         RowLayout {
                             spacing: Theme.sp.s3
                             ThemedSwitch {

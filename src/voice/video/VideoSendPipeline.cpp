@@ -60,7 +60,9 @@ void VideoSendPipeline::submitFrame(const QVideoFrame& frame, qint64 captureTime
     }
     // Coalesce wakeups — one queued call drains one pending slot, so a
     // second invoke while one is in flight would only encode the same
-    // frame twice.
+    // frame twice. The flag is cleared by the worker INSIDE the same
+    // critical section that takes the frame (see processPending), which
+    // is what makes this exchange safe: see the note there.
     if (!m_processQueued.exchange(true)) {
         QMetaObject::invokeMethod(&m_worker, [this]() { processPending(); },
                                   Qt::QueuedConnection);
@@ -80,8 +82,19 @@ void VideoSendPipeline::processPending() {
         config = m_config;
         configDirty = m_configDirty;
         m_configDirty = false;
+        // S-16: clear the coalescing flag while still holding the lock
+        // that guards the pending slot. Clearing it AFTER the unlock
+        // opened a window in which submitFrame() could store a frame
+        // (this worker had already taken the previous one) and then
+        // find the flag still set, so it queued no wakeup and the frame
+        // sat unencoded until the NEXT submit displaced it — a dropped
+        // frame per race, and the last frame of a share never sent at
+        // all. Ordering it inside the lock makes the two outcomes
+        // either "the worker takes the new frame" or "submitFrame sees
+        // a cleared flag and queues a wakeup"; the worst case is one
+        // spurious wakeup that finds an invalid frame and returns.
+        m_processQueued.store(false);
     }
-    m_processQueued.store(false);
     if (!frame.isValid()) return;
 
     // Lossless takes the identity-I444 path at FULL capture size —

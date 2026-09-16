@@ -8,6 +8,10 @@
 #include <QPointer>
 #include <QVariantList>
 
+#include "voice/video/LatestWinsWorker.h"
+
+#include <memory>
+
 #ifdef Q_OS_MACOS
 class MacScreenCapturer;
 #else
@@ -154,12 +158,26 @@ private:
     // server).
     QList<QMetaObject::Connection> m_voiceRoomConns;
     QVideoFrame m_pendingFrame;
+    // Off-GUI-thread helpers (S-10): the capture QImage -> QVideoFrame
+    // copy and the legacy JPEG encode. Declared after everything they
+    // touch so destruction joins their threads first.
+    std::unique_ptr<LatestWinsWorker> m_frameWorker;
+    std::unique_ptr<LatestWinsWorker> m_jpegWorker;
     bool m_active = false;
     bool m_transmitting = false;
     QString m_lastError;
 
     void pushFrameToPeers();
     void setTransmitting(bool transmitting);
+    // Single place the active flag flips. Forces an IDR on the way up
+    // (S-11 — a restarted share reuses the encoder session, so its
+    // first frame would otherwise be a P-frame referencing a picture no
+    // viewer holds) and announces the stream's on/off state to peers
+    // (S-7) so tiles appear and clear immediately.
+    void setActiveState(bool active);
+    void announceStream(bool on);
+    // The transport of the connection actually in a call, or nullptr.
+    IVoiceTransport* currentVoice() const;
     // Rewires the per-server "voice room changed" subscriptions
     // whenever the server list or active server changes. Stops the
     // screen share when no connection is in voice so share state

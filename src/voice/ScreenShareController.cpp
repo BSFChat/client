@@ -2,6 +2,7 @@
 #include "voice/IVoiceTransport.h"
 #include "voice/VoiceEngine.h"
 #include "voice/video/VideoRateController.h"
+#include "voice/video/LatestWinsWorker.h"
 #include "voice/video/VideoSendPipeline.h"
 #include "net/ServerManager.h"
 #include "net/ServerConnection.h"
@@ -90,29 +91,50 @@ ScreenShareController::ScreenShareController(QObject* parent)
             emit lastErrorChanged();
             stop();
         });
+    // S-12: showPicker() starts the capture throttle up front so the
+    // first frame after a selection isn't delayed by a timer tick. If
+    // the user cancels instead, that timer was left running forever,
+    // waking the app 2-15 times a second to look at an invalid frame.
+    connect(m_mac, &MacScreenCapturer::pickerCancelled, this,
+        [this]() {
+            if (m_active) return;   // a capture was already running
+            m_throttle->stop();
+            m_pendingFrame = {};
+            setTransmitting(false);
+        });
     connect(m_mac, &MacScreenCapturer::frameReady, this,
         [this](const QImage& img) {
-            if (!m_active) {
-                // First frame — flip active state so QML preview shows.
-                m_active = true;
-                emit activeChanged();
+            // First frame — flip active state so QML preview shows.
+            if (!m_active) setActiveState(true);
+            // S-10: the QImage -> QVideoFrame copy is a full-frame
+            // memcpy (33 MB at 4K Retina) and used to run right here,
+            // in the GUI thread, once per captured frame. Hand the
+            // (implicitly shared, so free to pass) image to a worker
+            // and take the result back on this thread. A capture tick
+            // that arrives while the worker is still busy replaces the
+            // pending one — latest wins, never a backlog.
+            if (!m_frameWorker) {
+                m_frameWorker = std::make_unique<LatestWinsWorker>(
+                    QStringLiteral("video-frame-copy"));
             }
-            // Feed the internal sink so any VideoOutput mirroring via
-            // forwardTo() receives frames. Construct a QVideoFrame
-            // from the QImage via a frame format that matches.
-            QVideoFrameFormat fmt(img.size(),
-                QVideoFrameFormat::pixelFormatFromImageFormat(img.format()));
-            QVideoFrame vf(fmt);
-            if (vf.map(QVideoFrame::WriteOnly)) {
+            m_frameWorker->submit([this, img]() {
+                QVideoFrameFormat fmt(img.size(),
+                    QVideoFrameFormat::pixelFormatFromImageFormat(img.format()));
+                QVideoFrame vf(fmt);
+                if (!vf.map(QVideoFrame::WriteOnly)) return;
                 // One plane, RGB image.
                 std::memcpy(vf.bits(0), img.bits(),
                             size_t(img.bytesPerLine()) * size_t(img.height()));
                 vf.unmap();
-                m_sink->setVideoFrame(vf);
-            }
-            // Cache the latest image for peer push — skip the
-            // QVideoFrame→QImage conversion the other OSes need.
-            m_pendingFrame = vf;
+                QMetaObject::invokeMethod(this, [this, vf]() {
+                    if (!m_active) return;
+                    // Feed the internal sink so any VideoOutput
+                    // mirroring via forwardTo() receives frames, and
+                    // cache the latest for the peer push.
+                    m_sink->setVideoFrame(vf);
+                    m_pendingFrame = vf;
+                }, Qt::QueuedConnection);
+            });
         });
 #else
     m_capture = new QScreenCapture(this);
@@ -129,9 +151,8 @@ ScreenShareController::ScreenShareController(QObject* parent)
     auto updateActive = [this]() {
         const bool a = m_capture->isActive() || m_windowCapture->isActive();
         if (m_active == a) return;
-        m_active = a;
         qInfo("[screenshare] active=%d", int(a));
-        emit activeChanged();
+        setActiveState(a);
     };
     connect(m_capture, &QScreenCapture::activeChanged, this, updateActive);
     connect(m_windowCapture, &QWindowCapture::activeChanged,
@@ -511,16 +532,54 @@ void ScreenShareController::stop()
     m_sink->setVideoFrame(QVideoFrame());
 #ifdef Q_OS_MACOS
     if (m_mac) m_mac->stop();
-    if (m_active) {
-        m_active = false;
-        emit activeChanged();
-    }
+    if (m_active) setActiveState(false);
 #else
     if (m_active) {
+        // Both capturers report through updateActive(), which routes
+        // the flip through setActiveState().
         m_capture->stop();
         m_windowCapture->stop();
     }
 #endif
+}
+
+void ScreenShareController::setActiveState(bool active)
+{
+    if (m_active == active) return;
+    m_active = active;
+    if (!active) {
+        // A frame conversion in flight completes into a share that no
+        // longer exists; the completion checks m_active, and clearing
+        // here (after the flag drops) keeps a late one from becoming
+        // the first frame of the NEXT share.
+        m_pendingFrame = {};
+    }
+    if (active && m_pipeline) {
+        // S-11: the encode session survives a stop/start (that is the
+        // point — a restart costs no renegotiation), so without this
+        // the first frame of the new share is a P-frame against a
+        // reference nobody has, and every viewer sits on a placeholder
+        // until the periodic IDR.
+        m_pipeline->forceKeyframe();
+    }
+    announceStream(active);
+    emit activeChanged();
+}
+
+IVoiceTransport* ScreenShareController::currentVoice() const
+{
+    if (!m_servers) return nullptr;
+    auto* vs = m_servers->voiceServer();
+    return vs ? vs->voiceEngine() : nullptr;
+}
+
+void ScreenShareController::announceStream(bool on)
+{
+    // S-7: an explicit end-of-stream. Without it a viewer holds the
+    // last frame for the 4 s liveness timeout and then shows
+    // "Starting share…" until the ~5 s roster poll disagrees.
+    if (auto* voice = currentVoice())
+        voice->announceVideoStreamState(VideoStreamId::Screen, on);
 }
 
 void ScreenShareController::setTransmitting(bool transmitting)
@@ -638,6 +697,11 @@ void ScreenShareController::pushFrameToPeers()
                 emit lastErrorChanged();
             });
         m_wiredEngine = voice;
+        // The engine can be created AFTER the share started (share
+        // first, join voice second), so the "stream on" this session
+        // never heard about is replayed here (S-7).
+        if (m_active)
+            voice->announceVideoStreamState(VideoStreamId::Screen, true);
     }
 
     // RTP path: hand the raw frame to the encode worker. Capable
@@ -681,6 +745,11 @@ void ScreenShareController::pushFrameToPeers()
             cfg.targetBitrateKbps = m_rate->targetKbps();
             cfg.maxBitrateKbps = m_rate->maxKbps();
             cfg.width = cfg.height = qMin(g_maxWidth, m_rate->longEdge());
+            // S-15: keep every peer's RTP pacer above what this config
+            // allows the encoder to emit. A pacer budget below it does
+            // not shave peaks, it accumulates them.
+            voice->setVideoSendCeiling(VideoStreamId::Screen,
+                                       cfg.maxBitrateKbps);
             m_pipeline->configure(cfg);
             m_pipeline->submitFrame(m_pendingFrame,
                                     QDateTime::currentMSecsSinceEpoch() * 1000);
@@ -716,20 +785,37 @@ void ScreenShareController::pushFrameToPeers()
         // can never be sent.
         const int legacyMaxW = qMin(g_maxWidth, 1600);
         const int legacyQ    = qMin(g_jpegQuality, 75);
-        if (img.width() > legacyMaxW)
-            img = img.scaledToWidth(legacyMaxW, Qt::SmoothTransformation);
 
-        QByteArray jpeg;
-        {
-            QBuffer buf(&jpeg);
-            buf.open(QIODevice::WriteOnly);
-            if (!img.save(&buf, "JPEG", legacyQ)) return;
+        // S-10: encode off the GUI thread. A 1600 px Q75 encode is
+        // milliseconds of solid CPU and it ran in the timer slot, so
+        // every legacy viewer cost the sharer UI smoothness. The
+        // broadcast happens back on this thread, where the transport
+        // lives — and the engine is re-resolved there because a voice
+        // session can end while a frame is in flight.
+        if (!m_jpegWorker) {
+            m_jpegWorker = std::make_unique<LatestWinsWorker>(
+                QStringLiteral("video-jpeg-enc"));
         }
-
-        voice->broadcastScreenFrame(jpeg);
-        if (s_tickCount % 25 == 1)
-            qInfo("[screenshare] broadcast %d-byte JPEG (tick #%d)",
-                  int(jpeg.size()), s_tickCount);
+        const int tick = s_tickCount;
+        m_jpegWorker->submit([this, img, legacyMaxW, legacyQ, tick]() {
+            QImage scaled = img.width() > legacyMaxW
+                ? img.scaledToWidth(legacyMaxW, Qt::SmoothTransformation)
+                : img;
+            QByteArray jpeg;
+            {
+                QBuffer buf(&jpeg);
+                buf.open(QIODevice::WriteOnly);
+                if (!scaled.save(&buf, "JPEG", legacyQ)) return;
+            }
+            QMetaObject::invokeMethod(this, [this, jpeg, tick]() {
+                auto* transport = currentVoice();
+                if (!transport) return;
+                transport->broadcastScreenFrame(jpeg);
+                if (tick % 25 == 1)
+                    qInfo("[screenshare] broadcast %d-byte JPEG (tick #%d)",
+                          int(jpeg.size()), tick);
+            }, Qt::QueuedConnection);
+        });
     }
 
     setTransmitting(canTransmit);

@@ -83,8 +83,9 @@ void VideoReceivePipeline::submitAccessUnit(const QByteArray& au,
 void VideoReceivePipeline::requestKeyframeThrottled() {
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     qint64 last = m_lastKfRequestMs.load(std::memory_order_relaxed);
-    if (now - last < kKfRequestMinIntervalMs) return;
+    if (now - last < m_kfRequestIntervalMs.load(std::memory_order_relaxed)) return;
     if (!m_lastKfRequestMs.compare_exchange_strong(last, now)) return;
+    m_kfRequests.fetch_add(1);
     emit keyframeNeeded(m_userId, int(m_streamId));
 }
 
@@ -114,6 +115,30 @@ void VideoReceivePipeline::drainQueue() {
             continue;
         }
 
+        // Keyframe gate BEFORE decoder creation: while we're waiting
+        // there is nothing to decode, so a stream that never recovers
+        // must not also hold a decoder session open.
+        if (m_waitingForKeyframe) {
+            // H.264 AUs are scanned for an IDR NAL; other codecs rely
+            // on the transport-provided keyframe flag.
+            const bool isKey = m_codec == VideoCodecKind::H264
+                ? containsIdr(au) : queued.keyframe;
+            if (!isKey) {
+                m_droppedAus.fetch_add(1);
+                // S-2: keep asking. The request that put us in this
+                // state can be lost (it used to ride an unreliable
+                // channel, and even a reliable one loses the race when
+                // the sender is mid-teardown), and nothing else re-fires
+                // it — the stream then stayed frozen until the periodic
+                // IDR, i.e. 10-30 s. Throttled to one request per
+                // kKfRequestMinIntervalMs, so a 30 fps P-frame run costs
+                // ~1.4 requests/s, not 30.
+                requestKeyframeThrottled();
+                continue;
+            }
+            m_waitingForKeyframe = false;
+        }
+
         if (!m_decoder) {
             m_decoder = VideoDecoder::create(m_codec);
             if (!m_decoder || !m_decoder->init(m_codec)) {
@@ -124,15 +149,6 @@ void VideoReceivePipeline::drainQueue() {
                 m_queue.clear();
                 return;
             }
-        }
-
-        if (m_waitingForKeyframe) {
-            // H.264 AUs are scanned for an IDR NAL; other codecs rely
-            // on the transport-provided keyframe flag.
-            const bool isKey = m_codec == VideoCodecKind::H264
-                ? containsIdr(au) : queued.keyframe;
-            if (!isKey) { m_droppedAus.fetch_add(1); continue; }
-            m_waitingForKeyframe = false;
         }
 
         QVideoFrame frame;

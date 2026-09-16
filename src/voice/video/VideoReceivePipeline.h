@@ -54,6 +54,16 @@ public:
     // the UI polls and diffs successive snapshots for rates.
     quint64 decodedFrames() const { return m_decodedFrames.load(); }
     quint64 droppedAus() const { return m_droppedAus.load(); }
+    // Cumulative keyframe requests this pipeline has emitted. Read by
+    // the video diagnostics and asserted on by the unit tests.
+    quint64 keyframeRequests() const { return m_kfRequests.load(); }
+
+    // Minimum spacing between keyframe requests. Production leaves the
+    // default; tests shorten it so a re-request run doesn't cost a
+    // second of wall clock per assertion. Thread-safe.
+    void setKeyframeRequestIntervalMs(qint64 ms) {
+        m_kfRequestIntervalMs.store(qMax(qint64(0), ms));
+    }
     int frameWidth() const { return m_lastWidth.load(); }
     int frameHeight() const { return m_lastHeight.load(); }
 
@@ -92,6 +102,8 @@ private:
     std::atomic<int> m_lastWidth{0};
     std::atomic<int> m_lastHeight{0};
     std::atomic<qint64> m_lastKfRequestMs{0};
+    std::atomic<quint64> m_kfRequests{0};
+    std::atomic<qint64> m_kfRequestIntervalMs{kKfRequestMinIntervalMs};
 
     // Worker-thread-only state.
     std::unique_ptr<VideoDecoder> m_decoder;

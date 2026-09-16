@@ -25,16 +25,63 @@ Rectangle {
     // since signals aren't dependency-tracked from property bindings.
     // _peersSharing reads this so it re-evaluates as peers come and go.
     property int _shareTick: 0
+
+    // The remote-share tile list. STORED, not a binding: a binding that
+    // rebuilt the array on every tick handed the Repeater a new model
+    // object each time, and a Repeater destroys and recreates every
+    // delegate when its model identity changes — so each tile, and the
+    // VideoOutput inside it, was thrown away and rebuilt several times a
+    // second during a call (S-13). _refreshPeersSharing() compares
+    // membership and assigns only on a real change, which keeps the
+    // identity — and the tiles — stable.
+    property var _peersSharing: []
+
+    function _refreshPeersSharing() {
+        var s = serverManager.activeServer;
+        var next = [];
+        if (s) {
+            var all = s.peersCurrentlySharing();
+            var reg = s.videoRegistry;
+            for (var i = 0; i < all.length; ++i) {
+                // S-7: the sender told us this stream stopped. The
+                // roster's announced flag lags by a poll, and honouring
+                // it here is what kept a dead share on screen as a
+                // "Starting share…" placeholder for seconds after it
+                // ended. Frames arriving clear the flag again.
+                if (reg && reg.streamStopped(all[i], 0)) continue;
+                next.push(all[i]);
+            }
+        }
+        // peersCurrentlySharing() is sorted, so equal membership means
+        // element-wise equality.
+        var cur = room._peersSharing;
+        if (next.length === cur.length) {
+            var same = true;
+            for (var j = 0; j < next.length; ++j) {
+                if (next[j] !== cur[j]) { same = false; break; }
+            }
+            if (same) return;
+        }
+        room._peersSharing = next;
+    }
+
     Connections {
         target: serverManager.activeServer
         ignoreUnknownSignals: true
-        function onPeerScreenFrameChanged(userId) { room._shareTick++; }
+        function onPeerScreenFrameChanged(userId) {
+            room._shareTick++;
+            room._refreshPeersSharing();
+        }
     }
-    readonly property var _peersSharing: {
-        _shareTick;
-        var s = serverManager.activeServer;
-        return s ? s.peersCurrentlySharing() : [];
+    Connections {
+        target: serverManager
+        ignoreUnknownSignals: true
+        function onActiveServerChanged() {
+            room._shareTick++;
+            room._refreshPeersSharing();
+        }
     }
+    Component.onCompleted: room._refreshPeersSharing()
     readonly property bool isSharing:
         (screenShare && screenShare.active) || _peersSharing.length > 0
 

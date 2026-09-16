@@ -1,9 +1,13 @@
 #include "voice/PeerConnectionManager.h"
+
+#include "voice/video/RtpSeqTracker.h"
 #include <QDateTime>
 #include <mutex>
 #include <QDebug>
 #include <QLoggingCategory>
 #include <QRandomGenerator>
+#include <chrono>
+#include <queue>
 
 // Mirror VoiceEngine's category. Each TU owns its own QLoggingCategory
 // instance — Qt coalesces them by name at runtime, so enabling
@@ -75,6 +79,7 @@ public:
 
     void incoming(rtc::message_vector& messages,
                   const rtc::message_callback&) override {
+        const int64_t now = QDateTime::currentMSecsSinceEpoch();
         for (const auto& msg : messages) {
             if (!msg || msg->size() < sizeof(rtc::RtpHeader)) continue;
             const auto* h = reinterpret_cast<const rtc::RtpHeader*>(msg->data());
@@ -86,25 +91,123 @@ public:
             // stray RTCP packet masquerade as a sequence jump.
             const uint8_t pt = std::to_integer<uint8_t>(msg->at(1));
             if (pt >= 192 && pt <= 223) continue;
-            const uint16_t seq = h->seqNumber();
-            if (m_hasLast) {
-                // Serial-number arithmetic: ahead==0 is in-order;
-                // ahead in (0, 2^15) means packets went missing;
-                // ahead >= 2^15 is a late/reordered duplicate whose
-                // absence was already accounted — don't resync on it.
-                const uint16_t ahead = uint16_t(seq - uint16_t(m_lastSeq + 1));
-                if (ahead >= 0x8000) continue;
-                if (ahead != 0 && m_onGap) m_onGap();
-            }
-            m_lastSeq = seq;
-            m_hasLast = true;
+            // S-4: the gap verdict is held for a short reorder window
+            // (see RtpSeqTracker) instead of firing on the first
+            // out-of-order packet — single-packet reordering used to
+            // cost a dropped access unit and an IDR request every time.
+            if (m_tracker.observe(h->seqNumber(), now) && m_onGap) m_onGap();
         }
+        // A gap at the tail of this batch would otherwise wait for the
+        // next one; resolve it on elapsed time here.
+        if (m_tracker.poll(now) && m_onGap) m_onGap();
     }
 
 private:
     std::function<void()> m_onGap;
-    uint16_t m_lastSeq = 0;
-    bool m_hasLast = false;
+    RtpSeqTracker m_tracker;
+};
+
+// Token-bucket RTP pacer with a BOUNDED backlog (S-15).
+//
+// Replaces rtc::PacingHandler, whose budget is fixed at construction.
+// That fixed 20 Mbps sat BELOW what the encoder is allowed to produce
+// (the screen-share envelope reaches hundreds of Mbps on a 4K/60
+// setting), and its queue has no bound: every byte the encoder emits
+// above the budget was buffered rather than dropped, so on a
+// misconfigured-high bitrate the send queue — and with it the viewer's
+// latency — grew without limit while the picture stayed "smooth".
+//
+// Two changes fix that:
+//   * the ceiling is live-settable and is driven from the encoder's own
+//     max bitrate (VoiceEngine::setVideoSendCeiling), so pacing only
+//     ever shaves bursts, never throttles the steady state;
+//   * the backlog is capped at kMaxBacklogSeconds of budget and
+//     overflow drops the OLDEST queued packets. Old RTP is worthless:
+//     the receiver has already moved on, and the loss makes it ask for
+//     a keyframe (which now actually re-fires, see S-2) instead of
+//     replaying stale pictures late.
+//
+// Leftovers ride out on the next outgoing() call rather than a timer —
+// libdatachannel's scheduler lives in a private header. With the
+// ceiling tracking the encoder that path is reached only by an IDR
+// burst, and the next access unit is one frame interval away.
+class PacedRtpSender final : public rtc::MediaHandler {
+public:
+    explicit PacedRtpSender(int ceilingKbps) { setCeilingKbps(ceilingKbps); }
+
+    // Thread-safe; called from the Qt main thread while outgoing()
+    // runs on libdatachannel's network thread.
+    void setCeilingKbps(int kbps) {
+        m_bytesPerSecond.store(double(std::max(kbps, kMinCeilingKbps))
+                                   * 1000.0 / 8.0,
+                               std::memory_order_relaxed);
+    }
+
+    quint64 droppedPackets() const {
+        return m_dropped.load(std::memory_order_relaxed);
+    }
+
+    void outgoing(rtc::message_vector& messages,
+                  const rtc::message_callback& send) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const double rate = m_bytesPerSecond.load(std::memory_order_relaxed);
+        const auto now = std::chrono::steady_clock::now();
+        if (m_started) {
+            const double elapsed =
+                std::chrono::duration<double>(now - m_lastRun).count();
+            m_budget = std::min(m_budget + elapsed * rate,
+                                rate * kMaxBurstSeconds);
+        } else {
+            // First burst starts with a full bucket: a share's opening
+            // IDR must not be held back behind an empty budget.
+            m_budget = rate * kMaxBurstSeconds;
+            m_started = true;
+        }
+        m_lastRun = now;
+
+        for (auto& m : messages) {
+            if (!m) continue;
+            m_backlogBytes += m->size();
+            m_queue.push(std::move(m));
+        }
+        messages.clear();
+
+        const size_t maxBacklog =
+            size_t(std::max(rate * kMaxBacklogSeconds, kMinBacklogBytes));
+        while (m_backlogBytes > maxBacklog && !m_queue.empty()) {
+            m_backlogBytes -= m_queue.front()->size();
+            m_queue.pop();
+            m_dropped.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        while (!m_queue.empty() && m_budget > 0) {
+            auto msg = std::move(m_queue.front());
+            m_queue.pop();
+            const double size = double(msg->size());
+            m_backlogBytes -= msg->size();
+            send(std::move(msg));
+            m_budget -= size;
+        }
+    }
+
+private:
+    // A pacer that can throttle below this would be a bug generator,
+    // not a smoother.
+    static constexpr int kMinCeilingKbps = 1000;
+    // Bucket depth: how much of a burst may leave back to back.
+    static constexpr double kMaxBurstSeconds = 0.05;
+    // Hard bound on queued-but-unsent bytes, in seconds of budget.
+    static constexpr double kMaxBacklogSeconds = 0.25;
+    static constexpr double kMinBacklogBytes = 64 * 1024;
+
+    std::atomic<double> m_bytesPerSecond{0.0};
+    std::atomic<quint64> m_dropped{0};
+    std::mutex m_mutex;
+    std::queue<rtc::message_ptr> m_queue;
+    size_t m_backlogBytes = 0;
+    double m_budget = 0.0;
+    bool m_started = false;
+    std::chrono::steady_clock::time_point m_lastRun;
 };
 } // namespace
 
@@ -265,6 +368,8 @@ void PeerConnectionManager::setupCallbacks() {
             // clobber the audio/control channel.
             if (dc->label() == "video-lossless")
                 setupLosslessChannel(dc);
+            else if (dc->label() == "control")
+                setupControlChannel(dc);
             else
                 setupDataChannel(dc);
         }, Qt::QueuedConnection);
@@ -358,6 +463,64 @@ void PeerConnectionManager::setupDataChannel(std::shared_ptr<rtc::DataChannel> d
     });
 }
 
+void PeerConnectionManager::ensureControlChannel() {
+    if (m_controlDc || !m_pc) return;
+    // HARD compatibility gate. A build that predates this channel
+    // dispatches every incoming data channel except "video-lossless"
+    // into setupDataChannel(), which would REBIND ITS AUDIO CHANNEL to
+    // whatever we just opened — its Opus would then ride a reliable,
+    // ordered channel and stall behind retransmissions. Fixing video
+    // must not damage audio for anyone who has not updated, so the
+    // channel is opened only toward a peer that says it knows the
+    // label. Everyone else keeps getting control on the audio channel,
+    // exactly as before.
+    if (!peerUsesControlChannel(m_remoteCaps, m_remoteCapsKnown)) return;
+    // Only the offerer opens channels; the answerer adopts by label via
+    // onDataChannel. Opening from both sides would produce two.
+    if (!m_isOfferer) return;
+    try {
+        // Reliable and ordered are the DataChannelInit defaults —
+        // exactly what a keyframe request needs. Opens in-band; the
+        // renegotiation libdatachannel raises for it is handled by the
+        // auto-negotiation path in setupCallbacks (same as the lossless
+        // channel).
+        auto dc = m_pc->createDataChannel("control");
+        setupControlChannel(dc);
+        qCInfo(logVoicePc, " [%s] opening reliable control channel",
+              qPrintable(m_peerId));
+    } catch (const std::exception& e) {
+        qCWarning(logVoicePc, " [%s] control channel create failed: %s "
+                 "— control stays on the audio channel",
+                 qPrintable(m_peerId), e.what());
+    }
+}
+
+void PeerConnectionManager::setupControlChannel(std::shared_ptr<rtc::DataChannel> dc) {
+    m_controlDc = dc;
+    dc->onOpen([this]() {
+        QMetaObject::invokeMethod(this, [this]() {
+            qCInfo(logVoicePc, " [%s] control channel open (reliable)",
+                  qPrintable(m_peerId));
+        }, Qt::QueuedConnection);
+    });
+    dc->onMessage([this](rtc::message_variant msg) {
+        if (!std::holds_alternative<rtc::binary>(msg)) return;
+        auto& data = std::get<rtc::binary>(msg);
+        if (data.empty()) return;
+        // Same 0x04 framing as the audio channel so both paths hand the
+        // engine an identical payload. Untagged JSON is accepted too
+        // (a '{' is 0x7B, never 0x04) — cheap tolerance for anything
+        // that ever writes this channel without the tag.
+        const bool tagged = std::to_integer<uint8_t>(data[0]) == 0x04;
+        const size_t off = tagged ? 1u : 0u;
+        QByteArray payload(reinterpret_cast<const char*>(data.data() + off),
+                           int(data.size() - off));
+        QMetaObject::invokeMethod(this, [this, payload]() {
+            emit controlMessageReceived(payload);
+        }, Qt::QueuedConnection);
+    });
+}
+
 void PeerConnectionManager::createOffer() {
     qCInfo(logVoicePc, " [%s] Creating offer (we are offerer)",
           qPrintable(m_peerId));
@@ -392,6 +555,11 @@ void PeerConnectionManager::createOffer() {
 
         auto dc = m_pc->createDataChannel("audio", dcInit);
         setupDataChannel(dc);
+
+        // The reliable "control" channel is NOT opened here: at this
+        // point the peer's caps are unknown, and it may only be opened
+        // toward a peer that advertises control_dc. See
+        // ensureControlChannel().
 
         m_pc->setLocalDescription(rtc::Description::Type::Offer);
     } catch (const std::exception& e) {
@@ -525,16 +693,33 @@ void PeerConnectionManager::maybeRenegotiateAgain() {
 }
 
 void PeerConnectionManager::sendControl(const QByteArray& json) {
-    if (!m_dc || !m_dc->isOpen()) return;
     // HARD compatibility gate: legacy clients misparse unknown tags as
     // audio frames (see onMessage's fallback), so control traffic may
     // only flow once the caps handshake proved the peer understands it.
     if (!remoteSupportsVideoRtp()) return;
+    // Brings the reliable channel up the first time control traffic
+    // flows toward a peer that advertises it; no-op otherwise.
+    ensureControlChannel();
     rtc::binary data;
     data.reserve(json.size() + 1);
     data.push_back(std::byte{0x04});
     auto* raw = reinterpret_cast<const std::byte*>(json.constData());
     data.insert(data.end(), raw, raw + json.size());
+
+    // Reliable path first. Control messages are tiny (tens of bytes), so
+    // the max-message-size guard sendOnDataChannel() applies to media is
+    // not needed here; a throw is still possible on a teardown race.
+    if (m_controlDc && m_controlDc->isOpen()) {
+        try {
+            m_controlDc->send(data);
+            return;
+        } catch (const std::exception& e) {
+            qCDebug(logVoicePc, " [%s] control send failed on reliable "
+                   "channel (%s) — falling back to the audio channel",
+                   qPrintable(m_peerId), e.what());
+        }
+    }
+    if (!m_dc || !m_dc->isOpen()) return;
     sendOnDataChannel(std::move(data), "control");
 }
 
@@ -617,10 +802,14 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
         }, Qt::QueuedConnection);
     }));
     // Pace outgoing RTP so a large IDR doesn't burst-blast the path in
-    // one UDP salvo (bursts are what routers drop first). Budget sits
-    // far above any configured bitrate — it only shaves peaks.
-    packetizer->addToChain(std::make_shared<rtc::PacingHandler>(
-        20'000'000.0, std::chrono::milliseconds(5)));
+    // one UDP salvo (bursts are what routers drop first). The ceiling
+    // tracks the encoder's own max bitrate (setVideoPacingCeilingKbps)
+    // so pacing only ever shaves peaks, and the backlog is bounded —
+    // see PacedRtpSender for why the stock handler could not do either.
+    ctx.pacer = std::make_shared<PacedRtpSender>(
+        m_pacerCeilingKbps[idx] > 0 ? m_pacerCeilingKbps[idx]
+                                    : kDefaultPacerCeilingKbps);
+    packetizer->addToChain(ctx.pacer);
     packetizer->addToChain(std::make_shared<rtc::H264RtpDepacketizer>(
         rtc::NalUnit::Separator::LongStartSequence));
     // Gap detector AFTER the depacketizer in build order = BEFORE it
@@ -684,6 +873,22 @@ bool PeerConnectionManager::hasVideoTrackOpen(VideoStreamId stream) const {
 void PeerConnectionManager::sendVideoFrame(VideoStreamId stream,
                                            const EncodedFrame& frame) {
     auto& ctx = m_video[int(stream)];
+    // S-1: never push H.264 at a peer that cannot decode it. The track
+    // being open proves only that the m-lines were negotiated — they
+    // are in every initial offer — not that anything on the far side
+    // can turn the bytes back into pictures. VoiceEngine gates on the
+    // same predicate; this is the backstop that makes it impossible to
+    // reach the wire by another route.
+    if (!remoteCanReceiveRtpVideo()) {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - ctx.txSkipLogMs > 5000) {
+            ctx.txSkipLogMs = now;
+            qCInfo(logVoicePc, " [%s] video tx skipped for %s: peer "
+                  "advertises no h264 decode (legacy JPEG path instead)",
+                  qPrintable(m_peerId), kVideoSpecs[int(stream)].mid);
+        }
+        return;
+    }
     if (!ctx.open || !ctx.track || !ctx.track->isOpen()) {
         // Encoder is producing but this track can't carry it — say so
         // (throttled), a silent return here once hid a dead share.
@@ -719,6 +924,14 @@ void PeerConnectionManager::sendVideoFrame(VideoStreamId stream,
         qCDebug(logVoicePc, " [%s] video send failed: %s",
                qPrintable(m_peerId), e.what());
     }
+}
+
+void PeerConnectionManager::setVideoPacingCeilingKbps(VideoStreamId stream,
+                                                      int maxKbps) {
+    const int idx = int(stream);
+    m_pacerCeilingKbps[idx] = maxKbps;
+    if (auto pacer = std::static_pointer_cast<PacedRtpSender>(m_video[idx].pacer))
+        pacer->setCeilingKbps(maxKbps);
 }
 
 void PeerConnectionManager::requestPeerKeyframe(VideoStreamId stream) {

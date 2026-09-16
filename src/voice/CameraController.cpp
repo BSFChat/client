@@ -47,10 +47,7 @@ CameraController::CameraController(QObject* parent)
     m_mac = new MacCameraCapturer(this);
     connect(m_mac, &MacCameraCapturer::frameReady, this,
         [this](const QImage& img) {
-            if (!m_active) {
-                m_active = true;
-                emit activeChanged();
-            }
+            if (!m_active) setActiveState(true);
             // Expose the frame through our internal QVideoSink so
             // QML VideoOutputs mirrored via forwardTo() render it.
             QVideoFrameFormat fmt(img.size(),
@@ -76,9 +73,7 @@ CameraController::CameraController(QObject* parent)
     m_session->setVideoSink(m_sink);
 
     connect(m_camera, &QCamera::activeChanged, this, [this](bool a) {
-        if (m_active == a) return;
-        m_active = a;
-        emit activeChanged();
+        setActiveState(a);
     });
     connect(m_camera, &QCamera::errorOccurred, this, [this](QCamera::Error err,
                                                              const QString& d) {
@@ -241,13 +236,38 @@ void CameraController::stop()
     m_sink->setVideoFrame(QVideoFrame());
 #ifdef Q_OS_MACOS
     if (m_mac) m_mac->stop();
-    if (m_active) {
-        m_active = false;
-        emit activeChanged();
-    }
+    if (m_active) setActiveState(false);
 #else
+    // QCamera::activeChanged routes the flip through setActiveState().
     if (m_camera && m_camera->isActive()) m_camera->stop();
 #endif
+}
+
+void CameraController::setActiveState(bool active)
+{
+    if (m_active == active) return;
+    m_active = active;
+    // S-11: the encode session outlives a stop/start, so the first
+    // frame of a restarted camera would reference a picture no viewer
+    // holds. Start clean.
+    if (active && m_pipeline) m_pipeline->forceKeyframe();
+    announceStream(active);
+    emit activeChanged();
+}
+
+IVoiceTransport* CameraController::currentVoice() const
+{
+    if (!m_servers) return nullptr;
+    auto* vs = m_servers->voiceServer();
+    return vs ? vs->voiceEngine() : nullptr;
+}
+
+void CameraController::announceStream(bool on)
+{
+    // S-7: explicit lifecycle, so a viewer's camera tile clears the
+    // moment the camera goes off rather than after the liveness timeout.
+    if (auto* voice = currentVoice())
+        voice->announceVideoStreamState(VideoStreamId::Camera, on);
 }
 
 void CameraController::setTransmitting(bool transmitting)
@@ -313,6 +333,10 @@ void CameraController::pushFrameToPeers()
                     m_rate->reportKeyframeRequest();
             });
         m_wiredEngine = voice;
+        // Engine created after the camera was switched on — replay the
+        // "stream on" this session never heard (S-7).
+        if (m_active)
+            voice->announceVideoStreamState(VideoStreamId::Camera, true);
     }
 
     // RTP path (capable peers). User knobs with hardcoded fallbacks
@@ -336,6 +360,8 @@ void CameraController::pushFrameToPeers()
         cfg.width = cfg.height = qMin(maxEdge, m_rate->longEdge());
         cfg.keyframeIntervalSec = 10;   // background refresh only —
                                         // receivers PLI when they need one
+        // S-15: pacer ceiling follows the encoder's, never sits below.
+        voice->setVideoSendCeiling(VideoStreamId::Camera, cfg.maxBitrateKbps);
         m_pipeline->configure(cfg);
         m_pipeline->submitFrame(m_pendingFrame,
                                 QDateTime::currentMSecsSinceEpoch() * 1000);

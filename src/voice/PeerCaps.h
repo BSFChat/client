@@ -25,11 +25,25 @@ struct PeerCaps {
     QStringList h264ProfilesDecode;    // e.g. {"cb", "high"}
     QStringList h264ProfilesEncode;    // e.g. {"high"}
     QStringList lossless;              // e.g. {"av1-dc"} — AV1 over reliable data channel
+    // Understands the separate reliable+ordered "control" data channel
+    // (S-2). MUST be advertised before that channel is opened toward a
+    // peer: a build without this flag dispatches every non-lossless
+    // incoming channel into setupDataChannel(), which would rebind its
+    // audio channel to ours and push its Opus down a reliable, ordered
+    // channel — head-of-line blocking on the audio path, to fix video.
+    bool controlDc = false;
+
+    // True when the peer advertises `codec` as one it can DECODE.
+    // Case-insensitive: the field is free-form JSON from another build.
+    bool decodes(const QString& codec) const {
+        return videoCodecs.contains(codec, Qt::CaseInsensitive);
+    }
 
     static PeerCaps fromJson(const nlohmann::json& j) {
         PeerCaps c;
         if (!j.is_object()) return c;
         c.videoRtp = j.value("video_rtp", 0) != 0;
+        c.controlDc = j.value("control_dc", 0) != 0;
         auto strList = [&j](const char* key) {
             QStringList out;
             for (const auto& v : j.value(key, nlohmann::json::array()))
@@ -52,6 +66,7 @@ struct PeerCaps {
         };
         return {
             {"video_rtp", videoRtp ? 1 : 0},
+            {"control_dc", controlDc ? 1 : 0},
             {"video_codecs", arr(videoCodecs)},
             {"h264_profiles_decode", arr(h264ProfilesDecode)},
             {"h264_profiles_encode", arr(h264ProfilesEncode)},
@@ -59,3 +74,50 @@ struct PeerCaps {
         };
     }
 };
+
+// The codec identifier the RTP video path advertises and sends.
+inline QString videoCodecIdH264() { return QStringLiteral("h264"); }
+
+// ---------------------------------------------------------------------
+// Who gets which video path (S-1)
+// ---------------------------------------------------------------------
+// These two predicates are the whole legacy/RTP routing decision, kept
+// here as free functions so they can be unit-tested without a live
+// peer connection — the bug they encode was a one-line misjudgement
+// that made Android receive NOTHING once a desktop shared.
+//
+// The old rule keyed "legacy" on whether the RTP TRACK was open. That
+// is not the same question:
+//   * a peer with video_rtp:1 but no decoder (Android without openh264
+//     or libaom) still gets a NEGOTIATED, OPEN track — the m-lines are
+//     in the initial offer regardless — so it was classified capable,
+//     skipped by the JPEG fan-out, and pushed H.264 it cannot decode;
+//   * a peer whose track has not opened yet is genuinely in the
+//     transition gap and does need JPEG for those few seconds.
+// Decode capability answers the first; track state answers the second;
+// both are needed.
+
+// True when `codec` video over RTP will actually be decodable by this
+// peer. Unknown caps ⇒ false: before the handshake we assume nothing.
+inline bool peerCanReceiveRtpVideo(const PeerCaps& caps, bool capsKnown,
+                                   const QString& codec) {
+    return capsKnown && caps.videoRtp && caps.decodes(codec);
+}
+
+// True when the reliable "control" data channel may be opened toward
+// this peer (S-2). Unknown caps, or caps without the flag, mean a build
+// that would rebind its AUDIO channel to whatever label it is handed —
+// so control traffic stays on the audio channel for those peers, which
+// is what every build did before this existed.
+inline bool peerUsesControlChannel(const PeerCaps& caps, bool capsKnown) {
+    return capsKnown && caps.controlDc;
+}
+
+// True when the peer must be served the legacy JPEG stills path:
+// either it cannot decode our RTP codec at all, or it can but its
+// track for this stream has not opened yet.
+inline bool peerNeedsLegacyJpeg(const PeerCaps& caps, bool capsKnown,
+                                bool videoTrackOpen, const QString& codec) {
+    if (!peerCanReceiveRtpVideo(caps, capsKnown, codec)) return true;
+    return !videoTrackOpen;
+}

@@ -1,6 +1,69 @@
 #include "voice/video/VideoStreamRegistry.h"
 
+#include <QMutex>
+#include <QThread>
 #include <QVideoFrameFormat>
+
+#include <atomic>
+
+// Off-thread JPEG decode for the legacy stills path (S-10).
+//
+// Decoding a 1600 px JPEG costs single-digit milliseconds; doing it in
+// the GUI thread's slot, once per frame per sharing peer, is a visible
+// hitch in scrolling and typing while anyone shares. The queue is
+// LATEST-WINS PER STREAM: a decode that falls behind drops the frames
+// it was overtaken by rather than growing a backlog, which is the same
+// rule the send and receive pipelines follow.
+class VideoStreamRegistry::JpegDecodeWorker {
+public:
+    explicit JpegDecodeWorker(VideoStreamRegistry* owner) : m_owner(owner) {
+        m_worker.moveToThread(&m_thread);
+        m_thread.setObjectName(QStringLiteral("video-jpeg-dec"));
+        m_thread.start();
+    }
+    ~JpegDecodeWorker() {
+        m_thread.quit();
+        m_thread.wait();
+    }
+
+    void submit(const QString& userId, int streamId, const QByteArray& jpeg) {
+        {
+            QMutexLocker lock(&m_mutex);
+            m_pending[{userId, streamId}] = jpeg;   // drop-oldest
+        }
+        if (!m_drainQueued.exchange(true)) {
+            QMetaObject::invokeMethod(&m_worker, [this]() { drain(); },
+                                      Qt::QueuedConnection);
+        }
+    }
+
+private:
+    void drain() {
+        QHash<QPair<QString, int>, QByteArray> batch;
+        {
+            QMutexLocker lock(&m_mutex);
+            batch.swap(m_pending);
+            m_drainQueued.store(false);
+        }
+        for (auto it = batch.constBegin(); it != batch.constEnd(); ++it) {
+            QImage img;
+            if (!img.loadFromData(it.value(), "JPEG")) continue;
+            const QString userId = it.key().first;
+            const int streamId = it.key().second;
+            auto* owner = m_owner;
+            QMetaObject::invokeMethod(owner, [owner, userId, streamId, img]() {
+                owner->deliverImage(userId, streamId, img);
+            }, Qt::QueuedConnection);
+        }
+    }
+
+    VideoStreamRegistry* const m_owner;
+    QThread m_thread;
+    QObject m_worker;
+    QMutex m_mutex;
+    QHash<QPair<QString, int>, QByteArray> m_pending;
+    std::atomic<bool> m_drainQueued{false};
+};
 
 VideoStreamRegistry::VideoStreamRegistry(QObject* parent)
     : QObject(parent)
@@ -11,6 +74,10 @@ VideoStreamRegistry::VideoStreamRegistry(QObject* parent)
     m_sweepTimer.setInterval(1000);
     connect(&m_sweepTimer, &QTimer::timeout, this, &VideoStreamRegistry::sweepStale);
     m_sweepTimer.start();
+}
+
+VideoStreamRegistry::~VideoStreamRegistry() {
+    delete m_jpegWorker;   // joins the decode thread
 }
 
 VideoStreamRegistry::Entry& VideoStreamRegistry::entry(const QString& userId,
@@ -56,10 +123,47 @@ QStringList VideoStreamRegistry::liveUsers(int streamId) const {
 
 void VideoStreamRegistry::markLive(const QString& userId, int streamId, Entry& e) {
     e.lastFrameMs = QDateTime::currentMSecsSinceEpoch();
+    // Frames are the ground truth: anything arriving means the stream
+    // is not stopped, whatever the last control message claimed.
+    const bool wasStopped = e.stopped;
+    e.stopped = false;
     if (!e.live) {
         e.live = true;
         emit liveVideoChanged(userId, streamId);
+    } else if (wasStopped) {
+        emit liveVideoChanged(userId, streamId);
     }
+}
+
+bool VideoStreamRegistry::streamStopped(const QString& userId,
+                                        int streamId) const {
+    auto it = m_entries.constFind({userId, streamId});
+    return it != m_entries.constEnd() && it->stopped && !it->live;
+}
+
+void VideoStreamRegistry::setStreamAnnounced(const QString& userId,
+                                             int streamId, bool on) {
+    Entry& e = entry(userId, streamId);
+    if (on) {
+        if (!e.stopped) return;
+        e.stopped = false;
+        emit liveVideoChanged(userId, streamId);
+        return;
+    }
+    e.stopped = true;
+    // dropStream only signals when the stream WAS live; a share that
+    // stopped before its first frame landed still has to clear the
+    // announced-but-never-started tile, so signal unconditionally here.
+    const bool wasLive = e.live;
+    dropStream(userId, streamId);
+    if (!wasLive) emit liveVideoChanged(userId, streamId);
+}
+
+void VideoStreamRegistry::deliverJpeg(const QString& userId, int streamId,
+                                      const QByteArray& jpeg) {
+    if (jpeg.isEmpty()) return;
+    if (!m_jpegWorker) m_jpegWorker = new JpegDecodeWorker(this);
+    m_jpegWorker->submit(userId, streamId, jpeg);
 }
 
 void VideoStreamRegistry::deliverFrame(const QString& userId, int streamId,

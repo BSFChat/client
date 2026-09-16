@@ -16,6 +16,7 @@
 // VideoRateController. Those must keep working.
 
 #include "voice/IVoiceTransport.h"
+#include "voice/video/DeliveryRatioEstimator.h"
 #include "voice/video/VideoCodec.h"
 
 #include <QObject>
@@ -117,6 +118,12 @@ public:
     void broadcastCameraFrame(const QByteArray& jpegData) override;
 
     // ---- RTP video ----
+    // Explicit stream lifecycle control ({"t":"stream"}) — see
+    // IVoiceTransport. Latched so a peer that joins mid-share is told
+    // the stream is already running as soon as its caps arrive.
+    void announceVideoStreamState(VideoStreamId stream, bool on) override;
+    // Pushes the encoder ceiling down into every peer's RTP pacer.
+    void setVideoSendCeiling(VideoStreamId stream, int maxKbps) override;
     // Local user started/stopped producing video. Adds tracks (with
     // renegotiation) toward every capable peer; tracks persist after
     // stop so a share restart costs no renegotiation.
@@ -245,13 +252,21 @@ private:
     // get tracks as soon as their caps arrive.
     bool m_videoSendActive = false;
     QMap<QPair<QString, int>, VideoReceivePipeline*> m_recvPipelines;
+    // Last announced on/off state per outgoing stream (S-7), replayed
+    // to peers whose caps arrive after the share started.
+    bool m_streamAnnounced[kVideoStreamCount] = {};
+    // Last ceiling pushed into the peers' pacers per stream (S-15), so
+    // a peer created mid-share inherits it.
+    int m_pacerCeilingKbps[kVideoStreamCount] = {};
 
     // Receiver reports: every 500 ms each receive pipeline's cumulative
     // counters go to its sender ({"t":"rr"}); on the send side, the
     // last-seen (rx, tx) snapshots per peer×stream turn the next report
     // into a windowed delivery ratio.
     QTimer m_rrTimer;
-    struct RrSnapshot { quint64 rxBytes = 0; quint64 txBytes = 0; };
-    QMap<QPair<QString, int>, RrSnapshot> m_rrSnapshots;
+    // Per peer x stream delivery-ratio state. Lags the denominator by
+    // one report so bytes still in flight are not read as loss (S-3) —
+    // see DeliveryRatioEstimator for why that mattered.
+    QMap<QPair<QString, int>, DeliveryRatioEstimator> m_rrSnapshots;
     void sendReceiverReports();
 };
