@@ -923,12 +923,21 @@ void ServerConnection::setActiveRoom(const QString& roomId)
     // event as "newer than nothing" and lands them at the top of
     // the channel. Centralising the persist on the C++ side closes
     // that race and is a no-op if no Settings is wired (e.g. tests).
-    if (!m_activeRoomId.isEmpty() && m_messageModel && m_settings) {
+    //
+    // Gated on the view's last at-bottom sample (U-M3): writing the
+    // newest LOADED timestamp for somebody who was reading halfway up
+    // marks everything below it read and destroys the unread divider
+    // they would have come back to.
+    if (!m_activeRoomId.isEmpty() && m_messageModel && m_settings
+        && m_timelineAtBottom) {
         qint64 newestTs = m_messageModel->newestTimestampMs();
         if (newestTs > 0) {
             m_settings->setLastReadTs(m_activeRoomId, newestTs);
         }
     }
+    // The incoming room has its own scroll position; assume nothing about
+    // it until the view says otherwise.
+    m_timelineAtBottom = false;
 
     m_activeRoomId = roomId;
 
@@ -962,12 +971,12 @@ void ServerConnection::setActiveRoom(const QString& roomId)
     m_activeRoomName = m_roomListModel->roomDisplayName(roomId);
     m_activeRoomTopic = m_roomListModel->roomTopic(roomId);
 
-    // Reset unread count for this room immediately (optimistic) and tell the
-    // server to advance the read marker so future syncs also report zero.
-    m_roomListModel->resetUnreadCount(roomId);
-    if (!roomId.isEmpty()) {
-        m_client->sendReadMarker(roomId);
-    }
+    // NO unread reset and NO read marker here any more (U-M3). Opening a
+    // channel is not reading it: this used to tell the server everything
+    // was read the instant the room came on screen, so a user who opened
+    // a busy channel and switched away had no way back to what they had
+    // missed. markRoomRead() does it when the view reports the user is
+    // actually at the end of the timeline.
 
     emit activeRoomIdChanged();
     emit activeRoomNameChanged();
@@ -982,6 +991,29 @@ void ServerConnection::setActiveRoom(const QString& roomId)
     // Recalculate hasUnread
     bool hadUnread = m_hasUnread;
     m_hasUnread = m_roomListModel->totalUnreadCount() > 0;
+    if (m_hasUnread != hadUnread) emit hasUnreadChanged();
+}
+
+void ServerConnection::setTimelineAtBottom(bool atBottom)
+{
+    m_timelineAtBottom = atBottom;
+}
+
+void ServerConnection::markRoomRead(const QString& roomId, qint64 tsMs)
+{
+    if (roomId.isEmpty()) return;
+    if (m_settings && tsMs > 0) m_settings->setLastReadTs(roomId, tsMs);
+    if (m_roomListModel) m_roomListModel->resetUnreadCount(roomId);
+
+    // One POST per advance, not one per inbound message: this is called
+    // from the view on every count change while the user sits at the
+    // bottom of a busy channel.
+    if (tsMs > 0 && m_sentReadMarkerTs.value(roomId, 0) >= tsMs) return;
+    if (tsMs > 0) m_sentReadMarkerTs.insert(roomId, tsMs);
+    m_client->sendReadMarker(roomId);
+
+    const bool hadUnread = m_hasUnread;
+    m_hasUnread = m_roomListModel && m_roomListModel->totalUnreadCount() > 0;
     if (m_hasUnread != hadUnread) emit hasUnreadChanged();
 }
 
