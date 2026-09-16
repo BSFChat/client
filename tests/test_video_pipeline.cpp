@@ -121,6 +121,45 @@ private slots:
         QVERIFY(!peerCanReceiveRtpVideo(other, true, videoCodecIdH264()));
     }
 
+    // The reliable control channel may only be opened toward a peer
+    // that says it knows the label. An older build dispatches any
+    // unknown channel into its AUDIO binding (proved in
+    // test_media_loopback), so opening one unasked fixes video by
+    // damaging audio.
+    void controlChannelIsOpenedOnlyWhenThePeerAdvertisesIt() {
+        PeerCaps updated = capsWith(true, {QStringLiteral("h264")});
+        updated.controlDc = true;
+        QVERIFY(peerUsesControlChannel(updated, true));
+        // Caps not exchanged yet — control stays on the audio channel.
+        QVERIFY(!peerUsesControlChannel(updated, false));
+
+        // A build that speaks RTP video but predates the channel.
+        PeerCaps olderRtpPeer = capsWith(true, {QStringLiteral("h264")});
+        QVERIFY(!olderRtpPeer.controlDc);
+        QVERIFY(!peerUsesControlChannel(olderRtpPeer, true));
+
+        // ...and it must still be a full video peer: the fallback is
+        // the old behaviour, not a downgrade to JPEG.
+        QVERIFY(peerCanReceiveRtpVideo(olderRtpPeer, true, videoCodecIdH264()));
+    }
+
+    // The flag has to survive the caps round-trip or the gate above is
+    // decided on a field nobody ever sets.
+    void controlChannelCapSurvivesJsonRoundTrip() {
+        PeerCaps out = capsWith(true, {QStringLiteral("h264")});
+        out.controlDc = true;
+        const PeerCaps back = PeerCaps::fromJson(out.toJson());
+        QVERIFY(back.controlDc);
+        QVERIFY(back.videoRtp);
+
+        // Absent field (an older peer's caps) reads as false, never as
+        // "probably supported".
+        nlohmann::json legacy;
+        legacy["video_rtp"] = 1;
+        legacy["video_codecs"] = nlohmann::json::array({"h264"});
+        QVERIFY(!PeerCaps::fromJson(legacy).controlDc);
+    }
+
     // ---- S-2: keyframe recovery ------------------------------------
 
     // A keyframe request can be lost (it used to ride a channel with

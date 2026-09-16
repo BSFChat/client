@@ -463,6 +463,38 @@ void PeerConnectionManager::setupDataChannel(std::shared_ptr<rtc::DataChannel> d
     });
 }
 
+void PeerConnectionManager::ensureControlChannel() {
+    if (m_controlDc || !m_pc) return;
+    // HARD compatibility gate. A build that predates this channel
+    // dispatches every incoming data channel except "video-lossless"
+    // into setupDataChannel(), which would REBIND ITS AUDIO CHANNEL to
+    // whatever we just opened — its Opus would then ride a reliable,
+    // ordered channel and stall behind retransmissions. Fixing video
+    // must not damage audio for anyone who has not updated, so the
+    // channel is opened only toward a peer that says it knows the
+    // label. Everyone else keeps getting control on the audio channel,
+    // exactly as before.
+    if (!peerUsesControlChannel(m_remoteCaps, m_remoteCapsKnown)) return;
+    // Only the offerer opens channels; the answerer adopts by label via
+    // onDataChannel. Opening from both sides would produce two.
+    if (!m_isOfferer) return;
+    try {
+        // Reliable and ordered are the DataChannelInit defaults —
+        // exactly what a keyframe request needs. Opens in-band; the
+        // renegotiation libdatachannel raises for it is handled by the
+        // auto-negotiation path in setupCallbacks (same as the lossless
+        // channel).
+        auto dc = m_pc->createDataChannel("control");
+        setupControlChannel(dc);
+        qCInfo(logVoicePc, " [%s] opening reliable control channel",
+              qPrintable(m_peerId));
+    } catch (const std::exception& e) {
+        qCWarning(logVoicePc, " [%s] control channel create failed: %s "
+                 "— control stays on the audio channel",
+                 qPrintable(m_peerId), e.what());
+    }
+}
+
 void PeerConnectionManager::setupControlChannel(std::shared_ptr<rtc::DataChannel> dc) {
     m_controlDc = dc;
     dc->onOpen([this]() {
@@ -524,17 +556,10 @@ void PeerConnectionManager::createOffer() {
         auto dc = m_pc->createDataChannel("audio", dcInit);
         setupDataChannel(dc);
 
-        // Control traffic (keyframe requests, caps refreshes, receiver
-        // reports, stream on/off) gets its own RELIABLE, ORDERED channel
-        // — the DataChannelInit defaults. Sharing the audio channel meant
-        // every one of those messages inherited maxRetransmits=0, so a
-        // single dropped datagram lost a keyframe request outright and
-        // the viewer stayed frozen until the next periodic IDR (S-2).
-        // Opened here, in the initial offer, so it is up before any
-        // video is negotiated. Peers on older builds never open it and
-        // keep receiving control on the audio channel.
-        auto ctl = m_pc->createDataChannel("control");
-        setupControlChannel(ctl);
+        // The reliable "control" channel is NOT opened here: at this
+        // point the peer's caps are unknown, and it may only be opened
+        // toward a peer that advertises control_dc. See
+        // ensureControlChannel().
 
         m_pc->setLocalDescription(rtc::Description::Type::Offer);
     } catch (const std::exception& e) {
@@ -672,6 +697,9 @@ void PeerConnectionManager::sendControl(const QByteArray& json) {
     // audio frames (see onMessage's fallback), so control traffic may
     // only flow once the caps handshake proved the peer understands it.
     if (!remoteSupportsVideoRtp()) return;
+    // Brings the reliable channel up the first time control traffic
+    // flows toward a peer that advertises it; no-op otherwise.
+    ensureControlChannel();
     rtc::binary data;
     data.reserve(json.size() + 1);
     data.push_back(std::byte{0x04});

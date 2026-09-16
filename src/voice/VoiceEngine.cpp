@@ -420,6 +420,8 @@ void VoiceEngine::removePeer(const QString& userId) {
 nlohmann::json VoiceEngine::localCapsJson() {
     PeerCaps caps;
     caps.videoRtp = true;
+    // We both open and understand the reliable control channel (S-2).
+    caps.controlDc = true;
     // Probe the codec backends compiled into this build. A platform
     // with no encoder still advertises its decode side so it can
     // receive video it can't send.

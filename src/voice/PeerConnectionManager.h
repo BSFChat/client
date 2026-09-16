@@ -192,6 +192,9 @@ private:
     void setupDataChannel(std::shared_ptr<rtc::DataChannel> dc);
     // Reliable+ordered channel carrying only 0x04 control JSON.
     void setupControlChannel(std::shared_ptr<rtc::DataChannel> dc);
+    // Opens that channel if — and only if — the peer's caps say it
+    // understands the label. Idempotent; safe to call per message.
+    void ensureControlChannel();
     void flushPendingCandidates();
     // Fires a queued renegotiation once the signaling state is stable.
     void maybeRenegotiateAgain();
@@ -283,10 +286,11 @@ private:
     quint64 m_txFrames[kVideoStreamCount] = {};
     quint64 m_txBytes[kVideoStreamCount] = {};
 
-    // Reliable, ordered control channel ("control"). Created by the
-    // offerer in createOffer(); the answerer adopts it via the
-    // onDataChannel label match. Null against a peer running a build
-    // that predates it — sendControl() then falls back to m_dc.
+    // Reliable, ordered control channel ("control"). Opened lazily by
+    // the OFFERER once the peer's caps advertise control_dc; the
+    // answerer adopts it via the onDataChannel label match. Null
+    // against a peer running a build that predates it — sendControl()
+    // then falls back to m_dc, which is what every build did before.
     //
     // NOTE for the teardown work (S-6/V-C2): this channel's onMessage
     // callback captures `this` exactly like m_dc's, so whatever

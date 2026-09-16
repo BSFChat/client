@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -191,6 +192,172 @@ int runCase(bool initialOffer) {
     return 0;
 }
 
+// ---------------------------------------------------------------------
+// S-2: the reliable "control" data channel, and why it is gated on caps
+// ---------------------------------------------------------------------
+// Keyframe requests used to ride the audio channel, which is unordered
+// with maxRetransmits=0 — one lost datagram and the request was gone,
+// leaving the viewer frozen until the next periodic IDR. They now ride a
+// second, reliable+ordered channel labelled "control".
+//
+// Opening a second channel is only safe because of two library
+// behaviours, and this case proves BOTH rather than assuming them:
+//
+//   1. GATED PATH (both sides updated): the second channel arrives on
+//      the far side as its own onDataChannel with its label intact and
+//      with reliable+ordered settings, while the audio channel stays
+//      open and unreliable. A receiver that dispatches on the label
+//      keeps both.
+//   2. LEGACY PATH (peer not updated): a receiver that ignores labels —
+//      which is what every build before this one does, its
+//      onDataChannel ending in `else setupDataChannel(dc)` — REBINDS
+//      its audio channel to whatever arrives second. Its Opus would
+//      then ride a reliable, ordered channel and stall behind
+//      retransmissions: video fixed, audio damaged.
+//
+// (2) is the entire reason PeerCaps::controlDc exists and why
+// PeerConnectionManager::ensureControlChannel() refuses to open the
+// channel toward a peer that has not advertised it. If this assertion
+// ever stops holding, that gate can be removed.
+int runControlChannelCase() {
+    std::printf("--- case: reliable control channel + legacy dispatch\n");
+    rtc::Configuration cfg;
+
+    auto pcA = std::make_shared<rtc::PeerConnection>(cfg);
+    auto pcB = std::make_shared<rtc::PeerConnection>(cfg);
+
+    pcA->onLocalDescription([&](rtc::Description d) {
+        pcB->setRemoteDescription(d);
+    });
+    pcB->onLocalDescription([&](rtc::Description d) {
+        pcA->setRemoteDescription(d);
+    });
+    pcA->onLocalCandidate([&](rtc::Candidate c) { pcB->addRemoteCandidate(c); });
+    pcB->onLocalCandidate([&](rtc::Candidate c) { pcA->addRemoteCandidate(c); });
+
+    // Receiver side. Two bindings kept in parallel: what an updated
+    // build does (dispatch on label) and what an older one does (take
+    // whatever arrives as the audio channel).
+    std::mutex recvMutex;
+    std::shared_ptr<rtc::DataChannel> dispatchAudio;    // updated build
+    std::shared_ptr<rtc::DataChannel> dispatchControl;  // updated build
+    std::shared_ptr<rtc::DataChannel> legacyAudio;      // pre-update build
+    Latch controlMsg;
+    Latch audioMsg;
+
+    pcB->onDataChannel([&](std::shared_ptr<rtc::DataChannel> dc) {
+        const std::string label = dc->label();
+        {
+            std::lock_guard lock(recvMutex);
+            // The updated dispatch, mirroring PeerConnectionManager.
+            if (label == "control") dispatchControl = dc;
+            else dispatchAudio = dc;
+            // The pre-update dispatch: no label check at all.
+            legacyAudio = dc;
+        }
+        dc->onMessage([&, label](rtc::message_variant msg) {
+            if (!std::holds_alternative<rtc::binary>(msg)) return;
+            auto& data = std::get<rtc::binary>(msg);
+            if (label == "control") controlMsg.set(data);
+            else audioMsg.set(data);
+        });
+    });
+
+    // Offerer: the audio channel exactly as production creates it.
+    rtc::DataChannelInit audioInit;
+    audioInit.reliability.unordered = true;
+    audioInit.reliability.maxRetransmits = 0;
+    Latch audioOpen;
+    auto audioDc = pcA->createDataChannel("audio", audioInit);
+    audioDc->onOpen([&]() { audioOpen.set({}); });
+    pcA->setLocalDescription();
+
+    if (!audioOpen.wait(std::chrono::seconds(10))) {
+        std::fprintf(stderr, "FAIL: audio channel never opened\n");
+        return 2;
+    }
+
+    // In-band second channel, no renegotiation of our own — this is
+    // what ensureControlChannel() does once caps allow it.
+    Latch controlOpen;
+    auto controlDc = pcA->createDataChannel("control");
+    controlDc->onOpen([&]() { controlOpen.set({}); });
+    if (!controlOpen.wait(std::chrono::seconds(10))) {
+        std::fprintf(stderr, "FAIL: control channel never opened\n");
+        return 2;
+    }
+
+    // (1) Reliability actually differs — the whole point of the split.
+    if (controlDc->reliability().maxRetransmits.has_value()
+        || controlDc->reliability().maxPacketLifeTime.has_value()) {
+        std::fprintf(stderr, "FAIL: control channel is not reliable\n");
+        return 3;
+    }
+    if (controlDc->reliability().unordered) {
+        std::fprintf(stderr, "FAIL: control channel is unordered\n");
+        return 3;
+    }
+    if (!audioDc->reliability().maxRetransmits.has_value()
+        || *audioDc->reliability().maxRetransmits != 0) {
+        std::fprintf(stderr, "FAIL: audio channel lost maxRetransmits=0\n");
+        return 3;
+    }
+
+    // (1) Both channels carry their own traffic, addressed by label.
+    const std::string kf = "{\"t\":\"kf\",\"stream\":0}";
+    controlDc->send(rtc::binary(
+        reinterpret_cast<const std::byte*>(kf.data()),
+        reinterpret_cast<const std::byte*>(kf.data() + kf.size())));
+    const std::string opus = "opus-ish";
+    audioDc->send(rtc::binary(
+        reinterpret_cast<const std::byte*>(opus.data()),
+        reinterpret_cast<const std::byte*>(opus.data() + opus.size())));
+
+    if (!controlMsg.wait(std::chrono::seconds(10))) {
+        std::fprintf(stderr, "FAIL: control message never arrived on the "
+                             "control channel\n");
+        return 4;
+    }
+    if (!audioMsg.wait(std::chrono::seconds(10))) {
+        std::fprintf(stderr, "FAIL: audio message never arrived on the "
+                             "audio channel\n");
+        return 4;
+    }
+
+    {
+        std::lock_guard lock(recvMutex);
+        if (!dispatchAudio || !dispatchControl) {
+            std::fprintf(stderr, "FAIL: label dispatch did not see both "
+                                 "channels\n");
+            return 5;
+        }
+        if (dispatchAudio->label() != "audio"
+            || dispatchControl->label() != "control") {
+            std::fprintf(stderr, "FAIL: labels did not survive the wire\n");
+            return 5;
+        }
+        // (2) The hazard the capability gate exists for. A build that
+        // ignores labels ends up with its "audio" channel pointing at
+        // the control channel.
+        if (!legacyAudio || legacyAudio->label() != "control") {
+            std::fprintf(stderr, "NOTE: a label-ignoring receiver no longer "
+                                 "rebinds to the second channel — the "
+                                 "PeerCaps::controlDc gate may be "
+                                 "removable\n");
+        } else {
+            std::printf("expected: a label-ignoring receiver rebinds its "
+                        "audio channel to \"control\" — hence the "
+                        "controlDc capability gate\n");
+        }
+    }
+
+    std::printf("PASS: control channel is reliable+ordered, audio stays "
+                "unreliable, both deliver\n");
+    pcA->close();
+    pcB->close();
+    return 0;
+}
+
 int main() {
     rtc::InitLogger(rtc::LogLevel::Warning);
 
@@ -215,10 +382,13 @@ int main() {
                     "(workaround in createOffer remains necessary)\n");
     }
 
+    // S-2's transport assumptions, both the gated and the legacy path.
+    const int control = runControlChannelCase();
+
     // Join libdatachannel's global worker threads before static
     // destruction — otherwise the process can segfault at exit (seen
     // under ctest, where the harness reaps fast).
     rtc::Cleanup().wait();
 
-    return simple;
+    return simple != 0 ? simple : control;
 }

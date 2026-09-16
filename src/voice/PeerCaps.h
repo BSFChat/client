@@ -25,6 +25,13 @@ struct PeerCaps {
     QStringList h264ProfilesDecode;    // e.g. {"cb", "high"}
     QStringList h264ProfilesEncode;    // e.g. {"high"}
     QStringList lossless;              // e.g. {"av1-dc"} — AV1 over reliable data channel
+    // Understands the separate reliable+ordered "control" data channel
+    // (S-2). MUST be advertised before that channel is opened toward a
+    // peer: a build without this flag dispatches every non-lossless
+    // incoming channel into setupDataChannel(), which would rebind its
+    // audio channel to ours and push its Opus down a reliable, ordered
+    // channel — head-of-line blocking on the audio path, to fix video.
+    bool controlDc = false;
 
     // True when the peer advertises `codec` as one it can DECODE.
     // Case-insensitive: the field is free-form JSON from another build.
@@ -36,6 +43,7 @@ struct PeerCaps {
         PeerCaps c;
         if (!j.is_object()) return c;
         c.videoRtp = j.value("video_rtp", 0) != 0;
+        c.controlDc = j.value("control_dc", 0) != 0;
         auto strList = [&j](const char* key) {
             QStringList out;
             for (const auto& v : j.value(key, nlohmann::json::array()))
@@ -58,6 +66,7 @@ struct PeerCaps {
         };
         return {
             {"video_rtp", videoRtp ? 1 : 0},
+            {"control_dc", controlDc ? 1 : 0},
             {"video_codecs", arr(videoCodecs)},
             {"h264_profiles_decode", arr(h264ProfilesDecode)},
             {"h264_profiles_encode", arr(h264ProfilesEncode)},
@@ -93,6 +102,15 @@ inline QString videoCodecIdH264() { return QStringLiteral("h264"); }
 inline bool peerCanReceiveRtpVideo(const PeerCaps& caps, bool capsKnown,
                                    const QString& codec) {
     return capsKnown && caps.videoRtp && caps.decodes(codec);
+}
+
+// True when the reliable "control" data channel may be opened toward
+// this peer (S-2). Unknown caps, or caps without the flag, mean a build
+// that would rebind its AUDIO channel to whatever label it is handed —
+// so control traffic stays on the audio channel for those peers, which
+// is what every build did before this existed.
+inline bool peerUsesControlChannel(const PeerCaps& caps, bool capsKnown) {
+    return capsKnown && caps.controlDc;
 }
 
 // True when the peer must be served the legacy JPEG stills path:
