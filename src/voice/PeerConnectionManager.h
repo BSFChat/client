@@ -85,11 +85,6 @@ public:
     // datagram is lost — which is how a viewer stayed frozen until the
     // next periodic IDR, 10-30 s later.
     void sendControl(const QByteArray& json);
-    // True when the peer negotiated the reliable control channel, i.e.
-    // control messages are not riding the lossy audio channel.
-    bool hasReliableControl() const {
-        return m_controlDc && m_controlDc->isOpen();
-    }
 
     // ---- RTP video tracks ----
     // Add the vscreen/vcamera SendRecv tracks and renegotiate.

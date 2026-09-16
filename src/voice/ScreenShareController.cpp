@@ -547,6 +547,13 @@ void ScreenShareController::setActiveState(bool active)
 {
     if (m_active == active) return;
     m_active = active;
+    if (!active) {
+        // A frame conversion in flight completes into a share that no
+        // longer exists; the completion checks m_active, and clearing
+        // here (after the flag drops) keeps a late one from becoming
+        // the first frame of the NEXT share.
+        m_pendingFrame = {};
+    }
     if (active && m_pipeline) {
         // S-11: the encode session survives a stop/start (that is the
         // point — a restart costs no renegotiation), so without this
