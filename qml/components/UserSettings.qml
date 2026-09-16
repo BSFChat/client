@@ -274,10 +274,16 @@ Popup {
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
             }
             onClicked: {
-                if (serverManager.activeServer) {
-                    serverManager.activeServer.disconnectFromServer();
-                }
+                // D-H6. This used to call disconnectFromServer(), which
+                // only stops the sync loop: the access token stayed in
+                // QSettings and the server came back on the next launch
+                // as a dead entry with no way to reconnect it. Removing
+                // it is what "log out" has always meant — and it is only
+                // safe now that removeServer clears the active pointer
+                // before anything can dereference it (U-C1).
+                var idx = serverManager.activeServerIndex;
                 userSettings.close();
+                if (idx >= 0) serverManager.removeServer(idx);
             }
         }
     }
