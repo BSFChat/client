@@ -239,18 +239,11 @@ ApplicationWindow {
         id: loginDialog
     }
 
-    Connections {
-        target: serverManager
-        function onLoginError(serverUrl, error) {
-            loginDialog.isConnecting = false;
-            loginDialog.errorMessage = error;
-        }
-        function onLoginSuccess(serverUrl) {
-            loginDialog.isConnecting = false;
-            loginDialog.close();
-            loginDialog.errorMessage = "";
-        }
-    }
+    // (The duplicate loginError / loginSuccess handlers that lived here
+    // were removed with D-H5: LoginDialog subscribes to the same two
+    // signals itself, so this block was a second writer of the same
+    // dialog state and, together with the toast below, made one failed
+    // login produce three separate surfaces.)
 
     // The one way to flip the member list. MessageView's header button
     // used to assign to `showMemberList` directly, which is fine here but
@@ -489,7 +482,11 @@ ApplicationWindow {
     Connections {
         target: serverManager
         function onLoginError(serverUrl, error) {
-            toastError("Login failed: " + error);
+            // The dialog shows the error inline when it is up; toasting
+            // the same string at the same moment is the duplicate surface
+            // D-H5 is about. Toast only when nobody can see the inline one
+            // — e.g. a saved server failing to re-authenticate at launch.
+            if (!loginDialog.opened) toastError("Login failed: " + error);
         }
         function onIdentityLoginFailed(error) {
             toastError("Identity login failed: " + error);
