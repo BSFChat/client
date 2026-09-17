@@ -56,19 +56,22 @@ inline QString refusalMessage(StartRefusal refusal)
             "found. Check your audio devices and that BSFChat is allowed to "
             "use the microphone, then try again.");
     case StartRefusal::MicrophoneDenied:
-        return QStringLiteral(
+        // One return per platform: a preprocessor conditional inside a
+        // macro argument is ill-formed and MSVC rejects it (C2121).
 #if defined(Q_OS_MACOS)
+        return QStringLiteral(
             "Microphone access is denied for BSFChat in System Settings → "
             "Privacy & Security → Microphone. Turn it on there, then join "
-            "again."
+            "again.");
 #elif defined(Q_OS_WIN)
+        return QStringLiteral(
             "Microphone access is denied for BSFChat in Settings → Privacy & "
-            "security → Microphone. Turn it on there, then join again."
+            "security → Microphone. Turn it on there, then join again.");
 #else
+        return QStringLiteral(
             "Microphone access is denied for BSFChat by the system. Grant it "
-            "in your privacy settings, then join again."
+            "in your privacy settings, then join again.");
 #endif
-        );
     case StartRefusal::None:
         break;
     }
