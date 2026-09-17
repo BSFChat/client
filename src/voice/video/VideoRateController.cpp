@@ -27,6 +27,15 @@ Content VideoRateController::content() const {
                                                : Content::Screen;
 }
 
+void VideoRateController::setCodec(VideoCodecKind codec) {
+    if (codec == m_codec) return;
+    m_codec = codec;
+    // Deliberately no state reset: the measured path capacity did not
+    // change because we changed codec, and throwing away the converged
+    // bitrate would make every switch cost a fresh climb. Only the
+    // floors this bitrate is judged against move.
+}
+
 void VideoRateController::setEnvelope(int minKbps, int maxKbps, int fps,
                                       int maxLongEdge) {
     m_minKbps = qMax(50, minKbps);
@@ -47,7 +56,7 @@ int VideoRateController::startBitrate() const {
     const Content c = content();
     const int edge = videorate::edgeForRung(c, m_maxLongEdge, 0);
     const int fps0 = videorate::fpsForRung(c, m_fps, 0);
-    const int comfort = videorate::comfortKbpsFor(c, edge, fps0);
+    const int comfort = videorate::comfortKbpsFor(c, edge, fps0, m_codec);
     return qBound(m_minKbps, comfort, m_maxKbps);
 }
 
@@ -151,7 +160,7 @@ VideoRateController::classify(qint64 now, QString& worstPeer,
 void VideoRateController::applyLadder() {
     const Content c = content();
     const int floorHere =
-        videorate::rungMinKbps(c, m_maxLongEdge, m_fps, m_rungIdx);
+        videorate::rungMinKbps(c, m_maxLongEdge, m_fps, m_rungIdx, m_codec);
 
     if (m_bitrate < floorHere) {
         if (m_rungIdx >= videorate::kLadderRungs - 1) return;  // bottom
@@ -170,7 +179,7 @@ void VideoRateController::applyLadder() {
     const int upIdx = m_rungIdx - 1;
     const int comfortThere = videorate::comfortKbpsFor(
         c, videorate::edgeForRung(c, m_maxLongEdge, upIdx),
-        videorate::fpsForRung(c, m_fps, upIdx));
+        videorate::fpsForRung(c, m_fps, upIdx), m_codec);
     if (m_bitrate < comfortThere) { m_comfortTicks = 0; return; }
     if (++m_comfortTicks < T::kUpshiftTicks) return;
 
@@ -262,7 +271,7 @@ void VideoRateController::tick() {
     const int hardFloor = qBound(
         m_minKbps,
         videorate::rungMinKbps(content(), m_maxLongEdge, m_fps,
-                               videorate::kLadderRungs - 1),
+                               videorate::kLadderRungs - 1, m_codec),
         m_maxKbps);
     m_bitrate = qBound(hardFloor, m_bitrate, m_maxKbps);
     applyLadder();

@@ -20,6 +20,7 @@
 #include "voice/PeerCaps.h"
 #include "voice/video/ReceiverReportEstimator.h"
 #include "voice/video/RtpSeqTracker.h"
+#include "voice/video/VideoCodecSelect.h"
 #include "voice/video/VideoRatePolicy.h"
 #include "voice/video/VideoRateController.h"
 #include "voice/video/VideoReceivePipeline.h"
@@ -32,6 +33,28 @@ PeerCaps capsWith(bool videoRtp, const QStringList& codecs) {
     c.videoRtp = videoRtp;
     c.videoCodecs = codecs;
     return c;
+}
+
+// ---- S-18 codec-selection helpers ----------------------------------
+
+videocodec::Viewer viewer(bool videoRtp, const QStringList& codecs,
+                          bool capsKnown = true) {
+    return {capsWith(videoRtp, codecs), capsKnown};
+}
+// A peer that can decode both — the ordinary current desktop build.
+videocodec::Viewer hevcViewer() {
+    return viewer(true, {QStringLiteral("h264"), QStringLiteral("h265")});
+}
+// rc.19 and earlier, or any Linux build: H.264 only.
+videocodec::Viewer h264Viewer() {
+    return viewer(true, {QStringLiteral("h264")});
+}
+// Advertises the protocol with no decoder at all — the JPEG fan-out's
+// audience, which is a separate encode and must not get a vote.
+videocodec::Viewer jpegViewer() { return viewer(true, {}); }
+// Caps have not arrived yet.
+videocodec::Viewer unknownViewer() {
+    return viewer(true, {QStringLiteral("h264"), QStringLiteral("h265")}, false);
 }
 
 // Minimal Annex-B access unit with one NAL of `nalType`. The receive
@@ -162,6 +185,121 @@ private slots:
     // unknown channel into its AUDIO binding (proved in
     // test_media_loopback), so opening one unasked fixes video by
     // damaging audio.
+    // ---- S-18: which codec a stream is encoded in -------------------
+    //
+    // The whole truth table, because a mesh encodes ONCE per stream and
+    // fans the same bytes to everyone: getting this wrong does not
+    // degrade one viewer, it blacks out one viewer while everyone else
+    // sees a perfect picture, which is the hardest kind of bug to be
+    // told about.
+
+    void hevcNeedsThePreference_theEncoder_andEveryViewer() {
+        using namespace videocodec;
+        const QList<Viewer> allHevc{hevcViewer(), hevcViewer()};
+
+        // The happy path, under both spellings of "yes".
+        QCOMPARE(select(Preference::Auto, true, allHevc), VideoCodecKind::H265);
+        QCOMPARE(select(Preference::PreferHevc, true, allHevc),
+                 VideoCodecKind::H265);
+
+        // Each single "no" is sufficient on its own.
+        QCOMPARE(select(Preference::H264Only, true, allHevc),
+                 VideoCodecKind::H264);
+        QCOMPARE(select(Preference::Auto, /*localEncoder=*/false, allHevc),
+                 VideoCodecKind::H264);
+        QCOMPARE(select(Preference::Auto, true, {hevcViewer(), h264Viewer()}),
+                 VideoCodecKind::H264);
+        // ...including "prefer", which is a preference and not an order:
+        // there is no second encode to give the H.264 viewer.
+        QCOMPARE(select(Preference::PreferHevc, true,
+                        {hevcViewer(), h264Viewer()}),
+                 VideoCodecKind::H264);
+    }
+
+    void unknownCapsVoteNo() {
+        using namespace videocodec;
+        // A peer mid-handshake may turn out to be an rc.19 build.
+        // Starting on H.265 and rebuilding the encoder a second later
+        // is worse than starting correctly.
+        QCOMPARE(select(Preference::Auto, true, {unknownViewer()}),
+                 VideoCodecKind::H264);
+        QCOMPARE(select(Preference::Auto, true,
+                        {hevcViewer(), unknownViewer()}),
+                 VideoCodecKind::H264);
+    }
+
+    void jpegOnlyPeersDoNotGetAVote() {
+        using namespace videocodec;
+        // One Android in the room would otherwise pin every desktop
+        // viewer to H.264 for nothing: that peer is served by the JPEG
+        // fan-out, which is a separate encode entirely.
+        QCOMPARE(select(Preference::Auto, true, {hevcViewer(), jpegViewer()}),
+                 VideoCodecKind::H265);
+        // Same for a peer that does not speak RTP video at all.
+        QCOMPARE(select(Preference::Auto, true,
+                        {hevcViewer(), viewer(false, {})}),
+                 VideoCodecKind::H265);
+    }
+
+    void withNoViewersTheConditionIsVacuouslyTrue() {
+        using namespace videocodec;
+        // "Every viewer supports it" over an empty set. Costs nothing:
+        // the send path only encodes once a video-capable peer exists,
+        // and the first joiner that cannot decode flips it back.
+        QCOMPARE(select(Preference::Auto, true, {}), VideoCodecKind::H265);
+        QCOMPARE(select(Preference::Auto, false, {}), VideoCodecKind::H264);
+    }
+
+    // The transitions are the point — the setting is read once, the
+    // room changes constantly.
+    void joinAndLeaveFlipTheCodecBothWays() {
+        using namespace videocodec;
+        QList<Viewer> room{hevcViewer()};
+        QCOMPARE(select(Preference::Auto, true, room), VideoCodecKind::H265);
+
+        // An old build joins: everyone drops to H.264 on the next tick.
+        room.append(h264Viewer());
+        QCOMPARE(select(Preference::Auto, true, room), VideoCodecKind::H264);
+
+        // A third, capable peer joins — still H.264, one veto is enough.
+        room.append(hevcViewer());
+        QCOMPARE(select(Preference::Auto, true, room), VideoCodecKind::H264);
+
+        // The old build leaves: back up to H.265.
+        room.removeAt(1);
+        QCOMPARE(select(Preference::Auto, true, room), VideoCodecKind::H265);
+
+        // Everyone leaves.
+        room.clear();
+        QCOMPARE(select(Preference::Auto, true, room), VideoCodecKind::H265);
+    }
+
+    void capsArrivingIsATransitionToo() {
+        using namespace videocodec;
+        QList<Viewer> room{unknownViewer()};
+        QCOMPARE(select(Preference::Auto, true, room), VideoCodecKind::H264);
+        // Same peer, caps now known and capable.
+        room[0] = hevcViewer();
+        QCOMPARE(select(Preference::Auto, true, room), VideoCodecKind::H265);
+    }
+
+    void thePreferenceStringRoundTripsAndNormalises() {
+        using namespace videocodec;
+        for (const char* v : {"auto", "preferHevc", "h264Only"}) {
+            const QString str = QString::fromLatin1(v);
+            QCOMPARE(preferenceToString(preferenceFromString(str)), str);
+        }
+        // Anything unrecognised — an empty settings key, a value from a
+        // future build, a typo — must read as the safe default rather
+        // than as "never use H.265" or as undefined behaviour.
+        QCOMPARE(preferenceFromString(QString()), Preference::Auto);
+        QCOMPARE(preferenceFromString(QStringLiteral("hevc-please")),
+                 Preference::Auto);
+        // Case tolerance, same as the codec-id matching above.
+        QCOMPARE(preferenceFromString(QStringLiteral("H264ONLY")),
+                 Preference::H264Only);
+    }
+
     void controlChannelIsOpenedOnlyWhenThePeerAdvertisesIt() {
         PeerCaps updated = capsWith(true, {QStringLiteral("h264")});
         updated.controlDc = true;
@@ -424,6 +562,46 @@ private slots:
         // Comfort sits clearly above floor — that gap IS the anti-flap.
         QVERIFY(comfortKbpsFor(Content::Screen, 1280, 30)
                 > minKbpsFor(Content::Screen, 1280, 30) * 5 / 4);
+    }
+
+    void hevcFloorsAreLowerThanH264AtEverySizeAndRung() {
+        using namespace videorate;
+        // The floor is what the ladder uses to decide "this bitrate
+        // cannot carry this size, step down". Leaving H.264's floors in
+        // place under HEVC would drop resolution while the picture was
+        // still sharp — spending the codec win on a smaller image
+        // instead of a better one.
+        for (Content c : {Content::Screen, Content::Camera}) {
+            for (int edge : {1920, 1280, 960, 640}) {
+                const int h264 = minKbpsFor(c, edge, 30, VideoCodecKind::H264);
+                const int h265 = minKbpsFor(c, edge, 30, VideoCodecKind::H265);
+                QVERIFY2(h265 < h264, "HEVC must ask for fewer bits");
+                // ~0.6x, allowing for the integer truncation.
+                QVERIFY(h265 >= h264 * 55 / 100);
+                QVERIFY(h265 <= h264 * 65 / 100);
+            }
+        }
+        // The anti-flap gap survives the scaling: comfort still sits
+        // clearly above floor for HEVC, or the ladder would oscillate.
+        QVERIFY(comfortKbpsFor(Content::Screen, 1280, 30, VideoCodecKind::H265)
+                > minKbpsFor(Content::Screen, 1280, 30, VideoCodecKind::H265)
+                      * 5 / 4);
+        // And an HEVC floor is never so low it undercuts the bottom
+        // rung's usefulness: 1080p30 HEVC screen still wants > 2 Mbps.
+        QVERIFY(minKbpsFor(Content::Screen, 1920, 30, VideoCodecKind::H265)
+                > 2000);
+    }
+
+    void theDefaultCodecArgumentIsStillH264() {
+        using namespace videorate;
+        // Every existing caller passes no codec. If that default ever
+        // moved, every H.264 stream would silently be judged by HEVC's
+        // floors and would stop laddering down when it should.
+        QCOMPARE(minKbpsFor(Content::Screen, 1920, 30),
+                 minKbpsFor(Content::Screen, 1920, 30, VideoCodecKind::H264));
+        QCOMPARE(rungMinKbps(Content::Camera, 1280, 30, 3),
+                 rungMinKbps(Content::Camera, 1280, 30, 3,
+                             VideoCodecKind::H264));
     }
 
     void theLadderGivesUpTheRightThingFirst() {

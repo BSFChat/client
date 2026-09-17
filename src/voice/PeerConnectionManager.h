@@ -66,6 +66,13 @@ public:
         return peerCanReceiveRtpVideo(m_remoteCaps, m_remoteCapsKnown,
                                       videoCodecIdH264());
     }
+    // S-18: and can it decode H.265? Separate question with a separate
+    // answer — every RTP-capable peer decodes H.264, only some decode
+    // H.265, and the codec selector needs both.
+    bool remoteCanReceiveHevc() const {
+        return peerCanReceiveRtpVideo(m_remoteCaps, m_remoteCapsKnown,
+                                      videoCodecIdH265());
+    }
     // S-1: must this peer be served the legacy JPEG stills for `stream`
     // (no decoder, or decoder but the track hasn't opened yet)?
     bool needsLegacyJpeg(VideoStreamId stream) const {
@@ -95,6 +102,17 @@ public:
     // direction (SendRecv m-lines, so no counter-renegotiation).
     void ensureVideoTracks();
     bool hasVideoTrackOpen(VideoStreamId stream) const;
+    // Which codec this peer's stream is currently being sent in. Set
+    // implicitly by sendVideoFrame() from the frame's own codec; read
+    // by diagnostics and by the tests.
+    VideoCodecKind activeSendCodec(VideoStreamId stream) const {
+        return m_video[int(stream)].activeCodec;
+    }
+    // TEST ONLY. When false, the m-lines this process offers (and
+    // therefore answers with) carry the H.264 payload type alone, which
+    // is exactly what an rc.19-and-earlier peer puts on the wire.
+    // Process-wide, because it models a property of the BUILD.
+    static void setOfferH265ForTesting(bool on);
     // Packetize + send one encoded access unit. No-op while the track
     // isn't open. RTP timestamps derive from EncodedFrame::captureTimeUs.
     void sendVideoFrame(VideoStreamId stream, const EncodedFrame& frame);
@@ -180,13 +198,17 @@ signals:
     // per few seconds) — the share should fall back to H.264 rather
     // than keep pushing frames that never arrive.
     void losslessSendStalled();
-    // Reassembled H.264 access unit from the remote's video track.
+    // Reassembled access unit from the remote's video track.
     // `lossSuspected` is set when RTP sequence gaps were observed since
     // the previous AU — the unit is likely incomplete and decoding it
     // would display error-concealment garbage; the consumer should drop
     // it and wait for the next keyframe.
+    // `codec` is a VideoCodecKind, taken from the RTP payload type the
+    // AU arrived under — NOT from what we think the sender is using.
+    // It is an int because Qt's queued-connection metatype registry is
+    // not worth a new entry for an enum this signal already fits.
     void videoFrameReceived(int streamId, const QByteArray& accessUnit,
-                            bool lossSuspected);
+                            bool lossSuspected, int codec);
     // The send direction of a video track became usable.
     void videoTrackOpen(int streamId);
     // Remote sent RTCP PLI — it needs a keyframe on our send stream.
@@ -298,6 +320,13 @@ private:
         std::shared_ptr<rtc::RtcpSrReporter> srReporter;
         // PacedRtpSender (file-local type, so held as the base).
         std::shared_ptr<rtc::MediaHandler> pacer;
+        // CodecPacketizerRouter, same story — the head of the chain,
+        // holding one packetizer per codec. sendVideoFrame() points it
+        // at the codec of the frame it is about to send.
+        std::shared_ptr<rtc::MediaHandler> codecRouter;
+        // What that router is currently pointed at, so a switch is
+        // detected without reaching into the handler.
+        VideoCodecKind activeCodec = VideoCodecKind::H264;
         qint64 startTimeUs = -1;
         bool open = false;
         // Set by the RtpGapDetector (libdatachannel network thread),

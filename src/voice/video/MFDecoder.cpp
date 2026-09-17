@@ -19,7 +19,53 @@ bool ensureMFStartup() {
     static const bool ok = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE));
     return ok;
 }
+
+// Activate the first registered decoder MFT for `subtype`, or return
+// nullptr. Used for HEVC, which — unlike H.264 — has no CLSID we can
+// count on: the decoder ships with the vendor driver or with the Store
+// "HEVC Video Extensions" package, and on a machine with neither it
+// simply is not there. Enumerating is the only honest question.
+IMFTransform* activateDecoderMft(const GUID& subtype) {
+    MFT_REGISTER_TYPE_INFO inInfo{MFMediaType_Video, subtype};
+    IMFActivate** activates = nullptr;
+    UINT32 count = 0;
+    // SYNC MFTs only. This class drives ProcessInput/ProcessOutput
+    // directly and has no event pump, so an async (hardware) MFT would
+    // activate happily and then never produce a frame. Hardware decode
+    // is not lost by this: DXVA acceleration lives INSIDE the sync
+    // decoder MFTs on Windows, which is also how the H.264 path above
+    // has always got it.
+    const UINT32 flags = MFT_ENUM_FLAG_SORTANDFILTER | MFT_ENUM_FLAG_SYNCMFT;
+    if (FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, flags, &inInfo, nullptr,
+                         &activates, &count)) || count == 0) {
+        if (activates) CoTaskMemFree(activates);
+        return nullptr;
+    }
+    IMFTransform* mft = nullptr;
+    // First that actually activates wins; a registered-but-broken MFT
+    // should not mask a working one behind it.
+    for (UINT32 i = 0; i < count; ++i) {
+        if (!mft && FAILED(activates[i]->ActivateObject(IID_PPV_ARGS(&mft))))
+            mft = nullptr;
+        activates[i]->Release();
+    }
+    CoTaskMemFree(activates);
+    return mft;
+}
 } // namespace
+
+bool MFDecoder::hevcDecodeSupported() {
+    static const bool supported = []() -> bool {
+        if (!ensureMFStartup()) return false;
+        IMFTransform* mft = activateDecoderMft(MFVideoFormat_HEVC);
+        const bool ok = mft != nullptr;
+        if (mft) mft->Release();
+        qCInfo(logMFDec, "HEVC decode %s (decoder MFT %s)",
+              ok ? "available" : "unavailable", ok ? "found" : "not registered");
+        return ok;
+    }();
+    return supported;
+}
 
 MFDecoder::~MFDecoder() {
     destroy();
@@ -32,12 +78,20 @@ void MFDecoder::destroy() {
 
 bool MFDecoder::init(VideoCodecKind kind) {
     destroy();
-    if (kind != VideoCodecKind::H264) return false;
+    if (kind != VideoCodecKind::H264 && kind != VideoCodecKind::H265)
+        return false;
     if (!ensureMFStartup()) return false;
+    const bool hevc = kind == VideoCodecKind::H265;
 
-    if (FAILED(CoCreateInstance(CLSID_CMSH264DecoderMFT, nullptr,
-                                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&m_mft)))) {
-        qCWarning(logMFDec, "H.264 decoder MFT unavailable");
+    if (hevc) {
+        m_mft = activateDecoderMft(MFVideoFormat_HEVC);
+    } else if (FAILED(CoCreateInstance(CLSID_CMSH264DecoderMFT, nullptr,
+                                       CLSCTX_INPROC_SERVER,
+                                       IID_PPV_ARGS(&m_mft)))) {
+        m_mft = nullptr;
+    }
+    if (!m_mft) {
+        qCWarning(logMFDec, "%s decoder MFT unavailable", videoCodecName(kind));
         return false;
     }
 
@@ -50,9 +104,10 @@ bool MFDecoder::init(VideoCodecKind kind) {
     ComPtr<IMFMediaType> inType;
     if (FAILED(MFCreateMediaType(&inType))) return false;
     inType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    inType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+    inType->SetGUID(MF_MT_SUBTYPE,
+                    hevc ? MFVideoFormat_HEVC : MFVideoFormat_H264);
     if (FAILED(m_mft->SetInputType(0, inType.Get(), 0))) {
-        qCWarning(logMFDec, "SetInputType(H264) failed");
+        qCWarning(logMFDec, "SetInputType(%s) failed", videoCodecName(kind));
         destroy();
         return false;
     }

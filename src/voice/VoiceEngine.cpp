@@ -4,6 +4,7 @@
 #include "voice/VoiceStartPolicy.h"
 #include "voice/VoiceRosterReconcile.h"
 #include "voice/PeerCaps.h"
+#include "voice/video/VideoCodecSelect.h"
 #include "voice/PeerConnectionManager.h"
 #include "voice/video/VideoDecoder.h"
 #include "voice/video/VideoEncoder.h"
@@ -319,8 +320,13 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
 
     // RTP video receive: reassembled access units → per-peer decoder.
     connect(peer, &PeerConnectionManager::videoFrameReceived,
-            this, [this, userId](int streamId, const QByteArray& au, bool loss) {
-                recvPipeline(userId, streamId, VideoCodecKind::H264)
+            this, [this, userId](int streamId, const QByteArray& au, bool loss,
+                                 int codec) {
+                // S-18: the codec comes from the payload type the AU
+                // arrived under. recvPipeline() rebuilds the decoder
+                // when it changes, so a sender switching H.264 ↔ H.265
+                // mid-stream needs nothing else here.
+                recvPipeline(userId, streamId, VideoCodecKind(codec))
                     ->submitAccessUnit(au, /*keyframeHint=*/false,
                                        /*lossSuspected=*/loss);
             });
@@ -444,8 +450,9 @@ QVariantMap VoiceEngine::videoReceiveStats(const QString& userId,
     out["droppedAus"] = quint64(pipeline->droppedAus());
     out["width"] = pipeline->frameWidth();
     out["height"] = pipeline->frameHeight();
-    out["codec"] = pipeline->codec() == VideoCodecKind::Av1Lossless
-        ? QStringLiteral("av1-lossless") : QStringLiteral("h264");
+    // The overlay names the codec the DECODER is actually running, not
+    // the one we think the sender picked.
+    out["codec"] = QString::fromLatin1(videoCodecName(pipeline->codec()));
     return out;
 }
 
@@ -521,7 +528,14 @@ nlohmann::json VoiceEngine::localCapsJson() {
     caps.h264ProfilesEncode = VideoEncoder::h264EncodeProfiles();
     caps.h264ProfilesDecode = VideoDecoder::h264DecodeProfiles();
     if (!caps.h264ProfilesEncode.isEmpty() || !caps.h264ProfilesDecode.isEmpty())
-        caps.videoCodecs << QStringLiteral("h264");
+        caps.videoCodecs << videoCodecIdH264();
+    // S-18: advertise h265 on the DECODE side only. Whether we can
+    // encode it is nobody else's business — a peer uses this list to
+    // decide what to send US. Runtime-probed (VideoToolbox media
+    // engine / a registered Media Foundation MFT), so two builds of the
+    // same binary on different machines can legitimately disagree.
+    if (VideoDecoder::h265DecodeSupported())
+        caps.videoCodecs << videoCodecIdH265();
     if (VideoEncoder::queryCaps(VideoCodecKind::Av1Lossless).losslessSupported)
         caps.lossless << QStringLiteral("av1-dc");
     return caps.toJson();
@@ -772,12 +786,25 @@ H264Profile VoiceEngine::negotiatedH264Profile() const {
     return H264Profile::High;
 }
 
+VideoCodecKind VoiceEngine::negotiatedVideoCodec(
+    videocodec::Preference preference) const {
+    QList<videocodec::Viewer> viewers;
+    viewers.reserve(m_peers.size());
+    for (auto* peer : m_peers) {
+        if (!peer) continue;
+        viewers.append({peer->remoteCaps(), peer->remoteCapsKnown()});
+    }
+    return videocodec::select(preference, VideoEncoder::h265EncodeSupported(),
+                              viewers);
+}
+
 VideoReceivePipeline* VoiceEngine::recvPipeline(const QString& userId, int streamId,
                                                 VideoCodecKind codec) {
     const QPair<QString, int> key{userId, streamId};
     if (auto* existing = m_recvPipelines.value(key)) {
         if (existing->codec() == codec) return existing;
-        // Sender switched codec mid-call (lossless toggle) — rebuild.
+        // Sender switched codec mid-call (lossless toggle, or the
+        // H.264 ↔ H.265 renegotiation-free switch) — rebuild.
         m_recvPipelines.remove(key);
         existing->deleteLater();
     }

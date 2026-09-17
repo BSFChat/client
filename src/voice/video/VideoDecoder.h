@@ -31,4 +31,9 @@ public:
                                                 bool preferHardware = true);
     // H.264 profiles this platform can decode, as PeerCaps strings.
     static QStringList h264DecodeProfiles();
+    // Can this build, on THIS machine, decode H.265? Runtime-detected
+    // and cached. THIS is what gates advertising "h265" in
+    // bsfchat_caps, so a false positive here is a black tile for the
+    // user and an unwatchable stream for everyone else in the mesh.
+    static bool h265DecodeSupported();
 };

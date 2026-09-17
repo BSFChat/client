@@ -59,6 +59,15 @@ public:
     // User/server-resolved envelope; re-apply whenever settings change.
     void setEnvelope(int minKbps, int maxKbps, int fps, int maxLongEdge);
     void setActive(bool active);
+    // The codec the stream is actually being encoded in. It changes
+    // the QUALITY FLOORS, not the control law: HEVC carries the same
+    // picture in ~0.6x the bits, so the bitrate below which a given
+    // size stops being worth sending is 0.6x too. Set it before the
+    // encoder session is rebuilt, or the ladder spends the first few
+    // ticks after a switch judging H.265 by H.264's floors and steps
+    // resolution down for no reason.
+    void setCodec(VideoCodecKind codec);
+    VideoCodecKind codec() const { return m_codec; }
 
     // Current outputs, read by the sender each capture tick.
     int targetKbps() const { return m_bitrate; }
@@ -89,6 +98,8 @@ signals:
 
 private:
     enum class Health { Blind, NoGovernor, Healthy, Hold, Trim, Cut };
+
+    VideoCodecKind m_codec = VideoCodecKind::H264;
 
     qint64 nowMs() const;
     videorate::Content content() const;

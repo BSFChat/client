@@ -6,11 +6,16 @@ struct IMFTransform;
 struct IMFMediaEventGenerator;
 struct ICodecAPI;
 
-// Media Foundation H.264 encoder (Windows). Tries hardware encoder
-// MFTs first (async, event-driven — NVENC/AMF/QuickSync surface
-// through vendor MFTs), falling back to Microsoft's software H.264
-// encoder MFT (sync, present on every Windows 8+ install). Emits
-// Annex-B access units.
+// Media Foundation H.264 / HEVC encoder (Windows). Tries hardware
+// encoder MFTs first (async, event-driven — NVENC/AMF/QuickSync surface
+// through vendor MFTs), falling back to Microsoft's software encoder
+// MFT (sync; present on every Windows 8+ install for H.264, and NOT
+// present at all for HEVC unless the machine has a vendor MFT or the
+// Store HEVC extension). Emits Annex-B access units.
+//
+// HEVC is therefore RUNTIME-detected, never assumed: see
+// hevcEncodeSupported(). This class adds no link-time dependency for
+// it — the HEVC subtype GUID is in the base SDK.
 class MFEncoder : public VideoEncoder {
 public:
     explicit MFEncoder(bool preferHardware = true);
@@ -22,6 +27,10 @@ public:
     void setBitrate(int targetKbps, int maxKbps) override;
     bool reconfigure(const EncoderConfig& config) override;
     Caps caps() const override { return {m_isHardware, false, true}; }
+
+    // Runtime probe: is an HEVC encoder MFT registered on this machine?
+    // Asked once and cached. False ⇒ H.265 is never offered or selected.
+    static bool hevcEncodeSupported();
 
 private:
     void destroy();

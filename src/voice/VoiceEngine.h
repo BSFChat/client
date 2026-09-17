@@ -164,6 +164,8 @@ public:
     // mid-call CB-only joiner downgrades the stream (the pipeline
     // rebuilds the session and IDRs on the profile flip).
     H264Profile negotiatedH264Profile() const override;
+    VideoCodecKind negotiatedVideoCodec(
+        videocodec::Preference preference) const override;
 
     // NOTE: every signal this class emits is now declared on
     // IVoiceTransport. Re-declaring them here would shadow the base
