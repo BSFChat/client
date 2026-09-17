@@ -456,22 +456,11 @@ Popup {
                     var s = serverManager.activeServer;
                     if (!s) { profileCard.close(); return; }
 
-                    // An existing 1:1 room with this user is the one to open.
-                    // createDirectMessage always CREATES, so calling it blind
-                    // would add a second room with the same peer every time the
-                    // button is pressed and fill the DM section with
-                    // duplicates that all show the same name.
-                    var rooms = s.directRooms();
-                    for (var i = 0; i < rooms.length; ++i) {
-                        if (rooms[i].peerId === profileCard.userId) {
-                            s.setActiveRoom(rooms[i].roomId);
-                            profileCard.close();
-                            return;
-                        }
-                    }
-                    // No room yet. createDirectMessage jumps to the new one
-                    // itself once the server confirms it was created, so there
-                    // is nothing to do here but close.
+                    // createDirectMessage opens the existing 1:1 room with
+                    // this user if there is one, ignores a repeat press while
+                    // a create is still in flight, and jumps to the new room
+                    // itself once the server confirms it — so there is nothing
+                    // to do here but close.
                     s.createDirectMessage(profileCard.userId);
                     profileCard.close();
                 }

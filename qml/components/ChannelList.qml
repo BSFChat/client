@@ -632,21 +632,9 @@ Rectangle {
             var s = serverManager.activeServer;
             if (!s) return;
             if (m.userId === s.userId) return;
-            // Look for an existing DM so we jump instead of
-            // duplicating. matches directRooms() shape.
-            var existing = "";
-            var dms = s.directRooms();
-            for (var i = 0; i < dms.length; i++) {
-                if (dms[i].peerId === m.userId) {
-                    existing = dms[i].roomId;
-                    break;
-                }
-            }
-            if (existing.length > 0) {
-                s.setActiveRoom(existing);
-            } else {
-                s.createDirectMessage(m.userId);
-            }
+            // Jumps to the existing DM if there is one, creates
+            // otherwise — the connection decides, not this file.
+            s.createDirectMessage(m.userId);
             newDmField.text = "";
             _suggestions = [];
         }

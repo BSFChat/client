@@ -406,6 +406,15 @@ target_include_directories(test_tokened_reply PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_tokened_reply PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_tokened_reply COMMAND test_tokened_reply)
 
+# One DM room per peer: the existing-room lookup, the in-flight create guard
+# and the m.direct merge that lets the INVITED side recognise a DM at all.
+# Header-only (src/net/DirectRooms.h); the protocol lib is not needed because
+# merge() takes the plain std::map that SyncResponse::direct_rooms holds.
+qt_add_executable(test_direct_rooms test_direct_rooms.cpp)
+target_include_directories(test_direct_rooms PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_direct_rooms PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_direct_rooms COMMAND test_direct_rooms)
+
 # Media cache identity. The key used to include the access token, so every
 # re-login re-downloaded every image the user had ever seen.
 qt_add_executable(test_media_cache_key

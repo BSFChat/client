@@ -395,10 +395,10 @@ Rectangle {
                 memberProfileCard.open();
             }
         }
-        // Start or reveal a DM with the selected member. If we
-        // already have a DM room with them, jump there; otherwise
-        // create one (ServerConnection.createDirectMessage fires
-        // createRoomSuccess → setActiveRoom).
+        // Start or reveal a DM with the selected member.
+        // createDirectMessage jumps to the existing room when there
+        // is one and only otherwise creates — do not scan
+        // directRooms() here, that check belongs to the connection.
         MemberCtxItem {
             text: "Send direct message"
             iconName: "send"
@@ -408,20 +408,7 @@ Rectangle {
             onTriggered: {
                 var s = serverManager.activeServer;
                 if (!s) return;
-                // Look for an existing DM room with this peer.
-                var existing = "";
-                var dms = s.directRooms();
-                for (var i = 0; i < dms.length; i++) {
-                    if (dms[i].peerId === memberContextMenu.userId) {
-                        existing = dms[i].roomId;
-                        break;
-                    }
-                }
-                if (existing.length > 0) {
-                    s.setActiveRoom(existing);
-                } else {
-                    s.createDirectMessage(memberContextMenu.userId);
-                }
+                s.createDirectMessage(memberContextMenu.userId);
             }
         }
         MemberCtxItem {
