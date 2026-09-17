@@ -174,10 +174,27 @@ public:
 
         const size_t maxBacklog =
             size_t(std::max(rate * kMaxBacklogSeconds, kMinBacklogBytes));
+        quint64 droppedNow = 0;
         while (m_backlogBytes > maxBacklog && !m_queue.empty()) {
             m_backlogBytes -= m_queue.front()->size();
             m_queue.pop();
             m_dropped.fetch_add(1, std::memory_order_relaxed);
+            ++droppedNow;
+        }
+        // Never silent: a pacer that discards media is the difference
+        // between "the share is slow" and "the share never appears", and
+        // the first version of this class dropped keyframes without a word.
+        if (droppedNow > 0) {
+            const auto sinceLog = std::chrono::duration<double>(now - m_lastDropLog).count();
+            if (!m_everLoggedDrop || sinceLog > 2.0) {
+                m_everLoggedDrop = true;
+                m_lastDropLog = now;
+                qCWarning(logVoicePc, " RTP pacer dropped %llu packet(s) (backlog cap %zu bytes, "
+                          "ceiling %.0f kbps, %llu dropped in total)",
+                          static_cast<unsigned long long>(droppedNow), maxBacklog,
+                          rate * 8.0 / 1000.0,
+                          static_cast<unsigned long long>(m_dropped.load(std::memory_order_relaxed)));
+            }
         }
 
         while (!m_queue.empty() && m_budget > 0) {
@@ -197,8 +214,16 @@ private:
     // Bucket depth: how much of a burst may leave back to back.
     static constexpr double kMaxBurstSeconds = 0.05;
     // Hard bound on queued-but-unsent bytes, in seconds of budget.
-    static constexpr double kMaxBacklogSeconds = 0.25;
-    static constexpr double kMinBacklogBytes = 64 * 1024;
+    // Must comfortably hold a whole keyframe. A 1080p screen IDR is
+    // routinely 150-400 KB (field: 133 KB and 293 KB at 7.7 Mbps), and at
+    // that bitrate the old 0.25 s cap was ~250 KB — so the leading packets
+    // of every large IDR were dropped as "oldest", the viewer could never
+    // assemble a complete keyframe, asked for another, and lost that one
+    // the same way: a share that never appears. The cap still bounds
+    // latency on a misconfigured-high bitrate; it must never bite on a
+    // single access unit.
+    static constexpr double kMaxBacklogSeconds = 1.0;
+    static constexpr double kMinBacklogBytes = 4.0 * 1024 * 1024;
 
     std::atomic<double> m_bytesPerSecond{0.0};
     std::atomic<quint64> m_dropped{0};
@@ -208,6 +233,8 @@ private:
     double m_budget = 0.0;
     bool m_started = false;
     std::chrono::steady_clock::time_point m_lastRun;
+    std::chrono::steady_clock::time_point m_lastDropLog;
+    bool m_everLoggedDrop = false;
 };
 } // namespace
 
