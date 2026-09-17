@@ -46,6 +46,7 @@ public:
     // Feed one received packet. Returns true exactly once per gap, at
     // the moment that gap is CONFIRMED lost.
     bool observe(uint16_t seq, int64_t nowMs) {
+        ++m_received;
         if (!m_hasLast) {
             m_lastSeq = seq;
             m_hasLast = true;
@@ -82,12 +83,14 @@ public:
         // than reordering explains — stop waiting.
         if (m_gapOpen) {
             m_lastSeq = seq;
-            closeGap();
+            closeGap();             // the OLD gap's holes are confirmed…
+            m_lost += ahead;        // …and this one's are too
             return true;
         }
         if (int(ahead) > m_cfg.maxTrackedMissing) {
             m_lastSeq = seq;
             closeGap();
+            m_lost += ahead;
             return true;
         }
         m_missingCount = 0;
@@ -110,6 +113,17 @@ public:
 
     bool hasPendingGap() const { return m_gapOpen; }
 
+    // Cumulative counters for the receiver report (S-17). `lost` only
+    // ever counts holes the reorder window gave up on, so a reordered
+    // packet is not loss here either — which is the whole point of
+    // grading the sender on packets rather than on bytes. `expected`
+    // is derived rather than taken from a sequence-number span so that
+    // wraparound needs no special case at all: every packet is either
+    // received or confirmed missing, exactly once.
+    uint64_t received() const { return m_received; }
+    uint64_t lost() const { return m_lost; }
+    uint64_t expected() const { return m_received + m_lost; }
+
 private:
     bool confirmIfExpired(int64_t nowMs) {
         if (!m_gapOpen) return false;
@@ -122,6 +136,9 @@ private:
     }
 
     void closeGap() {
+        // Whatever is still outstanding when a gap closes is loss. A
+        // hole that filled itself was already erased from m_missing.
+        m_lost += uint64_t(m_missingCount);
         m_gapOpen = false;
         m_missingCount = 0;
         m_packetsSinceGap = 0;
@@ -147,4 +164,6 @@ private:
     int m_missingCount = 0;
     int64_t m_gapOpenedMs = 0;
     int m_packetsSinceGap = 0;
+    uint64_t m_received = 0;
+    uint64_t m_lost = 0;
 };

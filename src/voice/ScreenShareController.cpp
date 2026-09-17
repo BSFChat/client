@@ -438,7 +438,17 @@ static void applyEffectiveQuality(Settings* settings, ServerManager* servers)
     const double ceilPixels = double(maxW) * (double(maxW) * 9.0 / 16.0);
     const int allKeyframeKbps =
         int(ceilPixels * double(fps) * 0.5 / 1000.0);
+    const int kbpsWanted = kbps;
     kbps  = std::clamp(kbps,  250, std::max(allKeyframeKbps, 1000));
+    if (kbps < kbpsWanted) {
+        // Visible on purpose: this is the ONE place a user's
+        // configured ceiling is legitimately reduced, and "I set
+        // 50 Mbps and it never went near it" is otherwise
+        // indistinguishable from the rate controller misbehaving.
+        qInfo("[screenshare] %d kbps requested; %d px @ %d fps cannot spend "
+              "more than %d kbps — using that",
+              kbpsWanted, maxW, fps, kbps);
+    }
 
     g_frameIntervalMs = 1000 / fps;
     g_jpegQuality = jpegQ;
@@ -682,10 +692,11 @@ void ScreenShareController::pushFrameToPeers()
             });
         // Feed the rate controller: per-peer delivery ratios and
         // keyframe-request pressure for our screen stream.
-        connect(voice, &IVoiceTransport::videoDeliveryRatio, m_rate,
-            [this](const QString& userId, int streamId, double ratio) {
+        connect(voice, &IVoiceTransport::videoDeliveryReport, m_rate,
+            [this](const QString& userId, int streamId,
+                   const VideoDeliveryReport& r) {
                 if (streamId == int(VideoStreamId::Screen))
-                    m_rate->reportDeliveryRatio(userId, ratio);
+                    m_rate->reportDelivery(userId, r);
             });
         connect(voice, &IVoiceTransport::videoKeyframeRequested, m_rate,
             [this](int streamId) {
@@ -754,6 +765,11 @@ void ScreenShareController::pushFrameToPeers()
             cfg.targetBitrateKbps = m_rate->targetKbps();
             cfg.maxBitrateKbps = m_rate->maxKbps();
             cfg.width = cfg.height = qMin(g_maxWidth, m_rate->longEdge());
+            // Screen content gives up FRAME RATE before resolution —
+            // in-game text at 15 fps is readable and the same text at
+            // half the long edge is not — so the ladder's fps is an
+            // output now, not the static setting.
+            cfg.fps = qMin(g_encoderConfig.fps, m_rate->fps());
             // S-15: keep every peer's RTP pacer above what this config
             // allows the encoder to emit. A pacer budget below it does
             // not shave peaks, it accumulates them.

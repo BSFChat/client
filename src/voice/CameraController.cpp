@@ -331,10 +331,11 @@ void CameraController::pushFrameToPeers()
                 if (streamId == int(VideoStreamId::Camera))
                     m_pipeline->forceKeyframe();
             });
-        connect(voice, &IVoiceTransport::videoDeliveryRatio, m_rate,
-            [this](const QString& userId, int streamId, double ratio) {
+        connect(voice, &IVoiceTransport::videoDeliveryReport, m_rate,
+            [this](const QString& userId, int streamId,
+                   const VideoDeliveryReport& r) {
                 if (streamId == int(VideoStreamId::Camera))
-                    m_rate->reportDeliveryRatio(userId, ratio);
+                    m_rate->reportDelivery(userId, r);
             });
         connect(voice, &IVoiceTransport::videoKeyframeRequested, m_rate,
             [this](int streamId) {
@@ -357,11 +358,16 @@ void CameraController::pushFrameToPeers()
                                        : kRtpMaxLongEdge;
         const int targetKbps = m_settings ? m_settings->cameraTargetKbps()
                                           : kRtpTargetKbps;
+        // The configured target is the rate controller's CEILING, and
+        // headroom above it is what lets a clean path actually reach
+        // the number the user chose instead of orbiting half of it.
         m_rate->setEnvelope(150, targetKbps, fps, maxEdge);
         m_rate->setActive(true);
         EncoderConfig cfg;
         cfg.codec = VideoCodecKind::H264;
-        cfg.fps = fps;
+        // Camera content gives up RESOLUTION before frame rate — a
+        // soft face reads as fine, a stuttering one reads as broken.
+        cfg.fps = qMin(fps, m_rate->fps());
         cfg.screenContent = false;   // camera tuning: motion over text
         cfg.profile = voice->negotiatedH264Profile();
         cfg.targetBitrateKbps = m_rate->targetKbps();

@@ -17,7 +17,7 @@
 
 #include "voice/CallEventOutbox.h"
 #include "voice/IVoiceTransport.h"
-#include "voice/video/DeliveryRatioEstimator.h"
+#include "voice/video/ReceiverReportEstimator.h"
 #include "voice/video/VideoCodec.h"
 
 #include <QObject>
@@ -296,13 +296,15 @@ private:
     int m_pacerCeilingKbps[kVideoStreamCount] = {};
 
     // Receiver reports: every 500 ms each receive pipeline's cumulative
-    // counters go to its sender ({"t":"rr"}); on the send side, the
-    // last-seen (rx, tx) snapshots per peer×stream turn the next report
-    // into a windowed delivery ratio.
+    // counters (bytes, and S-17's expected/lost RTP packets) go to
+    // their sender ({"t":"rr"}); on the send side the previous
+    // snapshot per peer×stream turns the next report into one graded
+    // window.
     QTimer m_rrTimer;
-    // Per peer x stream delivery-ratio state. Lags the denominator by
-    // one report so bytes still in flight are not read as loss (S-3) —
-    // see DeliveryRatioEstimator for why that mattered.
-    QMap<QPair<QString, int>, DeliveryRatioEstimator> m_rrSnapshots;
+    // Per peer x stream report state. Seeds on the first report and
+    // discards the first difference, so a peer whose first rr predates
+    // its first packet is not read as total loss — see
+    // ReceiverReportEstimator.
+    QMap<QPair<QString, int>, ReceiverReportEstimator> m_rrSnapshots;
     void sendReceiverReports();
 };

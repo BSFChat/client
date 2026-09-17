@@ -15,9 +15,12 @@
 #include <QSignalSpy>
 #include <QVideoFrame>
 
+#include <cmath>
+
 #include "voice/PeerCaps.h"
-#include "voice/video/DeliveryRatioEstimator.h"
+#include "voice/video/ReceiverReportEstimator.h"
 #include "voice/video/RtpSeqTracker.h"
+#include "voice/video/VideoRatePolicy.h"
 #include "voice/video/VideoRateController.h"
 #include "voice/video/VideoReceivePipeline.h"
 #include "voice/video/VideoSendPipeline.h"
@@ -41,6 +44,39 @@ QByteArray annexB(quint8 nalType, int payloadBytes = 32) {
     au.append(char(nalType & 0x1F));
     au.append(QByteArray(payloadBytes, char(0x42)));
     return au;
+}
+
+// ---- Rate-controller test helpers (S-17) ---------------------------
+
+const QString kPeerA = QStringLiteral("@a:x");
+const QString kPeerB = QStringLiteral("@b:x");
+
+// One graded window from a peer running a current build.
+VideoDeliveryReport lossReport(quint64 expected, double lossPct,
+                               double goodputKbps = 4000.0) {
+    VideoDeliveryReport r;
+    r.hasLoss = true;
+    r.expected = expected;
+    r.lost = quint64(std::llround(double(expected) * lossPct / 100.0));
+    r.goodputKbps = goodputKbps;
+    return r;
+}
+
+// What a peer on a build that predates the packet counters produces:
+// bytes only, no opinion on loss.
+VideoDeliveryReport legacyReport(double goodputKbps = 3000.0) {
+    VideoDeliveryReport r;
+    r.hasLoss = false;
+    r.goodputKbps = goodputKbps;
+    return r;
+}
+
+void run(VideoRateController& rc, int ticks, const VideoDeliveryReport& r,
+         const QString& peer = kPeerA) {
+    for (int i = 0; i < ticks; ++i) {
+        rc.reportDelivery(peer, r);
+        rc.tick();
+    }
 }
 
 QVideoFrame makeTestFrame(int w, int h, int index) {
@@ -270,158 +306,393 @@ private slots:
         QVERIFY(!t.hasPendingGap());
     }
 
-    // ---- S-3: delivery ratio ---------------------------------------
+    // ---- S-17: loss counting in the sequence tracker ---------------
+    //
+    // `expected` is derived as received + confirmed-lost rather than
+    // from a sequence-number span, so wraparound needs no case of its
+    // own — and a reordered packet must not show up as loss, because
+    // the sender would then cut the bitrate for a path that dropped
+    // nothing at all.
 
-    void steadyDeliveryReadsAsClean() {
-        DeliveryRatioEstimator e;
-        double ratio = 0.0;
-        quint64 rx = 0, tx = 0;
-        QVERIFY(!e.update(rx, tx, ratio));          // first report: no basis
-        for (int i = 0; i < 5; ++i) {
-            tx += 50000;
-            rx += 50000;
-            if (e.update(rx, tx, ratio)) QCOMPARE(ratio, 1.0);
-        }
+    void lossCounterIgnoresReorderingAndWraparound() {
+        RtpSeqTracker clean;
+        for (int i = 0; i < 12; ++i)
+            clean.observe(uint16_t(65530 + i), i);   // wraps through 0
+        QCOMPARE(clean.received(), quint64(12));
+        QCOMPARE(clean.lost(), quint64(0));
+        QCOMPARE(clean.expected(), quint64(12));
+
+        RtpSeqTracker reordered;
+        reordered.observe(1, 0);
+        reordered.observe(2, 1);
+        reordered.observe(4, 2);      // gap opens
+        reordered.observe(3, 3);      // …and fills itself
+        reordered.observe(5, 4);
+        reordered.poll(5);
+        QCOMPARE(reordered.lost(), quint64(0));
+        QCOMPARE(reordered.expected(), quint64(5));
     }
 
-    // The S-3 case, exactly: a keyframe lands near the end of a report
-    // window, so its bytes are counted as SENT in that window but are
-    // still in flight when the peer's report is written. The naive
-    // ratio reads ~0.5 and the controller cuts the bitrate 25 % and
-    // steps the resolution down — on every keyframe.
-    void keyframeStraddlingAReportBoundaryIsNotLoss() {
-        DeliveryRatioEstimator e;
-        double ratio = 0.0;
-        quint64 rx = 0, tx = 0;
+    void lossCounterCountsRealHoles() {
+        RtpSeqTracker t;
+        t.observe(1, 0);
+        t.observe(2, 1);
+        t.observe(4, 2);              // 3 is really gone
+        t.observe(5, 3);
+        t.observe(6, 4);              // confirmed
+        QCOMPARE(t.lost(), quint64(1));
+        QCOMPARE(t.received(), quint64(5));
+        QCOMPARE(t.expected(), quint64(6));
 
-        tx += 40000; rx += 40000;
-        e.update(rx, tx, ratio);                    // priming report
+        // A gap too wide to be reordering is counted in full.
+        RtpSeqTracker big;
+        big.observe(100, 0);
+        big.observe(141, 1);
+        QCOMPARE(big.lost(), quint64(40));
+        QCOMPARE(big.expected(), quint64(42));
 
-        tx += 40000; rx += 40000;
-        QVERIFY(e.update(rx, tx, ratio));
-        QCOMPARE(ratio, 1.0);
-
-        // Window 3: 40 KB of P-frames plus a 60 KB IDR at the very end.
-        // The peer has only received the P-frames when it reports.
-        const quint64 windowTx = 100000;
-        tx += windowTx; rx += 40000;
-        QVERIFY(e.update(rx, tx, ratio));
-        const double naive = 40000.0 / double(windowTx);
-        QVERIFY2(naive < 0.5, "the naive ratio really would have panicked");
-        QVERIFY2(ratio > 0.97, qPrintable(QStringLiteral(
-            "in-flight IDR read as loss: ratio=%1").arg(ratio)));
-
-        // Window 4: the IDR lands. Graded against window 3's 100 KB.
-        tx += 40000; rx += 60000 + 40000;
-        QVERIFY(e.update(rx, tx, ratio));
-        QCOMPARE(ratio, 1.0);
+        // Wraparound around a genuine hole: 65534, [65535 lost], 0, 1…
+        RtpSeqTracker wrap;
+        wrap.observe(65534, 0);
+        wrap.observe(0, 1);
+        wrap.observe(1, 2);
+        wrap.observe(2, 3);
+        QCOMPARE(wrap.lost(), quint64(1));
     }
 
-    void realLossStillShowsUp() {
-        DeliveryRatioEstimator e;
-        double ratio = 0.0;
-        quint64 rx = 0, tx = 0;
-        tx += 50000; rx += 50000;
-        e.update(rx, tx, ratio);
-        // A path dropping 30 % of everything, steadily.
-        for (int i = 0; i < 4; ++i) {
-            tx += 50000;
-            rx += 35000;
-            if (e.update(rx, tx, ratio) && i > 0)
-                QVERIFY2(ratio < 0.75, qPrintable(QString::number(ratio)));
-        }
+    // ---- S-17: receiver-report estimator ---------------------------
+
+    // The field sequence, exactly: the peer's first rr is written
+    // before its first packet lands, so a naive difference reads
+    // "everything was lost". It cut 2338 → 985 kbps in 1.5 s before a
+    // single packet had been graded.
+    void theFirstReportsAfterASeedAreNeverLoss() {
+        ReceiverReportEstimator e;
+        const auto seed = e.update(0, 0, 0, true, 0);
+        QVERIFY2(!seed.governs(), "the first report is a baseline, not a verdict");
+        const auto warm = e.update(0, 0, 0, true, 500);
+        QVERIFY2(!warm.governs(), "the first difference must be discarded");
+
+        const auto first = e.update(50000, 40, 0, true, 1000);
+        QVERIFY(first.governs());
+        QCOMPARE(first.lossPct(), 0.0);
+        QVERIFY(first.goodputKbps > 0.0);
     }
 
-    void counterResetIsNotGradedAsTotalLoss() {
-        DeliveryRatioEstimator e;
-        double ratio = 0.0;
-        e.update(100000, 100000, ratio);
-        e.update(150000, 150000, ratio);
-        // Peer restarted its stream: counters go backwards.
-        QVERIFY(!e.update(0, 150000, ratio));
-        QVERIFY(!e.update(5000, 155000, ratio));   // rebuilding the basis
+    void aCounterResetReSeedsInsteadOfPanicking() {
+        ReceiverReportEstimator e;
+        e.update(100000, 800, 0, true, 0);
+        e.update(150000, 1200, 0, true, 500);
+        const auto graded = e.update(200000, 1600, 0, true, 1000);
+        QVERIFY(graded.governs());
+
+        // Peer rebuilt its receive pipeline: counters go backwards.
+        QVERIFY(!e.update(0, 0, 0, true, 1500).governs());
+        QVERIFY(!e.update(20000, 160, 0, true, 2000).governs());
+        QVERIFY(e.update(40000, 320, 0, true, 2500).governs());
     }
 
-    // ---- Rate controller control law -------------------------------
+    void realLossSurvivesTheEstimator() {
+        ReceiverReportEstimator e;
+        e.update(0, 0, 0, true, 0);
+        e.update(50000, 400, 0, true, 500);
+        const auto r = e.update(85000, 800, 80, true, 1000);
+        QVERIFY(r.governs());
+        QVERIFY2(qAbs(r.lossPct() - 20.0) < 0.001,
+                 qPrintable(QString::number(r.lossPct())));
+    }
 
-    void cleanReportsClimbAndLossBacksOff() {
+    void aPeerWithoutTheNewFieldsNeverGoverns() {
+        ReceiverReportEstimator e;
+        e.update(0, 0, 0, false, 0);
+        e.update(50000, 0, 0, false, 500);
+        const auto r = e.update(100000, 0, 0, false, 1000);
+        QVERIFY2(!r.governs(), "an old peer's report is not a 100 % loss report");
+        QVERIFY2(r.goodputKbps > 0.0, "…but its goodput is still usable");
+    }
+
+    // ---- S-17: the policy table ------------------------------------
+
+    void policyFloorsMatchWhatIsActuallyWatchable() {
+        using namespace videorate;
+        QVERIFY2(minKbpsFor(Content::Screen, 1920, 30) >= 4000,
+                 "1080p30 gameplay below ~4 Mbps is not a usable picture");
+        QVERIFY2(minKbpsFor(Content::Screen, 1280, 30) >= 1200,
+                 "720p30 screen content needs at least ~1.2 Mbps");
+        QVERIFY2(minKbpsFor(Content::Camera, 1280, 30) >= 1200, "720p camera");
+        QVERIFY2(minKbpsFor(Content::Camera, 1920, 30) >= 2500, "1080p camera");
+        // Comfort sits clearly above floor — that gap IS the anti-flap.
+        QVERIFY(comfortKbpsFor(Content::Screen, 1280, 30)
+                > minKbpsFor(Content::Screen, 1280, 30) * 5 / 4);
+    }
+
+    void theLadderGivesUpTheRightThingFirst() {
+        using namespace videorate;
+        // Screen: fps first, long edge defended.
+        QCOMPARE(rungAt(Content::Screen, 1).resScale, 1.0);
+        QVERIFY(rungAt(Content::Screen, 1).fpsScale < 1.0);
+        // Camera: resolution first, frame rate defended.
+        QVERIFY(rungAt(Content::Camera, 1).resScale < 1.0);
+        QCOMPARE(rungAt(Content::Camera, 1).fpsScale, 1.0);
+        // Both ladders end somewhere still watchable, not at zero.
+        QVERIFY(edgeForRung(Content::Screen, 1920, kLadderRungs - 1) >= 400);
+        QVERIFY(fpsForRung(Content::Screen, 30, kLadderRungs - 1) >= 15);
+    }
+
+    // ---- S-17: the control law -------------------------------------
+
+    // THE case. A clean LAN whose byte counts are bursty (goodput
+    // swings wildly, report windows hold anything from 120 to 900
+    // packets) but whose packet loss is zero. The old byte-ratio law
+    // read 0.77-0.96 here and walked to the floor; this must reach the
+    // configured maximum and stay there.
+    void aCleanLanClimbsToTheConfiguredMaximumAndStays() {
         VideoRateController rc(VideoStreamId::Screen);
-        rc.setEnvelope(250, 6000, 30, 1920);
+        rc.setEnvelope(250, 20000, 30, 1920);
+        rc.setActive(true);
+        const int start = rc.targetKbps();
+        QVERIFY2(start >= 4000, qPrintable(QStringLiteral(
+            "a 1080p30 share must not open at %1 kbps").arg(start)));
+
+        // 30 ticks = 15 s of wall clock at the 500 ms evaluation rate.
+        static const quint64 kBursty[] = {900, 120, 640, 210, 880, 150};
+        for (int i = 0; i < 30; ++i) {
+            rc.reportDelivery(kPeerA,
+                lossReport(kBursty[i % 6], 0.0,
+                           /*goodput swings by 8x*/ 900.0 * double(1 + i % 8)));
+            rc.tick();
+        }
+        QCOMPARE(rc.targetKbps(), 20000);
+        QCOMPARE(rc.longEdge(), 1920);
+        QCOMPARE(rc.fps(), 30);
+
+        // …and STAYS. The old law's 0.97 threshold made every window a
+        // back-off, so "stays" is half the bug.
+        for (int i = 0; i < 40; ++i) {
+            rc.reportDelivery(kPeerA, lossReport(kBursty[i % 6], 0.0));
+            rc.tick();
+        }
+        QCOMPARE(rc.targetKbps(), 20000);
+        QCOMPARE(rc.longEdge(), 1920);
+    }
+
+    // Steady moderate loss must find a resting place. A law with no
+    // hold band multiplies itself to the floor no matter how gentle
+    // each step is.
+    void fivePercentLossSettlesInsteadOfCollapsing() {
+        VideoRateController rc(VideoStreamId::Screen);
+        rc.setEnvelope(250, 20000, 30, 1920);
+        rc.setActive(true);
+        const int start = rc.targetKbps();
+        run(rc, 60, lossReport(600, 5.0));
+        QVERIFY2(rc.targetKbps() >= start * 9 / 10,
+                 qPrintable(QStringLiteral("5 %% loss walked %1 → %2 kbps")
+                                .arg(start).arg(rc.targetKbps())));
+        QCOMPARE(rc.longEdge(), 1920);
+        QVERIFY2(rc.targetKbps() >= 4000, "still a watchable 1080p rate");
+    }
+
+    void twentyPercentLossCutsThenRecoversWhenItClears() {
+        VideoRateController rc(VideoStreamId::Screen);
+        rc.setEnvelope(250, 20000, 30, 1920);
         rc.setActive(true);
         const int start = rc.targetKbps();
 
-        // Two clean ticks are the probe threshold.
-        for (int i = 0; i < 4; ++i) {
-            rc.reportDeliveryRatio(QStringLiteral("@a:x"), 1.0);
-            rc.tick();
-        }
-        QVERIFY2(rc.targetKbps() > start, "clean delivery must probe upward");
+        run(rc, 8, lossReport(600, 20.0));
+        const int trough = rc.targetKbps();
+        QVERIFY2(trough < start / 2, qPrintable(QStringLiteral(
+            "20 %% loss must actually back off: %1 → %2").arg(start).arg(trough)));
+        QVERIFY2(rc.longEdge() < 1920 || rc.fps() < 30,
+                 "and must trade quality, not just bits");
 
-        const int beforeCut = rc.targetKbps();
-        rc.reportDeliveryRatio(QStringLiteral("@a:x"), 0.4);
-        rc.tick();
-        QVERIFY2(rc.targetKbps() < beforeCut, "measured loss must back off");
+        run(rc, 90, lossReport(600, 0.0));
+        QCOMPARE(rc.targetKbps(), 20000);
+        QCOMPARE(rc.longEdge(), 1920);
+        QCOMPARE(rc.fps(), 30);
     }
 
-    // A share is only as smooth as its worst receiver.
-    void worstPeerGovernsTheRate() {
+    // An old peer sends rr without the packet fields. Reading that as
+    // total loss collapses the share; reading it as zero loss licenses
+    // a climb on no evidence. It must simply hold.
+    void reportsWithoutTheNewFieldsHold() {
         VideoRateController rc(VideoStreamId::Screen);
-        rc.setEnvelope(250, 6000, 30, 1920);
+        rc.setEnvelope(250, 20000, 30, 1920);
         rc.setActive(true);
-        for (int i = 0; i < 4; ++i) {
-            rc.reportDeliveryRatio(QStringLiteral("@a:x"), 1.0);
+        run(rc, 6, lossReport(600, 0.0));
+        const int held = rc.targetKbps();
+        QVERIFY(held > 0);
+
+        run(rc, 30, legacyReport());
+        QCOMPARE(rc.targetKbps(), held);
+        QCOMPARE(rc.longEdge(), 1920);
+    }
+
+    // Mesh: the worst GOVERNING peer sets the rate, but a peer with no
+    // opinion is not the worst peer — it is not a peer at all for this
+    // purpose.
+    void theWorstGoverningPeerSetsTheRate() {
+        VideoRateController rc(VideoStreamId::Screen);
+        rc.setEnvelope(250, 20000, 30, 1920);
+        rc.setActive(true);
+        run(rc, 6, lossReport(600, 0.0));
+        const int before = rc.targetKbps();
+        rc.reportDelivery(kPeerA, lossReport(600, 0.0));
+        rc.reportDelivery(kPeerB, lossReport(600, 25.0));
+        rc.tick();
+        QVERIFY2(rc.targetKbps() < before, "the worst receiver governs");
+    }
+
+    void aSilentOldPeerDoesNotDragTheRateDown() {
+        VideoRateController rc(VideoStreamId::Screen);
+        rc.setEnvelope(250, 20000, 30, 1920);
+        rc.setActive(true);
+        for (int i = 0; i < 30; ++i) {
+            rc.reportDelivery(kPeerA, lossReport(600, 0.0));   // current build
+            rc.reportDelivery(kPeerB, legacyReport());         // old build
             rc.tick();
         }
-        const int before = rc.targetKbps();
-        rc.reportDeliveryRatio(QStringLiteral("@a:x"), 1.0);
-        rc.reportDeliveryRatio(QStringLiteral("@b:x"), 0.5);
-        rc.tick();
-        QVERIFY(rc.targetKbps() < before);
+        QCOMPARE(rc.targetKbps(), 20000);
     }
 
     void keyframeStormCountsAsCongestion() {
         VideoRateController rc(VideoStreamId::Screen);
-        rc.setEnvelope(250, 6000, 30, 1920);
+        rc.setEnvelope(250, 20000, 30, 1920);
         rc.setActive(true);
-        rc.reportDeliveryRatio(QStringLiteral("@a:x"), 1.0);
-        rc.tick();
+        run(rc, 4, lossReport(600, 0.0));
         const int before = rc.targetKbps();
-        rc.reportDeliveryRatio(QStringLiteral("@a:x"), 1.0);
+        rc.reportDelivery(kPeerA, lossReport(600, 0.0));
         for (int i = 0; i < 3; ++i) rc.reportKeyframeRequest();
         rc.tick();
         QVERIFY2(rc.targetKbps() < before,
-                 "a keyframe storm is a congestion signal even at ratio 1.0");
+                 "a keyframe storm is a congestion signal even at zero loss");
     }
 
-    void resolutionLadderStepsDownWhenBitrateCannotSustainTheSize() {
+    // ---- S-17: ladder hysteresis -----------------------------------
+
+    void theLadderDwellsAfterADownshiftAndNeedsSustainedComfortToRise() {
         VideoRateController rc(VideoStreamId::Screen);
-        // A ceiling far too low for 1920 px at 30 fps: the floor
-        // bits-per-pixel is unreachable, so the size must give way.
-        rc.setEnvelope(250, 400, 30, 1920);
+        rc.setEnvelope(250, 20000, 30, 1920);
         rc.setActive(true);
-        const int fullEdge = rc.longEdge();
-        for (int i = 0; i < 6; ++i) {
-            rc.reportDeliveryRatio(QStringLiteral("@a:x"), 1.0);
+        // Two hard cuts take 1080p30 below its floor → fps gives way.
+        run(rc, 2, lossReport(600, 25.0));
+        QVERIFY2(rc.fps() < 30, "screen content spends fps first");
+        QCOMPARE(rc.longEdge(), 1920);
+        const int downFps = rc.fps();
+
+        // Minimum dwell: the path is instantly clean again and the
+        // bitrate climbs straight back, but the ladder must not.
+        for (int i = 0; i < videorate::Thresholds::kDwellTicks; ++i) {
+            rc.reportDelivery(kPeerA, lossReport(600, 0.0));
             rc.tick();
+            QCOMPARE(rc.fps(), downFps);
         }
-        QVERIFY2(rc.longEdge() < fullEdge,
-                 "resolution, not fps, is what gives way on screen content");
-        QVERIFY(rc.longEdge() >= 160);
+        run(rc, 40, lossReport(600, 0.0));
+        QCOMPARE(rc.fps(), 30);
+        QCOMPARE(rc.longEdge(), 1920);
     }
+
+    void theLadderDoesNotFlapOnAnIntermittentPath() {
+        VideoRateController rc(VideoStreamId::Screen);
+        rc.setEnvelope(250, 20000, 30, 1920);
+        rc.setActive(true);
+
+        int changes = 0;
+        int lastEdge = rc.longEdge(), lastFps = rc.fps();
+        // 200 ticks = 100 s: mostly clean with a loss spike every 5 s.
+        for (int i = 0; i < 200; ++i) {
+            rc.reportDelivery(kPeerA,
+                lossReport(600, (i % 10 == 9) ? 20.0 : 0.0));
+            rc.tick();
+            if (rc.longEdge() != lastEdge || rc.fps() != lastFps) {
+                ++changes;
+                lastEdge = rc.longEdge();
+                lastFps = rc.fps();
+            }
+        }
+        QVERIFY2(changes <= 6, qPrintable(QStringLiteral(
+            "ladder changed %1 times in 100 s — that is flapping")
+                .arg(changes)));
+        QCOMPARE(rc.longEdge(), 1920);
+    }
+
+    // ---- S-17: start-up and restart --------------------------------
+
+    // A camera target of 1500 kbps used to open at 1500/2 = 750 kbps of
+    // 1280x720 — below the rate at which 720p is worth encoding — so
+    // the share was mush before a single report had arrived.
+    void aFreshShareOpensAtAWatchableRate() {
+        VideoRateController cam(VideoStreamId::Camera);
+        cam.setEnvelope(150, 1500, 30, 1280);
+        cam.setActive(true);
+        QCOMPARE(cam.longEdge(), 1280);
+        QVERIFY2(cam.targetKbps() >= 1200, qPrintable(QStringLiteral(
+            "720p camera opened at %1 kbps").arg(cam.targetKbps())));
+
+        VideoRateController screen(VideoStreamId::Screen);
+        screen.setEnvelope(250, 46000, 30, 1920);
+        screen.setActive(true);
+        QVERIFY2(screen.targetKbps() >= 4000, qPrintable(QStringLiteral(
+            "1080p30 screen opened at %1 kbps").arg(screen.targetKbps())));
+    }
+
+    void aRestartedShareDoesNotInheritTheCollapse() {
+        VideoRateController rc(VideoStreamId::Screen);
+        rc.setEnvelope(250, 20000, 30, 1920);
+        rc.setActive(true);
+        const int start = rc.targetKbps();
+
+        run(rc, 20, lossReport(600, 30.0));
+        QVERIFY(rc.targetKbps() < start);
+        QVERIFY(rc.longEdge() < 1920);
+
+        rc.setActive(false);
+        rc.setActive(true);
+        QCOMPARE(rc.targetKbps(), start);
+        QCOMPARE(rc.longEdge(), 1920);
+        QCOMPARE(rc.fps(), 30);
+    }
+
+    // ---- S-17: blind mode ------------------------------------------
 
     // Without reports the controller has no evidence, so it must hold
-    // rather than climb on faith.
+    // rather than climb on faith — but the ceiling is for a path that
+    // has NEVER answered, not for one that answered and went quiet.
     void blindModeHoldsBelowTheCeiling() {
         VideoRateController rc(VideoStreamId::Screen);
         rc.setEnvelope(250, 40000, 30, 1920);
         rc.setActive(true);
-        // Past the startup grace, with no delivery reports at all.
-        QTest::qWait(3200);
+        rc.setNowForTest(QDateTime::currentMSecsSinceEpoch());
+        rc.setNowForTest(QDateTime::currentMSecsSinceEpoch() + 4000);
         rc.tick();
         rc.tick();
         QVERIFY2(rc.targetKbps() <= 8000,
                  qPrintable(QStringLiteral("blind at %1 kbps")
                                 .arg(rc.targetKbps())));
+    }
+
+    void aProvenPathIsNotClampedWhenReportsGoQuiet() {
+        VideoRateController rc(VideoStreamId::Screen);
+        rc.setEnvelope(250, 40000, 30, 1920);
+        const qint64 t0 = 1000000;
+        rc.setNowForTest(t0);
+        rc.setActive(true);
+        // Prove the path, reaching well above the blind ceiling.
+        for (int i = 0; i < 40; ++i) {
+            rc.setNowForTest(t0 + i * 500);
+            rc.reportDelivery(kPeerA, lossReport(600, 0.0));
+            rc.tick();
+        }
+        const int proven = rc.targetKbps();
+        QVERIFY2(proven > 8000, qPrintable(QStringLiteral(
+            "expected to climb past the blind ceiling, got %1").arg(proven)));
+
+        // Reports stop. Hold — do not descend past a ceiling that was
+        // only ever meant for a path nobody has heard from.
+        for (int i = 0; i < 20; ++i) {
+            rc.setNowForTest(t0 + 20000 + i * 500);
+            rc.tick();
+        }
+        QCOMPARE(rc.targetKbps(), proven);
     }
 
     // ---- S-11 / S-16: send pipeline --------------------------------

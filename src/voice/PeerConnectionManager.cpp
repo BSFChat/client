@@ -125,8 +125,18 @@ int streamIndexForMid(const std::string& mid) {
 // so it sees clean RTP packets post-RTCP-strip, pre-reassembly.
 class RtpGapDetector final : public rtc::MediaHandler {
 public:
-    explicit RtpGapDetector(std::function<void()> onGap)
-        : m_onGap(std::move(onGap)) {}
+    // `rxPackets`/`lostPackets` are the receiver-report counters (S-17)
+    // and are published after every batch. They are what the SENDER's
+    // rate controller is graded on now: a packet either arrived or was
+    // confirmed missing, which is a physical quantity that reads
+    // exactly zero on a clean LAN — unlike the delivered/sent byte
+    // ratio it replaces, which never could.
+    RtpGapDetector(std::function<void()> onGap,
+                   std::atomic<quint64>* rxPackets,
+                   std::atomic<quint64>* lostPackets)
+        : m_onGap(std::move(onGap))
+        , m_rxPackets(rxPackets)
+        , m_lostPackets(lostPackets) {}
 
     void incoming(rtc::message_vector& messages,
                   const rtc::message_callback&) override {
@@ -151,10 +161,18 @@ public:
         // A gap at the tail of this batch would otherwise wait for the
         // next one; resolve it on elapsed time here.
         if (m_tracker.poll(now) && m_onGap) m_onGap();
+        // Publish once per batch rather than per packet: the reader is
+        // a 500 ms report timer, and these are the only writes.
+        if (m_rxPackets)
+            m_rxPackets->store(m_tracker.received(), std::memory_order_relaxed);
+        if (m_lostPackets)
+            m_lostPackets->store(m_tracker.lost(), std::memory_order_relaxed);
     }
 
 private:
     std::function<void()> m_onGap;
+    std::atomic<quint64>* m_rxPackets = nullptr;
+    std::atomic<quint64>* m_lostPackets = nullptr;
     RtpSeqTracker m_tracker;
 };
 
@@ -1016,9 +1034,11 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
     // on the incoming (tail→head) traversal, so lossPending is set
     // before the depacketizer assembles — and onFrame delivers — the
     // access unit the gap corrupted.
-    packetizer->addToChain(std::make_shared<RtpGapDetector>([this, idx]() {
-        m_video[idx].lossPending.store(true, std::memory_order_relaxed);
-    }));
+    packetizer->addToChain(std::make_shared<RtpGapDetector>(
+        [this, idx]() {
+            m_video[idx].lossPending.store(true, std::memory_order_relaxed);
+        },
+        &m_video[idx].rxPackets, &m_video[idx].lostPackets));
     packetizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
     track->setMediaHandler(packetizer);
 
