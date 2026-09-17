@@ -43,6 +43,19 @@ public:
     Q_INVOKABLE void showPicker();   // prompts consent then starts
     Q_INVOKABLE void stop();
 
+    // The desktop controller's "Hide my IP while sharing" verbs, present here
+    // only so a shared QML file cannot throw a TypeError on this platform.
+    // They are deliberately inert: the Android share goes through
+    // MediaProjection and the same mesh transport, but there is no picker
+    // dialog on this path to offer the option in, so the user's STANDING
+    // setting is what applies — which VoiceEngine already honours without
+    // anything here. Answering "false" to canHideIpWhileSharing would be worse
+    // than inert: it would render the option disabled with a reason that is
+    // not the real one.
+    Q_INVOKABLE void setHideIpForShare(bool) {}
+    Q_INVOKABLE bool hideIpForShare() const { return false; }
+    Q_INVOKABLE bool canHideIpWhileSharing() const { return true; }
+
     // Called from JNI. Public so the extern "C" shim can reach it
     // through a global pointer without making the class a friend
     // of free functions.

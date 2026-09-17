@@ -226,12 +226,62 @@ target_include_directories(test_voice_transport PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_voice_transport PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_voice_transport COMMAND test_voice_transport)
 
+# "Hide my IP address": the ICE transport-policy decision table. Pure logic —
+# no libdatachannel, no TURN server, no network, no audio device — so the whole
+# 2x2x2x2 of (user setting, per-share option, server allow_p2p, TURN present)
+# is asserted without any of them, including the rows whose wrong answer is a
+# silently-published address.
+qt_add_executable(test_ip_privacy
+    test_ip_privacy.cpp
+    ${CMAKE_SOURCE_DIR}/src/voice/IpPrivacy.cpp
+)
+target_include_directories(test_ip_privacy PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_ip_privacy PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_ip_privacy COMMAND test_ip_privacy)
+
+# The relay path against a REAL coturn, in a Docker container.
+#
+# The only check in this tree that can prove the privacy claim rather than the
+# decision behind it: that rtc::TransportPolicy::Relay actually stops this
+# machine's LAN and public addresses reaching the ICE exchange. There is no
+# gatherer in a unit test, so there is nothing else that can tell a correct
+# implementation from one that reports success and sends the address anyway.
+#
+# The TARGET always builds where voice is enabled — a test that stops compiling
+# is a test that is gone — but it is only REGISTERED with ctest under
+# -DBSFCHAT_RELAY_E2E=ON. It needs Docker, binds UDP ports on the host, and
+# takes a few seconds, none of which belongs in the sweep run before a commit.
+if(BSFCHAT_ENABLE_VOICE)
+    option(BSFCHAT_RELAY_E2E
+           "Register the coturn-backed relay end-to-end test with ctest" OFF)
+    qt_add_executable(test_relay_e2e test_relay_e2e.cpp)
+    target_include_directories(test_relay_e2e PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_relay_e2e PRIVATE
+        Qt6::Core Qt6::Network Qt6::Test datachannel-static)
+    if(BSFCHAT_RELAY_E2E)
+        # The script starts coturn, exports the credentials, runs the binary and
+        # tears the container down. The binary's path is a generator expression
+        # rather than a guessed one, so it always exercises THIS build tree.
+        add_test(NAME relay_e2e
+                 COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/e2e/relay_e2e.sh)
+        set_tests_properties(relay_e2e PROPERTIES
+            LABELS e2e
+            ENVIRONMENT "BSFCHAT_RELAY_TEST_BIN=$<TARGET_FILE:test_relay_e2e>"
+            TIMEOUT 180
+            # Binds fixed UDP ports and a named container; two at once collide.
+            RUN_SERIAL TRUE)
+    endif()
+endif()
+
 # Media-key parsing and the security labelling. Pure logic — no SDK, no
 # network. The labelling tests assert the ABSENCE of an end-to-end claim,
 # which is the specific mistake this project has already made once.
 qt_add_executable(test_voice_encryption
     test_voice_encryption.cpp
     ${CMAKE_SOURCE_DIR}/src/voice/VoiceEncryption.cpp
+    # The same scan now covers the second thing this client can overclaim —
+    # whether an IP address is hidden. Same rule, same home for the wording.
+    ${CMAKE_SOURCE_DIR}/src/voice/IpPrivacy.cpp
 )
 target_include_directories(test_voice_encryption PRIVATE ${CMAKE_SOURCE_DIR}/src)
 # The labelling tests also scan the QML tree for hard-coded security

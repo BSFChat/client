@@ -298,6 +298,24 @@ public:
     QString pttKeySequence() const;
     void setPttKeySequence(const QString& seq);
 
+    // "Hide my IP address". "auto" ⇒ follow the server (peer-to-peer when it
+    // allows it, which is the faster route); "relayOnly" ⇒ always route this
+    // client's calls through the server's relay, so peers — and the room — see
+    // the relay's address instead of this machine's.
+    //
+    // Stored as a string rather than a bool so a future third option (relay
+    // only outside the LAN, say) does not have to migrate anybody's settings,
+    // and so an unrecognised value reads as "auto" — the safe direction for a
+    // setting whose other value can refuse a join.
+    //
+    // Normalised on the way in AND on the way out: voice::relayModeFromString
+    // treats anything it does not recognise as Auto, so a hand-edited or
+    // downgraded settings file cannot leave the client in a state that is
+    // neither.
+    Q_PROPERTY(QString voiceRelayMode READ voiceRelayMode WRITE setVoiceRelayMode NOTIFY voiceRelayModeChanged)
+    QString voiceRelayMode() const;
+    void setVoiceRelayMode(const QString& mode);
+
     // Auto-update check on launch + periodic re-poll. Defaults to
     // ON for desktop builds — Windows users in particular have
     // been complaining about the manual-MSI-download cadence, and
@@ -332,6 +350,7 @@ signals:
     void cameraTargetKbpsChanged();
     void voiceModeChanged();
     void pttKeySequenceChanged();
+    void voiceRelayModeChanged();
     void autoUpdateCheckChanged();
 public:
 

@@ -38,6 +38,10 @@ Rectangle {
         property string tooltip: ""
         property bool   enabled2: true
         signal clicked()
+        // Secondary action. Only the camera button uses it so far (its
+        // per-share IP-privacy option); every other DockButton simply has no
+        // handler and a right-click does nothing.
+        signal rightClicked()
 
         implicitWidth: 40
         implicitHeight: 40
@@ -64,7 +68,11 @@ Rectangle {
             hoverEnabled: true
             cursorShape: btn.enabled2 ? Qt.PointingHandCursor : Qt.ArrowCursor
             enabled: btn.enabled2
-            onClicked: btn.clicked()
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            onClicked: function(mouse) {
+                if (mouse.button === Qt.RightButton) btn.rightClicked();
+                else btn.clicked();
+            }
         }
 
         ToolTip.visible: hover.containsMouse && tooltip.length > 0
@@ -164,6 +172,64 @@ Rectangle {
                         color: Theme.fg2
                         elide: Text.ElideRight
                         Layout.fillWidth: true
+                    }
+                }
+
+                // ─── The IP-privacy shield ──────────────────────────
+                //
+                // Shown only while the local transport policy is relay-only,
+                // and it does NOT claim an address is hidden until the
+                // selected candidate pair actually is relayed — that decision
+                // is voice::ipExposure()'s, made in C++, and both strings
+                // below arrive through a Q_PROPERTY. Nothing about how a call
+                // is routed may be written here: a label composed in QML is a
+                // label nothing can check, which is exactly how the media
+                // badge once came to claim a protocol this client does not
+                // implement. See src/voice/IpPrivacy.h.
+                Rectangle {
+                    visible: ipShieldText.text.length > 0
+                    implicitWidth: ipShieldRow.implicitWidth + Theme.sp.s3
+                    implicitHeight: 20
+                    radius: Theme.r1
+                    color: Theme.accentGlow
+                    Layout.alignment: Qt.AlignVCenter
+
+                    RowLayout {
+                        id: ipShieldRow
+                        anchors.centerIn: parent
+                        spacing: Theme.sp.s1
+
+                        Icon {
+                            name: "shield"
+                            size: 12
+                            color: Theme.accent
+                        }
+                        Text {
+                            id: ipShieldText
+                            text: serverManager.activeServer
+                                ? serverManager.activeServer.voiceIpPrivacyBadge : ""
+                            font.family: Theme.fontSans
+                            font.pixelSize: 10
+                            font.weight: Theme.fontWeight.semibold
+                            color: Theme.accent
+                        }
+                    }
+
+                    // The badge is four words; the cost is not. Same shape as
+                    // the protection badge in VoiceRoom — detail verbatim from
+                    // the property, `contentWidth` so it wraps instead of
+                    // laying out as one screen-wide line.
+                    MouseArea {
+                        id: ipShieldHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                    }
+                    ToolTip {
+                        visible: ipShieldHover.containsMouse && text.length > 0
+                        text: serverManager.activeServer
+                            ? serverManager.activeServer.voiceIpPrivacyDetail : ""
+                        delay: 400
+                        contentWidth: 320
                     }
                 }
             }
@@ -297,12 +363,50 @@ Rectangle {
                 tooltip: visible && camera.active
                     ? "Stop camera" : "Start camera"
                 toggled: visible && camera.active
+                // Right-click is where the per-share option lives for the
+                // camera. There is no camera picker to put it in — the button
+                // starts the camera on click — and a second permanently
+                // visible control beside an already-crowded dock buys less
+                // than a menu that is there when you look for it. The default
+                // still follows the global setting, so somebody who never
+                // opens this menu gets exactly what they asked for in
+                // Settings.
+                onRightClicked: {
+                    if (!visible) return;
+                    cameraHideIpItem.checked =
+                        camera.hideIpForShare()
+                        || appSettings.voiceRelayMode === "relayOnly";
+                    cameraMenu.popup();
+                }
+
+                Menu {
+                    id: cameraMenu
+                    MenuItem {
+                        id: cameraHideIpItem
+                        text: "Hide my IP address while my camera is on"
+                        checkable: true
+                        // Shown disabled with no relay to use, for the same
+                        // reason the picker's switch is: an option that is
+                        // simply absent explains nothing.
+                        enabled: typeof camera !== "undefined"
+                                 && camera.canHideIpWhileSharing()
+                        onTriggered: camera.setHideIpForShare(checked)
+                    }
+                }
+
                 onClicked: {
                     if (!visible) return;
                     if (camera.active) {
                         camera.stop();
                         return;
                     }
+                    // The menu's value is a per-share intent, so it is pushed
+                    // fresh at every start rather than only when the menu item
+                    // is clicked: a user who has never opened the menu still
+                    // gets their global setting honoured here.
+                    camera.setHideIpForShare(
+                        cameraHideIpItem.checked
+                        || appSettings.voiceRelayMode === "relayOnly");
                     // Mobile: ask for CAMERA runtime perm before the
                     // first start. Desktop's hasCamera() short-
                     // circuits to true so this branch is free there.

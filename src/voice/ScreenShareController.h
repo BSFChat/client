@@ -116,6 +116,25 @@ public:
     // most reliable path is to have the user manually add the app.
     Q_INVOKABLE void openSystemSettings();
 
+    // ---- "Hide my IP while sharing" ----------------------------------
+    //
+    // A per-share override on the user's standing "Hide my IP address"
+    // setting, set by the picker (or the camera menu) BEFORE the share
+    // starts. Defaults to the standing setting, so leaving it alone does
+    // what the user already asked for globally.
+    //
+    // Because one peer connection carries voice AND both video streams,
+    // honouring this means the whole connection is relay-only for as long as
+    // the share lasts — the engine re-establishes its peers when it goes on,
+    // and again when it goes off. There is no way to relay the video and leave
+    // the voice direct.
+    Q_INVOKABLE void setHideIpForShare(bool hideIp) { m_hideIpForShare = hideIp; }
+    Q_INVOKABLE bool hideIpForShare() const { return m_hideIpForShare; }
+    // Whether this server can honour it at all (it needs a relay). QML asks so
+    // the option can be shown disabled with a reason, rather than offered and
+    // then refused.
+    Q_INVOKABLE bool canHideIpWhileSharing() const;
+
 signals:
     void activeChanged();
     void transmittingChanged();
@@ -176,11 +195,17 @@ private:
     // (S-7) so tiles appear and clear immediately.
     void setActiveState(bool active);
     void announceStream(bool on);
+    // Push the per-share override into the live transport as the share starts
+    // (on=true) and stops (on=false). Off always clears it, whatever
+    // m_hideIpForShare says, so ending a share can never leave the connection
+    // pinned to relay by a flag nobody can see.
+    void applyShareIpPrivacy(bool on);
     // The transport of the connection actually in a call, or nullptr.
     IVoiceTransport* currentVoice() const;
     // Rewires the per-server "voice room changed" subscriptions
     // whenever the server list or active server changes. Stops the
     // screen share when no connection is in voice so share state
     // can't outlive the call.
+    bool m_hideIpForShare = false;
     void rewireVoiceLeaveWatch();
 };

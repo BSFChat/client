@@ -16,6 +16,7 @@
 // VideoRateController. Those must keep working.
 
 #include "voice/CallEventOutbox.h"
+#include "voice/IpPrivacy.h"
 #include "voice/IVoiceTransport.h"
 #include "voice/video/ReceiverReportEstimator.h"
 #include "voice/video/VideoCodec.h"
@@ -115,6 +116,45 @@ public:
     // "failed", "new", "disconnected". VoicePanel reads this to show colored
     // indicators per member.
     QMap<QString, QString> peerStates() const override;
+
+    // Which route each live peer connection actually took — "direct",
+    // "relayed", or absent while ICE has not settled. Read from the selected
+    // candidate pair, never from the policy we asked for. See
+    // voice/IpPrivacy.h for why those are two different facts.
+    QMap<QString, QString> peerPaths() const override;
+
+    // ---- "Hide my IP address" ----------------------------------------
+    //
+    // The user's standing setting, and the per-share override, pushed in from
+    // ServerConnection. Both may arrive before start() (the usual case) or
+    // during a live session (the per-share one).
+    //
+    // A change that alters the effective ICE policy while peers exist cannot be
+    // applied to those peers: libdatachannel v0.24.5 has no setConfiguration
+    // and no way to re-gather under a different transport policy — the policy
+    // is read once, in the PeerConnection constructor. So the connections are
+    // torn down and re-offered, which is the same path a peer reconnect already
+    // takes and costs the same ~1–2 s. The voice SESSION is untouched: no
+    // hangup to the server, no membership change, no heartbeat gap, so nobody
+    // leaves and rejoins the channel on screen.
+    void setRelayMode(voice::RelayMode mode);
+    // `stream` is which share asked; the engine holds one flag per stream and
+    // relays while EITHER is set, because one PeerConnection carries voice and
+    // both video m-lines and there is no way to relay half of it.
+    void setStreamIpPrivacy(VideoStreamId stream, bool hideIp) override;
+    bool canHideIpAddress() const override;
+
+    // The policy this engine is currently building peer connections with, and
+    // whether that was our own choice rather than the server's. Read by
+    // ServerConnection for the shield indicator.
+    bool relayOnly() const;
+    bool relayIsLocalChoice() const;
+    // Peer connections currently held, and how many of them have confirmed
+    // that OUR end of the selected pair is a relay candidate. The shield may
+    // only claim an address is hidden when these two agree and the policy is
+    // Relay — see voice::ipExposure().
+    int peerCount() const { return int(m_peers.size()); }
+    int peersWithLocalRelay() const;
 
     // Cumulative receive-side stats for the diagnostics overlay:
     // rxFrames/rxBytes/decoded/dropped/width/height/codec. Empty map
@@ -216,6 +256,17 @@ private:
     // MatrixClient's per-event outcome for a queued signalling PUT.
     void onCallEventSendResult(quint64 token, bool ok, const QString& error);
     rtc::Configuration buildRtcConfig() const;
+    // The five-input decision, in one place. `hasTurn` is answered against the
+    // BUILT ice server list rather than the raw JSON, so it reflects what
+    // libdatachannel would really receive.
+    voice::IcePolicyDecision icePolicy() const;
+    // Re-establish every peer connection under the current policy. Sends a
+    // hangup, drops the peer, and immediately re-offers — deliberately
+    // ignoring the `uid > localUserId` offer-direction rule, because we have
+    // just told the far side to forget us and there is therefore no offer of
+    // theirs to collide with. Waiting for their 5 s reconciler instead would
+    // make half of all pairs take five times as long to come back.
+    void reestablishAllPeers(const char* why);
     QString generateCallId() const;
     // This client's media capabilities, advertised in every
     // invite/answer we send. Codec/profile lists come from the video
@@ -262,6 +313,10 @@ private:
     // told nobody. See voice::mayFlushCallEvents().
     bool m_stopping = false;
     bool m_allowP2P = false;
+    // "Hide my IP address": the standing setting, and one override per video
+    // stream for the per-share option. See setRelayMode / setStreamIpPrivacy.
+    voice::RelayMode m_relayMode = voice::RelayMode::Auto;
+    bool m_streamHidesIp[kVideoStreamCount] = {};
 
     // Outbound signalling awaiting the server's acknowledgement, with
     // its retry schedule (V-M2).

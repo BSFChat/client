@@ -1119,6 +1119,33 @@ void PeerConnectionManager::flushPendingControl() {
     }
 }
 
+PeerConnectionManager::SelectedPath PeerConnectionManager::selectedPath() const {
+    SelectedPath out;
+    if (!m_pc) return out;
+
+    rtc::Candidate local, remote;
+    try {
+        // Returns false until ICE has actually settled on a pair. It also
+        // throws on a closed or half-torn-down connection, which is reachable
+        // here: this is called from a UI refresh that can land in the same tick
+        // as a teardown. A diagnostics read must never be the thing that kills
+        // the call, so the whole thing is swallowed into "not known" — the same
+        // answer the caller already has to handle for a connection that has not
+        // finished connecting.
+        if (!const_cast<rtc::PeerConnection*>(m_pc.get())
+                 ->getSelectedCandidatePair(&local, &remote)) {
+            return out;
+        }
+    } catch (const std::exception&) {
+        return out;
+    }
+
+    out.known = true;
+    out.localRelayed = local.type() == rtc::Candidate::Type::Relayed;
+    out.remoteRelayed = remote.type() == rtc::Candidate::Type::Relayed;
+    return out;
+}
+
 bool PeerConnectionManager::videoMidsAlreadyDeclared() const {
     if (!m_pc) return true;   // nothing we could safely add anyway
     const auto declares = [](const auto& desc) {

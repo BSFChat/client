@@ -625,6 +625,62 @@ Popup {
                             : "You're not in a voice call. Join one and this row describes that call."
                     }
 
+                    SectionHeader {
+                        text: "Privacy"
+                        Layout.topMargin: Theme.sp.s5
+                    }
+
+                    // The one honest sentence about the trade-off, and it is a
+                    // trade-off in both directions — which is why the
+                    // description states the cost rather than only the benefit.
+                    //
+                    // The CONTROL's wording is allowed to live here because it
+                    // describes what the setting does, which is true by
+                    // construction. What may never live here is a claim about
+                    // the call actually running — whether an address is in fact
+                    // hidden depends on the selected ICE candidate pair, which
+                    // QML cannot see. That claim is the row below it, read
+                    // verbatim from ServerConnection.voiceIpPrivacyDetail.
+                    // test_voice_encryption scans every .qml file for both
+                    // kinds of overclaim. See src/voice/IpPrivacy.h.
+                    SettingRow {
+                        title: "Hide my IP address"
+                        description: "Routes your calls through the server instead of "
+                                   + "connecting straight to the other people in them, so "
+                                   + "they see the server's address rather than yours. "
+                                   + "Costs some delay, uses the server's bandwidth, and "
+                                   + "can lower video quality when the server is the "
+                                   + "slowest link. Their addresses stay their own choice. "
+                                   + "If the server has no relay, joining a call with this "
+                                   + "on will fail rather than connect directly."
+                        ThemedSwitch {
+                            checked: appSettings.voiceRelayMode === "relayOnly"
+                            // D-C1: a user toggle writes `checked` imperatively
+                            // and destroys the declarative binding, so it has to
+                            // be restored or the row stops tracking the setting.
+                            onToggled: {
+                                appSettings.voiceRelayMode = checked ? "relayOnly" : "auto";
+                                checked = Qt.binding(function() {
+                                    return appSettings.voiceRelayMode === "relayOnly";
+                                });
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        title: "Current call"
+                        // Verbatim from the property, same rule as "Call
+                        // protection" above: this one answers whether the
+                        // address is hidden RIGHT NOW, which depends on the
+                        // candidate pair ICE actually selected and not on what
+                        // the switch above asks for.
+                        readonly property string liveIp: serverManager.activeServer
+                            ? serverManager.activeServer.voiceIpPrivacyDetail : ""
+                        description: liveIp.length > 0
+                            ? liveIp
+                            : "You're not in a voice call. Join one and this row describes how it is routed."
+                    }
+
                     // No trailing fillHeight spacer: inside a Flickable the
                     // column is sized by its content.
                 }

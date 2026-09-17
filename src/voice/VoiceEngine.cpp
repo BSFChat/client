@@ -68,22 +68,31 @@ bool VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
     // join up front and say why. Checked against the built configuration
     // rather than the raw JSON so it reflects what libdatachannel would
     // actually receive (bad URI schemes are filtered out there).
-    if (!m_allowP2P) {
-        const auto probe = buildRtcConfig();
-        bool hasRelay = false;
-        for (const auto& server : probe.iceServers) {
-            if (server.type == rtc::IceServer::Type::Turn) { hasRelay = true; break; }
-        }
-        if (!hasRelay) {
-            qCWarning(logVoice, "refusing join: relay-only policy but no TURN "
-                     "server in the config (%lld ICE servers)",
-                     static_cast<long long>(probe.iceServers.size()));
-            emit error(voice::refusalMessage(
-                voice::StartRefusal::RelayOnlyNoTurn));
+    // Relay-only with no relay to use is a guaranteed, silent, total failure
+    // whoever asked for it — the server (allow_p2p = false), the user's "Hide
+    // my IP address" setting, or a share that asked to hide the address. Refuse
+    // the join and say which of the three it was, because the fix is in a
+    // different place for each.
+    //
+    // Never a quiet fall back to peer-to-peer. For the server case that would
+    // disobey policy; for the two local cases it would publish the exact
+    // address the user just asked to hide, while the UI carried on saying the
+    // setting was on. A call that does not start is recoverable; an address
+    // that has been sent is not.
+    {
+        const auto decision = icePolicy();
+        if (decision.refused()) {
+            qCWarning(logVoice, "refusing join: relay-only policy (source=%d) but "
+                     "no TURN server in the config",
+                     int(decision.source));
+            emit error(voice::relayRefusalMessage(decision.source));
             m_roomId.clear();
             m_turnConfig = QJsonObject();
             return false;
         }
+        qCInfo(logVoice, "ICE policy: %s (source=%d)",
+              decision.relayOnly() ? "relay-only" : "all",
+              int(decision.source));
     }
 
     m_running = true;
@@ -265,8 +274,15 @@ void VoiceEngine::updateTurnConfig(const QJsonObject& turnConfig) {
     m_turnConfig = turnConfig;
     // allow_p2p is server policy, not a credential; it can legitimately
     // change between fetches, and buildRtcConfig reads m_allowP2P.
+    const bool wasRelay = icePolicy().relayOnly();
     m_allowP2P = turnConfig.value("allow_p2p").toBool(m_allowP2P);
     qCInfo(logVoice, "TURN credentials refreshed");
+    // A server that flips allow_p2p mid-session has changed policy, and the
+    // peers already built are still on the old one. Rebuild them for the same
+    // reason a local switch does: a connection that outlives the policy it was
+    // created under is a policy that is not being enforced.
+    if (icePolicy().relayOnly() != wasRelay)
+        reestablishAllPeers("the server changed its peer-to-peer policy");
 }
 
 void VoiceEngine::ensurePeer(const QString& userId) {
@@ -474,6 +490,35 @@ QMap<QString, QString> VoiceEngine::peerStates() const {
             out[userId] = voice::peerDisplayState(QString(), /*gaveUp=*/true);
     }
     return out;
+}
+
+QMap<QString, QString> VoiceEngine::peerPaths() const {
+    QMap<QString, QString> out;
+    for (auto it = m_peers.begin(); it != m_peers.end(); ++it) {
+        if (!it.value()) continue;
+        const auto path = it.value()->selectedPath();
+        // Absent, not "direct", while ICE is still choosing. A peer that has
+        // not settled has no route to report, and filling one in would be the
+        // overlay inventing a fact.
+        if (!path.known) continue;
+        out[it.key()] = voice::peerPathName(
+            (path.localRelayed || path.remoteRelayed) ? voice::PeerPath::Relayed
+                                                      : voice::PeerPath::Direct);
+    }
+    return out;
+}
+
+// How many peer connections have confirmed that OUR end of the selected pair is
+// a relay candidate. This — not the policy, and not the peer's end — is what
+// the "IP hidden" claim is allowed to rest on.
+int VoiceEngine::peersWithLocalRelay() const {
+    int n = 0;
+    for (auto it = m_peers.begin(); it != m_peers.end(); ++it) {
+        if (!it.value()) continue;
+        const auto path = it.value()->selectedPath();
+        if (path.known && path.localRelayed) ++n;
+    }
+    return n;
 }
 
 void VoiceEngine::removePeer(const QString& userId) {
@@ -1252,11 +1297,135 @@ rtc::Configuration VoiceEngine::buildRtcConfig() const {
     // No default STUN/TURN — server admin must configure their own.
     // On LAN with P2P enabled, direct connections work without STUN.
 
-    if (!m_allowP2P) {
+    // Relay means libdatachannel gathers relay candidates ONLY: no host
+    // candidate carrying the LAN address, no server-reflexive one carrying the
+    // public IP, so neither is ever put into an m.call.* event and neither the
+    // peer nor the room ever sees one. That is the whole mechanism — there is
+    // no separate "don't send my candidates" step to forget.
+    //
+    // Unilateral by construction: it constrains what WE gather. A peer who has
+    // left the setting off still sends their own candidates and we still use
+    // them, so the call works normally with a mixed pair. Their address is
+    // theirs to expose.
+    if (icePolicy().relayOnly()) {
         config.iceTransportPolicy = rtc::TransportPolicy::Relay;
     }
 
     return config;
+}
+
+voice::IcePolicyDecision VoiceEngine::icePolicy() const {
+    voice::IcePolicyInputs in;
+    in.userMode = m_relayMode;
+    in.serverAllowsP2P = m_allowP2P;
+    for (int s = 0; s < kVideoStreamCount; ++s)
+        in.shareHidesIp = in.shareHidesIp || m_streamHidesIp[s];
+
+    // Answered against the ICE servers as BUILT, not against the raw JSON: a
+    // `uris` array full of entries with an unrecognised scheme is dropped
+    // silently on the way into the configuration, and counting those as a relay
+    // would let the join proceed into a gathering phase that produces nothing.
+    //
+    // Note the recursion this does NOT have: buildRtcConfig() calls icePolicy()
+    // only to set the transport policy, and this walks the server list only.
+    // Building the list is independent of the policy, so the helper below
+    // duplicates that half rather than calling back into buildRtcConfig().
+    const auto user = m_turnConfig.value("username").toString();
+    const auto pass = m_turnConfig.value("password").toString();
+    Q_UNUSED(user); Q_UNUSED(pass);
+    for (const auto& uriVal : m_turnConfig.value("uris").toArray()) {
+        const QString u = uriVal.toString();
+        if (u.startsWith("turn:") || u.startsWith("turns:")) { in.hasTurn = true; break; }
+    }
+
+    return voice::decideIcePolicy(in);
+}
+
+bool VoiceEngine::relayOnly() const { return icePolicy().relayOnly(); }
+bool VoiceEngine::relayIsLocalChoice() const { return icePolicy().localChoice(); }
+
+void VoiceEngine::setRelayMode(voice::RelayMode mode) {
+    if (m_relayMode == mode) return;
+    const bool wasRelay = icePolicy().relayOnly();
+    m_relayMode = mode;
+    if (icePolicy().relayOnly() != wasRelay)
+        reestablishAllPeers("the \"Hide my IP address\" setting changed");
+}
+
+bool VoiceEngine::canHideIpAddress() const {
+    voice::IcePolicyInputs probe;
+    probe.userMode = voice::RelayMode::RelayOnly;   // ask the question directly
+    probe.serverAllowsP2P = m_allowP2P;
+    for (const auto& uriVal : m_turnConfig.value("uris").toArray()) {
+        const QString u = uriVal.toString();
+        if (u.startsWith("turn:") || u.startsWith("turns:")) { probe.hasTurn = true; break; }
+    }
+    return !voice::decideIcePolicy(probe).refused();
+}
+
+void VoiceEngine::setStreamIpPrivacy(VideoStreamId stream, bool hideIp) {
+    const int idx = int(stream);
+    if (idx < 0 || idx >= kVideoStreamCount) return;
+    if (m_streamHidesIp[idx] == hideIp) return;
+
+    // Refuse rather than accept-and-fail. Setting the flag with no TURN server
+    // would make every rebuilt peer connection gather nothing at all: the share
+    // would appear to start, nobody would receive it, and the shield would sit
+    // on "Hiding IP…" forever with the address it was supposed to hide never
+    // having been the reason. The caller checks canHideIpAddress() first, so
+    // this is the belt to that braces — but it is the one that is impossible to
+    // route around.
+    if (hideIp && !canHideIpAddress()) {
+        qCWarning(logVoice, "refusing per-share IP privacy: no TURN server");
+        emit error(voice::relayRefusalMessage(voice::RelaySource::ShareOption));
+        return;
+    }
+    const bool wasRelay = icePolicy().relayOnly();
+    m_streamHidesIp[idx] = hideIp;
+    if (icePolicy().relayOnly() != wasRelay)
+        reestablishAllPeers(hideIp ? "a share asked to hide the IP address"
+                                   : "the share that was hiding the IP ended");
+}
+
+void VoiceEngine::reestablishAllPeers(const char* why) {
+    if (!m_running) return;   // nothing built yet; start() will use the new policy
+    if (m_peers.isEmpty()) return;
+
+    const auto peerIds = m_peers.keys();
+    qCInfo(logVoice, "re-establishing %lld peer connection(s): %s",
+          static_cast<long long>(peerIds.size()), why);
+
+    for (const QString& userId : peerIds) {
+        auto* peer = m_peers.value(userId);
+        if (!peer) continue;
+        // Tell them first, with the call id THEY know. Without a hangup the far
+        // side keeps the dead connection, its mixer row and its video tile
+        // until its own watchdog reaps it — tens of seconds of a frozen tile
+        // for somebody who is about to reappear in under two.
+        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallHangup),
+                      voice::buildHangup(peer->callId(), userId, "ice_policy_change"));
+    }
+
+    for (const QString& userId : peerIds) {
+        // removePeer() also clears this peer's receiver-report snapshots, which
+        // is what keeps the loss-based rate controller honest across the
+        // switch: the new connection seeds a fresh estimator and its first
+        // report is a seed rather than a delta against counters from a
+        // connection that no longer exists. Without that the estimator would
+        // read the reset sequence numbers as catastrophic loss and collapse the
+        // bitrate on a link that is merely different.
+        removePeer(userId);
+    }
+
+    // Offer to everyone, ignoring the `uid > m_localUserId` rule that normally
+    // decides direction. That rule exists to stop two sides offering at once;
+    // here only one side is switching policy and it has just told the other to
+    // forget the connection, so there is no competing offer to collide with.
+    // Deferring to the far side's 5 s roster reconciler instead would leave
+    // half of all pairs silent for five times as long as the other half.
+    for (const QString& userId : peerIds) {
+        addPeer(userId, /*isOfferer=*/true);
+    }
 }
 
 QString VoiceEngine::generateCallId() const {
