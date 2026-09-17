@@ -388,6 +388,13 @@ target_include_directories(test_url_handler PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_url_handler PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::Test)
 add_test(NAME test_url_handler COMMAND test_url_handler)
 
+# Correlating an async reply with its request. Qt::SingleShotConnection does
+# NOT mean "only one slot runs" — that misreading crossed uploads and DMs over.
+qt_add_executable(test_tokened_reply test_tokened_reply.cpp)
+target_include_directories(test_tokened_reply PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_tokened_reply PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_tokened_reply COMMAND test_tokened_reply)
+
 # 401 classification: the client had no dead-token handling at all, so an
 # expired access token showed as a permanent "Reconnecting…".
 qt_add_executable(test_auth_error

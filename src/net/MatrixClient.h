@@ -34,12 +34,18 @@ public:
     void sync(const QString& since = {}, int timeout = 30000);
 
     // Rooms
-    void createRoom(const QString& name, const QString& topic, const QString& visibility = "private");
+    // `requestId` correlates the call with its createRoomSuccess/
+    // createRoomError reply. Those signals are connection-wide and several
+    // flows wait on them at once (a DM and a channel, two DMs), so without a
+    // token the first reply was delivered to every waiting handler. See
+    // net/TokenedReply.h.
+    void createRoom(const QString& requestId, const QString& name, const QString& topic,
+                    const QString& visibility = "private");
 
     // Create a direct-message room with a single other user:
     // trusted_private_chat preset, no name/topic, is_direct=true,
     // invitee on creation. Mirrors the Matrix spec DM convention.
-    void createDirectMessageRoom(const QString& targetUserId);
+    void createDirectMessageRoom(const QString& requestId, const QString& targetUserId);
 
     void joinRoom(const QString& roomIdOrAlias);
     void leaveRoom(const QString& roomId);
@@ -129,7 +135,13 @@ public:
                          const QString& sourceEventId = {});
 
     // Media
-    void uploadMedia(const QByteArray& data, const QString& contentType, const QString& filename);
+    // `uploadId` correlates this upload with its mediaUploaded/
+    // mediaUploadError reply. Several unrelated flows (attachment, user
+    // avatar, server avatar) wait on those signals at once; without a token
+    // the first completion was delivered to all of them. See
+    // net/TokenedReply.h.
+    void uploadMedia(const QString& uploadId, const QByteArray& data,
+                     const QString& contentType, const QString& filename);
     QString mediaDownloadUrl(const QString& mxcUri) const;
 
     // GET /account/whoami — the server's canonical identity for our
@@ -232,7 +244,8 @@ public:
     // they auto-join to everyone — privacy is later enforced by a per-channel
     // @everyone DENY VIEW_CHANNEL override, applied separately by the caller
     // listening on createRoomSuccess.
-    void createChannelInCategory(const QString& name, const QString& categoryId, bool isVoice = false);
+    void createChannelInCategory(const QString& requestId, const QString& name,
+                                 const QString& categoryId, bool isVoice = false);
     void moveChannel(const QString& roomId, const QString& categoryId);
     void setChannelOrder(const QString& roomId, int order);
     void setRoomState(const QString& roomId, const QString& eventType, const QString& stateKey, const QByteArray& content);
@@ -248,8 +261,8 @@ signals:
     void syncSuccess(const bsfchat::SyncResponse& response);
     void syncError(const QString& error);
 
-    void createRoomSuccess(const QString& roomId);
-    void createRoomError(const QString& error);
+    void createRoomSuccess(const QString& requestId, const QString& roomId);
+    void createRoomError(const QString& requestId, const QString& error);
 
     void joinRoomSuccess(const QString& roomId);
     void joinRoomError(const QString& error);
@@ -293,12 +306,12 @@ signals:
     // PUT rejected. The local preference is rolled back by the caller.
     void roomNotifyLevelError(const QString& roomId, const QString& error);
 
-    void mediaUploaded(const QString& contentUri);
+    void mediaUploaded(const QString& uploadId, const QString& contentUri);
     // Per-upload progress 0..1. QNetworkAccessManager re-uses the
     // same reply object until it finishes, so `filename` identifies
     // which upload the tick belongs to when several run at once.
     void mediaUploadProgress(const QString& filename, double progress);
-    void mediaUploadError(const QString& error);
+    void mediaUploadError(const QString& uploadId, const QString& error);
 
     void voiceJoined(const QString& roomId, const QJsonArray& members);
     // Same reply, with the server's session token for this membership.
