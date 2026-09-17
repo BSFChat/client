@@ -9,16 +9,32 @@ Q_LOGGING_CATEGORY(logVideoRecv, "bsfchat.video.recv", QtWarningMsg)
 
 namespace {
 
-// Scan an Annex-B access unit for an IDR slice (NAL type 5). Handles
-// both 3- and 4-byte start codes.
-bool containsIdr(const QByteArray& au) {
+// Scan an Annex-B access unit for a NAL that lets a receiver start
+// here. Handles both 3- and 4-byte start codes.
+//
+//   H.264 — an IDR slice, NAL type 5, in the low 5 bits of a one-byte
+//           header.
+//   HEVC  — any IRAP picture, NAL types 16..23 (BLA_W_LP through
+//           CRA_NUT), in bits 1..6 of a TWO-byte header. Checking only
+//           IDR_W_RADL/IDR_N_LP would miss the CRA pictures a
+//           VideoToolbox HEVC encoder is free to emit for a forced
+//           keyframe, and the stream would then sit frozen re-asking
+//           for an IDR that had already arrived.
+bool containsKeyframeNal(const QByteArray& au, bool hevc) {
     const auto* p = reinterpret_cast<const uint8_t*>(au.constData());
     const int n = au.size();
     for (int i = 0; i + 3 < n; ++i) {
         if (p[i] == 0 && p[i + 1] == 0
             && (p[i + 2] == 1 || (p[i + 2] == 0 && i + 4 < n && p[i + 3] == 1))) {
             const int nalStart = i + (p[i + 2] == 1 ? 3 : 4);
-            if (nalStart < n && (p[nalStart] & 0x1F) == 5) return true;
+            if (hevc) {
+                if (nalStart + 1 < n) {
+                    const uint8_t type = (p[nalStart] >> 1) & 0x3F;
+                    if (type >= 16 && type <= 23) return true;
+                }
+            } else if (nalStart < n && (p[nalStart] & 0x1F) == 5) {
+                return true;
+            }
             i = nalStart - 1;
         }
     }
@@ -119,10 +135,12 @@ void VideoReceivePipeline::drainQueue() {
         // there is nothing to decode, so a stream that never recovers
         // must not also hold a decoder session open.
         if (m_waitingForKeyframe) {
-            // H.264 AUs are scanned for an IDR NAL; other codecs rely
-            // on the transport-provided keyframe flag.
-            const bool isKey = m_codec == VideoCodecKind::H264
-                ? containsIdr(au) : queued.keyframe;
+            // H.264/HEVC AUs are scanned for a random-access NAL; AV1
+            // relies on the transport-provided keyframe flag (its
+            // keyframes are not cheaply detectable from the bitstream).
+            const bool isKey = isRtpVideoCodec(m_codec)
+                ? containsKeyframeNal(au, m_codec == VideoCodecKind::H265)
+                : queued.keyframe;
             if (!isKey) {
                 m_droppedAus.fetch_add(1);
                 // S-2: keep asking. The request that put us in this

@@ -46,6 +46,7 @@
 // waiting for one waits forever. See VoiceTransportSelector.h.
 
 #include "voice/video/VideoCodec.h"
+#include "voice/video/VideoCodecSelect.h"
 #include "voice/video/VideoDeliveryReport.h"
 
 #include <QObject>
@@ -233,6 +234,21 @@ public:
     virtual bool hasVideoCapablePeers() const = 0;
     virtual bool hasLegacyOpenPeers(VideoStreamId stream) const = 0;
     virtual H264Profile negotiatedH264Profile() const = 0;
+    // S-18: which RTP video codec this stream should be encoded in,
+    // given the user's preference. The transport answers because only
+    // it knows the audience; the RULE itself is the pure function in
+    // video/VideoCodecSelect.h, so it can be tested without one.
+    //
+    // A mesh sender encodes ONCE and fans the same bytes out, so this
+    // is an intersection over every viewer, and the answer flips the
+    // moment anyone joins or leaves. Callers ask on every capture tick
+    // (exactly as they do for negotiatedH264Profile) and let
+    // VideoSendPipeline notice the change: a different EncoderConfig::
+    // codec is not sameSessionAs the old one, so the session is rebuilt
+    // and the next frame is an IDR. That is the whole "switch and force
+    // a keyframe" mechanism — no extra signal, no way to forget.
+    virtual VideoCodecKind negotiatedVideoCodec(
+        videocodec::Preference preference) const = 0;
 
     // ---- AV1 mathematically-lossless tier (mesh-only) ---------------
     //

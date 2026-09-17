@@ -257,12 +257,25 @@ public:
     Q_PROPERTY(int screenShareTargetKbps READ screenShareTargetKbps WRITE setScreenShareTargetKbps NOTIFY screenShareTargetKbpsChanged)
     Q_PROPERTY(int screenShareKeyframeSec READ screenShareKeyframeSec WRITE setScreenShareKeyframeSec NOTIFY screenShareKeyframeSecChanged)
     Q_PROPERTY(bool screenShareLossless READ screenShareLossless WRITE setScreenShareLossless NOTIFY screenShareLosslessChanged)
+    // Which RTP video codec shares and camera feeds are encoded in:
+    //   "auto"       — H.265 whenever it is available to EVERYONE in
+    //                  the call, H.264 otherwise (default)
+    //   "preferHevc" — same rule; reserved for when "auto" learns to
+    //                  weigh CPU/battery as well as capability
+    //   "h264Only"   — never negotiate H.265
+    // Anything else read back from disk normalises to "auto". This is
+    // a PREFERENCE, not a guarantee: a mesh encodes once per stream, so
+    // one viewer that cannot decode H.265 puts the stream back on
+    // H.264 whatever this says. See video/VideoCodecSelect.h.
+    Q_PROPERTY(QString videoCodecPreference READ videoCodecPreference WRITE setVideoCodecPreference NOTIFY videoCodecPreferenceChanged)
     int screenShareTargetKbps() const;
     void setScreenShareTargetKbps(int kbps);
     int screenShareKeyframeSec() const;
     void setScreenShareKeyframeSec(int sec);
     bool screenShareLossless() const;
     void setScreenShareLossless(bool on);
+    QString videoCodecPreference() const;
+    void setVideoCodecPreference(const QString& pref);
 
     // Camera knobs (previously hardcoded 640 px / 5 fps JPEG).
     Q_PROPERTY(int cameraFps READ cameraFps WRITE setCameraFps NOTIFY cameraFpsChanged)
@@ -313,6 +326,7 @@ signals:
     void screenShareTargetKbpsChanged();
     void screenShareKeyframeSecChanged();
     void screenShareLosslessChanged();
+    void videoCodecPreferenceChanged();
     void cameraFpsChanged();
     void cameraMaxWidthChanged();
     void cameraTargetKbpsChanged();

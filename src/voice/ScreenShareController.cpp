@@ -1,4 +1,6 @@
 #include "voice/ScreenShareController.h"
+
+#include "voice/video/VideoCodecSelect.h"
 #include "voice/IVoiceTransport.h"
 #include "voice/VoiceEngine.h"
 #include "voice/video/VideoRateController.h"
@@ -755,6 +757,18 @@ void ScreenShareController::pushFrameToPeers()
             // Emit the best profile every current receiver decodes — a
             // profile flip rebuilds the encoder session and IDRs.
             g_encoderConfig.profile = voice->negotiatedH264Profile();
+            // S-18: and the best CODEC every current receiver decodes.
+            // Same mechanism, same tick: a changed codec is not
+            // sameSessionAs the running encoder session, so the
+            // pipeline rebuilds it and the next frame out is an IDR —
+            // which is exactly what a viewer that just forced the
+            // switch by joining needs. Tell the rate controller first,
+            // so the new codec's quality floors govern the next ladder
+            // decision rather than the previous codec's.
+            g_encoderConfig.codec = voice->negotiatedVideoCodec(
+                videocodec::preferenceFromString(
+                    m_settings ? m_settings->videoCodecPreference() : QString()));
+            m_rate->setCodec(g_encoderConfig.codec);
             // Rate-controller outputs override the static envelope:
             // the governor moves bitrate live and steps the resolution
             // ladder down/up with the measured delivery ratio.

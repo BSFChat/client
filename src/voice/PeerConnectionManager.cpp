@@ -85,17 +85,56 @@ const char* gatherStr(rtc::PeerConnection::GatheringState s) {
 // Values are arbitrary but must differ per (m-line, role); SSRCs only
 // have to be unique within one peer connection, so the same four
 // constants are safe across every call.
+//
+// ---------------------------------------------------------------------
+// TWO payload types per m-line (S-18)
+// ---------------------------------------------------------------------
+// Each m-line offers H.264 AND H.265 up front, from the very first
+// offer, whether or not either end can do H.265. That is the entire
+// trick that makes a mid-call codec switch free: both payload types are
+// already negotiated, so switching costs a different packetizer and a
+// different PT byte and NOTHING else — no re-offer, no answer, no
+// renegotiation window in which video stops.
+//
+// The alternative (renegotiate on switch) was rejected: this codebase's
+// renegotiation path is the single most fragile thing in the call
+// (see the rc.13 answerer bug and the "m-lines must be in the INITIAL
+// offer or the transport has no SRTP" trap in createOffer), and a
+// codec switch fires on something as ordinary as a person joining.
+//
+// Against an OLD peer (rc.19 and earlier) this is still safe in both
+// directions: it offers one PT, so our answer reciprocates one PT; and
+// when we offer two, its answer carries whatever it kept. We never SEND
+// H.265 to it either way, because its caps lack h265 and the selection
+// rule keeps that stream on H.264 — the SDP is belt, the caps are
+// braces.
 struct VideoStreamSpec {
     const char* mid;
-    uint8_t payloadType;
+    uint8_t payloadType;        // H.264
+    uint8_t payloadTypeH265;
     const char* cname;
     uint32_t offererSsrc;    // used by the side that addTrack()s this m-line
     uint32_t answererSsrc;   // used by the side that adopts it via onTrack
 };
 constexpr VideoStreamSpec kVideoSpecs[kVideoStreamCount] = {
-    {"vscreen", 96, "bsf-screen", 0xB5F5C001u, 0xB5F5C002u},
-    {"vcamera", 97, "bsf-camera", 0xB5FCA001u, 0xB5FCA002u},
+    {"vscreen", 96, 98, "bsf-screen", 0xB5F5C001u, 0xB5F5C002u},
+    {"vcamera", 97, 99, "bsf-camera", 0xB5FCA001u, 0xB5FCA002u},
 };
+
+// Test hook: suppress the H.265 payload type from the m-lines this
+// process offers/answers, so tests/test_video_rtp_loopback can put a
+// real "old peer" on one side of a real connection. Never set in
+// production; see PeerConnectionManager::setOfferH265ForTesting().
+bool g_offerH265 = true;
+
+// Which codec a payload type on OUR m-lines means. Anything we do not
+// recognise reads as H.264 — that is what every packet did before H.265
+// existed, and a stray PT is better decoded wrongly than dropped
+// silently.
+VideoCodecKind codecForPayloadType(const VideoStreamSpec& spec, uint8_t pt) {
+    return pt == spec.payloadTypeH265 ? VideoCodecKind::H265
+                                      : VideoCodecKind::H264;
+}
 
 // The `a=ssrc:` lines that make the receiver's demultiplexer able to
 // find this m-line's track. Must be applied to the media description
@@ -105,6 +144,20 @@ void declareVideoSsrcs(rtc::Description::Video& media, const VideoStreamSpec& sp
 {
     media.addSSRC(spec.offererSsrc, spec.cname);
     media.addSSRC(spec.answererSsrc, spec.cname);
+}
+
+// The complete media description for one video m-line: both codecs,
+// both SSRCs. ONE function so the two places that add tracks
+// (createOffer and the ensureVideoTracks fallback) cannot drift — they
+// already had two copies of the SSRC+codec lines.
+rtc::Description::Video buildVideoMedia(const VideoStreamSpec& spec)
+{
+    rtc::Description::Video media(spec.mid,
+                                  rtc::Description::Direction::SendRecv);
+    media.addH264Codec(spec.payloadType);
+    if (g_offerH265) media.addH265Codec(spec.payloadTypeH265);
+    declareVideoSsrcs(media, spec);
+    return media;
 }
 
 int streamIndexForMid(const std::string& mid) {
@@ -174,6 +227,133 @@ private:
     std::atomic<quint64>* m_rxPackets = nullptr;
     std::atomic<quint64>* m_lostPackets = nullptr;
     RtpSeqTracker m_tracker;
+};
+
+// ---------------------------------------------------------------------
+// Codec routing inside ONE media-handler chain (S-18)
+// ---------------------------------------------------------------------
+// libdatachannel's chain is a singly-linked list of handlers, and both
+// RtpPacketizer and VideoRtpDepacketizer assume they are THE codec on
+// the track. Two of either cannot simply be chained:
+//
+//   * outgoing traverses head→tail, and a packetizer turns access units
+//     into RTP packets. A second packetizer downstream would see those
+//     RTP packets as fresh input and fragment them again.
+//   * incoming, a depacketizer buffers by RTP timestamp and reassembles
+//     on the marker bit. Feeding one depacketizer two interleaved
+//     codecs' packets would splice an H.264 tail onto an H.265 head at
+//     every switch.
+//
+// So each direction gets a router: one handler in the chain that owns
+// both real handlers off-chain and hands each message to exactly one of
+// them. The chain's shape — and therefore the RTCP, NACK, PLI, pacing
+// and gap-detector ordering that took a week to get right — is
+// unchanged.
+//
+// Both packetizers share ONE RtpPacketizationConfig. That is deliberate
+// and load-bearing: SSRC, CNAME, clock rate, the RTP timestamp the
+// sender advances by hand and, above all, the SEQUENCE NUMBER are
+// per-stream properties, not per-codec ones. Two configs would restart
+// the sequence at every switch, and the receiver's RtpSeqTracker would
+// read that as catastrophic loss and drive the rate controller into the
+// floor. Switching codec therefore means: point the shared config's
+// payloadType at the new codec, and route to the matching packetizer.
+class CodecPacketizerRouter final : public rtc::MediaHandler {
+public:
+    CodecPacketizerRouter(std::shared_ptr<rtc::RtpPacketizer> h264,
+                          std::shared_ptr<rtc::RtpPacketizer> h265,
+                          std::shared_ptr<rtc::RtpPacketizationConfig> config,
+                          uint8_t ptH264, uint8_t ptH265)
+        : m_h264(std::move(h264))
+        , m_h265(std::move(h265))
+        , m_config(std::move(config))
+        , m_ptH264(ptH264)
+        , m_ptH265(ptH265) {}
+
+    // Called from the Qt thread, immediately before the first frame in
+    // the new codec is handed to track->send(). Same thread as the
+    // send, so no locking: outgoing() runs synchronously inside send().
+    void setCodec(VideoCodecKind codec) {
+        const bool hevc = codec == VideoCodecKind::H265 && m_h265 != nullptr;
+        m_useH265 = hevc;
+        m_config->payloadType = hevc ? m_ptH265 : m_ptH264;
+    }
+
+    void outgoing(rtc::message_vector& messages,
+                  const rtc::message_callback& send) override {
+        const auto& pkt = (m_useH265 && m_h265) ? m_h265 : m_h264;
+        if (pkt) pkt->outgoing(messages, send);
+    }
+
+private:
+    std::shared_ptr<rtc::RtpPacketizer> m_h264;
+    std::shared_ptr<rtc::RtpPacketizer> m_h265;   // null where unsupported
+    std::shared_ptr<rtc::RtpPacketizationConfig> m_config;
+    const uint8_t m_ptH264;
+    const uint8_t m_ptH265;
+    bool m_useH265 = false;
+};
+
+// The receive half: split an incoming batch by payload type and give
+// each run to the depacketizer that understands it.
+//
+// Runs are preserved rather than the whole batch being partitioned,
+// because a depacketizer's reassembly buffer flushes on a timestamp
+// change or a marker bit and reordering packets across that boundary
+// would break frames that are currently fine. In practice a batch is
+// all one codec anyway — the split only ever matters for the handful of
+// packets straddling a switch.
+class CodecDepacketizerRouter final : public rtc::MediaHandler {
+public:
+    CodecDepacketizerRouter(std::shared_ptr<rtc::MediaHandler> h264,
+                            std::shared_ptr<rtc::MediaHandler> h265,
+                            uint8_t ptH265)
+        : m_h264(std::move(h264)), m_h265(std::move(h265)), m_ptH265(ptH265) {}
+
+    void incoming(rtc::message_vector& messages,
+                  const rtc::message_callback& send) override {
+        rtc::message_vector out;
+        rtc::message_vector run;
+        rtc::MediaHandler* current = nullptr;
+        auto flush = [&]() {
+            if (!current || run.empty()) return;
+            // incomingChain() on an off-chain handler is just its own
+            // incoming(); it is the public way to say so (the override
+            // itself is private on VideoRtpDepacketizer).
+            current->incomingChain(run, send);
+            for (auto& m : run) out.push_back(std::move(m));
+            run.clear();
+        };
+        for (auto& msg : messages) {
+            rtc::MediaHandler* target = routeFor(msg);
+            if (target != current) {
+                flush();
+                current = target;
+            }
+            if (!target) out.push_back(std::move(msg));   // pass through
+            else run.push_back(std::move(msg));
+        }
+        flush();
+        messages.swap(out);
+    }
+
+private:
+    rtc::MediaHandler* routeFor(const rtc::message_ptr& msg) const {
+        if (!msg || msg->type == rtc::Message::Control) return nullptr;
+        if (msg->size() < sizeof(rtc::RtpHeader)) return nullptr;
+        const auto* h = reinterpret_cast<const rtc::RtpHeader*>(msg->data());
+        if (h->version() != 2) return nullptr;
+        // RFC 5761 demux, same reasoning as RtpGapDetector: 192-223 in
+        // byte 1 is RTCP, never one of our RTP payload types.
+        const uint8_t byte1 = std::to_integer<uint8_t>(msg->at(1));
+        if (byte1 >= 192 && byte1 <= 223) return nullptr;
+        if (h->payloadType() == m_ptH265 && m_h265) return m_h265.get();
+        return m_h264.get();
+    }
+
+    std::shared_ptr<rtc::MediaHandler> m_h264;
+    std::shared_ptr<rtc::MediaHandler> m_h265;   // null where unsupported
+    const uint8_t m_ptH265;
 };
 
 // Token-bucket RTP pacer with a BOUNDED backlog (S-15).
@@ -673,6 +853,10 @@ void PeerConnectionManager::setupControlChannel(std::shared_ptr<rtc::DataChannel
     });
 }
 
+void PeerConnectionManager::setOfferH265ForTesting(bool on) {
+    g_offerH265 = on;
+}
+
 void PeerConnectionManager::createOffer() {
     qCInfo(logVoicePc, " [%s] Creating offer (we are offerer)",
           qPrintable(m_peerId));
@@ -693,11 +877,7 @@ void PeerConnectionManager::createOffer() {
     // different door (caught by the loopback test flaking on CI).
     try {
         for (int i = 0; i < kVideoStreamCount; ++i) {
-            rtc::Description::Video media(kVideoSpecs[i].mid,
-                                          rtc::Description::Direction::SendRecv);
-            media.addH264Codec(kVideoSpecs[i].payloadType);
-            declareVideoSsrcs(media, kVideoSpecs[i]);
-            auto track = m_pc->addTrack(std::move(media));
+            auto track = m_pc->addTrack(buildVideoMedia(kVideoSpecs[i]));
             attachVideoTrack(VideoStreamId(i), track, /*adopted=*/false);
         }
 
@@ -971,11 +1151,7 @@ void PeerConnectionManager::ensureVideoTracks() {
           qPrintable(m_peerId));
     try {
         for (int i = 0; i < kVideoStreamCount; ++i) {
-            rtc::Description::Video media(kVideoSpecs[i].mid,
-                                          rtc::Description::Direction::SendRecv);
-            media.addH264Codec(kVideoSpecs[i].payloadType);
-            declareVideoSsrcs(media, kVideoSpecs[i]);
-            auto track = m_pc->addTrack(std::move(media));
+            auto track = m_pc->addTrack(buildVideoMedia(kVideoSpecs[i]));
             attachVideoTrack(VideoStreamId(i), track, /*adopted=*/false);
         }
     } catch (const std::exception& e) {
@@ -1004,13 +1180,29 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
     ctx.rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
         adopted ? spec.answererSsrc : spec.offererSsrc, spec.cname,
         spec.payloadType, rtc::H264RtpPacketizer::ClockRate);
+    ctx.activeCodec = VideoCodecKind::H264;
 
     // Chain: outgoing traverses head→tail (packetize, then SR/NACK
     // bookkeeping); incoming traverses tail→head (RTCP session strips
     // control packets, depacketizer reassembles AUs for onFrame; the
     // send-side handlers pass incoming data through untouched).
-    auto packetizer = std::make_shared<rtc::H264RtpPacketizer>(
+    //
+    // The head and the depacketizer slot are ROUTERS (see the two
+    // classes above) holding one handler per codec. Both are built
+    // unconditionally — even a build that can neither encode nor decode
+    // H.265 keeps the H.265 half, because the router costs nothing when
+    // it is never routed to and a receive-only asymmetry (we decode
+    // what we cannot encode) is the normal case on at least one
+    // platform.
+    auto h264Packetizer = std::make_shared<rtc::H264RtpPacketizer>(
         rtc::NalUnit::Separator::LongStartSequence, ctx.rtpConfig);
+    auto h265Packetizer = std::make_shared<rtc::H265RtpPacketizer>(
+        rtc::NalUnit::Separator::LongStartSequence, ctx.rtpConfig);
+    auto router = std::make_shared<CodecPacketizerRouter>(
+        h264Packetizer, h265Packetizer, ctx.rtpConfig,
+        spec.payloadType, spec.payloadTypeH265);
+    ctx.codecRouter = router;
+    auto packetizer = std::static_pointer_cast<rtc::MediaHandler>(router);
     ctx.srReporter = std::make_shared<rtc::RtcpSrReporter>(ctx.rtpConfig);
     packetizer->addToChain(ctx.srReporter);
     packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
@@ -1028,8 +1220,12 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
         m_pacerCeilingKbps[idx] > 0 ? m_pacerCeilingKbps[idx]
                                     : kDefaultPacerCeilingKbps);
     packetizer->addToChain(ctx.pacer);
-    packetizer->addToChain(std::make_shared<rtc::H264RtpDepacketizer>(
-        rtc::NalUnit::Separator::LongStartSequence));
+    packetizer->addToChain(std::make_shared<CodecDepacketizerRouter>(
+        std::make_shared<rtc::H264RtpDepacketizer>(
+            rtc::NalUnit::Separator::LongStartSequence),
+        std::make_shared<rtc::H265RtpDepacketizer>(
+            rtc::NalUnit::Separator::LongStartSequence),
+        spec.payloadTypeH265));
     // Gap detector AFTER the depacketizer in build order = BEFORE it
     // on the incoming (tail→head) traversal, so lossPending is set
     // before the depacketizer assembles — and onFrame delivers — the
@@ -1042,21 +1238,31 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
     packetizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
     track->setMediaHandler(packetizer);
 
-    track->onFrame([this, idx, alive = m_alive](rtc::binary data, rtc::FrameInfo) {
+    track->onFrame([this, idx, alive = m_alive](rtc::binary data,
+                                                rtc::FrameInfo info) {
         if (!alive->load()) return;
         QByteArray au(reinterpret_cast<const char*>(data.data()),
                       int(data.size()));
+        // The depacketizer stamps each assembled AU with the payload
+        // type its packets carried, so the codec comes off the wire
+        // rather than out of our own (sender-side) bookkeeping. That
+        // matters at a switch: the last H.264 AU and the first H.265
+        // one can be in flight simultaneously, and the receiver must
+        // hand each to the right decoder.
+        const VideoCodecKind codec =
+            codecForPayloadType(kVideoSpecs[idx], info.payloadType);
         if (!m_video[idx].rxLogged.exchange(true)) {
-            qCInfo(logVoicePc, " [%s] first video AU received on %s (%d bytes)",
-                  qPrintable(m_peerId), kVideoSpecs[idx].mid, int(au.size()));
+            qCInfo(logVoicePc, " [%s] first video AU received on %s (%d bytes, %s)",
+                  qPrintable(m_peerId), kVideoSpecs[idx].mid, int(au.size()),
+                  videoCodecName(codec));
         }
         // Same-thread as the gap detector (libdatachannel delivers
         // frames during the incoming chain traversal), so this
         // read-and-clear pairs exactly with the AU it corrupted.
         const bool loss = m_video[idx].lossPending.exchange(
             false, std::memory_order_relaxed);
-        QMetaObject::invokeMethod(this, [this, idx, au, loss]() {
-            emit videoFrameReceived(idx, au, loss);
+        QMetaObject::invokeMethod(this, [this, idx, au, loss, codec]() {
+            emit videoFrameReceived(idx, au, loss, int(codec));
         }, Qt::QueuedConnection);
     });
     track->onOpen([this, idx, alive = m_alive]() {
@@ -1112,6 +1318,24 @@ void PeerConnectionManager::sendVideoFrame(VideoStreamId stream,
         }
         return;
     }
+    // S-18: a stream can only carry a codec this peer said it decodes.
+    // The mesh picks ONE codec per stream across all viewers, so this is
+    // normally already true — but a peer whose caps arrive late, or one
+    // that just joined, can be handed a frame from the old selection.
+    // Dropping it costs one frame; sending it costs a black tile until
+    // the next IDR.
+    if (frame.codec == VideoCodecKind::H265
+        && !peerCanReceiveRtpVideo(m_remoteCaps, m_remoteCapsKnown,
+                                   videoCodecIdH265())) {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - ctx.txSkipLogMs > 5000) {
+            ctx.txSkipLogMs = now;
+            qCInfo(logVoicePc, " [%s] video tx skipped for %s: frame is "
+                  "H.265 and this peer decodes only H.264",
+                  qPrintable(m_peerId), kVideoSpecs[int(stream)].mid);
+        }
+        return;
+    }
     if (!ctx.open || !ctx.track || !ctx.track->isOpen()) {
         // Encoder is producing but this track can't carry it — say so
         // (throttled), a silent return here once hid a dead share.
@@ -1124,6 +1348,22 @@ void PeerConnectionManager::sendVideoFrame(VideoStreamId stream,
                                                      : "not open yet"));
         }
         return;
+    }
+    // Codec switch, if any, BEFORE the timestamp is written: the
+    // router re-points the shared packetization config's payload type,
+    // and everything else about the stream — SSRC, sequence number,
+    // timestamp base — carries straight across. No renegotiation: both
+    // payload types were negotiated in the first offer.
+    if (frame.codec != ctx.activeCodec && isRtpVideoCodec(frame.codec)) {
+        if (auto router = std::static_pointer_cast<CodecPacketizerRouter>(
+                ctx.codecRouter)) {
+            router->setCodec(frame.codec);
+            qCInfo(logVoicePc, " [%s] %s now sending %s (PT %d), no "
+                  "renegotiation", qPrintable(m_peerId),
+                  kVideoSpecs[int(stream)].mid, videoCodecName(frame.codec),
+                  int(ctx.rtpConfig->payloadType));
+        }
+        ctx.activeCodec = frame.codec;
     }
     if (ctx.startTimeUs < 0) ctx.startTimeUs = frame.captureTimeUs;
     const double elapsed = double(frame.captureTimeUs - ctx.startTimeUs) / 1e6;

@@ -1,4 +1,6 @@
 #include "voice/CameraController.h"
+
+#include "voice/video/VideoCodecSelect.h"
 #include "voice/IVoiceTransport.h"
 #include "voice/VoiceEngine.h"
 #include "voice/video/VideoRateController.h"
@@ -364,7 +366,16 @@ void CameraController::pushFrameToPeers()
         m_rate->setEnvelope(150, targetKbps, fps, maxEdge);
         m_rate->setActive(true);
         EncoderConfig cfg;
-        cfg.codec = VideoCodecKind::H264;
+        // S-18: asked every tick, exactly like the H.264 profile below.
+        // The answer changes when someone joins or leaves, and a
+        // changed codec is not sameSessionAs the running session, so
+        // VideoSendPipeline rebuilds the encoder and emits an IDR. The
+        // rate controller is told first so the new codec's (lower)
+        // quality floors govern the very next ladder decision.
+        cfg.codec = voice->negotiatedVideoCodec(
+            videocodec::preferenceFromString(
+                m_settings ? m_settings->videoCodecPreference() : QString()));
+        m_rate->setCodec(cfg.codec);
         // Camera content gives up RESOLUTION before frame rate — a
         // soft face reads as fine, a stuttering one reads as broken.
         cfg.fps = qMin(fps, m_rate->fps());

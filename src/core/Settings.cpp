@@ -3,6 +3,7 @@
 #include "core/ReadState.h"
 #include "core/ReleaseSelection.h"
 #include "util/FileLogger.h"
+#include "voice/video/VideoCodecSelect.h"
 
 #include <QLoggingCategory>
 
@@ -675,6 +676,26 @@ void Settings::setScreenShareLossless(bool on)
     if (on == screenShareLossless()) return;
     m_settings.setValue(QStringLiteral("screenShare/lossless"), on);
     emit screenShareLosslessChanged();
+}
+
+QString Settings::videoCodecPreference() const
+{
+    const QString v = m_settings.value(
+        QStringLiteral("screenShare/codecPreference"),
+        QStringLiteral("auto")).toString();
+    // Normalise through the parser so an unknown/legacy value on disk
+    // can only ever read back as one of the three, and always as the
+    // spelling the UI compares against.
+    return videocodec::preferenceToString(videocodec::preferenceFromString(v));
+}
+
+void Settings::setVideoCodecPreference(const QString& pref)
+{
+    const QString v = videocodec::preferenceToString(
+        videocodec::preferenceFromString(pref));
+    if (v == videoCodecPreference()) return;
+    m_settings.setValue(QStringLiteral("screenShare/codecPreference"), v);
+    emit videoCodecPreferenceChanged();
 }
 
 int Settings::cameraFps() const
