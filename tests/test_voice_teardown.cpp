@@ -65,6 +65,7 @@
 // which is what exercises OUR callback lifetimes.
 
 #include "voice/PeerConnectionManager.h"
+#include <memory>
 
 #include <QCoreApplication>
 #include <QDeadlineTimer>
@@ -158,6 +159,16 @@ Peers bringUpPair(int round)
         QStringLiteral("@a:test"), QStringLiteral("call-%1").arg(round), cfg);
     connectSignalling(p.offerer, p.answerer);
     connectSignalling(p.answerer, p.offerer);
+    // Neither side may report Failed while the pair comes up. This harness
+    // has no VoiceEngine to remove a failed peer, so a failure here used to
+    // be invisible: applyOffer threw on a redundant second answer, the pair
+    // connected anyway, and the test passed — while in the app the engine
+    // removed the "failed" answerer and its answer with it (rc.13).
+    auto failed = std::make_shared<bool>(false);
+    for (PeerConnectionManager* pc : {p.offerer, p.answerer}) {
+        QObject::connect(pc, &PeerConnectionManager::peerStateChanged, pc,
+                         [failed](PeerConnectionManager::PeerState st) { if (st == PeerConnectionManager::PeerState::Failed) *failed = true; });
+    }
     p.offerer->setRemoteCaps(videoCaps());
     p.answerer->setRemoteCaps(videoCaps());
 
@@ -166,6 +177,11 @@ Peers bringUpPair(int round)
                              && p.answerer->isChannelOpen(); }, 15000)) {
         std::fprintf(stderr, "FAIL: data channels never opened (round %d)\n",
                      round);
+        return {};
+    }
+    if (*failed) {
+        std::fprintf(stderr, "FAIL: a peer reported Failed during bring-up "
+                             "(round %d) — negotiation is throwing\n", round);
         return {};
     }
     // Video m-lines were announced in the initial offer. The tracks are

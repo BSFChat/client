@@ -637,7 +637,18 @@ void PeerConnectionManager::applyOffer(const std::string& sdp) {
         m_remoteDescriptionSet = true;
         flushPendingCandidates();
 
-        m_pc->setLocalDescription(rtc::Description::Type::Answer);
+        // libdatachannel auto-negotiates: setRemoteDescription(offer)
+        // already produced the answer (it arrives via onLocalDescription)
+        // and returned the signaling state to Stable. Setting the answer a
+        // second time from Stable throws "Unexpected local desciption type
+        // answer in signaling state stable". That throw used to be
+        // survivable — the queued answer still went out — until a failed
+        // peer started being removed at once (rc.10+), which dropped the
+        // answer with it: the answerer never replied, every call timed out
+        // after 30 s, and nobody could hear or see anybody (rc.13 field
+        // report). Only answer explicitly if auto-negotiation did not.
+        if (m_pc->signalingState() == rtc::PeerConnection::SignalingState::HaveRemoteOffer)
+            m_pc->setLocalDescription(rtc::Description::Type::Answer);
     } catch (const std::exception& e) {
         failPeer("applyOffer", e);
     }
