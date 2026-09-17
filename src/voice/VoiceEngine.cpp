@@ -644,14 +644,12 @@ void VoiceEngine::setVideoSendCeiling(VideoStreamId stream, int maxKbps) {
     }
 }
 
-void VoiceEngine::maybeSetupVideoFor(const QString& userId) {
-    if (!m_videoSendActive) return;
-    auto* peer = m_peers.value(userId);
+// Brings one peer up to date with everything about our send side that
+// it missed by connecting late: the pacer ceiling, and which streams are
+// already running. Safe to call more than once — the announcements are
+// idempotent on the receiving end.
+void VoiceEngine::catchUpVideoState(PeerConnectionManager* peer) {
     if (!peer || !peer->remoteSupportsVideoRtp()) return;
-    peer->ensureVideoTracks();
-    // A peer that joined mid-share inherits the current pacer ceiling
-    // and hears that the stream is already running, rather than only
-    // learning either on the next change.
     for (int s = 0; s < kVideoStreamCount; ++s) {
         if (m_pacerCeilingKbps[s] > 0)
             peer->setVideoPacingCeilingKbps(VideoStreamId(s), m_pacerCeilingKbps[s]);
@@ -660,12 +658,35 @@ void VoiceEngine::maybeSetupVideoFor(const QString& userId) {
     }
 }
 
+void VoiceEngine::maybeSetupVideoFor(const QString& userId) {
+    auto* peer = m_peers.value(userId);
+    if (!peer || !peer->remoteSupportsVideoRtp()) return;
+    // The catch-up must NOT sit behind m_videoSendActive. That flag is
+    // only set once ScreenShareController sees a video-capable peer, so
+    // for the exact case this replay exists for — a share started while
+    // nobody capable was connected — it is still false at the moment
+    // the first such peer's caps arrive, and the whole replay was
+    // skipped. The viewer then heard about a camera started after it
+    // connected and never about the share that was already running
+    // (rc.15). What we have announced is a fact about us; it does not
+    // depend on whether the RTP tracks exist yet.
+    catchUpVideoState(peer);
+    if (!m_videoSendActive) return;
+    peer->ensureVideoTracks();
+}
+
 void VoiceEngine::prepareVideoSend() {
     if (!m_running) return;
+    const bool firstActivation = !m_videoSendActive;
     m_videoSendActive = true;
     for (auto it = m_peers.begin(); it != m_peers.end(); ++it) {
-        if (it.value()->remoteSupportsVideoRtp())
-            it.value()->ensureVideoTracks();
+        if (!it.value() || !it.value()->remoteSupportsVideoRtp()) continue;
+        it.value()->ensureVideoTracks();
+        // The other half of the same ordering hole: peers that were
+        // already connected when the send side latched on never got the
+        // replay either, because maybeSetupVideoFor ran (and bailed)
+        // before this point and is not called again.
+        if (firstActivation) catchUpVideoState(it.value());
     }
 }
 

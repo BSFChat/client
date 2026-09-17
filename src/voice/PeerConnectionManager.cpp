@@ -48,13 +48,64 @@ const char* gatherStr(rtc::PeerConnection::GatheringState s) {
 }
 
 // Fixed per-stream track identity. Both endpoints run this code, so
-// mids/PTs agree by construction; SSRCs are randomized per endpoint
-// (RTP requires sender-unique SSRCs within a session).
-struct VideoStreamSpec { const char* mid; uint8_t payloadType; const char* cname; };
-constexpr VideoStreamSpec kVideoSpecs[kVideoStreamCount] = {
-    {"vscreen", 96, "bsf-screen"},
-    {"vcamera", 97, "bsf-camera"},
+// mids/PTs agree by construction.
+//
+// SSRCs ARE PART OF THAT IDENTITY, and they are FIXED rather than
+// random for one blunt reason: libdatachannel routes every incoming RTP
+// packet by SSRC. impl::PeerConnection::dispatchMedia() has a shortcut
+// for a connection with exactly ONE m-line ("there is only one track,
+// give it everything"); with two or more it looks the packet's SSRC up
+// in a map built solely from the `a=ssrc:` attributes of the negotiated
+// descriptions, and drops the packet when the lookup misses. We
+// negotiate TWO video m-lines and used to declare no SSRCs at all, so
+// that map was empty and every video packet either side ever sent was
+// discarded inside the receiver before any track, handler or onFrame
+// saw it — a share that sends perfectly and is never seen (rc.15).
+//
+// Each m-line declares BOTH endpoints' SSRCs: the side that creates the
+// m-line sends on `offererSsrc`, the side that adopts it via onTrack
+// sends on `answererSsrc`.
+//
+// Declaring BOTH on the offering side is not belt-and-braces, it is the
+// only thing that makes the reverse direction work. The answerer cannot
+// contribute an SSRC of its own to the negotiation: its answer is built
+// by reciprocating the offer's media, and Description::Media::
+// reciprocate() ends with clearSSRCs() — so the answer carries no
+// `a=ssrc:` line whatever the answerer does, and our onTrack handler is
+// a queued invocation that could not get one in there in time anyway.
+// The demux map is fed from the LOCAL description as well as the remote
+// one, so one offer carrying both SSRCs is enough for both endpoints:
+// the offerer learns `answererSsrc` from its own offer, the answerer
+// learns `offererSsrc` from the same offer as its remote description.
+//
+// Consequence worth knowing: against a peer running a build from before
+// this change, only the direction INTO that peer works — its own RTP
+// still goes out under a random, undeclared SSRC that we cannot route.
+//
+// Values are arbitrary but must differ per (m-line, role); SSRCs only
+// have to be unique within one peer connection, so the same four
+// constants are safe across every call.
+struct VideoStreamSpec {
+    const char* mid;
+    uint8_t payloadType;
+    const char* cname;
+    uint32_t offererSsrc;    // used by the side that addTrack()s this m-line
+    uint32_t answererSsrc;   // used by the side that adopts it via onTrack
 };
+constexpr VideoStreamSpec kVideoSpecs[kVideoStreamCount] = {
+    {"vscreen", 96, "bsf-screen", 0xB5F5C001u, 0xB5F5C002u},
+    {"vcamera", 97, "bsf-camera", 0xB5FCA001u, 0xB5FCA002u},
+};
+
+// The `a=ssrc:` lines that make the receiver's demultiplexer able to
+// find this m-line's track. Must be applied to the media description
+// BEFORE it is handed to addTrack(), because that description is what
+// goes into the SDP.
+void declareVideoSsrcs(rtc::Description::Video& media, const VideoStreamSpec& spec)
+{
+    media.addSSRC(spec.offererSsrc, spec.cname);
+    media.addSSRC(spec.answererSsrc, spec.cname);
+}
 
 int streamIndexForMid(const std::string& mid) {
     for (int i = 0; i < kVideoStreamCount; ++i)
@@ -460,7 +511,7 @@ void PeerConnectionManager::setupCallbacks() {
                   qPrintable(m_peerId), track->mid().c_str());
             if (idx < 0) return;   // unknown m-line — future stream kind
             if (m_video[idx].track) return;   // already have it
-            attachVideoTrack(VideoStreamId(idx), track);
+            attachVideoTrack(VideoStreamId(idx), track, /*adopted=*/true);
         }, Qt::QueuedConnection);
     });
 }
@@ -473,6 +524,9 @@ void PeerConnectionManager::setupDataChannel(std::shared_ptr<rtc::DataChannel> d
         QMetaObject::invokeMethod(this, [this]() {
             qCInfo(logVoicePc, " [%s] DataChannel open — audio can flow",
                   qPrintable(m_peerId));
+            // Fallback path for control: whatever was queued before any
+            // channel existed goes out now, in order.
+            flushPendingControl();
         }, Qt::QueuedConnection);
     });
 
@@ -579,6 +633,7 @@ void PeerConnectionManager::setupControlChannel(std::shared_ptr<rtc::DataChannel
         QMetaObject::invokeMethod(this, [this]() {
             qCInfo(logVoicePc, " [%s] control channel open (reliable)",
                   qPrintable(m_peerId));
+            flushPendingControl();
         }, Qt::QueuedConnection);
     });
     dc->onMessage([this, alive = m_alive](rtc::message_variant msg) {
@@ -623,8 +678,9 @@ void PeerConnectionManager::createOffer() {
             rtc::Description::Video media(kVideoSpecs[i].mid,
                                           rtc::Description::Direction::SendRecv);
             media.addH264Codec(kVideoSpecs[i].payloadType);
+            declareVideoSsrcs(media, kVideoSpecs[i]);
             auto track = m_pc->addTrack(std::move(media));
-            attachVideoTrack(VideoStreamId(i), track);
+            attachVideoTrack(VideoStreamId(i), track, /*adopted=*/false);
         }
 
         // Create unreliable DataChannel for audio
@@ -799,6 +855,27 @@ void PeerConnectionManager::sendControl(const QByteArray& json) {
     // Brings the reliable channel up the first time control traffic
     // flows toward a peer that advertises it; no-op otherwise.
     ensureControlChannel();
+    if (deliverControl(json)) return;
+    // Nothing is open YET. That is the normal state at the only moment
+    // the engine has to tell a joining peer about a stream that is
+    // already running: caps arrive with the SDP answer, a full round
+    // trip before any data channel opens. Dropping the message here is
+    // how a viewer who joined during a share was never told the share
+    // existed (rc.15) — it saw the camera, started after it connected,
+    // and nothing else. Hold it until a channel opens.
+    if (m_pendingControl.size() >= kMaxPendingControl) {
+        // Bounded: control is small and idempotent-ish, and a peer that
+        // never opens a channel is a peer that is going away.
+        m_pendingControl.removeFirst();
+        qCDebug(logVoicePc, " [%s] pre-open control backlog full — "
+               "dropped the oldest message", qPrintable(m_peerId));
+    }
+    m_pendingControl.append(json);
+}
+
+// Returns false when there is no open channel to put this on; the
+// caller decides whether to queue it or let it go.
+bool PeerConnectionManager::deliverControl(const QByteArray& json) {
     rtc::binary data;
     data.reserve(json.size() + 1);
     data.push_back(std::byte{0x04});
@@ -811,15 +888,30 @@ void PeerConnectionManager::sendControl(const QByteArray& json) {
     if (m_controlDc && m_controlDc->isOpen()) {
         try {
             m_controlDc->send(data);
-            return;
+            return true;
         } catch (const std::exception& e) {
             qCDebug(logVoicePc, " [%s] control send failed on reliable "
                    "channel (%s) — falling back to the audio channel",
                    qPrintable(m_peerId), e.what());
         }
     }
-    if (!m_dc || !m_dc->isOpen()) return;
-    sendOnDataChannel(std::move(data), "control");
+    if (!m_dc || !m_dc->isOpen()) return false;
+    return sendOnDataChannel(std::move(data), "control");
+}
+
+// Called from every channel's onOpen. Order is preserved, and anything
+// that still cannot go out (the audio channel opened but the message
+// was rejected) goes back on the queue for the next opening.
+void PeerConnectionManager::flushPendingControl() {
+    if (m_pendingControl.isEmpty()) return;
+    const QList<QByteArray> queued = std::move(m_pendingControl);
+    m_pendingControl.clear();
+    qCInfo(logVoicePc, " [%s] replaying %d control message(s) held until a "
+          "channel opened", qPrintable(m_peerId), int(queued.size()));
+    for (const QByteArray& json : queued) {
+        if (!deliverControl(json))
+            m_pendingControl.append(json);
+    }
 }
 
 bool PeerConnectionManager::videoMidsAlreadyDeclared() const {
@@ -864,8 +956,9 @@ void PeerConnectionManager::ensureVideoTracks() {
             rtc::Description::Video media(kVideoSpecs[i].mid,
                                           rtc::Description::Direction::SendRecv);
             media.addH264Codec(kVideoSpecs[i].payloadType);
+            declareVideoSsrcs(media, kVideoSpecs[i]);
             auto track = m_pc->addTrack(std::move(media));
-            attachVideoTrack(VideoStreamId(i), track);
+            attachVideoTrack(VideoStreamId(i), track, /*adopted=*/false);
         }
     } catch (const std::exception& e) {
         failPeer("ensureVideoTracks", e);
@@ -875,16 +968,24 @@ void PeerConnectionManager::ensureVideoTracks() {
 }
 
 void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
-                                             std::shared_ptr<rtc::Track> track) {
+                                             std::shared_ptr<rtc::Track> track,
+                                             bool adopted) {
     const int idx = int(stream);
     const auto& spec = kVideoSpecs[idx];
     auto& ctx = m_video[idx];
 
     ctx.track = track;
     ctx.startTimeUs = -1;
+    // Which half of the m-line's declared SSRC pair is ours depends on
+    // which side put the m-line there, NOT on m_isOfferer: the fallback
+    // renegotiation path (ensureVideoTracks) can add tracks from either
+    // role. `adopted` is exactly that question. Getting this wrong
+    // collides the two endpoints' SSRCs and the depacketizer interleaves
+    // two senders' packets into one broken access unit — see
+    // kVideoSpecs for why the SSRC is fixed rather than random.
     ctx.rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
-        QRandomGenerator::global()->generate(), spec.cname,
-        spec.payloadType, rtc::H264RtpPacketizer::defaultClockRate);
+        adopted ? spec.answererSsrc : spec.offererSsrc, spec.cname,
+        spec.payloadType, rtc::H264RtpPacketizer::ClockRate);
 
     // Chain: outgoing traverses head→tail (packetize, then SR/NACK
     // bookkeeping); incoming traverses tail→head (RTCP session strips
