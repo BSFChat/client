@@ -1933,6 +1933,12 @@ void ServerConnection::teardownVoiceSession()
         m_voiceEngine->stop();
         delete m_voiceEngine;
         m_voiceEngine = nullptr;
+        // AFTER the engine is gone, not only before. The IP-privacy getters
+        // read the engine rather than a cached flag, so the emit inside
+        // clearVoiceProtection() above still saw the live session's answer —
+        // and the shield would have sat on the departed call's wording until
+        // something unrelated happened to re-evaluate it.
+        emit voiceIpPrivacyChanged();
     }
     // Blank every remote video surface from the session (fires
     // liveVideoChanged → peerScreen/CameraFrameChanged for QML).
@@ -2169,10 +2175,11 @@ void ServerConnection::setVoiceProtection(voice::MediaProtection p)
 
 void ServerConnection::clearVoiceProtection()
 {
-    // Unconditional, unlike the guard below: the IP-privacy getters read the
-    // ENGINE rather than a cached flag, so what they answer changes the moment
-    // the engine goes, and the dock must be told even when the protection
-    // badge itself was already clear.
+    // Unconditional, unlike the guard below, and deliberately paired with a
+    // second emit in teardownVoiceSession after the engine is deleted. The
+    // IP-privacy getters read the ENGINE rather than a cached flag, so this
+    // one covers the paths that clear protection without an engine to delete,
+    // and that one covers the moment the answer actually changes.
     emit voiceIpPrivacyChanged();
     if (!m_voiceProtectionActive) return;
     m_voiceProtectionActive = false;
