@@ -29,8 +29,13 @@ IMFTransform* activateDecoderMft(const GUID& subtype) {
     MFT_REGISTER_TYPE_INFO inInfo{MFMediaType_Video, subtype};
     IMFActivate** activates = nullptr;
     UINT32 count = 0;
-    const UINT32 flags = MFT_ENUM_FLAG_SORTANDFILTER | MFT_ENUM_FLAG_SYNCMFT
-        | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_HARDWARE;
+    // SYNC MFTs only. This class drives ProcessInput/ProcessOutput
+    // directly and has no event pump, so an async (hardware) MFT would
+    // activate happily and then never produce a frame. Hardware decode
+    // is not lost by this: DXVA acceleration lives INSIDE the sync
+    // decoder MFTs on Windows, which is also how the H.264 path above
+    // has always got it.
+    const UINT32 flags = MFT_ENUM_FLAG_SORTANDFILTER | MFT_ENUM_FLAG_SYNCMFT;
     if (FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, flags, &inInfo, nullptr,
                          &activates, &count)) || count == 0) {
         if (activates) CoTaskMemFree(activates);
