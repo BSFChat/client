@@ -261,6 +261,63 @@ private slots:
             "m.call.answer");
         QCOMPARE(voice::parseCallContent(payload).to, QString(kUs));
     }
+
+    // EVERY builder addresses its event, and the server now depends on it.
+    //
+    // Recipient-scoped delivery is keyed on `content.to`: the server hands an
+    // addressed signalling event to the sender and the addressee and nobody
+    // else, and sweeps it two minutes later. An event WITHOUT `to` cannot be
+    // scoped — the server would have to guess a recipient, and a wrong guess is
+    // a call that silently never connects — so it falls back to the old
+    // behaviour: broadcast to the whole room and kept in history forever, with
+    // the sender's LAN and public IP inside it.
+    //
+    // So a builder that forgets the field does not break the call. It quietly
+    // reopens the leak, on that one event type, with nothing failing anywhere.
+    // That is exactly the kind of regression that needs a test rather than a
+    // comment.
+    void everyOutboundBuilderAddressesItsEvent()
+    {
+        const QString to = QString::fromUtf8(kUs);
+        const QString callId = QStringLiteral("call-1");
+
+        const QVector<QPair<const char*, nlohmann::json>> built = {
+            {"m.call.invite", voice::buildInvite(callId, to, sampleSdp(), capsJson())},
+            {"m.call.answer", voice::buildAnswer(callId, to, sampleSdp(), capsJson())},
+            {"bsfchat.call.negotiate",
+             voice::buildNegotiate(callId, to, "offer", sampleSdp())},
+            {"m.call.candidates",
+             voice::buildCandidates(callId, to,
+                                    {{"candidate:1 1 udp 2130706431 192.168.1.9 "
+                                      "54321 typ host", "0"}})},
+            {"m.call.hangup", voice::buildHangup(callId, to, "user_hangup")},
+        };
+
+        for (const auto& [type, content] : built) {
+            const auto parsed = voice::parseCallContent(throughSync(content, type));
+            QVERIFY2(parsed.valid, type);
+            QVERIFY2(!parsed.to.isEmpty(),
+                     qPrintable(QStringLiteral("%1 goes out unaddressed — the server "
+                                               "cannot scope it and will broadcast it "
+                                               "to the whole room, addresses included")
+                                    .arg(QLatin1String(type))));
+            QCOMPARE(parsed.to, to);
+        }
+    }
+
+    // And the server's own rule for reading it, mirrored here so the two ends
+    // of the wire cannot drift: an empty string is NOT an address. The server
+    // treats it as unaddressed, so a client emitting one would be broadcasting
+    // while believing it was not.
+    void anEmptyAddresseeIsNotAnAddress()
+    {
+        auto content = voice::buildHangup(QStringLiteral("call-1"),
+                                          QString(), "user_hangup");
+        QCOMPARE(content["to"].get<std::string>(), std::string());
+        // The receiving half agrees: an empty `to` is the legacy,
+        // dispatch-on-sender path, not "addressed to nobody".
+        QVERIFY(voice::addressedToUs(QString(), QStringLiteral("@anyone:test")));
+    }
 };
 
 QTEST_MAIN(TestCallSignalling)
