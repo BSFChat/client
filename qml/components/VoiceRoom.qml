@@ -7,6 +7,7 @@ import QtMultimedia
 import BSFChat
 
 import "../js/VideoStage.js" as VideoStage
+import "../js/VideoWindows.js" as VideoWindows
 
 // VoiceRoom (SPEC §3.3) — the "hero" main-content view when the user is in
 // a voice channel. Header + participant grid. Each tile carries an avatar,
@@ -127,6 +128,16 @@ Rectangle {
         // leaving the stage blank.
         if (room._selectedKey && !VideoStage.hasKey(next, room._selectedKey))
             room._selectedKey = "";
+        // And a feed that has gone takes its windows with it: the share
+        // stopped, the peer left, or we left the channel. pruneToFeeds
+        // returns the SAME array when nothing is stale, which matters —
+        // this runs four times a second while anyone is sharing, and a
+        // fresh array would destroy and rebuild every pop-out window
+        // that often.
+        room._popouts = VideoWindows.pruneToFeeds(room._popouts, next);
+        if (room._fullscreenKey
+            && !VideoStage.hasKey(next, room._fullscreenKey))
+            room._fullscreenKey = "";
     }
 
     // The roster is the only place a display name lives; the feed
@@ -211,24 +222,135 @@ Rectangle {
     property bool showMembers: true
     onIsSharingChanged: if (isSharing) showMembers = true
 
-    property bool fullscreen: false
+    // ── Fullscreen and pop-out ────────────────────────────────────
+    //
+    // Both of these put a feed in a window of its own, and NEITHER of
+    // them touches the main window. The header button used to write
+    // `Window.window.visibility = Window.FullScreen`, which made the
+    // app — sidebar, channel list, member strip, dock and all — cover
+    // the screen with the video still in its panel in the middle. What
+    // the owner asked for is the VIDEO filling the screen, so the
+    // fullscreen button now opens VideoFullscreenWindow on the feed
+    // that is on the stage and leaves this window exactly as it was.
+    // tests/test_qml_hygiene.cpp fails if a write to another window's
+    // visibility comes back to any of the voice-room video files.
+    //
+    // The feed key currently shown fullscreen BY THIS ROOM, or "". A
+    // feed that is popped out gets its fullscreen from the pop-out
+    // window instead (VideoWindows.fullscreenOwner), so the app can
+    // never stack two fullscreen windows of one feed on one screen.
+    property string _fullscreenKey: ""
+    // Open pop-outs. See qml/js/VideoWindows.js — an array of records,
+    // oldest first, whose identity changes only when a window actually
+    // opens or closes.
+    property var _popouts: VideoWindows.emptyState()
+
+    readonly property bool fullscreen: _fullscreenKey !== ""
+
+    // "The feed on the stage" for a keyboard or header action: the
+    // explicit pick while it lives, else the automatic one.
+    function _stageFeedKey() {
+        return VideoStage.resolveSelection(room._feeds, room._selectedKey);
+    }
+
+    function feedForKey(key) {
+        var i = VideoStage.indexOfKey(room._feeds, key);
+        return i >= 0 ? room._feeds[i] : null;
+    }
+
+    function isPoppedOut(key) {
+        return VideoWindows.isOpen(room._popouts, key);
+    }
+
+    // Fullscreen for one feed, routed to whichever window owns it.
+    function toggleFullscreenFor(key) {
+        if (!key || !VideoStage.hasKey(room._feeds, key)) return;
+        if (VideoWindows.fullscreenOwner(room._popouts, key) === "popout") {
+            var w = popoutHost.windowFor(key);
+            if (w) {
+                w.raise();
+                w.requestActivate();
+                w.toggleFullscreen();
+            }
+            return;
+        }
+        room._fullscreenKey = (room._fullscreenKey === key) ? "" : key;
+    }
+
     function toggleFullscreen() {
-        var w = Window.window;
-        if (!w) return;
-        if (fullscreen) {
-            w.visibility = Window.AutomaticVisibility;
-            fullscreen = false;
-        } else {
-            w.visibility = Window.FullScreen;
-            fullscreen = true;
+        room.toggleFullscreenFor(room.fullscreen ? room._fullscreenKey
+                                                 : room._stageFeedKey());
+    }
+
+    // Pop a feed out into its own window, or raise the one already up.
+    function popOutFeed(key) {
+        var feed = room.feedForKey(key);
+        if (!feed) return;
+        var r = VideoWindows.requestPopout(room._popouts, feed);
+        if (r.action === "open") {
+            room._popouts = r.state;
+            // A feed cannot be fullscreen from here AND popped out:
+            // ownership just moved to the new window.
+            if (room._fullscreenKey === key) room._fullscreenKey = "";
+        } else if (r.action === "raise") {
+            var w = popoutHost.windowFor(r.key);
+            if (w) { w.raise(); w.requestActivate(); }
         }
     }
-    // Esc exits fullscreen. Only fires while the voice room has
-    // focus so we don't intercept Esc elsewhere.
-    Shortcut {
-        sequence: "Escape"
-        enabled: room.fullscreen
-        onActivated: room.toggleFullscreen()
+
+    function closePopout(key) {
+        room._popouts = VideoWindows.closePopout(room._popouts, key);
+    }
+
+    // The room's own fullscreen window. A Loader, so the window exists
+    // only while something is fullscreen and is destroyed — not merely
+    // hidden — on the way out. `active` also falls to false on its own
+    // when the feed disappears from _feeds, which is how "the stream
+    // ended, the peer left, we left the channel" closes it.
+    Loader {
+        id: roomFullscreen
+        active: room._fullscreenKey !== ""
+                && VideoStage.hasKey(room._feeds, room._fullscreenKey)
+        sourceComponent: VideoFullscreenWindow {
+            // Both of these have to survive the feed vanishing between
+            // one binding evaluation and the next — `active` above and
+            // these are not evaluated in any guaranteed order, and
+            // `feedForKey(...).userId` on a feed that has just ended is
+            // a TypeError that takes the whole binding with it.
+            feed: room.feedForKey(room._fullscreenKey)
+            displayName: {
+                var f = room.feedForKey(room._fullscreenKey);
+                return f ? room._displayNameFor(f.userId) : "";
+            }
+            liveTick: room._shareTick
+            onExitRequested: room._fullscreenKey = ""
+        }
+    }
+
+    // Pop-out windows, one per record. An Instantiator rather than a
+    // Repeater because these are Windows, not Items — there is no
+    // visual parent for them to sit in.
+    Instantiator {
+        id: popoutHost
+        model: room._popouts
+        delegate: VideoPopoutWindow {
+            required property var modelData
+            required property int index
+            feed: modelData
+            displayName: room._displayNameFor(modelData.userId)
+            liveTick: room._shareTick
+            cascadeIndex: index
+            onCloseRequested: room.closePopout(modelData.key)
+        }
+
+        // Raising an existing window needs the object behind a key.
+        function windowFor(key) {
+            for (var i = 0; i < count; ++i) {
+                var o = objectAt(i);
+                if (o && o.feed && o.feed.key === key) return o;
+            }
+            return null;
+        }
     }
 
     // Header (SPEC §3.3, 56h) — channel name, member count, crypto badge,
@@ -339,7 +461,8 @@ Rectangle {
                 }
                 ToolTip.visible: fullscreenHover.containsMouse
                 ToolTip.text: room.fullscreen
-                    ? "Exit fullscreen  (Esc)" : "Fullscreen"
+                    ? "Exit full screen  (Esc)"
+                    : "Full screen this video  (F)"
                 ToolTip.delay: 400
             }
 
@@ -596,13 +719,23 @@ Rectangle {
                     VideoStage.moveSelection(room._feeds, room._selectedKey, 1);
                 event.accepted = true;
             }
-            // Back to auto. The fullscreen Shortcut above takes Escape
-            // first while fullscreen (shortcuts are matched before key
-            // events reach items), which is the order you want: leave
-            // fullscreen, then let a second press drop the pick.
+            // Back to auto. The fullscreen window is a window of its
+            // own now and takes its own Escape while it has focus, so
+            // this one only ever means "drop the pick".
             Keys.onEscapePressed: function(event) {
                 room._selectedKey = "";
                 event.accepted = true;
+            }
+            // F full-screens the feed on the stage. A Keys handler and
+            // not a Shortcut, for the same reason as the arrows above:
+            // a window-wide "F" would fire in every text field in the
+            // app. Bare F only — Cmd-F is search.
+            Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_F
+                    && event.modifiers === Qt.NoModifier) {
+                    room.toggleFullscreen();
+                    event.accepted = true;
+                }
             }
 
             // The feed that is on the stage still occupies its slot in
@@ -696,6 +829,11 @@ Rectangle {
                     liveTick: room._shareTick
                     featured: stageIndex >= 0
                     compact: stageIndex < 0
+                    // The tile stays LIVE while its feed is popped out —
+                    // that is the whole reason the registry fans one
+                    // stream out to several sinks — so all this does is
+                    // say so.
+                    poppedOut: room.isPoppedOut(modelData.key)
                     x: cell.x
                     y: cell.y
                     width: cell.width
@@ -705,6 +843,10 @@ Rectangle {
                         feedArea.forceActiveFocus();
                         room._selectedKey = modelData.key;
                     }
+                    onFullscreenRequested:
+                        room.toggleFullscreenFor(modelData.key)
+                    onPopOutRequested: room.popOutFeed(modelData.key)
+                    onClosePopOutRequested: room.closePopout(modelData.key)
                 }
             }
         }
