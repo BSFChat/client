@@ -1159,30 +1159,53 @@ void ServerConnection::resetUnreadForRoom(const QString& roomId)
     if (m_hasUnread != hadUnread) emit hasUnreadChanged();
 }
 
-void ServerConnection::requestMicrophonePermission()
+voice::MicPermission ServerConnection::microphonePermission() const
 {
 #if QT_CONFIG(permissions)
-    QMicrophonePermission permission;
-    switch (qApp->checkPermission(permission)) {
-    case Qt::PermissionStatus::Undetermined:
+    switch (qApp->checkPermission(QMicrophonePermission{})) {
+    case Qt::PermissionStatus::Undetermined: return voice::MicPermission::Undetermined;
+    case Qt::PermissionStatus::Denied:       return voice::MicPermission::Denied;
+    case Qt::PermissionStatus::Granted:      return voice::MicPermission::Granted;
+    }
+    return voice::MicPermission::Unsupported;
+#else
+    return voice::MicPermission::Unsupported;
+#endif
+}
+
+bool ServerConnection::microphonePermissionAllowsJoin()
+{
+    const auto action = voice::micPermissionAction(microphonePermission());
+    switch (action) {
+    case voice::MicPermissionAction::Refuse:
+        // V-H4, second half. This used to be a warning and a join: the
+        // user landed in the channel with a microphone that records
+        // silence, their member row was kept alive by the poll, and
+        // nothing told them why nobody could hear them. The OS will not
+        // prompt again once it has said no, so there is nothing to wait
+        // for — refuse it here, the same way a missing audio device is
+        // refused, and point at the switch that fixes it.
+        qWarning("[voice] microphone permission is denied — refusing the join");
+        setVoiceError(voice::refusalMessage(voice::StartRefusal::MicrophoneDenied));
+        return false;
+    case voice::MicPermissionAction::RequestThenProceed:
+#if QT_CONFIG(permissions)
         // Asynchronous by construction — the prompt is modal to the OS,
         // not to us. The join continues; if the user denies it,
         // AudioEngine::start fails and VoiceSession unwinds the join.
-        qApp->requestPermission(permission, this,
-            [](const QPermission& granted) {
-                if (granted.status() != Qt::PermissionStatus::Granted) {
-                    qWarning("[voice] microphone permission denied — voice "
-                             "will not capture");
-                }
+        qApp->requestPermission(QMicrophonePermission{}, this,
+            [this](const QPermission& granted) {
+                if (granted.status() == Qt::PermissionStatus::Granted) return;
+                qWarning("[voice] microphone permission denied at the prompt");
+                setVoiceError(voice::refusalMessage(
+                    voice::StartRefusal::MicrophoneDenied));
             });
-        break;
-    case Qt::PermissionStatus::Denied:
-        qWarning("[voice] microphone permission is denied in system settings");
-        break;
-    case Qt::PermissionStatus::Granted:
+#endif
+        return true;
+    case voice::MicPermissionAction::Proceed:
         break;
     }
-#endif
+    return true;
 }
 
 void ServerConnection::joinVoiceChannel(const QString& roomId)
@@ -1226,7 +1249,10 @@ void ServerConnection::joinVoiceChannel(const QString& roomId)
         return;
     }
 
-    requestMicrophonePermission();
+    // A denied microphone is a refusal, not a warning (V-H4): joining
+    // with one produces a member nobody can hear and who is told
+    // nothing. setVoiceError has already said where the switch is.
+    if (!microphonePermissionAllowsJoin()) return;
 
     // Refreshed here rather than once at construction: m_userId is filled
     // in by whichever of the four login paths ran (password, register,

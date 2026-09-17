@@ -16,6 +16,7 @@
 // builds. The .cpp side of it is voice-gated, so every CALL into
 // voice:: below sits behind BSFCHAT_VOICE_ENABLED.
 #include "voice/VoiceEncryption.h"
+#include "voice/VoiceStartPolicy.h"
 // The join/leave state machine. Header-only dependency on QObject/QJson
 // (CallSignal is a plain value type), so it is safe in non-voice builds
 // too — the session runs there as well; it simply has no transport to
@@ -859,9 +860,15 @@ public:
     // the session, both live and when replaying what it buffered during
     // the join (V-C1).
     void dispatchCallSignal(const CallSignal& signal);
-    // Ask for the microphone before voice/join on platforms that gate it
-    // (macOS/iOS/Android, Qt 6.5+). No-op elsewhere. V-H4.
-    void requestMicrophonePermission();
+    // The OS microphone permission, flattened for voice::micPermissionAction.
+    // Always Unsupported on a platform (or a Qt) without permissions. V-H4.
+    voice::MicPermission microphonePermission() const;
+    // Applies that rule before voice/join on platforms that gate the
+    // microphone (macOS/iOS/Android, Qt 6.5+): fires the first-run
+    // request when the user has not been asked, and returns FALSE when
+    // the OS has already refused — a join that proceeds then is a member
+    // nobody can hear. The refusal message is set for the UI. V-H4.
+    bool microphonePermissionAllowsJoin();
     QTimer* m_voiceErrorTimer = nullptr;
     float m_micLevel = 0.0f;
     bool m_micSilent = false;

@@ -248,6 +248,29 @@ jobs:
             exit 1
           fi
           echo "Found app bundle: $APP_PATH"
+          # V-H4: the microphone/camera permission backends are STATIC Qt
+          # plugins, linked (or not) at configure time depending on
+          # whether the target's Info.plist already carries the matching
+          # usage description. When that link silently does not happen —
+          # which is how 0.0.44-rc.7 shipped — the app logs "Could not
+          # find permission plugin for QMicrophonePermission", every
+          # permission query answers Denied, macOS never prompts and
+          # never lists the app under Privacy & Security, and voice joins
+          # with a mic that only ever records silence. macdeployqt cannot
+          # fix this afterwards: there is no dylib to copy. So check the
+          # shipped artefact, not the source.
+          for key in NSMicrophoneUsageDescription NSCameraUsageDescription \
+                     NSScreenCaptureUsageDescription; do
+            /usr/libexec/PlistBuddy -c "print $key" "$APP_PATH/Contents/Info.plist" \
+              || { echo "ERROR: $key missing from the bundle's Info.plist"; exit 1; }
+          done
+          for plugin in QDarwinMicrophonePermissionPlugin QDarwinCameraPermissionPlugin; do
+            if ! nm -a "$APP_PATH/Contents/MacOS/bsfchat-app" | grep -q "$plugin"; then
+              echo "ERROR: $plugin is not linked into the binary — permissions will read as denied"
+              exit 1
+            fi
+          done
+          echo "Permission plugins linked and usage descriptions present"
           # Deploy Qt frameworks and QML modules into the bundle
           macdeployqt "$APP_PATH" -always-overwrite -qmldir=${{ github.workspace }}/qml -verbose=2
           # Ensure QML modules are copied (macdeployqt often misses them)
