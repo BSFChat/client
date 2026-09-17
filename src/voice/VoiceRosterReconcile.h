@@ -60,4 +60,31 @@ inline RosterReconcile reconcileRoster(const QJsonArray& members,
     return out;
 }
 
+// ---------------------------------------------------------------------
+// What a roster row should SAY about a peer
+// ---------------------------------------------------------------------
+// `liveState` is the PeerConnectionManager's own state while we still
+// hold one ("new" / "connecting" / "connected" / "disconnected" /
+// "failed"); pass an empty string for a roster member we hold no peer
+// connection for.
+//
+// The case this exists for: VoiceEngine tears a peer DOWN the instant it
+// reports Failed, in the same slot that emits the state change. The UI
+// therefore saw "failed" and, one statement later, saw the peer vanish
+// from the map — after which the roster's lookup missed and fell back to
+// the default, "new". The net visible state of a peer whose ICE had
+// failed was indistinguishable from one that had only just been added.
+//
+// That is the wrong way round. ICE failure IS the interesting state: the
+// mesh reconciler re-offers every 5 s (and only from the lesser-id side),
+// so a peer that keeps failing sits there looking like it is merely still
+// connecting, forever, with nothing anywhere saying otherwise. Remember
+// that we gave up on it and keep saying so until a peer object exists for
+// that user again.
+inline QString peerDisplayState(const QString& liveState, bool gaveUp)
+{
+    if (!liveState.isEmpty()) return liveState;
+    return gaveUp ? QStringLiteral("failed") : QStringLiteral("new");
+}
+
 } // namespace voice

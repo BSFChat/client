@@ -252,6 +252,7 @@ private slots:
     void outboxRetriesWithBackoffThenGivesUp();
     void outboxKeepsTheCandidateBatchUntilItIsAccepted();
     void leavingFlushesTheHangupsStopItselfQueued();
+    void aFailedPeerKeepsSayingFailedInsteadOfNew();
 
     // ---- V-L4 -------------------------------------------------------
     void transportSelectorRefusesMixedRoster();
@@ -1128,6 +1129,40 @@ void TestVoiceLifecycle::leavingFlushesTheHangupsStopItselfQueued()
         QCOMPARE(entry.type, QStringLiteral("m.call.hangup"));
     outbox.clear();
     QVERIFY(outbox.isEmpty());
+}
+
+void TestVoiceLifecycle::aFailedPeerKeepsSayingFailedInsteadOfNew()
+{
+    // VoiceEngine tears a peer down in the same slot that reports it
+    // Failed, so the roster saw "failed" and, one statement later, saw
+    // the peer leave the map — after which the lookup missed and fell
+    // back to the default. A peer whose ICE had failed therefore
+    // rendered identically to one that had only just been added, while
+    // the mesh reconciler quietly retried every 5 s from one side only.
+
+    // While a peer object exists, its own state is the answer.
+    QCOMPARE(voice::peerDisplayState(QStringLiteral("connected"), false),
+             QStringLiteral("connected"));
+    QCOMPARE(voice::peerDisplayState(QStringLiteral("connecting"), false),
+             QStringLiteral("connecting"));
+    // ...even a live peer that is itself reporting failure.
+    QCOMPARE(voice::peerDisplayState(QStringLiteral("failed"), false),
+             QStringLiteral("failed"));
+
+    // No peer and no history: genuinely new (a roster member we have
+    // not offered to yet, e.g. one whose id sorts below ours).
+    QCOMPARE(voice::peerDisplayState(QString(), false),
+             QStringLiteral("new"));
+
+    // THE REGRESSION: no peer, because we gave up on it.
+    QCOMPARE(voice::peerDisplayState(QString(), true),
+             QStringLiteral("failed"));
+
+    // A live state always wins over the memory of an earlier failure —
+    // that is what makes a successful re-offer clear the indicator
+    // without a second code path.
+    QCOMPARE(voice::peerDisplayState(QStringLiteral("connecting"), true),
+             QStringLiteral("connecting"));
 }
 
 void TestVoiceLifecycle::transportSelectorRefusesMixedRoster()

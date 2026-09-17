@@ -2,6 +2,7 @@
 #include "voice/AudioEngine.h"
 #include "voice/CallSignalCodec.h"
 #include "voice/VoiceStartPolicy.h"
+#include "voice/VoiceRosterReconcile.h"
 #include "voice/PeerCaps.h"
 #include "voice/PeerConnectionManager.h"
 #include "voice/video/VideoDecoder.h"
@@ -192,6 +193,7 @@ void VoiceEngine::stop() {
     m_callIds.clear();
     m_pendingCandidates.clear();
     m_inboundCandidates.clear();
+    m_gaveUpPeers.clear();
     // Nothing queued is worth sending into a call that no longer exists —
     // except the hangups just enqueued above, which went out immediately.
     m_outbox.clear();
@@ -248,6 +250,9 @@ void VoiceEngine::addPeer(const QString& userId, bool isOfferer) {
 }
 
 void VoiceEngine::dropPeer(const QString& userId) {
+    // They are off the roster: not a failure, and nothing will render
+    // a state for them any more.
+    m_gaveUpPeers.remove(userId);
     if (!m_peers.contains(userId)) return;
     qCInfo(logVoice, "reconcile: %s left the roster — dropping peer",
           qPrintable(userId));
@@ -279,6 +284,11 @@ bool VoiceEngine::hasOpenPeers() const {
 }
 
 void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
+    // Every path that creates a peer comes through here (addPeer and
+    // handleCallInvite), so this is where "we gave up on them" stops
+    // being true: there is a live connection attempt again.
+    m_gaveUpPeers.remove(userId);
+
     // Signaling
     connect(peer, &PeerConnectionManager::localDescriptionReady,
             this, [this, userId](const std::string& type, const std::string& sdp) {
@@ -354,6 +364,7 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
         // ICE blip, so give it a grace period before giving up.
         if (s == PeerConnectionManager::PeerState::Failed) {
             // removePeer() emits peerDisconnected itself.
+            m_gaveUpPeers.insert(userId);
             removePeer(userId);
         } else if (s == PeerConnectionManager::PeerState::Disconnected) {
             startDisconnectGrace(userId);
@@ -378,6 +389,7 @@ void VoiceEngine::startDisconnectGrace(const QString& userId) {
         if (peer->peerState() == PeerConnectionManager::PeerState::Connected) return;
         qCInfo(logVoice, "peer %s did not recover from disconnect — removing",
               qPrintable(userId));
+        m_gaveUpPeers.insert(userId);
         removePeer(userId);
     });
     m_disconnectTimers[userId] = timer;
@@ -407,6 +419,7 @@ void VoiceEngine::startConnectWatchdog(const QString& userId) {
         if (peer->peerState() == PeerConnectionManager::PeerState::Connected) return;
         qCWarning(logVoice, "peer %s never reached connected — tearing down",
                  qPrintable(userId));
+        m_gaveUpPeers.insert(userId);
         removePeer(userId);
     });
     m_connectWatchdogs[userId] = timer;
@@ -440,7 +453,18 @@ QMap<QString, QString> VoiceEngine::peerStates() const {
     QMap<QString, QString> out;
     static const char* names[] = {"new","connecting","connected","disconnected","failed"};
     for (auto it = m_peers.begin(); it != m_peers.end(); ++it) {
-        out[it.key()] = QString::fromLatin1(names[int(it.value()->peerState())]);
+        // Null-guarded like every other walk over m_peers in this file;
+        // this one was the exception.
+        if (!it.value()) continue;
+        out[it.key()] = voice::peerDisplayState(
+            QString::fromLatin1(names[int(it.value()->peerState())]),
+            /*gaveUp=*/false);
+    }
+    // Peers we tore down BECAUSE they failed keep saying so. Without
+    // this the roster reports "new" for them — see peerDisplayState.
+    for (const QString& userId : m_gaveUpPeers) {
+        if (!out.contains(userId))
+            out[userId] = voice::peerDisplayState(QString(), /*gaveUp=*/true);
     }
     return out;
 }
@@ -1001,6 +1025,8 @@ void VoiceEngine::handleCallHangup(const QString& sender, const QString& callId)
         dropInboundCandidates(sender, callId);
         return;
     }
+    // A hangup is a clean departure, not a failure.
+    m_gaveUpPeers.remove(sender);
     // Drops this call's parked candidates and emits peerDisconnected.
     removePeer(sender);
 }
