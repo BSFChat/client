@@ -3,6 +3,7 @@
 #include "net/SyncLoop.h"
 #include "net/AuthError.h"
 #include "net/TokenedReply.h"
+#include "net/SnapshotGate.h"
 #include "model/RoomListModel.h"
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
@@ -12,6 +13,7 @@
 #include "util/PermissionMath.h"
 #include "identity/IdentityClient.h"
 #include "core/Settings.h"
+#include "core/ReadState.h"
 #include "store/LocalCache.h"
 #include "voice/CallSignalCodec.h"
 #include "voice/VoiceRosterReconcile.h"
@@ -477,8 +479,12 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             m_memberListModel->refreshDisplayNames();
             emitVoiceMembersIfChanged();
             // Sidebar voice rows carry a stamped display name, so they only
-            // rename when the snapshot is rebuilt.
+            // rename when the snapshot is rebuilt. Same for DM rows and the
+            // settings member lists.
             rebuildCategorizedRooms();
+            refreshDirectRooms();
+            m_memberSnapshotsDirty = true;
+            refreshMemberSnapshots();
         }
         emit profileFetched(userId, displayName, avatarUrl);
     });
@@ -503,6 +509,9 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             m_memberListModel->refreshDisplayNames();
             emitVoiceMembersIfChanged();
             rebuildCategorizedRooms();
+            refreshDirectRooms();
+            m_memberSnapshotsDirty = true;
+            refreshMemberSnapshots();
         }
         emit nicknameChanged(userId, nickname);
     });
@@ -2602,6 +2611,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 // Cache member events for all rooms + populate global
                 // display-name map that MessageModel reads from.
                 bsfchat::client::upsertMemberEvent(m_roomMembers[roomId], event);
+                m_memberSnapshotsDirty = true;
                 if (event.state_key.has_value()) {
                     QString uid = QString::fromStdString(*event.state_key);
                     QString dn = QString::fromStdString(event.content.data.value("displayname", ""));
@@ -2687,6 +2697,9 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
         // notification suppression below doesn't fire for events the
         // user has already seen in the live session.
         qint64 activeRoomNewestMsgTs = 0;
+        // Highest message origin_server_ts in this batch from ANY sender, for
+        // seeding a first-seen room's read marker after the loop.
+        qint64 batchNewestMsgTs = 0;
         // Mentions of us seen arriving in THIS batch. Only used when the server
         // reports no highlight_count for the room — see the apply site below.
         int witnessedMentions = 0;
@@ -2701,6 +2714,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 m_roomListModel->updateRoomName(roomId, name);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomMember)) {
                 bsfchat::client::upsertMemberEvent(m_roomMembers[roomId], event);
+                m_memberSnapshotsDirty = true;
                 if (roomId == m_activeRoomId) {
                     m_memberListModel->processEvent(event);
                 }
@@ -2762,6 +2776,8 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             if (type == QString::fromUtf8(bsfchat::event_type::kRoomMessage)) {
                 QString body = QString::fromStdString(event.content.data.value("body", ""));
                 m_roomListModel->updateLastMessage(roomId, body, event.origin_server_ts);
+                batchNewestMsgTs = std::max(batchNewestMsgTs,
+                                            static_cast<qint64>(event.origin_server_ts));
 
                 QString sender = QString::fromStdString(event.sender);
                 // Presence heuristic: any message means the sender was
@@ -2926,6 +2942,22 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             }
         }
 
+        // First sight of this room: give it a read marker, or the channel
+        // list's unread dot can never light for it (the dot needs something
+        // to compare against, and the marker was otherwise only ever written
+        // by opening the room). What "first sight" is worth depends on the
+        // batch — see core/ReadState.h. A resumed session's first sync is
+        // incremental, so a room that first appears there is new to us, not
+        // history. Deliberately AFTER the timeline loop: the notification and
+        // mention gates above must still see this batch against the marker
+        // as it stood before.
+        if (m_settings) {
+            const bool baselineBatch = m_hydratingFromCache
+                || (!m_firstSyncProcessed && !m_resumedFromCache);
+            m_settings->seedLastReadTs(
+                roomId, bsfchat::client::readSeedFor(baselineBatch, batchNewestMsgTs));
+        }
+
         // Apply server-authoritative unread count. The server already accounts
         // for the read marker, sender-is-self filtering, and backfill — so we
         // just mirror whatever it tells us.
@@ -3062,11 +3094,11 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
     // One presence tick for the whole sync pass (U-H8).
     if (presenceDirty) emit presenceChanged();
 
-    // Let any Bans-tab binding re-evaluate. This fires once per sync
-    // regardless of whether membership actually changed — cheap enough
-    // since QML only calls bannedMembers() when that tab is visible.
-    emit bannedMembersChanged();
-    emit serverMembersChanged();
+    // Republish the other snapshot lists, each only if it actually moved.
+    // The DM section's order, typing dots and presence all ride on
+    // directRoomsChanged, and nothing but a sync pass knows they changed.
+    refreshDirectRooms();
+    refreshMemberSnapshots();
 
     // Recalculate global hasUnread flag from the authoritative per-room counts.
     bool hadUnread = m_hasUnread;
@@ -3555,7 +3587,7 @@ void ServerConnection::createDirectMessage(const QString& targetUserId)
             s.endGroup();
             // Pull the new DM out of the regular category tree.
             rebuildCategorizedRooms();
-            emit directRoomsChanged();
+            refreshDirectRooms();
             // Jump to the new DM room so the user lands straight in it.
             setActiveRoom(roomId);
         },
@@ -3572,6 +3604,22 @@ bool ServerConnection::isDirectRoom(const QString& roomId) const
 QString ServerConnection::directRoomPeer(const QString& roomId) const
 {
     return m_directRoomPeers.value(roomId);
+}
+
+void ServerConnection::refreshDirectRooms()
+{
+    if (bsfchat::client::publishIfChanged(m_publishedDirectRooms, directRooms()))
+        emit directRoomsChanged();
+}
+
+void ServerConnection::refreshMemberSnapshots()
+{
+    if (!m_memberSnapshotsDirty) return;
+    m_memberSnapshotsDirty = false;
+    if (bsfchat::client::publishIfChanged(m_serverMembers, buildServerMembers()))
+        emit serverMembersChanged();
+    if (bsfchat::client::publishIfChanged(m_bannedMembers, buildBannedMembers()))
+        emit bannedMembersChanged();
 }
 
 QVariantList ServerConnection::directRooms() const
@@ -3758,7 +3806,7 @@ void ServerConnection::unbanFromServer(const QString& userId) {
     for (const QString& roomId : rooms) m_client->unbanUser(roomId, userId);
 }
 
-QVariantList ServerConnection::serverMembers() const {
+QVariantList ServerConnection::buildServerMembers() const {
     // Walk m_roomMembers, keeping only the latest event per (room, user),
     // then union users whose latest state in any room is "join". We pull
     // display name + avatar from the cached global map when available —
@@ -3815,7 +3863,7 @@ QVariantList ServerConnection::serverMembers() const {
     return out;
 }
 
-QVariantList ServerConnection::bannedMembers() const {
+QVariantList ServerConnection::buildBannedMembers() const {
     // STILL BUILT FROM THE CLIENT CACHE, because there is nothing else to build
     // it from. The server has the authoritative list — SqliteStore keeps a
     // `server_bans` table and even exposes list_server_bans() — but as of this

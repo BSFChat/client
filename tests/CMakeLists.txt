@@ -383,6 +383,24 @@ target_include_directories(test_server_roster PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_server_roster PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_server_roster COMMAND test_server_roster)
 
+# Publish gate for the QML snapshot lists (DMs, server members, bans): a
+# changed list must announce itself, an identical rebuild must stay silent
+# (U-H2). Header-only (src/net/SnapshotGate.h), so no ServerConnection needed.
+qt_add_executable(test_snapshot_gate test_snapshot_gate.cpp)
+target_include_directories(test_snapshot_gate PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_snapshot_gate PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_snapshot_gate COMMAND test_snapshot_gate)
+
+# Channel-list unread dot: first-sight seeding of the read marker, and the
+# server-clock rule for everything written to it. Header-only
+# (src/core/ReadState.h), so no Settings and no QSettings file.
+qt_add_executable(test_read_state test_read_state.cpp)
+target_include_directories(test_read_state PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_read_state PRIVATE
+    BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml")
+target_link_libraries(test_read_state PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_read_state COMMAND test_read_state)
+
 # Add-server URL resolution: normalisation, Matrix .well-known discovery,
 # and the honest login-flow outcome that replaced "any error means
 # password-only" (which is how `bsfchat.com` produced a registration form
