@@ -160,15 +160,15 @@ Rectangle {
                     ? Qt.rgba(1, 0, 0, 0.95)
                     : Qt.rgba(Theme.scrim.r, Theme.scrim.g, Theme.scrim.b, 0.7)
                 // Sits on the video thumbnail, so it is on a scrim in both
-                // themes — see Theme.onScrim.
-                border.color: Theme.onScrim; border.width: 2
+                // themes — see Theme.scrimFg.
+                border.color: Theme.scrimFg; border.width: 2
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                 Icon {
                     anchors.centerIn: parent
                     anchors.horizontalCenterOffset: 3
                     name: "play"
                     size: 28
-                    color: Theme.onScrim
+                    color: Theme.scrimFg
                 }
             }
 

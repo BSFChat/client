@@ -135,7 +135,7 @@ QtObject {
     // black backdrop. Named so the next person can tell "white because it sits
     // on a scrim" from "white because someone typed white".
     readonly property color scrim:   "#000000"
-    readonly property color onScrim: "#ffffff"
+    readonly property color scrimFg: "#ffffff"
 
     // ─── State colors ────────────────────────────────────────
     readonly property color danger:  isDark ? "#f04a5a" : "#d23040"
