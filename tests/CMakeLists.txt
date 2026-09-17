@@ -377,6 +377,17 @@ add_test(NAME test_server_roster COMMAND test_server_roster)
 # password-only" (which is how `bsfchat.com` produced a registration form
 # for a web server). ServerDiscovery takes its HTTP as a std::function, so
 # this needs no network, no event loop and no Settings.
+# Ownership of the bsfchat:// forwarding socket. The old install() unlinked
+# a live instance's socket, so deep links silently went to the newest process.
+qt_add_executable(test_url_handler
+    test_url_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/UrlHandler.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
+)
+target_include_directories(test_url_handler PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_url_handler PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::Test)
+add_test(NAME test_url_handler COMMAND test_url_handler)
+
 # 401 classification: the client had no dead-token handling at all, so an
 # expired access token showed as a permanent "Reconnecting…".
 qt_add_executable(test_auth_error

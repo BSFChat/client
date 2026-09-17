@@ -46,6 +46,28 @@ public:
     // server on all platforms. Safe to call once the QGuiApplication exists.
     void install(QCoreApplication* app);
 
+    // Result of trying to own `name` for URL forwarding.
+    enum class Acquisition {
+        Listening,       // we own it; deep links land here
+        AnotherInstance, // a live process is already listening on this name
+        Failed,          // neither — forwarding is unavailable this session
+    };
+
+    // Bind `server` to `name`, taking over a socket file only when nothing
+    // is actually listening on it.
+    //
+    // This used to be an unconditional QLocalServer::removeServer() followed
+    // by listen(). On Unix removeServer() unlinks the socket file even while
+    // a live process holds it, so a second launch of the same profile silently
+    // stole the name: from then on every bsfchat:// deep link went to the
+    // newest process while the first one kept running with a listening socket
+    // nobody could reach. It also destroyed the only signal that would ever
+    // say "already running" — listen() could never report AddressInUseError.
+    //
+    // Static and name-parameterised so the behaviour is testable without a
+    // second process; see tests/test_url_handler.cpp.
+    static Acquisition acquireServer(QLocalServer* server, const QString& name);
+
     // Register this binary as the OS-level handler for `bsfchat://`.
     // macOS is a build-time Info.plist affair (no-op here). Windows writes
     // HKCU registry entries. Linux writes a .desktop file. All are idempotent.
@@ -72,7 +94,13 @@ protected:
 
 private:
     void onNewConnection();
+
+public:
+    // Exposed for tests and for main(): the per-user, per-profile name this
+    // process forwards URLs on.
     static QString socketName();
+
+private:
 
     QLocalServer* m_server = nullptr;
 };
