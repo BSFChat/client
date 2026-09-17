@@ -171,6 +171,7 @@ public:
             turnUpdates.append(cfg);
         });
         session->setMicGate([this](bool gate) { gates.append(gate); });
+        session->setDeafenGate([this](bool d) { deafenGates.append(d); });
     }
 
     bool startSucceeds = true;
@@ -183,6 +184,7 @@ public:
     QVector<CallSignal> delivered;
     QVector<QJsonObject> turnUpdates;
     QVector<bool> gates;
+    QVector<bool> deafenGates;
 };
 
 // Drives a session all the way to Active, leaving the fakes primed.
@@ -251,6 +253,10 @@ private slots:
     // ---- V-M2 -------------------------------------------------------
     void outboxRetriesWithBackoffThenGivesUp();
     void outboxKeepsTheCandidateBatchUntilItIsAccepted();
+    void leavingFlushesTheHangupsStopItselfQueued();
+    void aFailedPeerKeepsSayingFailedInsteadOfNew();
+    void joiningWhileDeafenedDeafensTheNewEngine();
+    void anAcceptedRejoinAnnouncesItsNewMembership();
 
     // ---- V-L4 -------------------------------------------------------
     void transportSelectorRefusesMixedRoster();
@@ -1084,6 +1090,168 @@ void TestVoiceLifecycle::outboxKeepsTheCandidateBatchUntilItIsAccepted()
     // send it into.
     outbox.clear();
     QVERIFY(outbox.isEmpty());
+}
+
+void TestVoiceLifecycle::leavingFlushesTheHangupsStopItselfQueued()
+{
+    // VoiceEngine::stop() clears m_running and THEN enqueues one
+    // m.call.hangup per peer, which the outbox flush gate refused
+    // because the engine was no longer running — and two statements
+    // later stop() cleared the outbox. Leaving a voice channel therefore
+    // sent nothing to anybody, and each remaining peer held the leaver's
+    // connection, mixer row and tile until its own 10 s disconnect grace
+    // or 30 s setup watchdog expired.
+    //
+    // The gate now takes a third input so the session that is stopping
+    // may still drain what stop() queued.
+
+    // The regression: running is already false when the hangups go in.
+    QVERIFY(voice::mayFlushCallEvents(/*running=*/false, /*stopping=*/true,
+                                      /*haveRoom=*/true));
+    // A stopped, non-stopping engine stays silent: nothing queued after
+    // stop() returns belongs to a call that still exists.
+    QVERIFY(!voice::mayFlushCallEvents(false, false, true));
+    // Normal mid-call sending is unchanged.
+    QVERIFY(voice::mayFlushCallEvents(true, false, true));
+    // No room means no endpoint to PUT to, whatever the other two say.
+    QVERIFY(!voice::mayFlushCallEvents(true, false, false));
+    QVERIFY(!voice::mayFlushCallEvents(false, true, false));
+
+    // And the queue itself hands the hangups over on that first due()
+    // call, before stop()'s clear() discards the rest — i.e. one flush
+    // inside the stopping window is enough for every peer.
+    voice::CallEventOutbox outbox;
+    const qint64 t0 = 1'000;
+    for (const char* peer : {"@a:test", "@b:test", "@c:test"}) {
+        outbox.add("m.call.hangup",
+                   QByteArray("{\"to\":\"") + peer + "\"}", t0);
+    }
+    QCOMPARE(outbox.pendingCount(), 3);
+    const auto due = outbox.due(t0);
+    QCOMPARE(due.size(), 3);
+    for (const auto& entry : due)
+        QCOMPARE(entry.type, QStringLiteral("m.call.hangup"));
+    outbox.clear();
+    QVERIFY(outbox.isEmpty());
+}
+
+void TestVoiceLifecycle::aFailedPeerKeepsSayingFailedInsteadOfNew()
+{
+    // VoiceEngine tears a peer down in the same slot that reports it
+    // Failed, so the roster saw "failed" and, one statement later, saw
+    // the peer leave the map — after which the lookup missed and fell
+    // back to the default. A peer whose ICE had failed therefore
+    // rendered identically to one that had only just been added, while
+    // the mesh reconciler quietly retried every 5 s from one side only.
+
+    // While a peer object exists, its own state is the answer.
+    QCOMPARE(voice::peerDisplayState(QStringLiteral("connected"), false),
+             QStringLiteral("connected"));
+    QCOMPARE(voice::peerDisplayState(QStringLiteral("connecting"), false),
+             QStringLiteral("connecting"));
+    // ...even a live peer that is itself reporting failure.
+    QCOMPARE(voice::peerDisplayState(QStringLiteral("failed"), false),
+             QStringLiteral("failed"));
+
+    // No peer and no history: genuinely new (a roster member we have
+    // not offered to yet, e.g. one whose id sorts below ours).
+    QCOMPARE(voice::peerDisplayState(QString(), false),
+             QStringLiteral("new"));
+
+    // THE REGRESSION: no peer, because we gave up on it.
+    QCOMPARE(voice::peerDisplayState(QString(), true),
+             QStringLiteral("failed"));
+
+    // A live state always wins over the memory of an earlier failure —
+    // that is what makes a successful re-offer clear the indicator
+    // without a second code path.
+    QCOMPARE(voice::peerDisplayState(QStringLiteral("connecting"), true),
+             QStringLiteral("connecting"));
+}
+
+void TestVoiceLifecycle::joiningWhileDeafenedDeafensTheNewEngine()
+{
+    // Deafen reached the transport only through ServerConnection's
+    // deafenedChanged handler, which by definition cannot fire when the
+    // value has not changed. Every join builds a BRAND NEW VoiceEngine
+    // at the AudioEngine default (undeafened), so a user who was already
+    // deafened — because they deafened before joining, or deafened in
+    // one channel and switched to another — heard everybody, while the
+    // UI and the server both said they were deafened. Mute already had
+    // this covered (V-M7, the m_appliedGate reset in onTurnConfig);
+    // deafen had no hook at all.
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+
+    // Deafen before joining anything.
+    s.toggleDeafen();
+    QVERIFY(s.deafened());
+    QCOMPARE(engine.deafenGates, QVector<bool>{true});
+
+    joinTo(s, net, "!room:x");
+    QCOMPARE(s.state(), VoiceSession::State::Active);
+    QCOMPARE(engine.starts, 1);
+    // THE REGRESSION: the fresh engine is told, even though the value
+    // has not changed since the last time anything was told.
+    QCOMPARE(engine.deafenGates, (QVector<bool>{true, true}));
+    // The join also announced the non-default state to the server, the
+    // way the mic gate already did.
+    net.replyStateOk("!room:x");
+
+    // Mid-call toggles still reach it, and still only on a change.
+    s.toggleDeafen();
+    QVERIFY(!s.deafened());
+    QCOMPARE(engine.deafenGates, (QVector<bool>{true, true, false}));
+    net.replyStateOk("!room:x");
+
+    // Channel switch: another new engine, so the state is pushed again
+    // even though the value is unchanged.
+    s.requestJoin("!other:x");
+    net.replyLeaveOk("!room:x");
+    net.replyJoinOk("!other:x");
+    net.replyTurn(turnConfig());
+    QCOMPARE(s.state(), VoiceSession::State::Active);
+    QCOMPARE(engine.starts, 2);
+    QCOMPARE(engine.deafenGates, (QVector<bool>{true, true, false, false}));
+}
+
+void TestVoiceLifecycle::anAcceptedRejoinAnnouncesItsNewMembership()
+{
+    // V-H2 recovery keeps the room, the engine and every peer, so
+    // activeVoiceRoomId never changes across it — which is precisely why
+    // the media announcement, wired in main.cpp to that one edge, was
+    // never re-sent. But the re-join mints a NEW membership, and the
+    // server starts every membership with screen_sharing and camera_on
+    // false. A screen share or camera that was live when the ghost
+    // reaper fired therefore disappeared from every other participant's
+    // roster and did not come back until the user toggled it.
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+
+    QSignalSpy renewed(&s, &VoiceSession::membershipRenewed);
+    joinTo(s, net, "!room:x");
+    // A first join is not a renewal: the existing edge already covers it.
+    QCOMPARE(renewed.size(), 0);
+
+    // The server retires our row; the session re-POSTs the join.
+    s.onStateSuperseded("!room:x");
+    s.onStateUpdateFailed("!room:x", "Voice session superseded");
+    QCOMPARE(net.joins.last(), QStringLiteral("!room:x"));
+    QCOMPARE(renewed.size(), 0);    // not yet — the re-join is in flight
+
+    // Accepted. Same engine, same peers, new membership.
+    net.replyJoinOk("!room:x");
+    QVERIFY(s.isActive());
+    QCOMPARE(engine.starts, 1);     // the engine was never restarted
+    QCOMPARE(engine.stops, 0);
+    QCOMPARE(renewed.size(), 1);
+    QCOMPARE(renewed.first().first().toString(), QStringLiteral("!room:x"));
 }
 
 void TestVoiceLifecycle::transportSelectorRefusesMixedRoster()

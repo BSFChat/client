@@ -123,12 +123,23 @@ public:
     using TurnUpdater = std::function<void(const QJsonObject&)>;
     // Apply the effective mic gate to the running transport.
     using MicGate = std::function<void(bool effectiveMuted)>;
+    // Apply the deafen state to the running transport. Separate from
+    // MicGate because they gate opposite directions — mute is capture,
+    // deafen is playback — and, more to the point, because deafen used
+    // to have no hook at all: it reached the engine only through
+    // ServerConnection's deafenedChanged handler, which by definition
+    // does not fire when the value has not changed. A user who was
+    // already deafened and then joined (or switched channel) got a
+    // freshly-built engine at the AudioEngine default, undeafened, and
+    // heard everybody while the UI showed them deafened.
+    using DeafenGate = std::function<void(bool deafened)>;
 
     void setEngineStarter(EngineStarter f) { m_startEngine = std::move(f); }
     void setEngineStopper(EngineStopper f) { m_stopEngine = std::move(f); }
     void setSignalSink(SignalSink f) { m_signalSink = std::move(f); }
     void setTurnUpdater(TurnUpdater f) { m_turnUpdater = std::move(f); }
     void setMicGate(MicGate f) { m_micGate = std::move(f); }
+    void setDeafenGate(DeafenGate f) { m_deafenGate = std::move(f); }
 
     // ---- Intents (UI / app) ----------------------------------------
     // Join `roomId`. Switching channels enqueues the leave of the current
@@ -209,6 +220,23 @@ signals:
     void deafenedChanged();
     // A user-facing failure. Not every error unwinds the session.
     void errorOccurred(const QString& message);
+    // The server retired our voice row and the V-H2 re-join was
+    // ACCEPTED: same room, same engine, same peers — but a brand new
+    // membership, and the server starts every membership with
+    // screen_sharing and camera_on false. Anything that announced media
+    // state for the old row has to announce it again, because nothing
+    // else will: the media flags are pushed on a CHANGE in the capture
+    // controllers, and a re-join changes nothing about them. Without
+    // this, a screen share or camera that was live when the ghost
+    // reaper fired becomes invisible to every other participant and
+    // stays invisible until the user toggles it off and on.
+    //
+    // Deliberately not routed through the request queue: the media
+    // announcement does not go through VoiceSession at all today (see
+    // ServerConnection::setLocalMediaState) and moving it there is a
+    // larger change than this repair needs.
+    void membershipRenewed(const QString& roomId);
+
     // Emitted once the session has reached Idle with an empty queue, i.e.
     // every leave we issued has been answered. The quit path waits on it.
     void settled();
@@ -243,6 +271,7 @@ private:
     void unwind(QString roomId, QString reason);
     void replayBufferedSignals();
     void applyMicGate();
+    void applyDeafenGate();
     void scheduleTurnRefresh(const QJsonObject& config);
     // True when `op` is the request currently awaiting a reply and it
     // concerns `roomId`. Late replies to superseded requests are dropped.
@@ -272,6 +301,11 @@ private:
     // Last gate value handed to the transport, so a redundant apply is
     // free and so a reconnecting engine can be re-gated.
     std::optional<bool> m_appliedGate;
+    // What the running transport was last told about deafening. Reset
+    // whenever a NEW engine is about to be fed, so the state is pushed
+    // again rather than suppressed as a no-op — the same reason
+    // m_appliedGate is reset in onTurnConfig.
+    std::optional<bool> m_appliedDeafen;
 
     // V-H2 — one re-POST per retirement, never a loop.
     bool m_rejoinAttempted = false;
@@ -289,6 +323,7 @@ private:
     SignalSink m_signalSink;
     TurnUpdater m_turnUpdater;
     MicGate m_micGate;
+    DeafenGate m_deafenGate;
 
 public:
     // Bound on the V-C1 replay buffer. A join that never completes must

@@ -22,6 +22,7 @@
 
 #include <QObject>
 #include <QMap>
+#include <QSet>
 #include <QTimer>
 #include <QString>
 #include <QJsonArray>
@@ -237,12 +238,25 @@ private:
     AudioEngine* m_audioEngine = nullptr;
     QMap<QString, PeerConnectionManager*> m_peers;
     QMap<QString, QString> m_callIds;
+    // Users whose peer we tore down because it FAILED (ICE failure, the
+    // disconnect grace expiring, or the setup watchdog) rather than
+    // because they left. peerStates() keeps reporting "failed" for them
+    // until a peer object exists again, so an unrecoverable peer stops
+    // masquerading as one that is still connecting. Cleared in
+    // wirePeer() (a connection attempt is live again), on a hangup and
+    // on a roster drop (clean departures), and in stop().
+    QSet<QString> m_gaveUpPeers;
     // Per-peer single-shot grace timers for the Disconnected state.
     QMap<QString, QTimer*> m_disconnectTimers;
     // Per-peer single-shot watchdogs for the initial setup phase.
     QMap<QString, QTimer*> m_connectWatchdogs;
     QJsonObject m_turnConfig;
     bool m_running = false;
+    // True only for the duration of stop(). The outbox flush gate reads
+    // it so the hangups stop() enqueues can still leave, even though
+    // m_running is already false by then — without it, leaving a channel
+    // told nobody. See voice::mayFlushCallEvents().
+    bool m_stopping = false;
     bool m_allowP2P = false;
 
     // Outbound signalling awaiting the server's acknowledgement, with

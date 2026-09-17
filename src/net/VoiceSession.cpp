@@ -57,6 +57,13 @@ void VoiceSession::applyMicGate()
     if (m_micGate) m_micGate(gate);
 }
 
+void VoiceSession::applyDeafenGate()
+{
+    if (m_appliedDeafen && *m_appliedDeafen == m_deafened) return;
+    m_appliedDeafen = m_deafened;
+    if (m_deafenGate) m_deafenGate(m_deafened);
+}
+
 // ---------------------------------------------------------------------
 // Request queue
 // ---------------------------------------------------------------------
@@ -232,6 +239,7 @@ void VoiceSession::toggleDeafen()
 {
     m_deafened = !m_deafened;
     emit deafenedChanged();
+    applyDeafenGate();
     if (m_state == State::Active || m_state == State::FetchingTurn) {
         enqueue(stateOp(m_roomId));
     }
@@ -289,6 +297,9 @@ void VoiceSession::onJoinSucceeded(const QString& roomId,
         if (effectiveMuted() != m_ackedMuted || m_deafened != m_ackedDeafened) {
             enqueue(stateOp(roomId));
         }
+        // New membership, so the server's media flags are back to false.
+        // Whoever knows what we are actually capturing has to say so again.
+        emit membershipRenewed(roomId);
         return;
     }
     if (!inFlightIs(OpKind::Join, roomId)) {
@@ -390,6 +401,14 @@ void VoiceSession::onTurnConfig(const QJsonObject& config)
     // as unmuted, and mute must survive a channel switch (V-M7).
     m_appliedGate.reset();
     applyMicGate();
+    // Same for deafening, and for the same reason: this is a BRAND NEW
+    // engine at the AudioEngine default. Without the reset+apply a user
+    // who was already deafened before joining — or who deafened in the
+    // previous channel and switched — would hear everyone, because the
+    // only thing that ever pushed deafen into the engine was a CHANGE in
+    // its value, and nothing changed.
+    m_appliedDeafen.reset();
+    applyDeafenGate();
     completeOp();
     if (effectiveMuted() != m_ackedMuted || m_deafened != m_ackedDeafened) {
         enqueue(stateOp(roomId));

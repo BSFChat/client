@@ -2,6 +2,7 @@
 #include "voice/AudioEngine.h"
 #include "voice/CallSignalCodec.h"
 #include "voice/VoiceStartPolicy.h"
+#include "voice/VoiceRosterReconcile.h"
 #include "voice/PeerCaps.h"
 #include "voice/PeerConnectionManager.h"
 #include "voice/video/VideoDecoder.h"
@@ -162,7 +163,15 @@ bool VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
 }
 
 void VoiceEngine::stop() {
-    if (!m_running) return;
+    if (!m_running || m_stopping) return;
+    // The hangups below are enqueued into the outbox and flushed through
+    // the same gate as every other signalling event, and that gate
+    // refuses a session that is not running. Clearing m_running first
+    // therefore meant the hangups were queued, refused, and then dropped
+    // by the m_outbox.clear() at the end of this function — nobody was
+    // ever told we left. voice::mayFlushCallEvents() lets a STOPPING
+    // session drain what stop() itself queued; this flag is the input.
+    m_stopping = true;
     m_running = false;
 
     m_candidateBatchTimer.stop();
@@ -184,6 +193,7 @@ void VoiceEngine::stop() {
     m_callIds.clear();
     m_pendingCandidates.clear();
     m_inboundCandidates.clear();
+    m_gaveUpPeers.clear();
     // Nothing queued is worth sending into a call that no longer exists —
     // except the hangups just enqueued above, which went out immediately.
     m_outbox.clear();
@@ -215,6 +225,8 @@ void VoiceEngine::stop() {
         m_micLevel = 0.0f;
         emit micLevelChanged(0.0f);
     }
+
+    m_stopping = false;
 }
 
 void VoiceEngine::addPeer(const QString& userId, bool isOfferer) {
@@ -238,6 +250,9 @@ void VoiceEngine::addPeer(const QString& userId, bool isOfferer) {
 }
 
 void VoiceEngine::dropPeer(const QString& userId) {
+    // They are off the roster: not a failure, and nothing will render
+    // a state for them any more.
+    m_gaveUpPeers.remove(userId);
     if (!m_peers.contains(userId)) return;
     qCInfo(logVoice, "reconcile: %s left the roster — dropping peer",
           qPrintable(userId));
@@ -269,6 +284,11 @@ bool VoiceEngine::hasOpenPeers() const {
 }
 
 void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
+    // Every path that creates a peer comes through here (addPeer and
+    // handleCallInvite), so this is where "we gave up on them" stops
+    // being true: there is a live connection attempt again.
+    m_gaveUpPeers.remove(userId);
+
     // Signaling
     connect(peer, &PeerConnectionManager::localDescriptionReady,
             this, [this, userId](const std::string& type, const std::string& sdp) {
@@ -343,8 +363,9 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
         // mesh reconciler can re-offer. Disconnected is often a transient
         // ICE blip, so give it a grace period before giving up.
         if (s == PeerConnectionManager::PeerState::Failed) {
+            // removePeer() emits peerDisconnected itself.
+            m_gaveUpPeers.insert(userId);
             removePeer(userId);
-            emit peerDisconnected(userId);
         } else if (s == PeerConnectionManager::PeerState::Disconnected) {
             startDisconnectGrace(userId);
         } else if (s == PeerConnectionManager::PeerState::Connected) {
@@ -368,8 +389,8 @@ void VoiceEngine::startDisconnectGrace(const QString& userId) {
         if (peer->peerState() == PeerConnectionManager::PeerState::Connected) return;
         qCInfo(logVoice, "peer %s did not recover from disconnect — removing",
               qPrintable(userId));
+        m_gaveUpPeers.insert(userId);
         removePeer(userId);
-        emit peerDisconnected(userId);
     });
     m_disconnectTimers[userId] = timer;
     timer->start();
@@ -398,8 +419,8 @@ void VoiceEngine::startConnectWatchdog(const QString& userId) {
         if (peer->peerState() == PeerConnectionManager::PeerState::Connected) return;
         qCWarning(logVoice, "peer %s never reached connected — tearing down",
                  qPrintable(userId));
+        m_gaveUpPeers.insert(userId);
         removePeer(userId);
-        emit peerDisconnected(userId);
     });
     m_connectWatchdogs[userId] = timer;
     timer->start();
@@ -432,7 +453,18 @@ QMap<QString, QString> VoiceEngine::peerStates() const {
     QMap<QString, QString> out;
     static const char* names[] = {"new","connecting","connected","disconnected","failed"};
     for (auto it = m_peers.begin(); it != m_peers.end(); ++it) {
-        out[it.key()] = QString::fromLatin1(names[int(it.value()->peerState())]);
+        // Null-guarded like every other walk over m_peers in this file;
+        // this one was the exception.
+        if (!it.value()) continue;
+        out[it.key()] = voice::peerDisplayState(
+            QString::fromLatin1(names[int(it.value()->peerState())]),
+            /*gaveUp=*/false);
+    }
+    // Peers we tore down BECAUSE they failed keep saying so. Without
+    // this the roster reports "new" for them — see peerDisplayState.
+    for (const QString& userId : m_gaveUpPeers) {
+        if (!out.contains(userId))
+            out[userId] = voice::peerDisplayState(QString(), /*gaveUp=*/true);
     }
     return out;
 }
@@ -440,6 +472,7 @@ QMap<QString, QString> VoiceEngine::peerStates() const {
 void VoiceEngine::removePeer(const QString& userId) {
     cancelDisconnectGrace(userId);
     cancelConnectWatchdog(userId);
+    const bool held = m_peers.contains(userId);
     if (auto* peer = m_peers.take(userId)) {
         if (m_audioEngine) m_audioEngine->removePeer(userId);
         peer->deleteLater();
@@ -455,6 +488,26 @@ void VoiceEngine::removePeer(const QString& userId) {
     dropRecvPipelines(userId);
     for (int s = 0; s < kVideoStreamCount; ++s)
         m_rrSnapshots.remove({userId, s});
+
+    // ONE exit point for "this peer connection is gone". It used to be
+    // the caller's job to follow removePeer() with peerDisconnected(),
+    // and two of the five call sites did not: the roster prune
+    // (dropPeer, V-M5) and the three replace paths in handleCallInvite
+    // (dead peer / glare loss / new call id).
+    //
+    // That signal is not cosmetic — ServerConnection answers it by
+    // dropping the peer's entry from VideoStreamRegistry and its level
+    // meter. Without it the departed (or restarted) peer keeps its LAST
+    // DECODED FRAME on screen: a member who crashed and was pruned from
+    // the roster leaves a frozen video tile behind, and a peer that
+    // restarted its session shows the dead session's final frame until
+    // the new stream's first IDR lands — which is exactly the "frozen
+    // share" symptom the explicit stream on/off work (S-7) set out to
+    // remove, arriving by a different door.
+    //
+    // Emitting from here makes it structurally impossible to add a
+    // sixth call site that forgets.
+    if (held) emit peerDisconnected(userId);
 }
 
 nlohmann::json VoiceEngine::localCapsJson() {
@@ -972,8 +1025,10 @@ void VoiceEngine::handleCallHangup(const QString& sender, const QString& callId)
         dropInboundCandidates(sender, callId);
         return;
     }
-    removePeer(sender);   // drops this call's parked candidates too
-    emit peerDisconnected(sender);
+    // A hangup is a clean departure, not a failure.
+    m_gaveUpPeers.remove(sender);
+    // Drops this call's parked candidates and emits peerDisconnected.
+    removePeer(sender);
 }
 
 void VoiceEngine::setMuted(bool muted) {
@@ -1089,7 +1144,8 @@ void VoiceEngine::sendCallEvent(const QString& eventType, const nlohmann::json& 
 }
 
 void VoiceEngine::flushOutbox() {
-    if (!m_running || m_roomId.isEmpty()) return;
+    if (!voice::mayFlushCallEvents(m_running, m_stopping, !m_roomId.isEmpty()))
+        return;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     for (const auto& entry : m_outbox.due(now)) {
         m_client->sendCallEvent(m_roomId, entry.type, entry.payload, entry.token);

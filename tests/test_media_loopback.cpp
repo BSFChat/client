@@ -358,6 +358,113 @@ int runControlChannelCase() {
     return 0;
 }
 
+// ---------------------------------------------------------------------
+// Late track adoption: onOpen does not replay
+// ---------------------------------------------------------------------
+// PeerConnectionManager adopts a remote track from onTrack through a
+// QUEUED invocation, so attachVideoTrack() runs at least one event-loop
+// turn after libdatachannel handed the track over. Meanwhile
+// PeerConnection::processRemoteDescription enqueues openTracks() on its
+// own processor thread whenever a description arrives while DTLS is
+// already connected — so the two race, and the track can be open before
+// anyone installs a callback on it.
+//
+// Channel::onOpen is a plain assignment into the impl (channel.cpp: no
+// replay, unlike onMessage which flushes pending messages). This case
+// pins that: adopt deliberately late, and assert that the track is
+// already open AND that the freshly-installed onOpen never fires.
+//
+// That combination is why attachVideoTrack() has to consult
+// track->isOpen() itself. Without it ctx.open never flips: every access
+// unit is dropped by sendVideoFrame, the peer stays pinned to the legacy
+// JPEG path, and videoTrackOpen — the IDR request the far side needs
+// before it can decode anything — is never emitted.
+int runLateAdoptionCase() {
+    std::printf("--- case: track adopted after it is already open\n");
+    rtc::Configuration cfg;
+
+    auto pcA = std::make_shared<rtc::PeerConnection>(cfg);
+    auto pcB = std::make_shared<rtc::PeerConnection>(cfg);
+
+    pcA->onLocalDescription([&](rtc::Description d) { pcB->setRemoteDescription(d); });
+    pcB->onLocalDescription([&](rtc::Description d) { pcA->setRemoteDescription(d); });
+    pcA->onLocalCandidate([&](rtc::Candidate c) { pcB->addRemoteCandidate(c); });
+    pcB->onLocalCandidate([&](rtc::Candidate c) { pcA->addRemoteCandidate(c); });
+
+    // Hand the track to the "Qt thread" instead of adopting it inline,
+    // exactly as onTrack's QMetaObject::invokeMethod does.
+    std::mutex handoffMutex;
+    std::shared_ptr<rtc::Track> handedOver;
+    pcB->onTrack([&](std::shared_ptr<rtc::Track> track) {
+        std::lock_guard lock(handoffMutex);
+        handedOver = track;
+    });
+
+    Latch dcOpen;
+    auto dc = pcA->createDataChannel("kick");
+    dc->onOpen([&]() { dcOpen.set({}); });
+
+    rtc::Description::Video media(kMid, rtc::Description::Direction::SendRecv);
+    media.addH264Codec(kPayloadType);
+    auto sendTrack = pcA->addTrack(std::move(media));
+    Latch sendOpen;
+    sendTrack->onOpen([&]() { sendOpen.set({}); });
+    pcA->setLocalDescription();
+
+    if (!sendOpen.wait(std::chrono::seconds(10))) {
+        std::fprintf(stderr, "FAIL: send track never opened\n");
+        return 2;
+    }
+
+    // Give the receiving side's own openTracks() time to run — this is
+    // the delay the queued adoption introduces in production.
+    std::shared_ptr<rtc::Track> recvTrack;
+    for (int i = 0; i < 100 && !recvTrack; ++i) {
+        {
+            std::lock_guard lock(handoffMutex);
+            recvTrack = handedOver;
+        }
+        if (recvTrack) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (!recvTrack) {
+        std::fprintf(stderr, "FAIL: onTrack never delivered a track\n");
+        return 2;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    if (!recvTrack->isOpen()) {
+        std::printf("NOTE: receive track not open yet at late adoption — "
+                    "this run did not reach the racing state; the "
+                    "isOpen() check in attachVideoTrack costs nothing "
+                    "and still covers the runs that do\n");
+        pcA->close();
+        pcB->close();
+        return 0;
+    }
+
+    // THE ASSERTION: installing onOpen on an already-open track does
+    // NOT fire it. Anything relying on that callback alone to learn the
+    // track is usable never learns it.
+    Latch lateOpen;
+    recvTrack->onOpen([&]() { lateOpen.set({}); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    if (lateOpen.hit) {
+        std::printf("NOTE: onOpen DID replay on an already-open track — "
+                    "upstream behaviour changed; the isOpen() check in "
+                    "attachVideoTrack is now belt-and-braces\n");
+        pcA->close();
+        pcB->close();
+        return 0;
+    }
+
+    std::printf("PASS: already-open track never fires a late onOpen — "
+                "attachVideoTrack must read isOpen() itself (it does)\n");
+    pcA->close();
+    pcB->close();
+    return 0;
+}
+
 int main() {
     rtc::InitLogger(rtc::LogLevel::Warning);
 
@@ -385,10 +492,15 @@ int main() {
     // S-2's transport assumptions, both the gated and the legacy path.
     const int control = runControlChannelCase();
 
+    // Why attachVideoTrack cannot rely on onOpen alone.
+    const int lateAdoption = runLateAdoptionCase();
+
     // Join libdatachannel's global worker threads before static
     // destruction — otherwise the process can segfault at exit (seen
     // under ctest, where the harness reaps fast).
     rtc::Cleanup().wait();
 
-    return simple != 0 ? simple : control;
+    if (simple != 0) return simple;
+    if (control != 0) return control;
+    return lateAdoption;
 }
