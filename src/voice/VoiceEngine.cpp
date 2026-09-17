@@ -786,8 +786,10 @@ void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId,
     peer->applyOffer(sdp);
     // Their candidates are sent ONCE and commonly beat (or race) this
     // invite through the timeline — replay whatever we parked for this
-    // call id now that a peer exists to take them.
-    replayInboundCandidates(sender, callId);
+    // call id now that a peer exists to take them. Keyed on the id the
+    // peer object actually holds (identical to the invite's, except for
+    // the minted-id case above, where nothing can have been parked).
+    replayInboundCandidates(sender, effectiveCallId);
     // If we're mid-share, upgrade this newcomer to video right after
     // the initial exchange (ensureVideoTracks queues the renegotiation
     // until signaling is stable again).
