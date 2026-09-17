@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import BSFChat
 import "../js/LinkPreviewCache.js" as PreviewCache
+import "../js/LinkPreviewParse.js" as PreviewParse
 
 // Per-link OpenGraph unfurl card. A MessageBubble instantiates one
 // (or two) of these via a Repeater keyed on URLs detected in its body.
@@ -56,6 +57,20 @@ Rectangle {
         : (ogTitle.length > 0 || ogDescription.length > 0 || ogImage.length > 0)
     readonly property bool hasImage: ogImage.length > 0
     property bool _failed: false
+
+    // The request currently in flight, so it can be cancelled if this
+    // delegate goes away before it lands. A QML XHR callback is a plain JS
+    // closure with no owner: it fires whether or not the object that created
+    // it still exists, and once that object is gone every unqualified name in
+    // the closure resolves against a dead scope. Message delegates are
+    // recycled constantly, so the callbacks below regularly outlived their
+    // card — which is what the v0.0.44-rc.7 field logs were reporting as
+    // `ReferenceError: _looksLikeChallenge is not defined` (a helper read) and
+    // `Invalid write to global property "_failed"` (a property write). Neither
+    // was a missing helper; both were a live callback on a dead delegate.
+    property var _xhr: null
+
+    Component.onDestruction: _cancelFetch()
 
     // The unfurl cache lives in js/LinkPreviewCache.js. It used to be a
     // per-instance `property var` right here, and message delegates are
@@ -320,6 +335,7 @@ Rectangle {
     onUrlChanged: _fetch()
 
     function _fetch() {
+        _cancelFetch();
         var u = String(preview.url);
         if (!u || u.indexOf("http") !== 0) {
             _failed = true;
@@ -356,37 +372,38 @@ Rectangle {
         var api = "https://www.youtube.com/oembed?format=json&url="
             + encodeURIComponent(origUrl);
         var xhr = new XMLHttpRequest();
+        _xhr = xhr;
         xhr.open("GET", api);
         xhr.setRequestHeader("Accept", "application/json");
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return;
-            if (xhr.status < 200 || xhr.status >= 400) {
-                PreviewCache.store(origUrl, null);
-                _failed = true;
-                return;
+            _xhr = null;
+            var parsed = null;
+            if (xhr.status >= 200 && xhr.status < 400) {
+                try {
+                    var j = JSON.parse(xhr.responseText);
+                    if (j.title) {
+                        parsed = {
+                            title: j.title,
+                            siteName: j.author_name || "YouTube",
+                            description: "",
+                            image: "",
+                            ready: true
+                        };
+                    }
+                } catch (e) {
+                    parsed = null;
+                }
             }
-            try {
-                var j = JSON.parse(xhr.responseText);
-                var parsed = {
-                    title: j.title || "",
-                    siteName: j.author_name || "YouTube",
-                    description: "",
-                    image: "",
-                    ready: !!j.title
-                };
-                PreviewCache.store(origUrl, parsed.ready ? parsed : null);
-                if (parsed.ready) _apply(parsed);
-                else _failed = true;
-            } catch (e) {
-                PreviewCache.store(origUrl, null);
-                _failed = true;
-            }
+            PreviewCache.store(origUrl, parsed);
+            _finish(parsed);
         };
         xhr.send();
     }
 
     function _fetchOne(origUrl, currentUrl, redirectsLeft) {
         var xhr = new XMLHttpRequest();
+        _xhr = xhr;
         xhr.open("GET", currentUrl);
         xhr.setRequestHeader("Accept", "text/html,application/xhtml+xml");
         // Some sites (Reddit, LinkedIn, Twitter) return a completely
@@ -409,47 +426,44 @@ Rectangle {
                 var loc = xhr.getResponseHeader("Location")
                        || xhr.getResponseHeader("location");
                 if (loc) {
-                    var next = _absolutize(loc, currentUrl);
+                    var next = PreviewParse.absolutize(loc, currentUrl);
                     _fetchOne(origUrl, next, redirectsLeft - 1);
                     return;
                 }
             }
+            _xhr = null;
 
-            if (xhr.status < 200 || xhr.status >= 400) {
-                PreviewCache.store(origUrl, null);
-                _failed = true;
-                return;
+            // `parsed` stays null for every unusable outcome — bad status,
+            // non-HTML body, a bot-challenge shim, or HTML with nothing
+            // preview-worthy in it — and null is exactly what the cache
+            // stores for "do not fetch this again".
+            var parsed = null;
+            if (xhr.status >= 200 && xhr.status < 400) {
+                var ct = xhr.getResponseHeader("content-type") || "";
+                if (ct.indexOf("text/html") >= 0 || ct.indexOf("xhtml") >= 0) {
+                    // Limit the regex-scan prefix to avoid running big
+                    // regexes over a whole megabyte of body. 64KB used to
+                    // be enough for most sites' <head>, but modern
+                    // JS-heavy pages (YouTube, Reddit) push og tags past
+                    // 500KB; widen to 512KB so we still catch them.
+                    // YouTube specifically takes the oEmbed fast-path
+                    // above and never lands here.
+                    var html = xhr.responseText.substring(0, 524288);
+                    // Bot-challenge / verification pages. Client-side
+                    // fetches from a desktop app don't pass Cloudflare
+                    // Turnstile, PerimeterX, etc. — the response is a
+                    // short "please wait" shim with a placeholder title
+                    // but no real content. Render nothing rather than a
+                    // misleading card. Fix is a server-side unfurler;
+                    // this is the interim stop.
+                    if (!PreviewParse.looksLikeChallenge(html)) {
+                        var og = PreviewParse.parseOg(html, currentUrl);
+                        if (og.ready) parsed = og;
+                    }
+                }
             }
-            var ct = xhr.getResponseHeader("content-type") || "";
-            if (ct.indexOf("text/html") < 0 && ct.indexOf("xhtml") < 0) {
-                PreviewCache.store(origUrl, null);
-                _failed = true;
-                return;
-            }
-            // Limit the regex-scan prefix to avoid running big regexes
-            // over a whole megabyte of body. 64KB used to be enough
-            // for most sites' <head>, but modern JS-heavy pages
-            // (YouTube, Reddit) push og tags past 500KB; widen to
-            // 512KB so we still catch them. YouTube specifically
-            // takes the oEmbed fast-path above and never lands here.
-            var html = xhr.responseText.substring(0, 524288);
-
-            // Detect bot-challenge / verification pages. Client-side
-            // fetches from a desktop app don't pass Cloudflare
-            // Turnstile, PerimeterX, etc. — the response is a short
-            // "please wait" shim with a placeholder title but no real
-            // content. Render nothing rather than a misleading card.
-            // Fix is a server-side unfurler; this is the interim stop.
-            if (_looksLikeChallenge(html)) {
-                PreviewCache.store(origUrl, null);
-                _failed = true;
-                return;
-            }
-
-            var parsed = _parseOg(html, currentUrl);
-            PreviewCache.store(origUrl, parsed.ready ? parsed : null);
-            if (parsed.ready) _apply(parsed);
-            else _failed = true;
+            PreviewCache.store(origUrl, parsed);
+            _finish(parsed);
         };
         xhr.send();
     }
@@ -461,58 +475,25 @@ Rectangle {
         ogSiteName = data.siteName || "";
     }
 
-    // Regex-extract the OpenGraph set plus sensible fallbacks. This is
-    // deliberately not a real HTML parser — it just picks out the
-    // handful of <meta> tags we care about. Most modern sites emit
-    // them in the same `<meta property="og:*" content="...">` shape
-    // with quote variation that the regex tolerates.
-    function _parseOg(html, urlStr) {
-        function pick(prop) {
-            // Property-first or content-first ordering both seen in
-            // the wild. Match either.
-            var re = new RegExp(
-                '<meta[^>]+(?:property|name)=["\']' + prop
-                + '["\'][^>]*content=["\']([^"\']+)["\']', 'i');
-            var m = re.exec(html);
-            if (m) return _decode(m[1]);
-            re = new RegExp(
-                '<meta[^>]+content=["\']([^"\']+)["\'][^>]*(?:property|name)=["\']'
-                + prop + '["\']', 'i');
-            m = re.exec(html);
-            return m ? _decode(m[1]) : "";
-        }
-        var out = {};
-        out.title = pick("og:title");
-        out.description = pick("og:description");
-        out.image = pick("og:image");
-        out.siteName = pick("og:site_name");
-
-        // Fallbacks: <title> tag + <meta name="description">.
-        if (!out.title) {
-            var tm = /<title[^>]*>([^<]+)<\/title>/i.exec(html);
-            if (tm) out.title = _decode(tm[1].trim());
-        }
-        if (!out.description) out.description = pick("description");
-
-        // Relative or protocol-relative image URLs — turn into
-        // absolute against the requested url.
-        if (out.image) out.image = _absolutize(out.image, urlStr);
-
-        out.ready = !!(out.title || out.description || out.image);
-        return out;
+    // Single exit for both fetch paths. `null` means the URL has no usable
+    // preview — bad status, wrong content type, a challenge shim, or HTML with
+    // no OpenGraph and no <title> — and that is the state the card hides in.
+    function _finish(parsed) {
+        if (parsed) _apply(parsed);
+        else _failed = true;
     }
 
-    // Minimal HTML entity decode — covers the common ampersand /
-    // quote / apostrophe / less / greater entities that show up in
-    // og:title values.
-    function _decode(s) {
-        return s
-            .replace(/&amp;/g, "&")
-            .replace(/&quot;/g, '"')
-            .replace(/&#39;/g, "'")
-            .replace(/&apos;/g, "'")
-            .replace(/&lt;/g, "<")
-            .replace(/&gt;/g, ">");
+    // Drop the in-flight request, if any. Clearing the handler first matters:
+    // abort() dispatches a final readyState change, and running the normal
+    // callback from here would be the very thing this exists to prevent.
+    // Whatever the response would have been is simply lost — the URL stays
+    // absent from the cache and the next card that shows it fetches again.
+    function _cancelFetch() {
+        if (!_xhr) return;
+        var xhr = _xhr;
+        _xhr = null;
+        xhr.onreadystatechange = function() {};
+        xhr.abort();
     }
 
     // Known-platform sniff. Returns the platform-native video ID if
@@ -532,45 +513,5 @@ Rectangle {
         m = /^https?:\/\/(?:www\.|m\.)?youtube\.com\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{6,})/i.exec(u);
         if (m) return m[1];
         return "";
-    }
-
-    // Returns true when the fetched HTML is obviously a bot-challenge
-    // shim (Cloudflare, PerimeterX, DataDome, generic "please wait")
-    // rather than real page content. Matching is deliberately broad —
-    // a false positive at worst means no preview, which is fine since
-    // the alternative is showing "Please wait for verification" as a
-    // title. A properly-signed server-side fetcher won't hit these.
-    function _looksLikeChallenge(html) {
-        var t = /<title[^>]*>([^<]+)<\/title>/i.exec(html);
-        if (t) {
-            var title = t[1].toLowerCase();
-            if (title.indexOf("just a moment") >= 0) return true;
-            if (title.indexOf("please wait") >= 0) return true;
-            if (title.indexOf("verify you are human") >= 0) return true;
-            if (title.indexOf("attention required") >= 0) return true;
-            if (title.indexOf("access denied") >= 0) return true;
-            if (title.indexOf("verification") >= 0) return true;
-            if (title.indexOf("checking your browser") >= 0) return true;
-        }
-        // Body-level giveaways that survive even when the title is
-        // generic or missing.
-        if (/cf-chl-page|cf_chl_opt|_cf_chl_|challenge-platform/i.test(html)) return true;
-        if (/perimeterx\.net|pxhd-captcha|_pxAppId/i.test(html)) return true;
-        if (/datadome\.co|ddkey|dd_protected/i.test(html)) return true;
-        return false;
-    }
-
-    function _absolutize(maybeRel, baseUrl) {
-        if (/^https?:\/\//i.test(maybeRel)) return maybeRel;
-        if (maybeRel.indexOf("//") === 0) {
-            var scheme = baseUrl.match(/^(https?:)/i);
-            return (scheme ? scheme[1] : "https:") + maybeRel;
-        }
-        var base = baseUrl.match(/^(https?:\/\/[^\/]+)/i);
-        if (!base) return maybeRel;
-        if (maybeRel.indexOf("/") === 0) return base[1] + maybeRel;
-        // Strip trailing filename from the base path before appending.
-        var path = baseUrl.replace(base[1], "").replace(/[^\/]*$/, "");
-        return base[1] + path + maybeRel;
     }
 }
