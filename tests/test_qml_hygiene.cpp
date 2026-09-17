@@ -107,6 +107,51 @@ private slots:
     // private while `struct` defaults to public. A base-class list
     // ("class Settings : public QObject") is not an access specifier and is
     // not treated as one.
+    // A dialog that clamps its own height must be able to scroll.
+    //
+    // `height: Math.min(implicitHeight, parent.height - 32)` is the right way
+    // to keep a dialog inside the window — but with a plain Layout as
+    // contentItem the surplus is not compressed, it is clipped. LoginDialog
+    // did exactly that: main.qml sets the window minimum to 500 px, the
+    // sign-in form is taller, and at the minimum size the password fields and
+    // the Sign In button sat below the cut with no way to reach them. The app
+    // could not be signed into at a size it lets you resize to.
+    //
+    // There is no test binary that can instantiate these components (the
+    // BSFChat QML module is compiled into the app), so this is a source scan:
+    // if a file clamps a height against the parent, it must also contain a
+    // Flickable or a ScrollView.
+    void clampedDialogsCanScroll()
+    {
+        static const QRegularExpression clamps(
+            QStringLiteral(R"(height\s*:\s*Math\.min\s*\(\s*implicitHeight)"));
+
+        const QStringList qml = filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
+                                           QStringLiteral("*.qml"));
+        QVERIFY2(!qml.isEmpty(), "no QML found under BSFCHAT_QML_DIR");
+
+        QStringList offenders;
+        int checked = 0;
+        for (const QString& path : qml) {
+            const QString src = withoutComments(readAll(path));
+            if (!clamps.match(src).hasMatch()) continue;
+            ++checked;
+            if (!src.contains(QStringLiteral("Flickable"))
+                && !src.contains(QStringLiteral("ScrollView"))
+                && !src.contains(QStringLiteral("ListView"))) {
+                offenders << QFileInfo(path).fileName();
+            }
+        }
+        QVERIFY2(checked > 0,
+                 "no clamped dialog found — has the pattern changed? This "
+                 "guard is only meaningful while one exists.");
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "dialog clamps its height but cannot scroll, so content "
+                     "past the clamp is unreachable: ")
+                     + offenders.join(QStringLiteral(", "))));
+    }
+
     // QSettings must be named through AppProfile, never with literals.
     //
     // --profile exists so two accounts can run on one machine, and it works

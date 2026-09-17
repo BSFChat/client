@@ -201,150 +201,340 @@ Dialog {
         dialog.probeRedirected = false;
     }
 
-    contentItem: ColumnLayout {
-        spacing: Theme.sp.s5
+    // The dialog's height is clamped to the window, and main.qml sets the
+    // window's own minimum to 500 px — but the sign-in form is taller than
+    // that. With a bare ColumnLayout as contentItem the excess was simply
+    // clipped: at the minimum window size the password fields and the Sign In
+    // button were below the cut and unreachable, so the app could not be
+    // signed into at a size it lets you resize to. It only scrolls when it has
+    // to; at any normal window size nothing moves and nothing looks different.
+    contentItem: Flickable {
+        id: contentFlick
+        implicitWidth: loginForm.implicitWidth
+        implicitHeight: loginForm.implicitHeight
+        contentWidth: width
+        contentHeight: loginForm.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        ScrollBar.vertical: ThemedScrollBar {}
 
-        // --- Identity-first sign-in (the fast path).
-        Text {
-            text: "Sign in with your BSFChat ID to restore every server you've joined."
-            font.family: Theme.fontSans
-            font.pixelSize: Theme.fontSize.md
-            color: Theme.fg1
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            horizontalAlignment: Text.AlignHCenter
-        }
+        ColumnLayout {
+            id: loginForm
+            width: contentFlick.width
+            spacing: Theme.sp.s5
 
-        Button {
-            id: identityButton
-            Layout.fillWidth: true
-            Layout.topMargin: Theme.sp.s3
-            enabled: !dialog.identitySyncInProgress && !dialog.isConnecting && !dialog.oidcInProgress
-            contentItem: Text {
-                text: dialog.identitySyncInProgress ? "Waiting for browser login…"
-                                                    : "Sign in with BSFChat ID"
+            // --- Identity-first sign-in (the fast path).
+            Text {
+                text: "Sign in with your BSFChat ID to restore every server you've joined."
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.md
-                font.weight: Theme.fontWeight.semibold
-                font.letterSpacing: Theme.trackTight.md
-                color: parent.enabled ? Theme.onAccent : Theme.fg3
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-            }
-            background: Rectangle {
-                color: identityButton.enabled
-                       ? (identityButton.hovered ? Theme.accentDim : Theme.accent)
-                       : Theme.bg2
-                radius: Theme.r2
-                implicitHeight: 48
-                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
-            }
-            onClicked: {
-                dialog.errorMessage = "";
-                dialog.identitySyncInProgress = true;
-                serverManager.loginWithIdentityAndSync(identityUrlField.text.trim());
-            }
-        }
-
-        // Identity URL — editable for self-hosters, default to hosted service.
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: Theme.sp.s3
-
-            Text {
-                text: "Identity server"
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontSize.xs
-                font.weight: Theme.fontWeight.semibold
-                font.letterSpacing: Theme.trackWidest.xs
-                color: Theme.fg3
-            }
-
-            TextField {
-                id: identityUrlField
+                color: Theme.fg1
                 Layout.fillWidth: true
-                text: "https://id.bsfchat.com"
-                placeholderText: "https://id.bsfchat.com"
-                placeholderTextColor: Theme.fg3
-                color: Theme.fg0
-                font.family: Theme.fontMono
-                font.pixelSize: Theme.fontSize.sm
+                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignHCenter
+            }
+
+            Button {
+                id: identityButton
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.sp.s3
                 enabled: !dialog.identitySyncInProgress && !dialog.isConnecting && !dialog.oidcInProgress
-                background: Rectangle {
-                    color: Theme.bg0
-                    radius: Theme.r2
-                    border.color: identityUrlField.activeFocus ? Theme.accent : Theme.line
-                    border.width: 1
+                contentItem: Text {
+                    text: dialog.identitySyncInProgress ? "Waiting for browser login…"
+                                                        : "Sign in with BSFChat ID"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackTight.md
+                    color: parent.enabled ? Theme.onAccent : Theme.fg3
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
                 }
-                leftPadding: Theme.sp.s4
-                rightPadding: Theme.sp.s4
-                topPadding: Theme.sp.s3
-                bottomPadding: Theme.sp.s3
-            }
-        }
-
-        // Divider with embedded "or" label — softer than a full-width line
-        // with the toggle text separately below.
-        RowLayout {
-            Layout.fillWidth: true
-            Layout.topMargin: Theme.sp.s3
-            spacing: Theme.sp.s3
-
-            Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
-            Text {
-                text: "OR"
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontSize.xs
-                font.weight: Theme.fontWeight.semibold
-                font.letterSpacing: Theme.trackWidest.xs
-                color: Theme.fg3
-            }
-            Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
-        }
-
-        // Collapse toggle for the manual "add a specific server" flow.
-        Text {
-            Layout.fillWidth: true
-            text: dialog.showManualServer ? "Hide manual server entry"
-                                          : "Add a specific server"
-            font.family: Theme.fontSans
-            font.pixelSize: Theme.fontSize.sm
-            font.weight: Theme.fontWeight.medium
-            color: manualToggle.containsMouse ? Theme.accentDim : Theme.accent
-            horizontalAlignment: Text.AlignHCenter
-
-            MouseArea {
-                id: manualToggle
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: dialog.showManualServer = !dialog.showManualServer
-            }
-        }
-
-        // Server URL
-        ColumnLayout {
-            spacing: Theme.sp.s1
-            Layout.fillWidth: true
-            visible: dialog.showManualServer
-
-            Text {
-                text: "SERVER URL"
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontSize.xs
-                font.weight: Theme.fontWeight.semibold
-                font.letterSpacing: Theme.trackWidest.xs
-                color: Theme.fg3
+                background: Rectangle {
+                    color: identityButton.enabled
+                           ? (identityButton.hovered ? Theme.accentDim : Theme.accent)
+                           : Theme.bg2
+                    radius: Theme.r2
+                    implicitHeight: 48
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                }
+                onClicked: {
+                    dialog.errorMessage = "";
+                    dialog.identitySyncInProgress = true;
+                    serverManager.loginWithIdentityAndSync(identityUrlField.text.trim());
+                }
             }
 
+            // Identity URL — editable for self-hosters, default to hosted service.
             RowLayout {
                 Layout.fillWidth: true
-                spacing: Theme.sp.s1
+                spacing: Theme.sp.s3
+
+                Text {
+                    text: "Identity server"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xs
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackWidest.xs
+                    color: Theme.fg3
+                }
 
                 TextField {
-                    id: urlField
+                    id: identityUrlField
                     Layout.fillWidth: true
-                    placeholderText: "http://localhost:8448"
+                    text: "https://id.bsfchat.com"
+                    placeholderText: "https://id.bsfchat.com"
+                    placeholderTextColor: Theme.fg3
+                    color: Theme.fg0
+                    font.family: Theme.fontMono
+                    font.pixelSize: Theme.fontSize.sm
+                    enabled: !dialog.identitySyncInProgress && !dialog.isConnecting && !dialog.oidcInProgress
+                    background: Rectangle {
+                        color: Theme.bg0
+                        radius: Theme.r2
+                        border.color: identityUrlField.activeFocus ? Theme.accent : Theme.line
+                        border.width: 1
+                    }
+                    leftPadding: Theme.sp.s4
+                    rightPadding: Theme.sp.s4
+                    topPadding: Theme.sp.s3
+                    bottomPadding: Theme.sp.s3
+                }
+            }
+
+            // Divider with embedded "or" label — softer than a full-width line
+            // with the toggle text separately below.
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.sp.s3
+                spacing: Theme.sp.s3
+
+                Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
+                Text {
+                    text: "OR"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xs
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackWidest.xs
+                    color: Theme.fg3
+                }
+                Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
+            }
+
+            // Collapse toggle for the manual "add a specific server" flow.
+            Text {
+                Layout.fillWidth: true
+                text: dialog.showManualServer ? "Hide manual server entry"
+                                              : "Add a specific server"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                font.weight: Theme.fontWeight.medium
+                color: manualToggle.containsMouse ? Theme.accentDim : Theme.accent
+                horizontalAlignment: Text.AlignHCenter
+
+                MouseArea {
+                    id: manualToggle
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: dialog.showManualServer = !dialog.showManualServer
+                }
+            }
+
+            // Server URL
+            ColumnLayout {
+                spacing: Theme.sp.s1
+                Layout.fillWidth: true
+                visible: dialog.showManualServer
+
+                Text {
+                    text: "SERVER URL"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xs
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackWidest.xs
+                    color: Theme.fg3
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.sp.s1
+
+                    TextField {
+                        id: urlField
+                        Layout.fillWidth: true
+                        placeholderText: "http://localhost:8448"
+                        placeholderTextColor: Theme.fg2
+                        color: Theme.fg0
+                        font.pixelSize: Theme.fontSize.md
+                        enabled: !dialog.isConnecting && !dialog.oidcInProgress
+                        background: Rectangle {
+                            color: Theme.bg0
+                            radius: Theme.r2
+                            border.color: urlField.activeFocus ? Theme.accent : Theme.line
+                            border.width: 1
+                        }
+                        padding: Theme.sp.s3
+
+                        onEditingFinished: {
+                            if (urlField.text.trim() !== "")
+                                dialog.beginCheck(urlField.text.trim());
+                        }
+                    }
+
+                    // Ghost "Check" — probes the server for available login
+                    // flows (OIDC / password) without committing to a connect.
+                    Button {
+                        id: checkButton
+                        enabled: urlField.text.trim() !== "" && !dialog.isConnecting && !dialog.oidcInProgress && !dialog.checkingFlows
+                        contentItem: Text {
+                            text: "Check"
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.sm
+                            font.weight: Theme.fontWeight.medium
+                            color: checkButton.enabled ? Theme.fg1 : Theme.fg3
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle {
+                            color: checkButton.hovered && checkButton.enabled ? Theme.bg3 : "transparent"
+                            border.color: Theme.line
+                            border.width: 1
+                            radius: Theme.r2
+                            implicitWidth: 80
+                            implicitHeight: 36
+                            Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                        }
+                        onClicked: {
+                            dialog.errorMessage = "";
+                            dialog.beginCheck(urlField.text.trim());
+                        }
+                    }
+                }
+            }
+
+            // Checking indicator
+            Text {
+                text: "Checking server capabilities..."
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.fg2
+                visible: dialog.checkingFlows && dialog.showManualServer
+                Layout.alignment: Qt.AlignHCenter
+            }
+
+            // What we found. THE surface for "that is not a server" — the case
+            // the old dialog answered with a registration form. Also names the
+            // homeserver we resolved to, so someone who typed the product
+            // domain learns the address their client is actually using.
+            Text {
+                Layout.fillWidth: true
+                visible: dialog.showManualServer && dialog.probed && !dialog.checkingFlows
+                text: dialog.probeSummary()
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: dialog.probeFailed() ? Theme.danger : Theme.fg2
+                wrapMode: Text.Wrap
+            }
+
+            // Only set when a well-known file named a homeserver that did not
+            // answer and we fell back to the typed URL. Silence otherwise:
+            // having no well-known file at all is the normal case.
+            Text {
+                Layout.fillWidth: true
+                visible: dialog.showManualServer && dialog.probeNote !== "" && !dialog.checkingFlows
+                text: dialog.probeNote
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                color: Theme.fg3
+                wrapMode: Text.Wrap
+            }
+
+            // OIDC login button
+            Button {
+                id: oidcButton
+                Layout.fillWidth: true
+                visible: dialog.showManualServer && dialog.oidcAvailable && !dialog.checkingFlows
+                enabled: !dialog.isConnecting && !dialog.oidcInProgress
+                contentItem: Text {
+                    text: "Sign in with BSFChat ID"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    font.weight: Theme.fontWeight.semibold
+                    color: oidcButton.enabled ? Theme.onAccent : Theme.fg3
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    color: !oidcButton.enabled ? Theme.bg2
+                         : (oidcButton.hovered ? Theme.accentDim : Theme.accent)
+                    radius: Theme.r2
+                    implicitHeight: 44
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                }
+                onClicked: {
+                    dialog.errorMessage = "";
+                    dialog.oidcInProgress = true;
+                    serverManager.addServerWithOidc(dialog.targetUrl());
+                }
+            }
+
+            // Identity-only servers (the official one) have no register form to
+            // fall back to, and the button above gives no clue that it will
+            // make an account as well as use one. Say so, in one line, rather
+            // than leaving "where do I sign up?" as the user's problem.
+            Text {
+                Layout.fillWidth: true
+                Layout.topMargin: -Theme.sp.s1
+                visible: dialog.showManualServer && dialog.probed && dialog.oidcAvailable
+                         && !dialog.passwordAvailable && !dialog.checkingFlows
+                text: "No account needed — one is created the first time you sign in."
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                color: Theme.fg3
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+            }
+
+            // When OIDC is available, collapse password behind a link.
+            // When OIDC is NOT available, show password fields directly.
+            Text {
+                Layout.fillWidth: true
+                Layout.topMargin: -Theme.sp.s1
+                text: dialog.showPasswordFallback ? "Hide password login" : "Use password instead"
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.accent
+                horizontalAlignment: Text.AlignHCenter
+                visible: dialog.showManualServer && dialog.probed && dialog.oidcAvailable
+                         && dialog.passwordAvailable && !dialog.checkingFlows
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: dialog.showPasswordFallback = !dialog.showPasswordFallback
+                }
+            }
+
+            // Username (only when password auth is relevant and not collapsed)
+            ColumnLayout {
+                spacing: Theme.sp.s1
+                Layout.fillWidth: true
+                visible: dialog.showManualServer && dialog.probed && dialog.passwordAvailable
+                         && !dialog.checkingFlows
+                         && (!dialog.oidcAvailable || dialog.showPasswordFallback)
+
+                Text {
+                    text: "USERNAME"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xs
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackWidest.xs
+                    color: Theme.fg3
+                }
+
+                TextField {
+                    id: usernameField
+                    Layout.fillWidth: true
+                    placeholderText: "Enter username"
                     placeholderTextColor: Theme.fg2
                     color: Theme.fg0
                     font.pixelSize: Theme.fontSize.md
@@ -352,333 +542,163 @@ Dialog {
                     background: Rectangle {
                         color: Theme.bg0
                         radius: Theme.r2
-                        border.color: urlField.activeFocus ? Theme.accent : Theme.line
+                        border.color: usernameField.activeFocus ? Theme.accent : Theme.line
+                        border.width: 1
+                    }
+                    padding: Theme.sp.s3
+                }
+            }
+
+            // Password
+            ColumnLayout {
+                spacing: Theme.sp.s1
+                Layout.fillWidth: true
+                visible: dialog.showManualServer && dialog.probed && dialog.passwordAvailable
+                         && !dialog.checkingFlows
+                         && (!dialog.oidcAvailable || dialog.showPasswordFallback)
+
+                Text {
+                    text: "PASSWORD"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xs
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackWidest.xs
+                    color: Theme.fg3
+                }
+
+                TextField {
+                    id: passwordField
+                    Layout.fillWidth: true
+                    placeholderText: "Enter password"
+                    placeholderTextColor: Theme.fg2
+                    color: Theme.fg0
+                    font.pixelSize: Theme.fontSize.md
+                    echoMode: TextInput.Password
+                    enabled: !dialog.isConnecting && !dialog.oidcInProgress
+                    background: Rectangle {
+                        color: Theme.bg0
+                        radius: Theme.r2
+                        border.color: passwordField.activeFocus ? Theme.accent : Theme.line
                         border.width: 1
                     }
                     padding: Theme.sp.s3
 
-                    onEditingFinished: {
-                        if (urlField.text.trim() !== "")
-                            dialog.beginCheck(urlField.text.trim());
-                    }
+                    Keys.onReturnPressed: loginButton.clicked()
                 }
+            }
 
-                // Ghost "Check" — probes the server for available login
-                // flows (OIDC / password) without committing to a connect.
+            // Error message
+            Text {
+                text: dialog.errorMessage
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.danger
+                visible: dialog.errorMessage !== ""
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+
+            // Connecting indicator
+            Text {
+                text: dialog.oidcInProgress ? "Waiting for browser login..." : "Connecting..."
+                font.pixelSize: Theme.fontSize.md
+                color: Theme.fg2
+                visible: dialog.isConnecting || dialog.oidcInProgress
+                Layout.alignment: Qt.AlignHCenter
+            }
+
+            // Password auth buttons
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.sp.s3
+                // `probed` is load-bearing: no Register button exists until the
+                // server has said, in a login-flows document of its own, that
+                // it accepts m.login.password. Assuming it did is the entire
+                // bug this dialog is being fixed for.
+                visible: dialog.showManualServer && dialog.probed && dialog.passwordAvailable
+                         && !dialog.checkingFlows
+                         && (!dialog.oidcAvailable || dialog.showPasswordFallback)
+
+                // Ghost Register — secondary action, soft border, fg1.
                 Button {
-                    id: checkButton
-                    enabled: urlField.text.trim() !== "" && !dialog.isConnecting && !dialog.oidcInProgress && !dialog.checkingFlows
+                    id: registerBtn
+                    Layout.fillWidth: true
+                    enabled: !dialog.isConnecting && !dialog.oidcInProgress
                     contentItem: Text {
-                        text: "Check"
+                        text: "Register"
                         font.family: Theme.fontSans
-                        font.pixelSize: Theme.fontSize.sm
+                        font.pixelSize: Theme.fontSize.md
                         font.weight: Theme.fontWeight.medium
-                        color: checkButton.enabled ? Theme.fg1 : Theme.fg3
+                        color: registerBtn.enabled ? Theme.fg1 : Theme.fg3
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle {
-                        color: checkButton.hovered && checkButton.enabled ? Theme.bg3 : "transparent"
+                        color: registerBtn.hovered && registerBtn.enabled ? Theme.bg3 : "transparent"
                         border.color: Theme.line
                         border.width: 1
                         radius: Theme.r2
-                        implicitWidth: 80
-                        implicitHeight: 36
+                        implicitHeight: 40
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                     }
                     onClicked: {
                         dialog.errorMessage = "";
-                        dialog.beginCheck(urlField.text.trim());
+                        if (urlField.text.trim() === "" || usernameField.text.trim() === "" || passwordField.text.trim() === "") {
+                            dialog.errorMessage = "All fields are required";
+                            return;
+                        }
+                        dialog.isConnecting = true;
+                        serverManager.registerServer(dialog.targetUrl(), usernameField.text.trim(), passwordField.text.trim());
+                    }
+                }
+
+                // Primary Login — accent filled.
+                Button {
+                    id: loginButton
+                    Layout.fillWidth: true
+                    enabled: !dialog.isConnecting && !dialog.oidcInProgress
+                    contentItem: Text {
+                        text: "Login"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.semibold
+                        color: loginButton.enabled ? Theme.onAccent : Theme.fg3
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: !loginButton.enabled ? Theme.bg2
+                             : (loginButton.hovered ? Theme.accentDim : Theme.accent)
+                        radius: Theme.r2
+                        implicitHeight: 40
+                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                    }
+                    onClicked: {
+                        dialog.errorMessage = "";
+                        if (urlField.text.trim() === "" || usernameField.text.trim() === "" || passwordField.text.trim() === "") {
+                            dialog.errorMessage = "All fields are required";
+                            return;
+                        }
+                        dialog.isConnecting = true;
+                        serverManager.addServer(dialog.targetUrl(), usernameField.text.trim(), passwordField.text.trim());
                     }
                 }
             }
-        }
 
-        // Checking indicator
-        Text {
-            text: "Checking server capabilities..."
-            font.pixelSize: Theme.fontSize.sm
-            color: Theme.fg2
-            visible: dialog.checkingFlows && dialog.showManualServer
-            Layout.alignment: Qt.AlignHCenter
-        }
-
-        // What we found. THE surface for "that is not a server" — the case
-        // the old dialog answered with a registration form. Also names the
-        // homeserver we resolved to, so someone who typed the product
-        // domain learns the address their client is actually using.
-        Text {
-            Layout.fillWidth: true
-            visible: dialog.showManualServer && dialog.probed && !dialog.checkingFlows
-            text: dialog.probeSummary()
-            font.family: Theme.fontSans
-            font.pixelSize: Theme.fontSize.sm
-            color: dialog.probeFailed() ? Theme.danger : Theme.fg2
-            wrapMode: Text.Wrap
-        }
-
-        // Only set when a well-known file named a homeserver that did not
-        // answer and we fell back to the typed URL. Silence otherwise:
-        // having no well-known file at all is the normal case.
-        Text {
-            Layout.fillWidth: true
-            visible: dialog.showManualServer && dialog.probeNote !== "" && !dialog.checkingFlows
-            text: dialog.probeNote
-            font.family: Theme.fontSans
-            font.pixelSize: Theme.fontSize.xs
-            color: Theme.fg3
-            wrapMode: Text.Wrap
-        }
-
-        // OIDC login button
-        Button {
-            id: oidcButton
-            Layout.fillWidth: true
-            visible: dialog.showManualServer && dialog.oidcAvailable && !dialog.checkingFlows
-            enabled: !dialog.isConnecting && !dialog.oidcInProgress
-            contentItem: Text {
-                text: "Sign in with BSFChat ID"
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontSize.md
-                font.weight: Theme.fontWeight.semibold
-                color: oidcButton.enabled ? Theme.onAccent : Theme.fg3
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-            }
-            background: Rectangle {
-                color: !oidcButton.enabled ? Theme.bg2
-                     : (oidcButton.hovered ? Theme.accentDim : Theme.accent)
-                radius: Theme.r2
-                implicitHeight: 44
-                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
-            }
-            onClicked: {
-                dialog.errorMessage = "";
-                dialog.oidcInProgress = true;
-                serverManager.addServerWithOidc(dialog.targetUrl());
-            }
-        }
-
-        // Identity-only servers (the official one) have no register form to
-        // fall back to, and the button above gives no clue that it will
-        // make an account as well as use one. Say so, in one line, rather
-        // than leaving "where do I sign up?" as the user's problem.
-        Text {
-            Layout.fillWidth: true
-            Layout.topMargin: -Theme.sp.s1
-            visible: dialog.showManualServer && dialog.probed && dialog.oidcAvailable
-                     && !dialog.passwordAvailable && !dialog.checkingFlows
-            text: "No account needed — one is created the first time you sign in."
-            font.family: Theme.fontSans
-            font.pixelSize: Theme.fontSize.xs
-            color: Theme.fg3
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.Wrap
-        }
-
-        // When OIDC is available, collapse password behind a link.
-        // When OIDC is NOT available, show password fields directly.
-        Text {
-            Layout.fillWidth: true
-            Layout.topMargin: -Theme.sp.s1
-            text: dialog.showPasswordFallback ? "Hide password login" : "Use password instead"
-            font.pixelSize: Theme.fontSize.sm
-            color: Theme.accent
-            horizontalAlignment: Text.AlignHCenter
-            visible: dialog.showManualServer && dialog.probed && dialog.oidcAvailable
-                     && dialog.passwordAvailable && !dialog.checkingFlows
-
-            MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: dialog.showPasswordFallback = !dialog.showPasswordFallback
-            }
-        }
-
-        // Username (only when password auth is relevant and not collapsed)
-        ColumnLayout {
-            spacing: Theme.sp.s1
-            Layout.fillWidth: true
-            visible: dialog.showManualServer && dialog.probed && dialog.passwordAvailable
-                     && !dialog.checkingFlows
-                     && (!dialog.oidcAvailable || dialog.showPasswordFallback)
-
-            Text {
-                text: "USERNAME"
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontSize.xs
-                font.weight: Theme.fontWeight.semibold
-                font.letterSpacing: Theme.trackWidest.xs
-                color: Theme.fg3
-            }
-
-            TextField {
-                id: usernameField
-                Layout.fillWidth: true
-                placeholderText: "Enter username"
-                placeholderTextColor: Theme.fg2
-                color: Theme.fg0
-                font.pixelSize: Theme.fontSize.md
-                enabled: !dialog.isConnecting && !dialog.oidcInProgress
-                background: Rectangle {
-                    color: Theme.bg0
-                    radius: Theme.r2
-                    border.color: usernameField.activeFocus ? Theme.accent : Theme.line
-                    border.width: 1
-                }
-                padding: Theme.sp.s3
-            }
-        }
-
-        // Password
-        ColumnLayout {
-            spacing: Theme.sp.s1
-            Layout.fillWidth: true
-            visible: dialog.showManualServer && dialog.probed && dialog.passwordAvailable
-                     && !dialog.checkingFlows
-                     && (!dialog.oidcAvailable || dialog.showPasswordFallback)
-
-            Text {
-                text: "PASSWORD"
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontSize.xs
-                font.weight: Theme.fontWeight.semibold
-                font.letterSpacing: Theme.trackWidest.xs
-                color: Theme.fg3
-            }
-
-            TextField {
-                id: passwordField
-                Layout.fillWidth: true
-                placeholderText: "Enter password"
-                placeholderTextColor: Theme.fg2
-                color: Theme.fg0
-                font.pixelSize: Theme.fontSize.md
-                echoMode: TextInput.Password
-                enabled: !dialog.isConnecting && !dialog.oidcInProgress
-                background: Rectangle {
-                    color: Theme.bg0
-                    radius: Theme.r2
-                    border.color: passwordField.activeFocus ? Theme.accent : Theme.line
-                    border.width: 1
-                }
-                padding: Theme.sp.s3
-
-                Keys.onReturnPressed: loginButton.clicked()
-            }
-        }
-
-        // Error message
-        Text {
-            text: dialog.errorMessage
-            font.pixelSize: Theme.fontSize.sm
-            color: Theme.danger
-            visible: dialog.errorMessage !== ""
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-        }
-
-        // Connecting indicator
-        Text {
-            text: dialog.oidcInProgress ? "Waiting for browser login..." : "Connecting..."
-            font.pixelSize: Theme.fontSize.md
-            color: Theme.fg2
-            visible: dialog.isConnecting || dialog.oidcInProgress
-            Layout.alignment: Qt.AlignHCenter
-        }
-
-        // Password auth buttons
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: Theme.sp.s3
-            // `probed` is load-bearing: no Register button exists until the
-            // server has said, in a login-flows document of its own, that
-            // it accepts m.login.password. Assuming it did is the entire
-            // bug this dialog is being fixed for.
-            visible: dialog.showManualServer && dialog.probed && dialog.passwordAvailable
-                     && !dialog.checkingFlows
-                     && (!dialog.oidcAvailable || dialog.showPasswordFallback)
-
-            // Ghost Register — secondary action, soft border, fg1.
+            // Cancel — ghost text link, no bg at all.
             Button {
-                id: registerBtn
+                id: cancelBtn
                 Layout.fillWidth: true
-                enabled: !dialog.isConnecting && !dialog.oidcInProgress
                 contentItem: Text {
-                    text: "Register"
+                    text: "Cancel"
                     font.family: Theme.fontSans
-                    font.pixelSize: Theme.fontSize.md
-                    font.weight: Theme.fontWeight.medium
-                    color: registerBtn.enabled ? Theme.fg1 : Theme.fg3
+                    font.pixelSize: Theme.fontSize.sm
+                    color: cancelBtn.hovered ? Theme.fg1 : Theme.fg3
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                 }
-                background: Rectangle {
-                    color: registerBtn.hovered && registerBtn.enabled ? Theme.bg3 : "transparent"
-                    border.color: Theme.line
-                    border.width: 1
-                    radius: Theme.r2
-                    implicitHeight: 40
-                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
-                }
-                onClicked: {
-                    dialog.errorMessage = "";
-                    if (urlField.text.trim() === "" || usernameField.text.trim() === "" || passwordField.text.trim() === "") {
-                        dialog.errorMessage = "All fields are required";
-                        return;
-                    }
-                    dialog.isConnecting = true;
-                    serverManager.registerServer(dialog.targetUrl(), usernameField.text.trim(), passwordField.text.trim());
-                }
+                background: Rectangle { color: "transparent"; implicitHeight: 32 }
+                onClicked: dialog.close()
             }
-
-            // Primary Login — accent filled.
-            Button {
-                id: loginButton
-                Layout.fillWidth: true
-                enabled: !dialog.isConnecting && !dialog.oidcInProgress
-                contentItem: Text {
-                    text: "Login"
-                    font.family: Theme.fontSans
-                    font.pixelSize: Theme.fontSize.md
-                    font.weight: Theme.fontWeight.semibold
-                    color: loginButton.enabled ? Theme.onAccent : Theme.fg3
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                }
-                background: Rectangle {
-                    color: !loginButton.enabled ? Theme.bg2
-                         : (loginButton.hovered ? Theme.accentDim : Theme.accent)
-                    radius: Theme.r2
-                    implicitHeight: 40
-                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
-                }
-                onClicked: {
-                    dialog.errorMessage = "";
-                    if (urlField.text.trim() === "" || usernameField.text.trim() === "" || passwordField.text.trim() === "") {
-                        dialog.errorMessage = "All fields are required";
-                        return;
-                    }
-                    dialog.isConnecting = true;
-                    serverManager.addServer(dialog.targetUrl(), usernameField.text.trim(), passwordField.text.trim());
-                }
-            }
-        }
-
-        // Cancel — ghost text link, no bg at all.
-        Button {
-            id: cancelBtn
-            Layout.fillWidth: true
-            contentItem: Text {
-                text: "Cancel"
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontSize.sm
-                color: cancelBtn.hovered ? Theme.fg1 : Theme.fg3
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-            }
-            background: Rectangle { color: "transparent"; implicitHeight: 32 }
-            onClicked: dialog.close()
         }
     }
 }
