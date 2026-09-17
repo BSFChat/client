@@ -1,6 +1,7 @@
 #include "Updater.h"
 
 #include "ReleaseSelection.h"
+#include "AppProfile.h"
 
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -31,13 +32,20 @@ namespace {
 // difference between "here is 0.0.44" and "you are already on it".
 
 // Read the persisted channel without owning a Settings instance.
-// Settings uses QSettings("BSFChat", "BSFChat") and sync()s on write, so
-// this sees the current value; reading fresh per check also means a
-// toggle takes effect on the next check with no wiring between the two
-// objects (Updater is constructed in main() before Settings is reachable).
+// Settings sync()s on write, so this sees the current value; reading fresh
+// per check also means a toggle takes effect on the next check with no
+// wiring between the two objects (Updater is constructed in main() before
+// Settings is reachable).
+//
+// The names MUST come from AppProfile, exactly as Settings builds them.
+// Hard-coding ("BSFChat", "BSFChat") here meant that under --profile the
+// beta toggle wrote to BSFChat-<profile> while this read BSFChat: the
+// switch did nothing, `updater.channel` disagreed with `appSettings`
+// in the same dialog, and a profile silently inherited the default
+// install's channel.
 bsfchat::updates::Channel persistedChannel()
 {
-    QSettings s(QStringLiteral("BSFChat"), QStringLiteral("BSFChat"));
+    QSettings s(bsfchat::organizationName(), bsfchat::applicationName());
     return bsfchat::updates::channelFromString(
         s.value(QStringLiteral("updateChannel"),
                 QStringLiteral("stable")).toString());
@@ -133,6 +141,12 @@ void Updater::checkNow()
     req.setRawHeader("User-Agent", "BSFChat-Updater");
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                      QNetworkRequest::NoLessSafeRedirectPolicy);
+    // Without a timeout a request that is accepted and then never answered
+    // — a captive portal, a black-holed TCP connection — leaves m_state at
+    // Checking forever, and the guard above then makes both the 6-hour
+    // timer and the user's own "Check for updates" button permanent no-ops
+    // for the rest of the session.
+    req.setTransferTimeout(kCheckTimeoutMs);
     auto* reply = m_nam.get(req);
     connect(reply, &QNetworkReply::finished, this, &Updater::onCheckReply);
 }
@@ -158,7 +172,12 @@ void Updater::onCheckReply()
 
     const Channel ch = persistedChannel();
     m_channel = channelToString(ch);
-    const Selection sel = selectRelease(releases, ch, m_currentVersion);
+    // Only releases carrying this platform's artefact can be offered. An
+    // empty suffix means an unsupported platform: no filter, and the
+    // UpdateAvailable branch below bails out to Idle instead of promising
+    // a download we cannot perform.
+    const QString suffix = platformAssetSuffix();
+    const Selection sel = selectRelease(releases, ch, m_currentVersion, suffix);
     m_latestStableVersion = sel.newestStableTag;
 
     switch (sel.outcome) {
@@ -186,14 +205,16 @@ void Updater::onCheckReply()
         break;
     }
 
-    // Newer tag found. Resolve our platform's asset URL.
-    const QString suffix = platformAssetSuffix();
     if (suffix.isEmpty()) {
         // Unsupported platform — leave as Idle so the UI doesn't
         // promise something we can't deliver.
         setState(Idle);
         return;
     }
+
+    // Newer tag found; selectRelease has already guaranteed it carries our
+    // platform's asset, so this cannot fail. Kept as a guard rather than an
+    // assert because the alternative is offering an install with no file.
     const QString matchedUrl = assetUrlNamed(sel.release, suffix);
     if (matchedUrl.isEmpty()) {
         setError(QStringLiteral("Release %1 has no asset named %2")
@@ -224,6 +245,10 @@ void Updater::downloadUpdate()
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                      QNetworkRequest::NoLessSafeRedirectPolicy);
     req.setRawHeader("User-Agent", "BSFChat-Updater");
+    // Inactivity timeout, not a deadline: Qt restarts it on every chunk, so
+    // a slow but progressing 120 MB download is unaffected while a stalled
+    // one no longer pins the state machine at Downloading forever.
+    req.setTransferTimeout(kDownloadStallTimeoutMs);
     auto* reply = m_nam.get(req);
 
     m_downloadedBytes = 0;
@@ -245,7 +270,17 @@ void Updater::downloadUpdate()
                      .arg(m_assetLocalPath, f.errorString()));
             return;
         }
-        f.write(reply->readAll());
+        // A short write (full disk, quota) would otherwise hand a truncated
+        // DMG/EXE straight to hdiutil / the NSIS installer.
+        const QByteArray payload = reply->readAll();
+        if (f.write(payload) != payload.size() || !f.flush()) {
+            const QString why = f.errorString();
+            f.close();
+            QFile::remove(m_assetLocalPath);
+            setError(QStringLiteral("Couldn't save the update to %1: %2")
+                     .arg(m_assetLocalPath, why));
+            return;
+        }
         f.close();
         setState(ReadyToApply);
         emit updateReadyToInstall(m_availableVersion);

@@ -107,6 +107,58 @@ private slots:
     // private while `struct` defaults to public. A base-class list
     // ("class Settings : public QObject") is not an access specifier and is
     // not treated as one.
+    // QSettings must be named through AppProfile, never with literals.
+    //
+    // --profile exists so two accounts can run on one machine, and it works
+    // by giving each profile its own QSettings application name. Any code
+    // that hard-codes ("BSFChat", "BSFChat") silently reads and writes the
+    // DEFAULT profile's store instead of its own. That is how the beta
+    // channel toggle came to be a no-op under --profile: UpdateChannel-
+    // Settings wrote through Settings (profile-aware) while the Updater
+    // read its own literal handle (not), so the switch moved nothing and
+    // `updater.channel` disagreed with `appSettings.updateChannel` in the
+    // same dialog. The default-constructed QSettings() form is fine — it
+    // picks up QCoreApplication's names, which main() sets from the profile.
+    void qsettingsAreNamedThroughAppProfile()
+    {
+        // Two string literals as the first two constructor arguments.
+        // Written with \x22 rather than a literal quote: moc mis-lexes a
+        // raw string that contains a double quote and silently drops the
+        // rest of the class, which links as a missing vtable.
+        static const QRegularExpression literalPair(
+            QStringLiteral(R"(QSettings\s+\w+\s*\(\s*\x22[^\x22]*\x22\s*,\s*\x22)"));
+
+        // Windows shell registration writes real registry paths through
+        // QSettings, which has nothing to do with the profile store.
+        const QStringList exempt{QStringLiteral("src/core/UrlHandler.cpp")};
+        // Known offender owned by another workstream (src/voice/**):
+        // AudioWorker.cpp reads the input/output device preference through
+        // a literal pair, so a --profile instance gets the default
+        // profile's devices. Left alone here to avoid a cross-worker
+        // collision; listed so this guard still protects everything else.
+        const QStringList knownOffenders{QStringLiteral("src/voice/AudioWorker.cpp")};
+
+        const QString root = QStringLiteral(BSFCHAT_SRC_DIR);
+        QStringList sources = filesUnder(root, QStringLiteral("*.cpp"));
+        sources += filesUnder(root, QStringLiteral("*.h"));
+        QVERIFY2(!sources.isEmpty(), "no sources found under BSFCHAT_SRC_DIR");
+
+        QStringList offenders;
+        for (const QString& path : sources) {
+            QString rel = path;
+            const int cut = rel.indexOf(QStringLiteral("/src/"));
+            if (cut >= 0) rel = rel.mid(cut + 1);
+            if (exempt.contains(rel) || knownOffenders.contains(rel)) continue;
+            if (literalPair.match(withoutComments(readAll(path))).hasMatch())
+                offenders << rel;
+        }
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "QSettings constructed with literal org/app names — use "
+                     "bsfchat::organizationName()/applicationName() so --profile "
+                     "is honoured: ") + offenders.join(QStringLiteral(", "))));
+    }
+
     void everyQInvokableIsPublic()
     {
         static const QRegularExpression classDecl(
