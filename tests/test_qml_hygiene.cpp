@@ -253,6 +253,55 @@ private slots:
                      + offenders.join(QStringLiteral(", "))));
     }
 
+    // A LinkPreview's `url` is a binding, and a live delegate sees it change
+    // whenever its model row updates or it is recycled for another message.
+    // `_fetch()` re-runs for the new URL, but every outcome property still
+    // describes the old one, and `visible` gates on `_failed` with nothing
+    // else ever clearing it — so one dead link hid every URL that delegate
+    // was later handed. Same trick for the og* fields, which would otherwise
+    // render (or, on the early-return paths, keep rendering) the previous
+    // page's card under the new link.
+    //
+    // The guard: inside `function _fetch()`, `_failed = false` and a reset
+    // of each og* field must come before the first `_failed = true` and
+    // before any early `return`.
+    void linkPreviewFetchStartsFromACleanSlate()
+    {
+        const QString src = withoutComments(readQml(QStringLiteral("/components/LinkPreview.qml")));
+
+        const qsizetype open = src.indexOf(QRegularExpression(QStringLiteral(R"(function\s+_fetch\s*\(\s*\)\s*\{)")));
+        QVERIFY2(open >= 0, "LinkPreview.qml no longer has _fetch()");
+        qsizetype i = src.indexOf(QLatin1Char('{'), open);
+        const qsizetype bodyStart = i + 1;
+        int nesting = 0;
+        for (; i < src.size(); ++i) {
+            if (src.at(i) == QLatin1Char('{')) ++nesting;
+            else if (src.at(i) == QLatin1Char('}') && --nesting == 0) break;
+        }
+        const QString body = src.mid(bodyStart, i - bodyStart);
+
+        // The first thing that can end the function or record a failure.
+        static const QRegularExpression firstExit(
+            QStringLiteral(R"(\breturn\b|_failed\s*=\s*true)"));
+        const qsizetype exitAt = body.indexOf(firstExit);
+        QVERIFY2(exitAt >= 0, "_fetch() has no return and never fails — check the test, not the code");
+        const QString prologue = body.left(exitAt);
+
+        static const QRegularExpression clearFailed(QStringLiteral(R"(\b_failed\s*=\s*false\b)"));
+        QVERIFY2(prologue.contains(clearFailed),
+                 "_fetch() does not reset _failed before its first exit; a card that "
+                 "failed once stays hidden for every URL it is later bound to");
+
+        for (const char* field : {"ogTitle", "ogDescription", "ogImage", "ogSiteName"}) {
+            const QRegularExpression clearField(
+                QStringLiteral(R"(\b%1\s*=\s*"")").arg(QLatin1String(field)));
+            QVERIFY2(prologue.contains(clearField),
+                     qPrintable(QStringLiteral(
+                         "_fetch() does not clear %1 before its first exit; the previous "
+                         "URL's metadata renders under the new one").arg(QLatin1String(field))));
+        }
+    }
+
     // ---- Add-server dialog (2026-09-17) --------------------------------
     //
     // Same constraint, same technique: LoginDialog.qml imports the BSFChat

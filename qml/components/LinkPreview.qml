@@ -336,6 +336,20 @@ Rectangle {
 
     function _fetch() {
         _cancelFetch();
+        // Start from a clean slate. `url` is a binding, and a live delegate
+        // sees it change whenever the model row updates or the delegate is
+        // recycled for a different message. Every property below describes
+        // the *previous* URL: a `_failed` left over from a dead link would
+        // keep the card hidden for a perfectly good successor (`visible`
+        // gates on it and nothing else ever set it back), and stale og*
+        // fields would briefly render the old page's card — or, on the
+        // bad-URL and cached-failure paths that return before `_apply()`,
+        // keep it rendered — under the new link.
+        _failed = false;
+        ogTitle = "";
+        ogDescription = "";
+        ogImage = "";
+        ogSiteName = "";
         var u = String(preview.url);
         if (!u || u.indexOf("http") !== 0) {
             _failed = true;
