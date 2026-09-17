@@ -102,9 +102,13 @@ Rectangle {
         Component.onCompleted: {
             if (!tile.feed || !videoSink) return;
             if (tile.feed.isSelf) {
+                // typeof, not truthiness: neither controller exists on
+                // every platform (src/main.cpp), and naming one that is
+                // not there is a ReferenceError, not undefined.
                 if (tile.isScreen) {
-                    if (screenShare) screenShare.forwardTo(videoSink);
-                } else if (camera) {
+                    if (typeof screenShare !== "undefined" && screenShare)
+                        screenShare.forwardTo(videoSink);
+                } else if (typeof camera !== "undefined" && camera) {
                     camera.forwardTo(videoSink);
                 }
                 return;
@@ -192,9 +196,11 @@ Rectangle {
     Rectangle {
         visible: !tile.compact && tile.feed && tile.feed.isSelf === true
                  && (tile.isScreen
-                     ? (screenShare && screenShare.active
+                     ? (typeof screenShare !== "undefined" && screenShare
+                        && screenShare.active
                         && screenShare.transmitting === false)
-                     : (camera && camera.active
+                     : (typeof camera !== "undefined" && camera
+                        && camera.active
                         && camera.transmitting === false))
         anchors.top: parent.top
         anchors.left: parent.left

@@ -53,6 +53,18 @@ Rectangle {
     // stops.
     property string _selectedKey: ""
 
+    // The capture controllers are context properties that only exist on
+    // platforms that have the capture path (see src/main.cpp) — there is
+    // no `screenShare` on iOS and no `camera` in a build without voice.
+    // Naming one that isn't there throws a ReferenceError and takes the
+    // rest of the expression with it, which in _refreshFeeds() would mean
+    // abandoning the feed list half-built. Same `typeof` guard VoiceDock
+    // uses for its buttons.
+    readonly property bool _canShareScreen: typeof screenShare !== "undefined"
+                                            && screenShare !== null
+    readonly property bool _canUseCamera: typeof camera !== "undefined"
+                                          && camera !== null
+
     readonly property string _stageMode:
         VideoStage.stageMode(_feeds, _selectedKey)
     readonly property int _stageCount:
@@ -98,10 +110,10 @@ Rectangle {
             // only way to notice the camera is pointing at the ceiling.
             var me = s.userId || "";
             if (me) {
-                if (screenShare && screenShare.active)
+                if (room._canShareScreen && screenShare.active)
                     raw.push({ userId: me, kind: VideoStage.SCREEN,
                                isSelf: true });
-                if (camera && camera.active)
+                if (room._canUseCamera && camera.active)
                     raw.push({ userId: me, kind: VideoStage.CAMERA,
                                isSelf: true });
             }
@@ -136,11 +148,11 @@ Rectangle {
         ignoreUnknownSignals: true
         function onPeerScreenFrameChanged(userId) {
             room._shareTick++;
-            room._refreshFeeds();
+            feedRescan.nudge();
         }
         function onPeerCameraFrameChanged(userId) {
             room._shareTick++;
-            room._refreshFeeds();
+            feedRescan.nudge();
         }
         // A peer switching their camera on shows up as a roster change
         // before a single frame arrives — that is what puts the
@@ -159,15 +171,33 @@ Rectangle {
     // not part of the server connection, so their signals are what tells
     // us our own feeds came or went.
     Connections {
-        target: camera
+        target: room._canUseCamera ? camera : null
         ignoreUnknownSignals: true
         function onActiveChanged() { room._refreshFeeds(); }
     }
     Connections {
-        target: screenShare
+        target: room._canShareScreen ? screenShare : null
         ignoreUnknownSignals: true
         function onActiveChanged() { room._refreshFeeds(); }
     }
+    // A stream can start arriving without ever having been announced, so
+    // frames have to be able to add a feed. But frame signals fire per
+    // frame per peer — a roomful of 30 fps cameras is hundreds a second —
+    // and rebuilding the list means a roster walk and a sorted set each
+    // time. Liveness stays immediate (that is just _shareTick); the
+    // membership rescan is coalesced to at most one per interval.
+    //
+    // start(), NOT restart(): restarting on every frame would push the
+    // deadline back forever and the rescan would never run while anything
+    // was streaming.
+    Timer {
+        id: feedRescan
+        interval: 250
+        repeat: false
+        onTriggered: room._refreshFeeds()
+        function nudge() { if (!running) start(); }
+    }
+
     Component.onCompleted: room._refreshFeeds()
 
     // Any video at all — screen or camera, local or remote — takes over
