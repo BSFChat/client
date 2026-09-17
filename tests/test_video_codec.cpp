@@ -10,6 +10,8 @@
 #include "voice/video/FrameConverter.h"
 #include "voice/video/VideoDecoder.h"
 #include "voice/video/VideoEncoder.h"
+
+#include <memory>
 #ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
 #include "voice/video/MacVTEncoder.h"
 #include "voice/video/MacVTDecoder.h"
@@ -52,6 +54,12 @@ private slots:
     void frameConverterScalesToLongEdge();
     void h264RoundTrip();
     void h264DecoderRecoversAtKeyframe();
+    // S-18. These skip cleanly wherever H.265 is unavailable — which is
+    // every Linux build and any Windows machine without an HEVC MFT —
+    // so the target stays green on all three platforms.
+    void h265RoundTrip();
+    void h265KeyframeCarriesVpsSpsPps();
+    void h265DecoderRefusesAMidGopStart();
 #ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
     // Cross-backend interop: the real mac ↔ linux stream matrix.
     void vtEncodesOpenh264Decodes();
@@ -171,6 +179,200 @@ void TestVideoCodec::h264DecoderRecoversAtKeyframe() {
     QVERIFY(idr.keyframe);
     QVideoFrame out;
     QCOMPARE(int(decoder->decode(idr.data, out)), int(VideoDecoder::Result::Ok));
+}
+
+// ---- S-18: H.265 ----------------------------------------------------
+//
+// Same three questions as H.264, asked separately because the HEVC
+// paths are genuinely different code: a two-byte NAL header, a third
+// parameter set (the VPS) that VideoToolbox will not build a session
+// without, and a different set of "you may start here" NAL types.
+
+namespace {
+
+// Encoder + decoder pair for H.265, or {nullptr, nullptr} when this
+// machine has no H.265. The capability predicates are what production
+// gates on, so the test gates on exactly them rather than on whether
+// create() happened to succeed.
+struct HevcPair {
+    std::unique_ptr<VideoEncoder> enc;
+    std::unique_ptr<VideoDecoder> dec;
+};
+
+HevcPair makeHevcPair() {
+    if (!VideoEncoder::h265EncodeSupported()
+        || !VideoDecoder::h265DecodeSupported())
+        return {};
+    HevcPair p;
+    p.enc = VideoEncoder::create(VideoCodecKind::H265);
+    p.dec = VideoDecoder::create(VideoCodecKind::H265);
+    return p;
+}
+
+// Walk an Annex-B access unit and collect the HEVC NAL types in it.
+// Type lives in bits 1..6 of the FIRST of the two header bytes — the
+// single most likely thing to get wrong when porting H.264 code.
+QList<int> hevcNalTypes(const QByteArray& au) {
+    QList<int> types;
+    const auto* p = reinterpret_cast<const uint8_t*>(au.constData());
+    const int n = au.size();
+    for (int i = 0; i + 3 < n; ++i) {
+        if (p[i] != 0 || p[i + 1] != 0) continue;
+        int start = -1;
+        if (p[i + 2] == 1) start = i + 3;
+        else if (p[i + 2] == 0 && i + 3 < n && p[i + 3] == 1) start = i + 4;
+        if (start < 0 || start + 1 >= n) continue;
+        types.append((p[start] >> 1) & 0x3F);
+        i = start - 1;
+    }
+    return types;
+}
+
+} // namespace
+
+void TestVideoCodec::h265RoundTrip() {
+    HevcPair hevc = makeHevcPair();
+    if (!hevc.enc || !hevc.dec)
+        QSKIP("no H.265 encoder/decoder on this machine");
+
+    EncoderConfig cfg;
+    cfg.codec = VideoCodecKind::H265;
+    cfg.width = 640;
+    cfg.height = 360;
+    cfg.fps = 30;
+    cfg.targetBitrateKbps = 1500;
+    cfg.maxBitrateKbps = 3000;
+    QVERIFY(hevc.enc->init(cfg));
+    QVERIFY(hevc.dec->init(VideoCodecKind::H265));
+
+    int decoded = 0;
+    bool firstWasKeyframe = false;
+    qint64 totalBytes = 0;
+    for (int i = 0; i < 30; ++i) {
+        PlanarFrame planar = FrameConverter::toI420(
+            makeTestFrame(640, 360, i), 0, i * 33000);
+        QVERIFY(planar.isValid());
+
+        EncodedFrame enc;
+        if (!hevc.enc->encode(planar, /*forceKeyframe=*/i == 0, enc)) continue;
+        QVERIFY(!enc.data.isEmpty());
+        QVERIFY(enc.data.size() > 4);
+        // Long start code, as the RTP packetizer is configured to expect.
+        QVERIFY(enc.data[0] == '\0' && enc.data[1] == '\0'
+                && enc.data[2] == '\0' && enc.data[3] == '\1');
+        totalBytes += enc.data.size();
+        if (decoded == 0 && enc.keyframe) firstWasKeyframe = true;
+
+        QVideoFrame out;
+        const auto res = hevc.dec->decode(enc.data, out);
+        QVERIFY(res != VideoDecoder::Result::Error);
+        if (res == VideoDecoder::Result::Ok) {
+            QCOMPARE(out.width(), 640);
+            QCOMPARE(out.height(), 360);
+            ++decoded;
+        }
+    }
+    QVERIFY2(decoded >= 25, qPrintable(QStringLiteral(
+        "expected ≥25 decoded H.265 frames, got %1").arg(decoded)));
+    QVERIFY(firstWasKeyframe);
+    QVERIFY(totalBytes > 0);
+}
+
+void TestVideoCodec::h265KeyframeCarriesVpsSpsPps() {
+    HevcPair hevc = makeHevcPair();
+    if (!hevc.enc || !hevc.dec)
+        QSKIP("no H.265 encoder/decoder on this machine");
+
+    EncoderConfig cfg;
+    cfg.codec = VideoCodecKind::H265;
+    cfg.width = 320;
+    cfg.height = 240;
+    cfg.fps = 30;
+    QVERIFY(hevc.enc->init(cfg));
+
+    // A receiver joins mid-share, or re-enters after loss, with NO
+    // prior state — every keyframe has to be self-contained. For HEVC
+    // that means the VPS as well as the SPS and PPS; VideoToolbox
+    // refuses to build a decompression session without all three, so
+    // dropping the VPS produces a stream that no Mac can start on.
+    EncodedFrame idr;
+    PlanarFrame planar = FrameConverter::toI420(
+        makeTestFrame(320, 240, 0), 0, 0);
+    QVERIFY(hevc.enc->encode(planar, /*forceKeyframe=*/true, idr));
+    QVERIFY(idr.keyframe);
+
+    const QList<int> types = hevcNalTypes(idr.data);
+    QVERIFY2(types.contains(32), "keyframe must carry a VPS (NAL 32)");
+    QVERIFY2(types.contains(33), "keyframe must carry an SPS (NAL 33)");
+    QVERIFY2(types.contains(34), "keyframe must carry a PPS (NAL 34)");
+    // And an actual random-access picture, which is what the receive
+    // pipeline's keyframe gate scans for (IRAP = 16..23).
+    bool irap = false;
+    for (int t : types) irap = irap || (t >= 16 && t <= 23);
+    QVERIFY2(irap, "keyframe must carry an IRAP picture (NAL 16..23)");
+
+    // Parameter sets must come BEFORE the picture, or a decoder that
+    // stops at the first slice never sees them.
+    int firstParamSet = -1, firstIrap = -1;
+    for (int i = 0; i < types.size(); ++i) {
+        if (firstParamSet < 0 && types[i] >= 32 && types[i] <= 34)
+            firstParamSet = i;
+        if (firstIrap < 0 && types[i] >= 16 && types[i] <= 23) firstIrap = i;
+    }
+    QVERIFY(firstParamSet >= 0 && firstIrap > firstParamSet);
+
+    // A P-frame does NOT repeat them — that is the whole reason
+    // keyframes have to.
+    EncodedFrame delta;
+    PlanarFrame next = FrameConverter::toI420(
+        makeTestFrame(320, 240, 1), 0, 33000);
+    if (hevc.enc->encode(next, /*forceKeyframe=*/false, delta)
+        && !delta.keyframe) {
+        QVERIFY(!hevcNalTypes(delta.data).contains(33));
+    }
+}
+
+void TestVideoCodec::h265DecoderRefusesAMidGopStart() {
+    HevcPair hevc = makeHevcPair();
+    if (!hevc.enc || !hevc.dec)
+        QSKIP("no H.265 encoder/decoder on this machine");
+
+    EncoderConfig cfg;
+    cfg.codec = VideoCodecKind::H265;
+    cfg.width = 320;
+    cfg.height = 240;
+    cfg.fps = 30;
+    QVERIFY(hevc.enc->init(cfg));
+    QVERIFY(hevc.dec->init(VideoCodecKind::H265));
+
+    QList<EncodedFrame> frames;
+    for (int i = 0; i < 10; ++i) {
+        PlanarFrame planar = FrameConverter::toI420(
+            makeTestFrame(320, 240, i), 0, i * 33000);
+        EncodedFrame enc;
+        if (hevc.enc->encode(planar, i == 0, enc)) frames.append(enc);
+    }
+    QVERIFY(frames.size() >= 8);
+
+    // Same contract as H.264: a decoder handed references it never saw
+    // must refuse rather than present error-concealed garbage, because
+    // the receive pipeline treats Ok as "display this".
+    for (int i = 5; i < frames.size(); ++i) {
+        QVideoFrame out;
+        QVERIFY2(hevc.dec->decode(frames[i].data, out)
+                     != VideoDecoder::Result::Ok,
+                 "mid-GOP H.265 without parameter sets must not decode as Ok");
+    }
+
+    hevc.dec->reset();
+    EncodedFrame idr;
+    PlanarFrame planar = FrameConverter::toI420(
+        makeTestFrame(320, 240, 99), 0, 0);
+    QVERIFY(hevc.enc->encode(planar, /*forceKeyframe=*/true, idr));
+    QVERIFY(idr.keyframe);
+    QVideoFrame out;
+    QCOMPARE(int(hevc.dec->decode(idr.data, out)),
+             int(VideoDecoder::Result::Ok));
 }
 
 #ifdef BSFCHAT_HAVE_VIDEOTOOLBOX

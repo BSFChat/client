@@ -37,6 +37,7 @@ Popup {
         inputCombo.selectByDescription(appSettings.audioInputDevice);
         outputCombo.selectByDescription(appSettings.audioOutputDevice);
         voiceModeCombo.syncFromSettings();
+        videoCodecCombo.syncFromSettings();
         pttKeyField.text = Qt.binding(function() {
             return appSettings.pttKeySequence;
         });
@@ -797,6 +798,45 @@ Popup {
                                 color: Theme.fg0
                                 horizontalAlignment: Text.AlignRight
                             }
+                        }
+                    }
+
+                    SettingRow {
+                        title: "Video codec"
+                        description: "H.265 carries the same picture in "
+                                   + "roughly 40% fewer bits, which matters "
+                                   + "on an internet call and not on a LAN. "
+                                   + "A share is encoded ONCE for everyone, "
+                                   + "so H.265 is used only while every "
+                                   + "viewer can decode it — anyone joining "
+                                   + "who can't switches the whole call back "
+                                   + "to H.264 automatically."
+                        ThemedComboBox {
+                            id: videoCodecCombo
+                            implicitWidth: 220
+                            textRole: "label"
+                            model: [
+                                { label: "Automatic",   value: "auto"       },
+                                { label: "Prefer H.265", value: "preferHevc" },
+                                { label: "H.264 only",  value: "h264Only"   }
+                            ]
+                            function syncFromSettings() {
+                                var want = appSettings.videoCodecPreference;
+                                for (var i = 0; i < model.length; ++i) {
+                                    if (model[i].value === want) {
+                                        currentIndex = i;
+                                        return;
+                                    }
+                                }
+                                currentIndex = 0;
+                            }
+                            // Same reason as the input-mode box above:
+                            // this popup is created once and reused, so
+                            // Component.onCompleted alone would never see
+                            // a value changed elsewhere.
+                            Component.onCompleted: syncFromSettings()
+                            onActivated: appSettings.videoCodecPreference =
+                                         model[currentIndex].value
                         }
                     }
 
