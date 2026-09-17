@@ -6,6 +6,8 @@ import QtQuick.Window
 import QtMultimedia
 import BSFChat
 
+import "../js/VideoStage.js" as VideoStage
+
 // VoiceRoom (SPEC §3.3) — the "hero" main-content view when the user is in
 // a voice channel. Header + participant grid. Each tile carries an avatar,
 // name, peer-state status line, and (for self) a speaking-ring glow driven
@@ -17,52 +19,128 @@ Rectangle {
     id: room
     color: Theme.bg0
 
-    // ── Share-mode state ──────────────────────────────────────────
-    // True while anyone (local or any remote peer) is broadcasting
-    // a screen share. Triggers the alternate layout: big share
-    // viewer on top, compact member strip at the bottom.
-    // Bumped whenever a remote peer's screen share state changes,
-    // since signals aren't dependency-tracked from property bindings.
-    // _peersSharing reads this so it re-evaluates as peers come and go.
+    // ── Video state ───────────────────────────────────────────────
+    // Bumped whenever any video frame signal fires. Liveness — frames
+    // actually arriving, as opposed to a stream merely announced (S-7) —
+    // is read THROUGH this tick inside the tiles rather than stored on
+    // the feed list: signals aren't dependency-tracked from property
+    // bindings, and a feed list whose identity changed on every frame
+    // would rebuild every delegate.
     property int _shareTick: 0
 
-    // The remote-share tile list. STORED, not a binding: a binding that
-    // rebuilt the array on every tick handed the Repeater a new model
-    // object each time, and a Repeater destroys and recreates every
-    // delegate when its model identity changes — so each tile, and the
-    // VideoOutput inside it, was thrown away and rebuilt several times a
-    // second during a call (S-13). _refreshPeersSharing() compares
-    // membership and assigns only on a real change, which keeps the
-    // identity — and the tiles — stable.
-    property var _peersSharing: []
+    // The ordered feed list: every remote screen share, every remote
+    // camera, and our own camera / screen share while they are on. One
+    // entry per surface, so a peer who is sharing AND on camera is two.
+    //
+    // STORED, not a binding, and reassigned only when MEMBERSHIP
+    // changes. This is what replaces _peersSharing and it inherits that
+    // property's hard-won discipline: a binding that rebuilt the array
+    // on every tick handed the Repeater a new model object each time,
+    // and a Repeater destroys and recreates every delegate when its
+    // model identity changes — so each tile, and the VideoOutput inside
+    // it, was thrown away and rebuilt several times a second during a
+    // call (S-13). VideoStage.sameFeeds() is the membership comparison
+    // that keeps the identity; _refreshFeeds() assigns only on a real
+    // change.
+    property var _feeds: []
+    // Monotonic stamp handed to new feeds so "most recently started"
+    // means something. See qml/js/VideoStage.js.
+    property int _feedSeq: 0
 
-    function _refreshPeersSharing() {
+    // The user's explicit pick from the bottom strip. "" means auto —
+    // the most recently started screen share, else the most recently
+    // started camera. Escape returns here, and so does a pick whose feed
+    // stops.
+    property string _selectedKey: ""
+
+    // The capture controllers are context properties that only exist on
+    // platforms that have the capture path (see src/main.cpp) — there is
+    // no `screenShare` on iOS and no `camera` in a build without voice.
+    // Naming one that isn't there throws a ReferenceError and takes the
+    // rest of the expression with it, which in _refreshFeeds() would mean
+    // abandoning the feed list half-built. Same `typeof` guard VoiceDock
+    // uses for its buttons.
+    readonly property bool _canShareScreen: typeof screenShare !== "undefined"
+                                            && screenShare !== null
+    readonly property bool _canUseCamera: typeof camera !== "undefined"
+                                          && camera !== null
+
+    readonly property string _stageMode:
+        VideoStage.stageMode(_feeds, _selectedKey)
+    readonly property int _stageCount:
+        VideoStage.stageCount(_feeds, _selectedKey)
+    // The strip only earns its space when there is a choice to make —
+    // that is, when a screen share has pushed the other feeds off the
+    // stage. Cameras on their own are all on the stage already, and a
+    // strip under them would be a second copy of the same pictures.
+    readonly property bool _stripVisible: _stageMode === "focus"
+
+    function _refreshFeeds() {
+        var raw = [];
         var s = serverManager.activeServer;
-        var next = [];
+        var i;
         if (s) {
-            var all = s.peersCurrentlySharing();
             var reg = s.videoRegistry;
-            for (var i = 0; i < all.length; ++i) {
-                // S-7: the sender told us this stream stopped. The
-                // roster's announced flag lags by a poll, and honouring
-                // it here is what kept a dead share on screen as a
-                // "Starting share…" placeholder for seconds after it
-                // ended. Frames arriving clear the flag again.
-                if (reg && reg.streamStopped(all[i], 0)) continue;
-                next.push(all[i]);
+            // Remote screen shares. S-7: the sender told us this stream
+            // stopped. The roster's announced flag lags by a poll, and
+            // honouring it here is what kept a dead share on screen as a
+            // "Starting share…" placeholder for seconds after it ended.
+            var sharers = s.peersCurrentlySharing();
+            for (i = 0; i < sharers.length; ++i) {
+                if (reg && reg.streamStopped(sharers[i], 0)) continue;
+                raw.push({ userId: sharers[i], kind: VideoStage.SCREEN,
+                           isSelf: false });
+            }
+            // Remote cameras, off the voice roster. Self is excluded
+            // here deliberately: our own preview comes from the camera
+            // controller's sink and never through the remote-peer path,
+            // and including ourselves would conjure a frameless "remote"
+            // tile for our own face.
+            var members = s.voiceMembers || [];
+            for (i = 0; i < members.length; ++i) {
+                var uid = members[i].user_id || "";
+                if (!uid || uid === s.userId) continue;
+                if (!s.peerHasCamera(uid)) continue;
+                if (reg && reg.streamStopped(uid, 1)) continue;
+                raw.push({ userId: uid, kind: VideoStage.CAMERA,
+                           isSelf: false });
+            }
+            // Our own feeds are first-class. The owner asked to see
+            // everyone "including self", and a self-view is also the
+            // only way to notice the camera is pointing at the ceiling.
+            var me = s.userId || "";
+            if (me) {
+                if (room._canShareScreen && screenShare.active)
+                    raw.push({ userId: me, kind: VideoStage.SCREEN,
+                               isSelf: true });
+                if (room._canUseCamera && camera.active)
+                    raw.push({ userId: me, kind: VideoStage.CAMERA,
+                               isSelf: true });
             }
         }
-        // peersCurrentlySharing() is sorted, so equal membership means
-        // element-wise equality.
-        var cur = room._peersSharing;
-        if (next.length === cur.length) {
-            var same = true;
-            for (var j = 0; j < next.length; ++j) {
-                if (next[j] !== cur[j]) { same = false; break; }
-            }
-            if (same) return;
+
+        var next = VideoStage.mergeFeeds(room._feeds, raw, room._feedSeq + 1);
+        if (VideoStage.sameFeeds(room._feeds, next)) return;
+        room._feedSeq++;
+        room._feeds = next;
+        // A pick whose feed has gone falls back to auto rather than
+        // leaving the stage blank.
+        if (room._selectedKey && !VideoStage.hasKey(next, room._selectedKey))
+            room._selectedKey = "";
+    }
+
+    // The roster is the only place a display name lives; the feed
+    // objects stay free of anything that can change under them.
+    function _displayNameFor(userId) {
+        var s = serverManager.activeServer;
+        if (!s) return userId;
+        if (userId === s.userId) return s.displayName || userId;
+        var members = s.voiceMembers || [];
+        for (var i = 0; i < members.length; ++i) {
+            if ((members[i].user_id || "") === userId)
+                return members[i].displayName || userId;
         }
-        room._peersSharing = next;
+        return userId;
     }
 
     Connections {
@@ -70,20 +148,62 @@ Rectangle {
         ignoreUnknownSignals: true
         function onPeerScreenFrameChanged(userId) {
             room._shareTick++;
-            room._refreshPeersSharing();
+            feedRescan.nudge();
         }
+        function onPeerCameraFrameChanged(userId) {
+            room._shareTick++;
+            feedRescan.nudge();
+        }
+        // A peer switching their camera on shows up as a roster change
+        // before a single frame arrives — that is what puts the
+        // "Starting camera…" placeholder on the stage on time.
+        function onVoiceMembersChanged() { room._refreshFeeds(); }
     }
     Connections {
         target: serverManager
         ignoreUnknownSignals: true
         function onActiveServerChanged() {
             room._shareTick++;
-            room._refreshPeersSharing();
+            room._refreshFeeds();
         }
     }
-    Component.onCompleted: room._refreshPeersSharing()
-    readonly property bool isSharing:
-        (screenShare && screenShare.active) || _peersSharing.length > 0
+    // The local capture controllers are context properties of their own,
+    // not part of the server connection, so their signals are what tells
+    // us our own feeds came or went.
+    Connections {
+        target: room._canUseCamera ? camera : null
+        ignoreUnknownSignals: true
+        function onActiveChanged() { room._refreshFeeds(); }
+    }
+    Connections {
+        target: room._canShareScreen ? screenShare : null
+        ignoreUnknownSignals: true
+        function onActiveChanged() { room._refreshFeeds(); }
+    }
+    // A stream can start arriving without ever having been announced, so
+    // frames have to be able to add a feed. But frame signals fire per
+    // frame per peer — a roomful of 30 fps cameras is hundreds a second —
+    // and rebuilding the list means a roster walk and a sorted set each
+    // time. Liveness stays immediate (that is just _shareTick); the
+    // membership rescan is coalesced to at most one per interval.
+    //
+    // start(), NOT restart(): restarting on every frame would push the
+    // deadline back forever and the rescan would never run while anything
+    // was streaming.
+    Timer {
+        id: feedRescan
+        interval: 250
+        repeat: false
+        onTriggered: room._refreshFeeds()
+        function nudge() { if (!running) start(); }
+    }
+
+    Component.onCompleted: room._refreshFeeds()
+
+    // Any video at all — screen or camera, local or remote — takes over
+    // the main column. The name predates cameras being part of it; the
+    // header toggle and the classic grid both read it.
+    readonly property bool isSharing: _feeds.length > 0
 
     // User-toggleable: hide the member strip to give the share even
     // more room. Reset to true on every share-mode transition so a
@@ -295,11 +415,20 @@ Rectangle {
         }
     }
 
-    // ── Share-mode layout ─────────────────────────────────────────
-    // When any screen share is in progress, the main column turns
-    // into a hero viewer for the share(s) with a compact member
-    // strip (hide-able) along the bottom. Hidden when nobody's
-    // sharing — the classic participant grid takes over.
+    // ── Video layout ──────────────────────────────────────────────
+    // When anyone has a camera or a screen share up, the main column
+    // becomes a stage with the audio member strip along the bottom and,
+    // when there is a choice to make, a strip of feed thumbnails above
+    // it. Hidden when there is no video — the classic participant grid
+    // takes over.
+    //
+    // THE ONE RULE HERE: there is exactly one tile per feed, and it is
+    // the same item whether it is filling the stage or sitting in the
+    // strip. The Repeater is driven by _feeds, which changes only on
+    // membership; picking a different feed rewrites x/y/width/height and
+    // nothing else. Reparenting the tile, or splitting stage and strip
+    // into two Repeaters, would destroy and rebuild the VideoOutput and
+    // the picture would blink every time somebody clicked a thumbnail.
     Item {
         id: shareLayout
         visible: room.isSharing
@@ -436,312 +565,145 @@ Rectangle {
             }
         }
 
-        // Share viewer area — anchored fill between header and
-        // member strip. When local and remote both share we split
-        // the area vertically via a Column; the usual case (one
-        // source) gets the whole pane.
+        // Stage + thumbnail strip. One coordinate space for both, so a
+        // feed moving between them is an animated resize rather than a
+        // change of parent.
         Item {
-            id: viewerArea
+            id: feedArea
             anchors.top: parent.top
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: memberStrip.top
             anchors.margins: Theme.sp.s5
 
-            readonly property int _sources:
-                ((screenShare && screenShare.active) ? 1 : 0)
-                + room._peersSharing.length
+            readonly property int gap: Theme.sp.s3
+            readonly property int stripH: room._stripVisible ? 92 : 0
+            readonly property int stageH:
+                height - (stripH > 0 ? stripH + gap : 0)
+            readonly property int thumbMaxW: 168
 
-            // Local-own hero tile.
-            Rectangle {
-                id: localHero
-                visible: screenShare && screenShare.active
-                anchors.top: parent.top
-                anchors.left: parent.left
-                anchors.right: parent.right
-                height: visible
-                    ? (viewerArea._sources > 1
-                        ? viewerArea.height / viewerArea._sources - Theme.sp.s3
-                        : viewerArea.height)
-                    : 0
-                radius: Theme.r3
-                color: Theme.bg2
-                border.color: Theme.accent
-                border.width: 1
-                clip: true
+            // Keyboard picking. Scoped to focus rather than a Shortcut
+            // on purpose: a window-wide Left/Right would fire inside
+            // every settings dialog and text field in the app.
+            focus: true
+            Keys.onLeftPressed: function(event) {
+                room._selectedKey =
+                    VideoStage.moveSelection(room._feeds, room._selectedKey, -1);
+                event.accepted = true;
+            }
+            Keys.onRightPressed: function(event) {
+                room._selectedKey =
+                    VideoStage.moveSelection(room._feeds, room._selectedKey, 1);
+                event.accepted = true;
+            }
+            // Back to auto. The fullscreen Shortcut above takes Escape
+            // first while fullscreen (shortcuts are matched before key
+            // events reach items), which is the order you want: leave
+            // fullscreen, then let a second press drop the pick.
+            Keys.onEscapePressed: function(event) {
+                room._selectedKey = "";
+                event.accepted = true;
+            }
 
-                VideoOutput {
-                    id: heroScreenOutput
-                    anchors.fill: parent
-                    anchors.margins: 1
-                    fillMode: VideoOutput.PreserveAspectFit
-                    Component.onCompleted: {
-                        if (screenShare && videoSink)
-                            screenShare.forwardTo(videoSink);
-                    }
-                }
+            // The feed that is on the stage still occupies its slot in
+            // the strip, highlighted, so the strip reads as the whole
+            // set rather than "the others". A chip, not a second copy of
+            // the video: two VideoOutputs on one sink is twice the
+            // compositing for a thumbnail nobody is looking at.
+            Repeater {
+                model: room._feeds
+                delegate: Rectangle {
+                    id: stageMarker
+                    required property var modelData
+                    required property int index
 
-                Rectangle {
-                    anchors.top: parent.top
-                    anchors.right: parent.right
-                    anchors.margins: Theme.sp.s3
-                    width: heroLabel.implicitWidth + Theme.sp.s3 * 2
-                    height: 22
-                    radius: Theme.r1
-                    color: Theme.accent
-                    Text {
-                        id: heroLabel
+                    readonly property var slot: VideoStage.stripSlot(
+                        index, room._feeds.length, feedArea.width,
+                        feedArea.gap, feedArea.thumbMaxW)
+
+                    visible: room._stripVisible
+                             && VideoStage.stageIndexOf(
+                                    room._feeds, room._selectedKey,
+                                    modelData.key) >= 0
+                    x: slot.x
+                    y: feedArea.stageH + feedArea.gap
+                    width: slot.width
+                    height: feedArea.stripH
+                    radius: Theme.r2
+                    color: Theme.accentGlow
+                    border.color: Theme.accent
+                    border.width: 2
+
+                    Column {
                         anchors.centerIn: parent
-                        text: "YOU'RE SHARING"
-                        font.family: Theme.fontSans
-                        font.pixelSize: 10
-                        font.weight: Theme.fontWeight.semibold
-                        font.letterSpacing: Theme.trackWidest.xs
-                        color: Theme.onAccent
-                    }
-                }
+                        spacing: 2
+                        width: parent.width - Theme.sp.s4
 
-                // Capturing but no open peer channel is receiving the
-                // frames — warn that the share isn't reaching anyone.
-                // `=== false` keeps this hidden on builds whose share
-                // controller doesn't expose `transmitting`.
-                Rectangle {
-                    visible: screenShare && screenShare.active
-                             && screenShare.transmitting === false
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.margins: Theme.sp.s3
-                    width: notVisibleRow.implicitWidth + Theme.sp.s3 * 2
-                    height: 22
-                    radius: Theme.r1
-                    color: Theme.bg1
-                    border.color: Theme.warn
-                    border.width: 1
-                    Row {
-                        id: notVisibleRow
-                        anchors.centerIn: parent
-                        spacing: Theme.sp.s2
-                        Icon {
-                            anchors.verticalCenter: parent.verticalCenter
-                            name: "bolt"
-                            size: 10
-                            color: Theme.warn
+                        Text {
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
+                            text: "ON STAGE"
+                            font.family: Theme.fontSans
+                            font.pixelSize: 9
+                            font.weight: Theme.fontWeight.semibold
+                            font.letterSpacing: Theme.trackWidest.xs
+                            color: Theme.accent
                         }
                         Text {
-                            id: notVisibleLabel
-                            anchors.verticalCenter: parent.verticalCenter
-                            // Alone in the channel = nothing wrong, just
-                            // nobody to receive frames yet. Only warn of
-                            // a transmission problem when peers exist.
-                            text: {
-                                var s = serverManager.activeServer;
-                                var members = s && s.voiceMembers
-                                    ? s.voiceMembers.length : 0;
-                                return members <= 1
-                                    ? "No one else is in the channel"
-                                    : "Not visible to others";
-                            }
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
+                            text: VideoStage.feedLabel(
+                                room._displayNameFor(stageMarker.modelData.userId),
+                                stageMarker.modelData.kind,
+                                stageMarker.modelData.isSelf === true)
                             font.family: Theme.fontSans
-                            font.pixelSize: 10
-                            font.weight: Theme.fontWeight.semibold
-                            font.letterSpacing: Theme.trackWide.sm
-                            color: Theme.warn
+                            font.pixelSize: 9
+                            color: Theme.fg2
+                            elide: Text.ElideRight
                         }
                     }
                 }
             }
 
-            // Remote shares — stacked beneath the local hero. Since
-            // Column doesn't anchor-fill, we compute explicit
-            // heights so the total fills the viewer pane evenly.
-            Column {
-                id: remoteShareColumn
-                anchors.top: localHero.visible ? localHero.bottom : parent.top
-                anchors.topMargin: localHero.visible ? Theme.sp.s3 : 0
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                spacing: Theme.sp.s3
+            // The feeds themselves.
+            Repeater {
+                model: room._feeds
+                delegate: VideoFeedTile {
+                    id: feedTile
+                    required property var modelData
+                    required property int index
 
-                Repeater {
-                    model: room._peersSharing
-                    delegate: Rectangle {
-                        id: remoteShareTile
-                        required property string modelData
-                        width: remoteShareColumn.width
-                        height: {
-                            var n = room._peersSharing.length;
-                            if (n <= 0) return 0;
-                            var total = remoteShareColumn.height
-                                      - (n - 1) * Theme.sp.s3;
-                            return Math.max(120, total / n);
-                        }
-                        radius: Theme.r3
-                        color: Theme.bg2
-                        border.color: Theme.accent
-                        border.width: 1
-                        clip: true
+                    // Where this feed belongs right now: a stage cell if
+                    // it is on the stage, otherwise its strip slot.
+                    readonly property int stageIndex: VideoStage.stageIndexOf(
+                        room._feeds, room._selectedKey, modelData.key)
+                    readonly property var cell: {
+                        if (stageIndex >= 0)
+                            return VideoStage.gridCell(
+                                stageIndex, room._stageCount, feedArea.width,
+                                feedArea.stageH, feedArea.gap);
+                        var slot = VideoStage.stripSlot(
+                            index, room._feeds.length, feedArea.width,
+                            feedArea.gap, feedArea.thumbMaxW);
+                        return { x: slot.x,
+                                 y: feedArea.stageH + feedArea.gap,
+                                 width: slot.width,
+                                 height: feedArea.stripH };
+                    }
 
-                        // Live once frames actually arrive — the tile
-                        // itself can already exist off the announced
-                        // screen_sharing flag.
-                        readonly property bool live: {
-                            room._shareTick;
-                            var s = serverManager.activeServer;
-                            return s && s.videoRegistry
-                                ? s.videoRegistry.hasLiveVideo(modelData, 0)
-                                : false;
-                        }
+                    feed: modelData
+                    displayName: room._displayNameFor(modelData.userId)
+                    liveTick: room._shareTick
+                    featured: stageIndex >= 0
+                    compact: stageIndex < 0
+                    x: cell.x
+                    y: cell.y
+                    width: cell.width
+                    height: cell.height
 
-                        // Fed by the per-peer sink in the registry —
-                        // decoded RTP video and legacy JPEG frames
-                        // both land there. (The old data-URL Image
-                        // reloaded asynchronously per frame and
-                        // blanked in between — the flicker bug.)
-                        VideoOutput {
-                            anchors.fill: parent
-                            anchors.margins: 1
-                            fillMode: VideoOutput.PreserveAspectFit
-                            Component.onCompleted: {
-                                var s = serverManager.activeServer;
-                                if (s && s.videoRegistry && videoSink)
-                                    s.videoRegistry.attachOutput(
-                                        remoteShareTile.modelData, 0, videoSink);
-                            }
-                        }
-
-                        // Video diagnostics overlay (Settings →
-                        // Advanced). Polls cumulative receive counters
-                        // once a second and diffs successive snapshots
-                        // into rates — fps here is DECODED fps, i.e.
-                        // what the viewer actually gets to see.
-                        Rectangle {
-                            id: diagOverlay
-                            visible: appSettings.showVideoDiagnostics
-                                     && remoteShareTile.live
-                            anchors.top: parent.top
-                            anchors.left: parent.left
-                            anchors.margins: Theme.sp.s3
-                            color: "#c0000000"
-                            radius: Theme.r1
-                            width: diagText.implicitWidth + Theme.sp.s3 * 2
-                            height: diagText.implicitHeight + Theme.sp.s2 * 2
-
-                            property var _prev: null
-                            property string statsLine: "measuring…"
-
-                            Timer {
-                                running: diagOverlay.visible
-                                interval: 1000
-                                repeat: true
-                                triggeredOnStart: true
-                                onTriggered: {
-                                    var s = serverManager.activeServer;
-                                    if (!s) return;
-                                    var st = s.videoReceiveStats(
-                                        remoteShareTile.modelData, 0);
-                                    if (!st || st.rxFrames === undefined) {
-                                        diagOverlay.statsLine = "no stream data";
-                                        diagOverlay._prev = null;
-                                        return;
-                                    }
-                                    var now = Date.now();
-                                    var p = diagOverlay._prev;
-                                    diagOverlay._prev = {
-                                        t: now,
-                                        decoded: st.decodedFrames,
-                                        bytes: st.rxBytes,
-                                    };
-                                    if (!p) return;
-                                    var dt = (now - p.t) / 1000;
-                                    if (dt <= 0) return;
-                                    var fps = Math.max(0,
-                                        (st.decodedFrames - p.decoded) / dt);
-                                    var kbps = Math.max(0,
-                                        (st.rxBytes - p.bytes) * 8 / dt / 1000);
-                                    // Uncompressed I420 at this res/fps
-                                    // vs received bits = compression ratio.
-                                    var rawKbps = fps * st.width * st.height
-                                                  * 1.5 * 8 / 1000;
-                                    var ratio = kbps > 0 ? rawKbps / kbps : 0;
-                                    diagOverlay.statsLine =
-                                        st.width + "x" + st.height
-                                        + " @ " + fps.toFixed(0) + " fps"
-                                        + " · " + (kbps >= 1000
-                                            ? (kbps / 1000).toFixed(1) + " Mbps"
-                                            : kbps.toFixed(0) + " kbps")
-                                        + " · " + (ratio > 0
-                                            ? ratio.toFixed(0) + ":1" : "–")
-                                        + " · drops " + st.droppedAus
-                                        + " · " + st.codec;
-                                }
-                            }
-
-                            Text {
-                                id: diagText
-                                anchors.centerIn: parent
-                                text: diagOverlay.statsLine
-                                color: "#e0ffffff"
-                                font.family: Theme.fontMono
-                                font.pixelSize: Theme.fontSize.xs
-                            }
-                        }
-
-                        // Announced-but-not-yet-streaming placeholder:
-                        // avatar initial + status line, same vocabulary
-                        // as the participant tiles, so the announcement
-                        // shows up ahead of the first frame.
-                        Column {
-                            anchors.centerIn: parent
-                            spacing: Theme.sp.s3
-                            visible: !remoteShareTile.live
-
-                            Rectangle {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                width: Theme.avatar.xl
-                                height: Theme.avatar.xl
-                                radius: Theme.avatar.xl / 2
-                                color: Theme.senderColor(remoteShareTile.modelData)
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: (remoteShareTile.modelData
-                                          .replace(/^[^a-zA-Z0-9]+/, "")
-                                          .charAt(0) || "?").toUpperCase()
-                                    font.family: Theme.fontSans
-                                    font.pixelSize: 28
-                                    font.weight: Theme.fontWeight.semibold
-                                    color: Theme.onAccent
-                                }
-                            }
-
-                            Text {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                text: "Starting share…"
-                                font.family: Theme.fontSans
-                                font.pixelSize: Theme.fontSize.sm
-                                color: Theme.fg2
-                            }
-                        }
-
-                        Rectangle {
-                            anchors.top: parent.top
-                            anchors.left: parent.left
-                            anchors.margins: Theme.sp.s3
-                            width: rsLabel.implicitWidth + Theme.sp.s3 * 2
-                            height: 22
-                            radius: Theme.r1
-                            color: Theme.accent
-                            Text {
-                                id: rsLabel
-                                anchors.centerIn: parent
-                                text: modelData + " — SCREEN SHARE"
-                                font.family: Theme.fontSans
-                                font.pixelSize: 10
-                                font.weight: Theme.fontWeight.semibold
-                                font.letterSpacing: Theme.trackWidest.xs
-                                color: Theme.onAccent
-                            }
-                        }
+                    onClicked: {
+                        feedArea.forceActiveFocus();
+                        room._selectedKey = modelData.key;
                     }
                 }
             }

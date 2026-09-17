@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Layouts
-import QtMultimedia
 import BSFChat
 
 // Single tile in VoiceRoom's participant grid (SPEC §3.3).
@@ -68,128 +67,20 @@ Rectangle {
 
     Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
 
-    // Camera feed — either local (self, via CameraController's
-    // internal sink mirrored through a VideoOutput) or remote
-    // (base64 data URL refreshed on peerCameraFrameChanged).
-    readonly property bool hasCamera: {
-        tile._cameraTick;
-        if (isSelf) return camera && camera.active;
-        var s = serverManager.activeServer;
-        return s ? s.peerHasCamera(userId) : false;
-    }
-    property int _cameraTick: 0
-    Connections {
-        target: serverManager.activeServer
-        ignoreUnknownSignals: true
-        function onPeerCameraFrameChanged(u) {
-            if (u === tile.userId) tile._cameraTick++;
-        }
-    }
-
-    // Local self-preview video output. Hidden for remote peers.
-    VideoOutput {
-        id: selfCam
-        anchors.fill: parent
-        anchors.margins: 1
-        visible: tile.isSelf && tile.hasCamera
-        fillMode: VideoOutput.PreserveAspectCrop
-        Component.onCompleted: {
-            if (camera && videoSink) camera.forwardTo(videoSink);
-        }
-    }
-
-    // Whether the remote camera stream is actually delivering frames
-    // (vs merely announced). Registry live-state, refreshed on the
-    // same _cameraTick the announced flag uses.
-    readonly property bool cameraLive: {
-        tile._cameraTick;
-        if (!tile.hasCamera || tile.isSelf) return false;
-        var s = serverManager.activeServer;
-        return s && s.videoRegistry
-            ? s.videoRegistry.hasLiveVideo(userId, 1) : false;
-    }
-
-    // Remote camera — a VideoOutput fed by the per-peer sink in the
-    // VideoStreamRegistry (both RTP video and legacy JPEG frames land
-    // there). Replaces the per-frame data-URL Image, whose async
-    // reloads blanked the tile between frames.
-    VideoOutput {
-        id: peerCam
-        anchors.fill: parent
-        anchors.margins: 1
-        visible: !tile.isSelf && tile.hasCamera
-        fillMode: VideoOutput.PreserveAspectCrop
-        Component.onCompleted: {
-            var s = serverManager.activeServer;
-            if (s && s.videoRegistry && videoSink)
-                s.videoRegistry.attachOutput(tile.userId, 1, videoSink);
-        }
-    }
-
-    // Camera announced but no frame yet — avatar + status line in
-    // place of an empty tile, mirroring the audio-tile vocabulary.
-    Column {
-        anchors.centerIn: parent
-        spacing: Theme.sp.s3
-        visible: !tile.isSelf && tile.hasCamera && !tile.cameraLive
-
-        Rectangle {
-            anchors.horizontalCenter: parent.horizontalCenter
-            width: Theme.avatar.xl
-            height: Theme.avatar.xl
-            radius: Theme.avatar.xl / 2
-            color: Theme.senderColor(tile.userId)
-            Text {
-                anchors.centerIn: parent
-                text: {
-                    var stripped = tile.dispName.replace(/^[^a-zA-Z0-9]+/, "");
-                    return (stripped.length > 0
-                            ? stripped.charAt(0)
-                            : "?").toUpperCase();
-                }
-                font.family: Theme.fontSans
-                font.pixelSize: 28
-                font.weight: Theme.fontWeight.semibold
-                color: Theme.onAccent
-            }
-        }
-
-        Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: "Starting camera…"
-            font.family: Theme.fontSans
-            font.pixelSize: Theme.fontSize.sm
-            color: Theme.fg2
-        }
-    }
-
-    // Bottom-left name pill only when the video is showing, so the
-    // peer's identity doesn't get lost behind the feed.
-    Rectangle {
-        visible: tile.hasCamera
-        anchors.left: parent.left
-        anchors.bottom: parent.bottom
-        anchors.margins: Theme.sp.s3
-        width: camNameTxt.implicitWidth + Theme.sp.s3 * 2
-        height: 22
-        radius: Theme.r1
-        color: Qt.rgba(0, 0, 0, 0.55)
-        Text {
-            id: camNameTxt
-            anchors.centerIn: parent
-            text: tile.dispName
-            font.family: Theme.fontSans
-            font.pixelSize: Theme.fontSize.sm
-            font.weight: Theme.fontWeight.medium
-            color: "white"
-        }
-    }
-
+    // NO VIDEO HERE. A camera feed used to render inside this 220×180
+    // tile, which is what the owner was complaining about: turning your
+    // webcam on put your face in a thumbnail in a grid of avatars. Every
+    // live video surface — screen shares and cameras alike, local and
+    // remote — now belongs to VoiceRoom's stage and its bottom strip
+    // (VideoFeedTile.qml), and the moment any of them exists this grid
+    // is not on screen at all (VoiceRoom.isSharing). So a tile here is
+    // always an audio-only participant, and giving it a VideoOutput
+    // would only mean a second sink attached to the same stream,
+    // composited behind a hidden view.
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: Theme.sp.s5
         spacing: Theme.sp.s3
-        visible: !tile.hasCamera
 
         // Top spacer.
         Item { Layout.fillHeight: true }
