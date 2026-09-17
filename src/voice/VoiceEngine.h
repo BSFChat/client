@@ -225,6 +225,8 @@ private:
     // Add video tracks toward `userId` when we're actively sending
     // and its caps allow — called wherever caps become known.
     void maybeSetupVideoFor(const QString& userId);
+    // Replays pacer ceiling + already-announced streams to one peer.
+    void catchUpVideoState(PeerConnectionManager* peer);
     // Lazily create the per-peer decode pipeline for a stream. A
     // codec switch (H.264 ↔ AV1 lossless mid-call) tears the old
     // pipeline down and builds a fresh one.

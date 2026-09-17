@@ -512,6 +512,9 @@ void PeerConnectionManager::setupDataChannel(std::shared_ptr<rtc::DataChannel> d
         QMetaObject::invokeMethod(this, [this]() {
             qCInfo(logVoicePc, " [%s] DataChannel open — audio can flow",
                   qPrintable(m_peerId));
+            // Fallback path for control: whatever was queued before any
+            // channel existed goes out now, in order.
+            flushPendingControl();
         }, Qt::QueuedConnection);
     });
 
@@ -618,6 +621,7 @@ void PeerConnectionManager::setupControlChannel(std::shared_ptr<rtc::DataChannel
         QMetaObject::invokeMethod(this, [this]() {
             qCInfo(logVoicePc, " [%s] control channel open (reliable)",
                   qPrintable(m_peerId));
+            flushPendingControl();
         }, Qt::QueuedConnection);
     });
     dc->onMessage([this, alive = m_alive](rtc::message_variant msg) {
@@ -839,6 +843,27 @@ void PeerConnectionManager::sendControl(const QByteArray& json) {
     // Brings the reliable channel up the first time control traffic
     // flows toward a peer that advertises it; no-op otherwise.
     ensureControlChannel();
+    if (deliverControl(json)) return;
+    // Nothing is open YET. That is the normal state at the only moment
+    // the engine has to tell a joining peer about a stream that is
+    // already running: caps arrive with the SDP answer, a full round
+    // trip before any data channel opens. Dropping the message here is
+    // how a viewer who joined during a share was never told the share
+    // existed (rc.15) — it saw the camera, started after it connected,
+    // and nothing else. Hold it until a channel opens.
+    if (m_pendingControl.size() >= kMaxPendingControl) {
+        // Bounded: control is small and idempotent-ish, and a peer that
+        // never opens a channel is a peer that is going away.
+        m_pendingControl.removeFirst();
+        qCDebug(logVoicePc, " [%s] pre-open control backlog full — "
+               "dropped the oldest message", qPrintable(m_peerId));
+    }
+    m_pendingControl.append(json);
+}
+
+// Returns false when there is no open channel to put this on; the
+// caller decides whether to queue it or let it go.
+bool PeerConnectionManager::deliverControl(const QByteArray& json) {
     rtc::binary data;
     data.reserve(json.size() + 1);
     data.push_back(std::byte{0x04});
@@ -851,15 +876,30 @@ void PeerConnectionManager::sendControl(const QByteArray& json) {
     if (m_controlDc && m_controlDc->isOpen()) {
         try {
             m_controlDc->send(data);
-            return;
+            return true;
         } catch (const std::exception& e) {
             qCDebug(logVoicePc, " [%s] control send failed on reliable "
                    "channel (%s) — falling back to the audio channel",
                    qPrintable(m_peerId), e.what());
         }
     }
-    if (!m_dc || !m_dc->isOpen()) return;
-    sendOnDataChannel(std::move(data), "control");
+    if (!m_dc || !m_dc->isOpen()) return false;
+    return sendOnDataChannel(std::move(data), "control");
+}
+
+// Called from every channel's onOpen. Order is preserved, and anything
+// that still cannot go out (the audio channel opened but the message
+// was rejected) goes back on the queue for the next opening.
+void PeerConnectionManager::flushPendingControl() {
+    if (m_pendingControl.isEmpty()) return;
+    const QList<QByteArray> queued = std::move(m_pendingControl);
+    m_pendingControl.clear();
+    qCInfo(logVoicePc, " [%s] replaying %d control message(s) held until a "
+          "channel opened", qPrintable(m_peerId), int(queued.size()));
+    for (const QByteArray& json : queued) {
+        if (!deliverControl(json))
+            m_pendingControl.append(json);
+    }
 }
 
 bool PeerConnectionManager::videoMidsAlreadyDeclared() const {

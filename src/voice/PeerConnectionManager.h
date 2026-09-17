@@ -191,6 +191,10 @@ private:
     // Opens that channel if — and only if — the peer's caps say it
     // understands the label. Idempotent; safe to call per message.
     void ensureControlChannel();
+    // The actual write half of sendControl(). False = no open channel.
+    bool deliverControl(const QByteArray& json);
+    // Replays m_pendingControl; called from every channel's onOpen.
+    void flushPendingControl();
     void flushPendingCandidates();
     // Fires a queued renegotiation once the signaling state is stable.
     void maybeRenegotiateAgain();
@@ -320,6 +324,16 @@ private:
     // ~PeerConnectionManager ends up doing to m_dc (close +
     // resetCallbacks) MUST also be done to m_controlDc.
     std::shared_ptr<rtc::DataChannel> m_controlDc;
+
+    // Control messages that arrived before any channel could carry
+    // them. sendControl() is driven by the caps handshake, which
+    // completes one SDP round trip BEFORE the audio channel opens — so
+    // the "a share is already running" replay to a peer joining
+    // mid-share was, without this, written to a closed channel and
+    // lost. Touched only on the Qt main thread (sendControl runs there,
+    // and every onOpen hops through a queued invocation).
+    QList<QByteArray> m_pendingControl;
+    static constexpr int kMaxPendingControl = 32;
 
     // Lossless channel (created lazily by the sending side; adopted
     // via onDataChannel label match on the receiving side).
