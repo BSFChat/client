@@ -209,7 +209,7 @@ Always shown. Avatar + handle + mute/deafen/settings icon buttons. Mute/deafen a
 - Name below avatar (14px fg0) + status line (12px fg2)
 - Bottom-left: muted icon (danger bg `danger22`) OR speaking-ring around avatar
 - Bottom-right: latency mono fg3
-- Sharing-screen tile: replace avatar with live thumbnail (use `Image` or `VideoOutput`); border becomes `Theme.accent` + `accentGlow` shadow
+- **No video in a participant tile.** A tile is an audio-only participant, always. The moment anybody has a camera or a screen share up, this grid is off screen entirely and every live surface is on the video stage (§3.4). Putting a webcam into a 220×180 avatar chip was the original complaint; `ParticipantTile.qml` no longer contains a `VideoOutput` and `tests/test_qml_hygiene.cpp` fails if one comes back.
 
 **Speaking ring:**
 - Outer `Rectangle` ring, `border.width: 2 + level*4`, `border.color: Theme.accent`
@@ -222,19 +222,27 @@ Always shown. Avatar + handle + mute/deafen/settings icon buttons. Mute/deafen a
 
 ---
 
-### 3.4 ScreenShare (main content, alternate)
-**Source:** `components/ScreenShare.jsx`
-**Purpose:** when `CallController.sharingScreen === true`. Replaces the participant grid.
+### 3.4 Video stage (main content, alternate)
+**Source:** `qml/components/VoiceRoom.qml` + `qml/components/VideoFeedTile.qml`
+**Policy:** `qml/js/VideoStage.js` (tested by `tests/qml/tst_videostage.qml`)
+**Purpose:** shown whenever there is any video at all. Replaces the participant grid.
 
-**Layout:**
-- Big stream area (fills main minus 96h for mini-tile strip below)
-- Strip of mini participant tiles (100w × 64h) along the bottom, horizontally scrollable
-- Floating toolbar top-center (r5 pill, bg `Theme.bg2`, shadow3): cursor, annotate, pointer, clear, stop-share (danger)
-- When `annotateMode === true`: a `Canvas` or `Shape` overlay takes pointer events; strokes are drawn as `PathPolyline` with the accent color
+**Feeds.** One ordered list: every remote screen share, every remote camera, and our own camera and screen share while they are on. One entry per surface, so a peer who is sharing *and* on camera is two. Screen shares sort before cameras, oldest first within a kind.
 
-**Translation notes:**
-- Annotation strokes should live in a `StrokeModel` (C++) with roles `points`, `color`, `width`. Pen input goes via `MouseArea` → `controller.addStrokePoint(x,y)`.
-- Use `QtQuick.Shapes` for smooth strokes; `Canvas` is a fallback.
+**Stage:**
+- One feed → it fills the stage.
+- Cameras only → a grid, everybody visible at once, self included. 2 is two columns, 3–4 is 2×2, 5–6 is 3×2; past that the columns stay at 3 and the tiles shrink. A short final row is centred.
+- Any screen share → the selected feed fills the stage and the rest drop to the strip. Default selection is the most recently started screen share, else the most recently started camera.
+
+**Strip (92h, above the member strip):** thumbnails of *all* feeds, including the one on stage — that one appears as a highlighted "on stage" chip rather than a second copy of the picture. Click promotes a feed; ←/→ walk the strip; Escape returns to automatic selection. A feed that stops is removed, and if it was the selected one the stage falls back to automatic rather than going blank. Thumbnails shrink to fit rather than scrolling, so nothing is unreachable.
+
+**Member strip (88h, bottom):** unchanged — every voice member as an avatar chip with speaking ring and mute/deafen glyph, hideable from the header.
+
+**The constraint that shapes the code.** There is exactly one `VideoOutput` per feed, declared only in `VideoFeedTile.qml`, and it serves both positions. `VoiceRoom` keeps a single `Repeater` over the feed list and moves tiles by writing `x`/`y`/`width`/`height`. Do not reparent a tile, do not split stage and strip into two Repeaters, and do not put liveness on the feed objects: any of those changes the delegate's identity, the engine destroys and rebuilds the `VideoOutput`, and the picture goes black until the next frame — a fifth of a second on a 5 fps share, on every click.
+
+**Still true:** the `Starting share…` / `Starting camera…` placeholder belongs to a stream that has been announced but is not yet delivering frames (S-7, `VideoStreamRegistry::streamStopped`); the diagnostics overlay is Settings → Advanced and shows *decoded* fps; `attachOutput` replays the last frame so a tile that appears mid-stream is never blank.
+
+**Not built:** the annotation toolbar (cursor / annotate / pointer / clear) from the mock. When it lands, strokes belong in a C++ `StrokeModel` with roles `points`, `color`, `width`, drawn with `QtQuick.Shapes`, over the stage tile only.
 
 ---
 
