@@ -613,7 +613,16 @@ void PeerConnectionManager::createOffer() {
         // toward a peer that advertises control_dc. See
         // ensureControlChannel().
 
-        m_pc->setLocalDescription(rtc::Description::Type::Offer);
+        // createDataChannel() above triggers libdatachannel's own
+        // negotiation, which sets the local description itself. Asking
+        // again once it has is not just redundant — it logs
+        // "Unexpected local description in signaling state
+        // have-local-offer, ignoring" on EVERY offer we make, which
+        // reads like the offer was dropped when in fact the auto-
+        // negotiated one went out. Only set it when we are still in
+        // Stable, i.e. when nothing has negotiated for us.
+        if (m_pc->signalingState() == rtc::PeerConnection::SignalingState::Stable)
+            m_pc->setLocalDescription(rtc::Description::Type::Offer);
     } catch (const std::exception& e) {
         failPeer("createOffer", e);
     }

@@ -302,6 +302,34 @@ set_target_properties(bsfchat-app PROPERTIES
     WIN32_EXECUTABLE TRUE
 )
 
+if(APPLE)
+    # V-H4. This property is load-bearing twice over: it is the bundle's
+    # Info.plist, AND it is what Qt reads at CONFIGURE time to decide
+    # whether to link the static QMicrophonePermission /
+    # QCameraPermission backends (Qt6CoreMacros.cmake,
+    # _qt_internal_darwin_permission_finalizer: no property ⇒ it returns
+    # immediately ⇒ no plugin ⇒ every permission query answers Denied,
+    # with no OS prompt and no entry in System Settings for the user to
+    # flip). rc.7 shipped with the usage descriptions added POST_BUILD,
+    # which is far too late for that decision — the bundle read correctly
+    # and the microphone was dead.
+    #
+    # Configured here rather than left to CMake's own substitution pass:
+    # that one only fills @MACOSX_BUNDLE_*@ from same-named VARIABLES, so
+    # a custom template fed by target properties silently produces an
+    # Info.plist with an empty CFBundleIdentifier and no version.
+    set(MACOSX_BUNDLE_EXECUTABLE_NAME "bsfchat-app")
+    set(MACOSX_BUNDLE_BUNDLE_NAME "BSFChat")
+    set(MACOSX_BUNDLE_GUI_IDENTIFIER "${BSFCHAT_BUNDLE_ID}")
+    set(MACOSX_BUNDLE_BUNDLE_VERSION "${BSFCHAT_VERSION_DOTS}")
+    set(MACOSX_BUNDLE_SHORT_VERSION_STRING "${BSFCHAT_VERSION_DOTS}")
+    set(MACOSX_BUNDLE_ICON_FILE "BSFChat.icns")
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/macos/Info.plist.in"
+                   "${CMAKE_CURRENT_BINARY_DIR}/Info.plist" @ONLY)
+    set_target_properties(bsfchat-app PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/Info.plist")
+endif()
+
 # Bundle the brand .icns into Contents/Resources/ so the value of
 # MACOSX_BUNDLE_ICON_FILE actually resolves at runtime. Without
 # this, Finder shows the generic Qt icon even though Info.plist
@@ -326,45 +354,28 @@ if(WIN32)
 endif()
 
 if(APPLE)
-    # CMake's generated Info.plist only covers the canonical MACOSX_BUNDLE_*
-    # keys. Inject the TCC usage descriptions we need after the bundle has
-    # been written — without NSMicrophoneUsageDescription, macOS denies mic
-    # access silently with no prompt, so voice chat opens the input device
-    # but only captures silence.
+    # The usage descriptions and the bsfchat:// URL scheme used to be
+    # injected here, POST_BUILD, with plutil and PlistBuddy. They now live
+    # in macos/Info.plist.in, because Qt has to be able to READ them at
+    # configure time to link the permission plugins (see the
+    # MACOSX_BUNDLE_INFO_PLIST property above). Nothing edits the bundle's
+    # plist after the fact any more.
+    #
+    # Guard it: a plist that reaches the bundle without
+    # NSMicrophoneUsageDescription is not a cosmetic problem, it is voice
+    # silently not working for every user of that build, and the failure
+    # is invisible on a machine that already granted the permission to an
+    # earlier bundle with the same id.
     add_custom_command(TARGET bsfchat-app POST_BUILD
-        # CMake writes the plist read-only; plutil -replace refuses to edit
-        # it without write permission. Make it writable first.
-        COMMAND /bin/chmod u+w
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
-        COMMAND /usr/bin/plutil -replace NSMicrophoneUsageDescription
-                -string "BSFChat needs microphone access so you can talk in voice channels."
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
-        COMMAND /usr/bin/plutil -replace NSCameraUsageDescription
-                -string "BSFChat needs camera access to share your webcam in voice channels."
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
-        # Screen Recording permission is gated by TCC without a
-        # dedicated string — add it so macOS prompts on first capture
-        # attempt instead of silently refusing.
-        COMMAND /usr/bin/plutil -replace NSScreenCaptureUsageDescription
-                -string "BSFChat needs screen-recording access so you can share your screen in voice channels."
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
-        # Register `bsfchat://` as a URL scheme the app handles. Launch
-        # Services reads CFBundleURLTypes on install and routes activation
-        # to our QFileOpenEvent filter (see src/core/UrlHandler.cpp).
-        # PlistBuddy is happier with CMake VERBATIM than `plutil -json`,
-        # which gets its argument mangled by the quoting pass. Each Delete
-        # tolerates absence (|| true) so this is idempotent across builds.
-        COMMAND /bin/sh -c "/usr/libexec/PlistBuddy -c 'Delete :CFBundleURLTypes' \"$0\" || true" "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
-        COMMAND /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes array"
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
-        COMMAND /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0 dict"
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
-        COMMAND /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLName string com.bsfchat.url"
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
-        COMMAND /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array"
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
-        COMMAND /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string bsfchat"
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist"
+        COMMAND /usr/libexec/PlistBuddy -c "print NSMicrophoneUsageDescription"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist" > /dev/null
+        COMMAND /usr/libexec/PlistBuddy -c "print NSCameraUsageDescription"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist" > /dev/null
+        COMMAND /usr/libexec/PlistBuddy -c "print NSScreenCaptureUsageDescription"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist" > /dev/null
+        COMMAND /usr/libexec/PlistBuddy -c "print CFBundleURLTypes:0:CFBundleURLSchemes:0"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist" > /dev/null
+        COMMENT "Checking the bundle's TCC usage descriptions and URL scheme"
         VERBATIM
     )
 endif()

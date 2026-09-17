@@ -242,6 +242,7 @@ private slots:
 
     // ---- V-H4 -------------------------------------------------------
     void startPolicyRefusesWithoutAudioOrRelay();
+    void deniedMicrophoneRefusesTheJoin();
 
     // ---- V-H3 -------------------------------------------------------
     void settledFiresOnceEveryLeaveIsAnswered();
@@ -881,6 +882,47 @@ void TestVoiceLifecycle::startPolicyRefusesWithoutAudioOrRelay()
              StartRefusal::RelayOnlyNoTurn);
     QVERIFY(!voice::refusalMessage(StartRefusal::AudioUnavailable).isEmpty());
     QVERIFY(voice::refusalMessage(StartRefusal::None).isEmpty());
+}
+
+void TestVoiceLifecycle::deniedMicrophoneRefusesTheJoin()
+{
+    // V-H4, second half. rc.7 logged "microphone permission is denied in
+    // system settings" and then joined anyway: the user sat in the
+    // channel with a mic capturing silence (peak |sample| = 30 on a live
+    // RØDE NT-USB+), their member row kept alive by the poll, with
+    // nothing in the UI to explain why nobody could hear them.
+    //
+    // The OS status cannot be faked in-process — there is no way to
+    // answer a TCC prompt from a test — so the decision is a value and
+    // it is the value that is pinned here.
+    using voice::MicPermission;
+    using voice::MicPermissionAction;
+    QCOMPARE(voice::micPermissionAction(MicPermission::Denied),
+             MicPermissionAction::Refuse);
+    // Never asked: fire the prompt and carry on; a denial at the prompt
+    // fails AudioEngine::start, which unwinds the join.
+    QCOMPARE(voice::micPermissionAction(MicPermission::Undetermined),
+             MicPermissionAction::RequestThenProceed);
+    QCOMPARE(voice::micPermissionAction(MicPermission::Granted),
+             MicPermissionAction::Proceed);
+    // A platform (or Qt) with no permission concept must not be turned
+    // into a platform where voice never starts.
+    QCOMPARE(voice::micPermissionAction(MicPermission::Unsupported),
+             MicPermissionAction::Proceed);
+
+    // The refusal has to name the switch the user must flip: "denied" on
+    // its own sends people to the audio-device settings, which are fine.
+    const QString msg =
+        voice::refusalMessage(voice::StartRefusal::MicrophoneDenied);
+    QVERIFY(!msg.isEmpty());
+    QVERIFY(msg.contains(QStringLiteral("Microphone")));
+#if defined(Q_OS_MACOS)
+    QVERIFY(msg.contains(QStringLiteral("System Settings")));
+    QVERIFY(msg.contains(QStringLiteral("Privacy")));
+#endif
+    // Distinct from the no-device refusal: same symptom for the user,
+    // completely different fix.
+    QVERIFY(msg != voice::refusalMessage(voice::StartRefusal::AudioUnavailable));
 }
 
 void TestVoiceLifecycle::settledFiresOnceEveryLeaveIsAnswered()

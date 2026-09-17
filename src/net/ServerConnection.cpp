@@ -11,6 +11,7 @@
 #include "identity/IdentityClient.h"
 #include "core/Settings.h"
 #include "store/LocalCache.h"
+#include "voice/CallSignalCodec.h"
 #include "voice/VoiceRosterReconcile.h"
 #include "voice/VoiceTransportSelector.h"
 #ifdef BSFCHAT_VOICE_ENABLED
@@ -1158,30 +1159,53 @@ void ServerConnection::resetUnreadForRoom(const QString& roomId)
     if (m_hasUnread != hadUnread) emit hasUnreadChanged();
 }
 
-void ServerConnection::requestMicrophonePermission()
+voice::MicPermission ServerConnection::microphonePermission() const
 {
 #if QT_CONFIG(permissions)
-    QMicrophonePermission permission;
-    switch (qApp->checkPermission(permission)) {
-    case Qt::PermissionStatus::Undetermined:
+    switch (qApp->checkPermission(QMicrophonePermission{})) {
+    case Qt::PermissionStatus::Undetermined: return voice::MicPermission::Undetermined;
+    case Qt::PermissionStatus::Denied:       return voice::MicPermission::Denied;
+    case Qt::PermissionStatus::Granted:      return voice::MicPermission::Granted;
+    }
+    return voice::MicPermission::Unsupported;
+#else
+    return voice::MicPermission::Unsupported;
+#endif
+}
+
+bool ServerConnection::microphonePermissionAllowsJoin()
+{
+    const auto action = voice::micPermissionAction(microphonePermission());
+    switch (action) {
+    case voice::MicPermissionAction::Refuse:
+        // V-H4, second half. This used to be a warning and a join: the
+        // user landed in the channel with a microphone that records
+        // silence, their member row was kept alive by the poll, and
+        // nothing told them why nobody could hear them. The OS will not
+        // prompt again once it has said no, so there is nothing to wait
+        // for — refuse it here, the same way a missing audio device is
+        // refused, and point at the switch that fixes it.
+        qWarning("[voice] microphone permission is denied — refusing the join");
+        setVoiceError(voice::refusalMessage(voice::StartRefusal::MicrophoneDenied));
+        return false;
+    case voice::MicPermissionAction::RequestThenProceed:
+#if QT_CONFIG(permissions)
         // Asynchronous by construction — the prompt is modal to the OS,
         // not to us. The join continues; if the user denies it,
         // AudioEngine::start fails and VoiceSession unwinds the join.
-        qApp->requestPermission(permission, this,
-            [](const QPermission& granted) {
-                if (granted.status() != Qt::PermissionStatus::Granted) {
-                    qWarning("[voice] microphone permission denied — voice "
-                             "will not capture");
-                }
+        qApp->requestPermission(QMicrophonePermission{}, this,
+            [this](const QPermission& granted) {
+                if (granted.status() == Qt::PermissionStatus::Granted) return;
+                qWarning("[voice] microphone permission denied at the prompt");
+                setVoiceError(voice::refusalMessage(
+                    voice::StartRefusal::MicrophoneDenied));
             });
-        break;
-    case Qt::PermissionStatus::Denied:
-        qWarning("[voice] microphone permission is denied in system settings");
-        break;
-    case Qt::PermissionStatus::Granted:
+#endif
+        return true;
+    case voice::MicPermissionAction::Proceed:
         break;
     }
-#endif
+    return true;
 }
 
 void ServerConnection::joinVoiceChannel(const QString& roomId)
@@ -1225,7 +1249,10 @@ void ServerConnection::joinVoiceChannel(const QString& roomId)
         return;
     }
 
-    requestMicrophonePermission();
+    // A denied microphone is a refusal, not a warning (V-H4): joining
+    // with one produces a member nobody can hear and who is told
+    // nothing. setVoiceError has already said where the switch is.
+    if (!microphonePermissionAllowsJoin()) return;
 
     // Refreshed here rather than once at construction: m_userId is filled
     // in by whichever of the four login paths ran (password, register,
@@ -1765,15 +1792,17 @@ void ServerConnection::dispatchCallSignal(const CallSignal& signal)
 {
 #ifdef BSFCHAT_VOICE_ENABLED
     if (!m_voiceEngine) return;
-    nlohmann::json c;
-    try {
-        c = nlohmann::json::parse(signal.payload.toStdString());
-    } catch (const std::exception& e) {
-        qWarning("[voice] unparseable %s from %s: %s", qPrintable(signal.type),
-                 qPrintable(signal.sender), e.what());
+    // V-C3: one codec for both ends of the wire. VoiceEngine builds
+    // these events with voice::build*(); this reads them back with the
+    // same header, so the key set cannot drift between the two files
+    // (see src/voice/CallSignalCodec.h — an unreadable `call_id` is a
+    // silent, permanent call failure).
+    const voice::InboundCall call = voice::parseCallContent(signal.payload);
+    if (!call.valid) {
+        qWarning("[voice] unparseable %s from %s", qPrintable(signal.type),
+                 qPrintable(signal.sender));
         return;
     }
-    if (!c.is_object()) return;
 
     // Call signalling rides the shared room timeline, so every
     // participant sees every other participant's invites/answers/
@@ -1785,37 +1814,24 @@ void ServerConnection::dispatchCallSignal(const CallSignal& signal)
     // Newer clients stamp the recipient in "to". Absent (older client) we
     // keep the old sender-only behaviour rather than dropping the event,
     // so a mixed fleet still connects.
-    std::string toUser;
-    if (auto toIt = c.find("to"); toIt != c.end() && toIt->is_string())
-        toUser = toIt->get<std::string>();
-    if (!toUser.empty() && toUser != m_userId.toStdString()) return;
+    if (!voice::addressedToUs(call.to, m_userId)) return;
 
     const QString& sender = signal.sender;
     const QString& type = signal.type;
     if (type == QString::fromUtf8(bsfchat::event_type::kCallInvite)) {
-        m_voiceEngine->handleCallInvite(sender,
-            QString::fromStdString(c.value("call_id", "")),
-            c.value("offer", nlohmann::json::object()).value("sdp", ""),
-            c.value("bsfchat_caps", nlohmann::json::object()));
+        m_voiceEngine->handleCallInvite(sender, call.callId, call.sdp,
+                                        call.caps);
     } else if (type == QString::fromUtf8(bsfchat::event_type::kCallAnswer)) {
-        m_voiceEngine->handleCallAnswer(sender,
-            QString::fromStdString(c.value("call_id", "")),
-            c.value("answer", nlohmann::json::object()).value("sdp", ""),
-            c.value("bsfchat_caps", nlohmann::json::object()));
+        m_voiceEngine->handleCallAnswer(sender, call.callId, call.sdp,
+                                        call.caps);
     } else if (type == QString::fromUtf8(bsfchat::event_type::kCallNegotiate)) {
-        const auto desc = c.value("description", nlohmann::json::object());
-        m_voiceEngine->handleCallNegotiate(sender,
-            QString::fromStdString(c.value("call_id", "")),
-            desc.value("type", ""), desc.value("sdp", ""));
+        m_voiceEngine->handleCallNegotiate(sender, call.callId, call.sdpType,
+                                           call.sdp);
     } else if (type == QString::fromUtf8(bsfchat::event_type::kCallCandidates)) {
-        std::vector<std::pair<std::string, std::string>> cands;
-        for (const auto& ic : c.value("candidates", nlohmann::json::array()))
-            cands.emplace_back(ic.value("candidate", ""), ic.value("sdpMid", ""));
-        m_voiceEngine->handleCallCandidates(sender,
-            QString::fromStdString(c.value("call_id", "")), cands);
+        m_voiceEngine->handleCallCandidates(sender, call.callId,
+                                            call.candidates);
     } else if (type == QString::fromUtf8(bsfchat::event_type::kCallHangup)) {
-        m_voiceEngine->handleCallHangup(sender,
-            QString::fromStdString(c.value("call_id", "")));
+        m_voiceEngine->handleCallHangup(sender, call.callId);
     }
 #else
     Q_UNUSED(signal);
