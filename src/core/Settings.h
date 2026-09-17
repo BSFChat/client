@@ -64,10 +64,20 @@ class Settings : public QObject {
     // which is being edited elsewhere this cycle.)
     Q_PROPERTY(QVariantList audioInputDevices READ audioInputDevices NOTIFY audioDevicesChanged)
     Q_PROPERTY(QVariantList audioOutputDevices READ audioOutputDevices NOTIFY audioDevicesChanged)
-    // Re-publish the device lists. Cheap (a QMediaDevices enumeration).
-    Q_INVOKABLE void refreshAudioDevices();
 
 public:
+    // Re-publish the device lists. Cheap (a QMediaDevices enumeration).
+    //
+    // Must stay under an access specifier that makes it public. It was
+    // declared in the leading block above with the Q_PROPERTYs, which reads
+    // as if it belongs with them but is `private` in a class, and moc only
+    // exposes public invokables to QML — so ClientSettings.qml's
+    // onAboutToShow died on "Property 'refreshAudioDevices' of object
+    // Settings is not a function" and took the rest of the handler
+    // (the combo-box resync) with it. tests/test_qml_hygiene.cpp now fails
+    // the build if any Q_INVOKABLE drifts back under a non-public specifier.
+    Q_INVOKABLE void refreshAudioDevices();
+
     explicit Settings(QObject* parent = nullptr);
 
     struct ServerEntry {
