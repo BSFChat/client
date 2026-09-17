@@ -177,6 +177,8 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
             ${libaom_SOURCE_DIR} ${libaom_BINARY_DIR})
     endif()
     add_test(NAME test_video_pipeline COMMAND test_video_pipeline)
+    # Encodes real frames against QTRY deadlines; flaky under parallel ctest.
+    set_tests_properties(test_video_pipeline PROPERTIES RUN_SERIAL TRUE)
     # Headless: no window, no capture device, no audio.
     set_tests_properties(test_video_pipeline PROPERTIES
         TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
@@ -310,7 +312,10 @@ if(BSFCHAT_ENABLE_VOICE)
     # manually on real Windows machines.
     if(NOT WIN32)
         add_test(NAME test_media_loopback COMMAND test_media_loopback)
-        set_tests_properties(test_media_loopback PROPERTIES TIMEOUT 60)
+        # Real sockets, real DTLS handshakes and wall-clock deadlines: under
+        # `ctest -j4` on a loaded CI runner this timed out twice in one day
+        # (rc.11). Serial, so it never competes with the video pipeline test.
+        set_tests_properties(test_media_loopback PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
     endif()
 endif()
 
