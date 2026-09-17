@@ -377,6 +377,16 @@ add_test(NAME test_server_roster COMMAND test_server_roster)
 # password-only" (which is how `bsfchat.com` produced a registration form
 # for a web server). ServerDiscovery takes its HTTP as a std::function, so
 # this needs no network, no event loop and no Settings.
+# 401 classification: the client had no dead-token handling at all, so an
+# expired access token showed as a permanent "Reconnecting…".
+qt_add_executable(test_auth_error
+    test_auth_error.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
+)
+target_include_directories(test_auth_error PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_auth_error PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_auth_error COMMAND test_auth_error)
+
 qt_add_executable(test_server_discovery
     test_server_discovery.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerDiscovery.cpp

@@ -151,7 +151,11 @@ Rectangle {
             color: {
                 if (!serverManager.activeServer) return "transparent";
                 if (serverManager.activeServer.connectionStatus === 2) return Theme.warn;
-                if (serverManager.activeServer.connectionStatus === 0) return Theme.danger;
+                // 3 = session expired. Red, like disconnected: it is a
+                // permanent state until the user signs in again, not a
+                // transient one the client can recover from by waiting.
+                if (serverManager.activeServer.connectionStatus === 0
+                    || serverManager.activeServer.connectionStatus === 3) return Theme.danger;
                 return "transparent";
             }
             visible: serverManager.activeServer !== null && serverManager.activeServer.connectionStatus !== 1
@@ -180,6 +184,8 @@ Rectangle {
                         if (!serverManager.activeServer) return "";
                         if (serverManager.activeServer.connectionStatus === 2)
                             return "Reconnecting to server…";
+                        if (serverManager.activeServer.connectionStatus === 3)
+                            return serverManager.activeServer.syncErrorMessage;
                         if (serverManager.activeServer.connectionStatus === 0)
                             return "Disconnected — messages won't send until the server is reachable";
                         return "";

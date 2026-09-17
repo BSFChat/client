@@ -1,6 +1,7 @@
 #include "net/ServerConnection.h"
 #include "net/MatrixClient.h"
 #include "net/SyncLoop.h"
+#include "net/AuthError.h"
 #include "model/RoomListModel.h"
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
@@ -132,6 +133,25 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 
     // Track sync errors for UI
     connect(m_syncLoop, &SyncLoop::syncError, this, [this](const QString& error) {
+        // A dead access token is not a network problem and retrying it can
+        // never succeed. Tokens expire after 90 days and are revoked on
+        // logout/ban/device removal, so this is a state real users reach.
+        // Before this branch the loop retried the same dead bearer token
+        // every 60 s forever behind a "Reconnecting…" banner, with no hint
+        // that signing in again was the only way out.
+        if (AuthError::indicatesDeadAccessToken(error)) {
+            if (m_connectionStatus == 3) return; // already surfaced
+            m_syncLoop->stop();
+            m_connected = false;
+            m_connectionStatus = 3; // session expired
+            m_syncErrorMessage =
+                tr("Your session has expired. Sign in again to reconnect.");
+            emit connectedChanged();
+            emit connectionStatusChanged();
+            emit syncErrorMessageChanged();
+            emit sessionExpired(m_serverUrl);
+            return;
+        }
         m_connectionStatus = 2; // reconnecting
         m_syncErrorMessage = error;
         emit connectionStatusChanged();
