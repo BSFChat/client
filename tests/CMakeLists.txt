@@ -343,6 +343,31 @@ if(BSFCHAT_ENABLE_VOICE)
     endif()
 endif()
 
+# RTP video RECEPTION between two real PeerConnectionManagers (S-16).
+# test_media_loopback proves the handler chain packetizes and
+# depacketizes; it uses a single m-line, which silently skips
+# libdatachannel's SSRC demultiplexer. This one runs the production
+# two-m-line setup and asserts that videoFrameReceived actually fires on
+# the far side, in both directions, on both streams.
+if(BSFCHAT_ENABLE_VOICE)
+    qt_add_executable(test_video_rtp_loopback
+        test_video_rtp_loopback.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/PeerConnectionManager.cpp
+    )
+    target_include_directories(test_video_rtp_loopback PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_video_rtp_loopback PRIVATE
+        bsfchat_protocol
+        Qt6::Core Qt6::Test LibDataChannel::LibDataChannel)
+    # Not on Windows, for the same reason as the other two loopback
+    # tests: the runners stall UDP host-candidate binds behind Defender.
+    if(NOT WIN32)
+        add_test(NAME test_video_rtp_loopback COMMAND test_video_rtp_loopback)
+        # Real DTLS handshakes plus four wall-clock delivery windows.
+        set_tests_properties(test_video_rtp_loopback PROPERTIES
+            TIMEOUT 300 RUN_SERIAL TRUE)
+    endif()
+endif()
+
 # Video-player playback maths (qml/js/PlaybackMath.js), driven through a
 # QML test runner because that is where the code lives and where the app
 # calls it — a C++ copy of the same arithmetic would prove nothing about
