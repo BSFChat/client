@@ -297,6 +297,9 @@ void VoiceSession::onJoinSucceeded(const QString& roomId,
         if (effectiveMuted() != m_ackedMuted || m_deafened != m_ackedDeafened) {
             enqueue(stateOp(roomId));
         }
+        // New membership, so the server's media flags are back to false.
+        // Whoever knows what we are actually capturing has to say so again.
+        emit membershipRenewed(roomId);
         return;
     }
     if (!inFlightIs(OpKind::Join, roomId)) {

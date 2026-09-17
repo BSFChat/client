@@ -1637,6 +1637,12 @@ void ServerConnection::setupVoiceSession()
 #endif
     });
 
+    // A re-join keeps the room and the engine, so stateChanged below
+    // never fires for it — but the membership behind us is new and its
+    // media flags are back to the server's defaults. Forward the edge.
+    connect(vs, &VoiceSession::membershipRenewed, this,
+            [this](const QString&) { emit voiceMembershipRenewed(); });
+
     // ---- QML-facing mirrors ---------------------------------------
     connect(vs, &VoiceSession::stateChanged, this, [this]() {
         using State = VoiceSession::State;

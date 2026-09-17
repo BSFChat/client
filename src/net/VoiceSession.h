@@ -220,6 +220,23 @@ signals:
     void deafenedChanged();
     // A user-facing failure. Not every error unwinds the session.
     void errorOccurred(const QString& message);
+    // The server retired our voice row and the V-H2 re-join was
+    // ACCEPTED: same room, same engine, same peers — but a brand new
+    // membership, and the server starts every membership with
+    // screen_sharing and camera_on false. Anything that announced media
+    // state for the old row has to announce it again, because nothing
+    // else will: the media flags are pushed on a CHANGE in the capture
+    // controllers, and a re-join changes nothing about them. Without
+    // this, a screen share or camera that was live when the ghost
+    // reaper fired becomes invisible to every other participant and
+    // stays invisible until the user toggles it off and on.
+    //
+    // Deliberately not routed through the request queue: the media
+    // announcement does not go through VoiceSession at all today (see
+    // ServerConnection::setLocalMediaState) and moving it there is a
+    // larger change than this repair needs.
+    void membershipRenewed(const QString& roomId);
+
     // Emitted once the session has reached Idle with an empty queue, i.e.
     // every leave we issued has been answered. The quit path waits on it.
     void settled();

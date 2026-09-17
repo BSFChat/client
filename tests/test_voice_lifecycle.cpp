@@ -256,6 +256,7 @@ private slots:
     void leavingFlushesTheHangupsStopItselfQueued();
     void aFailedPeerKeepsSayingFailedInsteadOfNew();
     void joiningWhileDeafenedDeafensTheNewEngine();
+    void anAcceptedRejoinAnnouncesItsNewMembership();
 
     // ---- V-L4 -------------------------------------------------------
     void transportSelectorRefusesMixedRoster();
@@ -1215,6 +1216,42 @@ void TestVoiceLifecycle::joiningWhileDeafenedDeafensTheNewEngine()
     QCOMPARE(s.state(), VoiceSession::State::Active);
     QCOMPARE(engine.starts, 2);
     QCOMPARE(engine.deafenGates, (QVector<bool>{true, true, false, false}));
+}
+
+void TestVoiceLifecycle::anAcceptedRejoinAnnouncesItsNewMembership()
+{
+    // V-H2 recovery keeps the room, the engine and every peer, so
+    // activeVoiceRoomId never changes across it — which is precisely why
+    // the media announcement, wired in main.cpp to that one edge, was
+    // never re-sent. But the re-join mints a NEW membership, and the
+    // server starts every membership with screen_sharing and camera_on
+    // false. A screen share or camera that was live when the ghost
+    // reaper fired therefore disappeared from every other participant's
+    // roster and did not come back until the user toggled it.
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+
+    QSignalSpy renewed(&s, &VoiceSession::membershipRenewed);
+    joinTo(s, net, "!room:x");
+    // A first join is not a renewal: the existing edge already covers it.
+    QCOMPARE(renewed.size(), 0);
+
+    // The server retires our row; the session re-POSTs the join.
+    s.onStateSuperseded("!room:x");
+    s.onStateUpdateFailed("!room:x", "Voice session superseded");
+    QCOMPARE(net.joins.last(), QStringLiteral("!room:x"));
+    QCOMPARE(renewed.size(), 0);    // not yet — the re-join is in flight
+
+    // Accepted. Same engine, same peers, new membership.
+    net.replyJoinOk("!room:x");
+    QVERIFY(s.isActive());
+    QCOMPARE(engine.starts, 1);     // the engine was never restarted
+    QCOMPARE(engine.stops, 0);
+    QCOMPARE(renewed.size(), 1);
+    QCOMPARE(renewed.first().first().toString(), QStringLiteral("!room:x"));
 }
 
 void TestVoiceLifecycle::transportSelectorRefusesMixedRoster()

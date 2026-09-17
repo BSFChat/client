@@ -283,13 +283,24 @@ int main(int argc, char *argv[])
                                  announceMediaState](int index) {
             auto* sc = mgr->connectionAt(index);
             if (!sc) return;
-            QObject::connect(sc, &ServerConnection::activeVoiceRoomIdChanged,
-                             &camera,
-                             [sc, &screenShare, &camera, announceMediaState]() {
+            auto announceIfCapturing =
+                [sc, &screenShare, &camera, announceMediaState]() {
                 if (sc->inVoiceChannel()
                     && (screenShare.active() || camera.active()))
                     announceMediaState();
-            });
+            };
+            QObject::connect(sc, &ServerConnection::activeVoiceRoomIdChanged,
+                             &camera, announceIfCapturing);
+            // Second edge, same need: the ghost reaper retired our voice
+            // row and the V-H2 re-join was accepted. The room and the
+            // engine are unchanged — so activeVoiceRoomIdChanged does NOT
+            // fire — but the membership is new and the server starts
+            // every membership with screen_sharing and camera_on false.
+            // Without re-announcing here, a share that was live when the
+            // reaper fired vanishes from everyone else's roster and only
+            // comes back if the user toggles it off and on.
+            QObject::connect(sc, &ServerConnection::voiceMembershipRenewed,
+                             &camera, announceIfCapturing);
         };
         for (int i = 0; i < mgr->connectionCount(); ++i) wireJoinAnnounce(i);
         QObject::connect(mgr, &ServerManager::serverAdded,

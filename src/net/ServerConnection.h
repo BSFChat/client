@@ -636,6 +636,13 @@ signals:
     void mediaSendCompleted();
     void mediaSendFailed(const QString& error);
     void activeVoiceRoomIdChanged();
+    // The server retired our voice row and the V-H2 re-join was
+    // accepted: same room and same engine, but a NEW membership whose
+    // screen_sharing/camera_on both start false. activeVoiceRoomId does
+    // not change across it, so anything that announces media state on
+    // joining needs this second edge as well — otherwise a live share
+    // silently disappears from everyone else's roster.
+    void voiceMembershipRenewed();
     void voiceErrorChanged();
     void viewingVoiceRoomChanged();
     void voiceMutedChanged();
