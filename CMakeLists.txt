@@ -407,6 +407,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/VoiceRoom.qml
         qml/components/VoiceParticipantList.qml
         qml/components/ParticipantTile.qml
+        qml/components/VideoFeedTile.qml
         qml/components/Icon.qml
         qml/components/ThemedSwitch.qml
         qml/components/ThemedScrollBar.qml
@@ -460,6 +461,10 @@ qt_add_qml_module(bsfchat-app
         # Overlay visibility rules for the message timeline, shared by
         # MessageView.qml and tests/qml/tst_timelineoverlay.qml.
         qml/js/TimelineOverlay.js
+        # Grid arithmetic and stage-selection policy for the voice room's
+        # video feeds, shared by VoiceRoom.qml, VideoFeedTile.qml and
+        # tests/qml/tst_videostage.qml.
+        qml/js/VideoStage.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt
