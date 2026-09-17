@@ -377,6 +377,56 @@ add_test(NAME test_server_roster COMMAND test_server_roster)
 # password-only" (which is how `bsfchat.com` produced a registration form
 # for a web server). ServerDiscovery takes its HTTP as a std::function, so
 # this needs no network, no event loop and no Settings.
+# Ownership of the bsfchat:// forwarding socket. The old install() unlinked
+# a live instance's socket, so deep links silently went to the newest process.
+qt_add_executable(test_url_handler
+    test_url_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/UrlHandler.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
+)
+target_include_directories(test_url_handler PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_url_handler PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::Test)
+add_test(NAME test_url_handler COMMAND test_url_handler)
+
+# Correlating an async reply with its request. Qt::SingleShotConnection does
+# NOT mean "only one slot runs" — that misreading crossed uploads and DMs over.
+qt_add_executable(test_tokened_reply test_tokened_reply.cpp)
+target_include_directories(test_tokened_reply PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_tokened_reply PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_tokened_reply COMMAND test_tokened_reply)
+
+# Media cache identity. The key used to include the access token, so every
+# re-login re-downloaded every image the user had ever seen.
+qt_add_executable(test_media_cache_key
+    test_media_cache_key.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
+)
+target_include_directories(test_media_cache_key PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_media_cache_key PRIVATE Qt6::Core Qt6::Network Qt6::Test)
+add_test(NAME test_media_cache_key COMMAND test_media_cache_key)
+
+# Deleting a message must be able to fail. redactEvent reported nothing at
+# all, so a refused delete looked exactly like an accepted one.
+qt_add_executable(test_redaction_result
+    test_redaction_result.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
+)
+target_include_directories(test_redaction_result PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_redaction_result
+    PRIVATE Qt6::Core Qt6::Network Qt6::Test bsfchat_protocol nlohmann_json::nlohmann_json)
+add_test(NAME test_redaction_result COMMAND test_redaction_result)
+
+# 401 classification: the client had no dead-token handling at all, so an
+# expired access token showed as a permanent "Reconnecting…".
+qt_add_executable(test_auth_error
+    test_auth_error.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
+)
+target_include_directories(test_auth_error PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_auth_error PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_auth_error COMMAND test_auth_error)
+
 qt_add_executable(test_server_discovery
     test_server_discovery.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerDiscovery.cpp

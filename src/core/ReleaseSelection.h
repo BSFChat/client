@@ -316,15 +316,28 @@ struct Selection {
     QString newestStableTag;      // newest non-prerelease tag, if any
 };
 
+// Pick the asset for this platform out of a chosen release. Exact-name
+// match, same as the previous /releases/latest code path.
+inline QString assetUrlNamed(const Release& r, const QString& assetName)
+{
+    if (assetName.isEmpty()) return QString();
+    for (const ReleaseAsset& a : r.assets)
+        if (a.name == assetName) return a.url;
+    return QString();
+}
+
 // Decide what to do given every release we can see, the user's channel,
 // and the running build's version string.
 //
 // Stable users never see a prerelease here at all — not "see it and
 // reject it", it is filtered before comparison — so no RC tag, note or
 // asset URL can reach a stable user's UI.
+// `requiredAsset`, when non-empty, also skips any release that does not
+// carry an asset of that exact name — see the loop body.
 inline Selection selectRelease(const QVector<Release>& releases,
                                Channel channel,
-                               const QString& currentVersion)
+                               const QString& currentVersion,
+                               const QString& requiredAsset = QString())
 {
     Selection sel;
     const Version cur = parseVersion(currentVersion);
@@ -339,6 +352,17 @@ inline Selection selectRelease(const QVector<Release>& releases,
         }
         const bool eligible = (channel == Channel::Beta) || !r.prerelease;
         if (!eligible) continue;
+        // A release we cannot install is not an update. GitHub publishes
+        // the release row before CI finishes uploading artefacts, and a
+        // release job that dies half-way leaves one permanently assetless
+        // (or with only some platforms' assets). Such a release used to win
+        // the scan and then fail at the asset lookup, so every check for the
+        // rest of that release's life ended in a sticky "no asset named X"
+        // error the user could do nothing about — and the last good release
+        // was never offered. Skipping it here falls back to the newest one
+        // this platform can actually take.
+        if (!requiredAsset.isEmpty() && assetUrlNamed(r, requiredAsset).isEmpty())
+            continue;
         if (!bestChannel || compareVersions(r.version, bestChannel->version) > 0)
             bestChannel = &r;
     }
@@ -368,16 +392,6 @@ inline Selection selectRelease(const QVector<Release>& releases,
     }
     sel.outcome = Outcome::UpToDate;
     return sel;
-}
-
-// Pick the asset for this platform out of a chosen release. Exact-name
-// match, same as the previous /releases/latest code path.
-inline QString assetUrlNamed(const Release& r, const QString& assetName)
-{
-    if (assetName.isEmpty()) return QString();
-    for (const ReleaseAsset& a : r.assets)
-        if (a.name == assetName) return a.url;
-    return QString();
 }
 
 // "RC" / "DEV" / "PRE" / "" for the running build, so the UI can badge a

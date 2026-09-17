@@ -621,6 +621,10 @@ signals:
     void pttPressedChanged();
     void activeRoomNameChanged();
     void connectedChanged();
+    // The homeserver has stopped accepting our access token (expired,
+    // revoked, signed out elsewhere). Sync has been stopped; only a fresh
+    // login can revive this connection. ServerManager surfaces it.
+    void sessionExpired(const QString& serverUrl);
     void connectionStatusChanged();
     void syncErrorMessageChanged();
     void activeRoomTopicChanged();
@@ -761,7 +765,8 @@ private:
     QString m_activeRoomName;
     QString m_activeRoomTopic;
     bool m_connected = false;
-    int m_connectionStatus = 0; // 0=disconnected, 1=connected, 2=reconnecting
+    // 0=disconnected, 1=connected, 2=reconnecting, 3=session expired
+    int m_connectionStatus = 0;
     QString m_syncErrorMessage;
     bool m_hasUnread = false;
     bool m_viewingVoiceRoom = false;

@@ -332,7 +332,9 @@ Rectangle {
                 Row {
                     spacing: Theme.sp.s2
                     // connectionStatus is the sync loop's live verdict
-                    // (0 disconnected / 1 healthy / 2 reconnecting) —
+                    // (0 disconnected / 1 healthy / 2 reconnecting /
+                    // 3 session expired, which falls through to the
+                    // danger branch and shows syncErrorMessage) —
                     // NOT `connected`, which flips true optimistically
                     // when credentials are set, before any sync
                     // succeeds. Must agree with MessageView's banner.

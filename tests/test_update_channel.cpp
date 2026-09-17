@@ -492,6 +492,103 @@ private slots:
                  QStringLiteral("notes for v0.0.45-rc.1"));
     }
 
+    // ---- Installable-release filter --------------------------------
+    //
+    // GitHub creates the release row before CI has finished uploading
+    // artefacts, and a release job that fails half-way leaves one that
+    // never gets them. v0.0.44-rc.8 is the live example: the tag exists
+    // and no release was ever published for it.
+
+    void releaseWithoutOurAssetIsSkipped() {
+        // rc.9 is newest but carries only the Windows artefact; a Mac
+        // must be offered rc.7, not a permanent error about rc.9.
+        const QByteArray body = list({
+            rel(QStringLiteral("v0.0.44-rc.7"), true),
+            rel(QStringLiteral("v0.0.44-rc.9"), true,
+                QStringLiteral("BSFChat-Setup.exe")),
+        });
+        QString err;
+        const auto releases = parseReleaseList(body, &err);
+        QVERIFY(err.isEmpty());
+        const Selection sel = selectRelease(releases, Channel::Beta,
+                                            QStringLiteral("0.0.44-rc.6"),
+                                            QStringLiteral("BSFChat-macOS.dmg"));
+        QCOMPARE(sel.outcome, Outcome::UpdateAvailable);
+        QCOMPARE(sel.release.tag, QStringLiteral("v0.0.44-rc.7"));
+        QCOMPARE(assetUrlNamed(sel.release, QStringLiteral("BSFChat-macOS.dmg")),
+                 QStringLiteral("https://example.invalid/BSFChat-macOS.dmg"));
+    }
+
+    void assetlessNewestDoesNotBlockTheOffer() {
+        // The regression that produced a sticky, unactionable "Release
+        // v0.0.44-rc.9 has no asset named BSFChat-macOS.dmg" on every
+        // check for the life of that release.
+        const QByteArray body = list({
+            rel(QStringLiteral("v0.0.44-rc.7"), true),
+            rel(QStringLiteral("v0.0.44-rc.9"), true, QString()), // no assets at all
+        });
+        QString err;
+        const auto releases = parseReleaseList(body, &err);
+        QVERIFY(err.isEmpty());
+        const Selection sel = selectRelease(releases, Channel::Beta,
+                                            QStringLiteral("0.0.44-rc.6"),
+                                            QStringLiteral("BSFChat-macOS.dmg"));
+        QCOMPARE(sel.outcome, Outcome::UpdateAvailable);
+        QCOMPARE(sel.release.tag, QStringLiteral("v0.0.44-rc.7"));
+        QVERIFY(!assetUrlNamed(sel.release,
+                               QStringLiteral("BSFChat-macOS.dmg")).isEmpty());
+    }
+
+    void assetlessReleaseYouAreAlreadyOnIsUpToDate() {
+        // Falling back must not hand the user a downgrade: rc.7 is older
+        // than the running build, so there is nothing to offer.
+        const QByteArray body = list({
+            rel(QStringLiteral("v0.0.44-rc.7"), true),
+            rel(QStringLiteral("v0.0.44-rc.9"), true, QString()),
+        });
+        QString err;
+        const auto releases = parseReleaseList(body, &err);
+        QVERIFY(err.isEmpty());
+        const Selection sel = selectRelease(releases, Channel::Beta,
+                                            QStringLiteral("0.0.44-rc.9"),
+                                            QStringLiteral("BSFChat-macOS.dmg"));
+        QCOMPARE(sel.outcome, Outcome::AheadOfChannel);
+        QVERIFY(sel.release.tag.isEmpty());
+    }
+
+    void emptyRequiredAssetDisablesTheFilter() {
+        // Unsupported platform: platformAssetSuffix() is empty and the
+        // selection must behave exactly as it did before the filter.
+        const QByteArray body = list({
+            rel(QStringLiteral("v0.0.45"), false, QString()),
+        });
+        QString err;
+        const auto releases = parseReleaseList(body, &err);
+        QVERIFY(err.isEmpty());
+        const Selection sel = selectRelease(releases, Channel::Stable,
+                                            QStringLiteral("0.0.44"), QString());
+        QCOMPARE(sel.outcome, Outcome::UpdateAvailable);
+        QCOMPARE(sel.release.tag, QStringLiteral("v0.0.45"));
+    }
+
+    void newestStableTagStillReportsTheAssetlessRelease() {
+        // "Latest stable is X" is a statement about what has shipped, not
+        // about what we can install, so the filter must not rewrite it.
+        const QByteArray body = list({
+            rel(QStringLiteral("v0.0.44"), false),
+            rel(QStringLiteral("v0.0.45"), false, QString()),
+        });
+        QString err;
+        const auto releases = parseReleaseList(body, &err);
+        QVERIFY(err.isEmpty());
+        const Selection sel = selectRelease(releases, Channel::Stable,
+                                            QStringLiteral("0.0.43"),
+                                            QStringLiteral("BSFChat-macOS.dmg"));
+        QCOMPARE(sel.newestStableTag, QStringLiteral("v0.0.45"));
+        QCOMPARE(sel.outcome, Outcome::UpdateAvailable);
+        QCOMPARE(sel.release.tag, QStringLiteral("v0.0.44"));
+    }
+
     // ---- Build badge -----------------------------------------------
 
     void buildLabelIdentifiesPrereleaseBuilds() {

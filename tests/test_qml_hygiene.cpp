@@ -107,6 +107,103 @@ private slots:
     // private while `struct` defaults to public. A base-class list
     // ("class Settings : public QObject") is not an access specifier and is
     // not treated as one.
+    // A dialog that clamps its own height must be able to scroll.
+    //
+    // `height: Math.min(implicitHeight, parent.height - 32)` is the right way
+    // to keep a dialog inside the window — but with a plain Layout as
+    // contentItem the surplus is not compressed, it is clipped. LoginDialog
+    // did exactly that: main.qml sets the window minimum to 500 px, the
+    // sign-in form is taller, and at the minimum size the password fields and
+    // the Sign In button sat below the cut with no way to reach them. The app
+    // could not be signed into at a size it lets you resize to.
+    //
+    // There is no test binary that can instantiate these components (the
+    // BSFChat QML module is compiled into the app), so this is a source scan:
+    // if a file clamps a height against the parent, it must also contain a
+    // Flickable or a ScrollView.
+    void clampedDialogsCanScroll()
+    {
+        static const QRegularExpression clamps(
+            QStringLiteral(R"(height\s*:\s*Math\.min\s*\(\s*implicitHeight)"));
+
+        const QStringList qml = filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
+                                           QStringLiteral("*.qml"));
+        QVERIFY2(!qml.isEmpty(), "no QML found under BSFCHAT_QML_DIR");
+
+        QStringList offenders;
+        int checked = 0;
+        for (const QString& path : qml) {
+            const QString src = withoutComments(readAll(path));
+            if (!clamps.match(src).hasMatch()) continue;
+            ++checked;
+            if (!src.contains(QStringLiteral("Flickable"))
+                && !src.contains(QStringLiteral("ScrollView"))
+                && !src.contains(QStringLiteral("ListView"))) {
+                offenders << QFileInfo(path).fileName();
+            }
+        }
+        QVERIFY2(checked > 0,
+                 "no clamped dialog found — has the pattern changed? This "
+                 "guard is only meaningful while one exists.");
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "dialog clamps its height but cannot scroll, so content "
+                     "past the clamp is unreachable: ")
+                     + offenders.join(QStringLiteral(", "))));
+    }
+
+    // QSettings must be named through AppProfile, never with literals.
+    //
+    // --profile exists so two accounts can run on one machine, and it works
+    // by giving each profile its own QSettings application name. Any code
+    // that hard-codes ("BSFChat", "BSFChat") silently reads and writes the
+    // DEFAULT profile's store instead of its own. That is how the beta
+    // channel toggle came to be a no-op under --profile: UpdateChannel-
+    // Settings wrote through Settings (profile-aware) while the Updater
+    // read its own literal handle (not), so the switch moved nothing and
+    // `updater.channel` disagreed with `appSettings.updateChannel` in the
+    // same dialog. The default-constructed QSettings() form is fine — it
+    // picks up QCoreApplication's names, which main() sets from the profile.
+    void qsettingsAreNamedThroughAppProfile()
+    {
+        // Two string literals as the first two constructor arguments.
+        // Written with \x22 rather than a literal quote: moc mis-lexes a
+        // raw string that contains a double quote and silently drops the
+        // rest of the class, which links as a missing vtable.
+        static const QRegularExpression literalPair(
+            QStringLiteral(R"(QSettings\s+\w+\s*\(\s*\x22[^\x22]*\x22\s*,\s*\x22)"));
+
+        // Windows shell registration writes real registry paths through
+        // QSettings, which has nothing to do with the profile store.
+        const QStringList exempt{QStringLiteral("src/core/UrlHandler.cpp")};
+        // Known offender owned by another workstream (src/voice/**):
+        // AudioWorker.cpp reads the input/output device preference through
+        // a literal pair, so a --profile instance gets the default
+        // profile's devices. Left alone here to avoid a cross-worker
+        // collision; listed so this guard still protects everything else.
+        const QStringList knownOffenders{QStringLiteral("src/voice/AudioWorker.cpp")};
+
+        const QString root = QStringLiteral(BSFCHAT_SRC_DIR);
+        QStringList sources = filesUnder(root, QStringLiteral("*.cpp"));
+        sources += filesUnder(root, QStringLiteral("*.h"));
+        QVERIFY2(!sources.isEmpty(), "no sources found under BSFCHAT_SRC_DIR");
+
+        QStringList offenders;
+        for (const QString& path : sources) {
+            QString rel = path;
+            const int cut = rel.indexOf(QStringLiteral("/src/"));
+            if (cut >= 0) rel = rel.mid(cut + 1);
+            if (exempt.contains(rel) || knownOffenders.contains(rel)) continue;
+            if (literalPair.match(withoutComments(readAll(path))).hasMatch())
+                offenders << rel;
+        }
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "QSettings constructed with literal org/app names — use "
+                     "bsfchat::organizationName()/applicationName() so --profile "
+                     "is honoured: ") + offenders.join(QStringLiteral(", "))));
+    }
+
     void everyQInvokableIsPublic()
     {
         static const QRegularExpression classDecl(

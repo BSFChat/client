@@ -89,22 +89,62 @@ UrlHandler::UrlHandler(QObject* parent)
 
 UrlHandler::~UrlHandler() = default;
 
+UrlHandler::Acquisition UrlHandler::acquireServer(QLocalServer* server,
+                                                  const QString& name)
+{
+    if (!server || name.isEmpty()) return Acquisition::Failed;
+
+    // Try to bind first. A clean failure here is the only honest evidence
+    // that the name is taken, so it must come BEFORE any removeServer().
+    if (server->listen(name)) return Acquisition::Listening;
+
+    // Taken. Is anyone home? A socket file outliving its process (crash,
+    // SIGKILL, a reboot that kept /tmp) still refuses listen() but refuses
+    // connect() too.
+    {
+        QLocalSocket probe;
+        probe.connectToServer(name);
+        if (probe.waitForConnected(300)) {
+            probe.disconnectFromServer();
+            return Acquisition::AnotherInstance;
+        }
+    }
+
+    // Nobody answered: stale. Now unlinking it is safe, and only now.
+    QLocalServer::removeServer(name);
+    if (server->listen(name)) return Acquisition::Listening;
+    return Acquisition::Failed;
+}
+
 void UrlHandler::install(QCoreApplication* app)
 {
     if (app) app->installEventFilter(this);
 
-    // Clean any stale socket left behind by a previous crash, then listen.
-    QLocalServer::removeServer(socketName());
     m_server = new QLocalServer(this);
-    if (!m_server->listen(socketName())) {
+    switch (acquireServer(m_server, socketName())) {
+    case Acquisition::Listening:
+        connect(m_server, &QLocalServer::newConnection,
+                this, &UrlHandler::onNewConnection);
+        return;
+    case Acquisition::AnotherInstance:
+        // Another live instance of this profile owns URL forwarding. We do
+        // not take it from them: deep links keep reaching the process that
+        // has been running, and this one still handles in-process clicks.
+        // Run a second account with --profile to get its own socket.
+        qInfo() << "UrlHandler: another instance is already handling "
+                   "bsfchat:// links for this profile; leaving it in place";
+        delete m_server;
+        m_server = nullptr;
+        return;
+    case Acquisition::Failed:
         qWarning() << "UrlHandler: QLocalServer failed to listen:"
                    << m_server->errorString();
-        // Non-fatal: we just lose the single-instance / out-of-process URL
-        // forwarding feature. In-process URL clicks still work.
+        // Non-fatal: we just lose the out-of-process URL forwarding
+        // feature. In-process URL clicks still work.
+        delete m_server;
+        m_server = nullptr;
         return;
     }
-    connect(m_server, &QLocalServer::newConnection,
-            this, &UrlHandler::onNewConnection);
 }
 
 void UrlHandler::onNewConnection()

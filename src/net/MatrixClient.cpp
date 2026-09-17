@@ -210,7 +210,8 @@ void MatrixClient::sync(const QString& since, int timeout)
     });
 }
 
-void MatrixClient::createRoom(const QString& name, const QString& topic, const QString& visibility)
+void MatrixClient::createRoom(const QString& requestId, const QString& name,
+                              const QString& topic, const QString& visibility)
 {
     bsfchat::CreateRoomRequest req;
     if (!name.isEmpty()) req.name = name.toStdString();
@@ -222,25 +223,25 @@ void MatrixClient::createRoom(const QString& name, const QString& topic, const Q
     QByteArray body = QByteArray::fromStdString(j.dump());
 
     auto* reply = makeRequest("POST", QString::fromUtf8(bsfchat::api_path::kCreateRoom), body);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, requestId]() {
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit createRoomError(QString::fromUtf8(data));
+            emit createRoomError(requestId, QString::fromUtf8(data));
             return;
         }
         try {
             auto j = json::parse(data.toStdString());
             bsfchat::CreateRoomResponse resp;
             bsfchat::from_json(j, resp);
-            emit createRoomSuccess(QString::fromStdString(resp.room_id));
+            emit createRoomSuccess(requestId, QString::fromStdString(resp.room_id));
         } catch (const std::exception& e) {
-            emit createRoomError(QString::fromStdString(e.what()));
+            emit createRoomError(requestId, QString::fromStdString(e.what()));
         }
     });
 }
 
-void MatrixClient::createDirectMessageRoom(const QString& targetUserId)
+void MatrixClient::createDirectMessageRoom(const QString& requestId, const QString& targetUserId)
 {
     bsfchat::CreateRoomRequest req;
     req.visibility = "private";
@@ -253,20 +254,20 @@ void MatrixClient::createDirectMessageRoom(const QString& targetUserId)
     QByteArray body = QByteArray::fromStdString(j.dump());
 
     auto* reply = makeRequest("POST", QString::fromUtf8(bsfchat::api_path::kCreateRoom), body);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, requestId]() {
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit createRoomError(QString::fromUtf8(data));
+            emit createRoomError(requestId, QString::fromUtf8(data));
             return;
         }
         try {
             auto j = json::parse(data.toStdString());
             bsfchat::CreateRoomResponse resp;
             bsfchat::from_json(j, resp);
-            emit createRoomSuccess(QString::fromStdString(resp.room_id));
+            emit createRoomSuccess(requestId, QString::fromStdString(resp.room_id));
         } catch (const std::exception& e) {
-            emit createRoomError(QString::fromStdString(e.what()));
+            emit createRoomError(requestId, QString::fromStdString(e.what()));
         }
     });
 }
@@ -756,7 +757,8 @@ void MatrixClient::sendCallEvent(const QString& roomId, const QString& eventType
     });
 }
 
-void MatrixClient::uploadMedia(const QByteArray& data, const QString& contentType, const QString& filename)
+void MatrixClient::uploadMedia(const QString& uploadId, const QByteArray& data,
+                               const QString& contentType, const QString& filename)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kMediaUpload);
     QUrl url = buildUrl(path);
@@ -777,24 +779,24 @@ void MatrixClient::uploadMedia(const QByteArray& data, const QString& contentTyp
             emit mediaUploadProgress(filename,
                 double(sent) / double(total));
         });
-    connect(reply, &QNetworkReply::finished, this, [this, reply, filename]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, filename, uploadId]() {
         reply->deleteLater();
         emit mediaUploadProgress(filename, 1.0);
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit mediaUploadError(QString::fromUtf8(data));
+            emit mediaUploadError(uploadId, QString::fromUtf8(data));
             return;
         }
         try {
             auto j = json::parse(data.toStdString());
             QString contentUri = QString::fromStdString(j.value("content_uri", ""));
             if (contentUri.isEmpty()) {
-                emit mediaUploadError("No content_uri in response");
+                emit mediaUploadError(uploadId, QStringLiteral("No content_uri in response"));
             } else {
-                emit mediaUploaded(contentUri);
+                emit mediaUploaded(uploadId, contentUri);
             }
         } catch (const std::exception& e) {
-            emit mediaUploadError(QString::fromStdString(e.what()));
+            emit mediaUploadError(uploadId, QString::fromStdString(e.what()));
         }
     });
 }
@@ -1326,8 +1328,11 @@ void MatrixClient::createCategoryRoom(const QString& name)
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
         auto data = reply->readAll();
+        // Category creation answers on its own categoryRoomCreated signal, so
+        // it needs no token; its failures still ride createRoomError, with an
+        // empty token that no awaitTokenedReply handler will claim.
         if (reply->error() != QNetworkReply::NoError) {
-            emit createRoomError(QString::fromUtf8(data));
+            emit createRoomError(QString(), QString::fromUtf8(data));
             return;
         }
         try {
@@ -1336,12 +1341,13 @@ void MatrixClient::createCategoryRoom(const QString& name)
             bsfchat::from_json(j, resp);
             emit categoryRoomCreated(QString::fromStdString(resp.room_id));
         } catch (const std::exception& e) {
-            emit createRoomError(QString::fromStdString(e.what()));
+            emit createRoomError(QString(), QString::fromStdString(e.what()));
         }
     });
 }
 
-void MatrixClient::createChannelInCategory(const QString& name, const QString& categoryId, bool isVoice)
+void MatrixClient::createChannelInCategory(const QString& requestId, const QString& name,
+                                           const QString& categoryId, bool isVoice)
 {
     json content;
     content["name"] = name.toStdString();
@@ -1357,20 +1363,20 @@ void MatrixClient::createChannelInCategory(const QString& name, const QString& c
     QByteArray body = QByteArray::fromStdString(content.dump());
 
     auto* reply = makeRequest("POST", QString::fromUtf8(bsfchat::api_path::kCreateRoom), body);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, requestId]() {
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit createRoomError(QString::fromUtf8(data));
+            emit createRoomError(requestId, QString::fromUtf8(data));
             return;
         }
         try {
             auto j = json::parse(data.toStdString());
             bsfchat::CreateRoomResponse resp;
             bsfchat::from_json(j, resp);
-            emit createRoomSuccess(QString::fromStdString(resp.room_id));
+            emit createRoomSuccess(requestId, QString::fromStdString(resp.room_id));
         } catch (const std::exception& e) {
-            emit createRoomError(QString::fromStdString(e.what()));
+            emit createRoomError(requestId, QString::fromStdString(e.what()));
         }
     });
 }
@@ -1503,7 +1509,8 @@ void MatrixClient::setChannelSlowmode(const QString& roomId, int seconds)
                  QString(), payload);
 }
 
-void MatrixClient::redactEvent(const QString& roomId, const QString& eventId, const QString& reason)
+void MatrixClient::redactEvent(const QString& requestId, const QString& roomId,
+                               const QString& eventId, const QString& reason)
 {
     QString txn = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
@@ -1515,7 +1522,14 @@ void MatrixClient::redactEvent(const QString& roomId, const QString& eventId, co
     QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
 
     auto* reply = makeRequest("PUT", path, payload);
-    connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
+    connect(reply, &QNetworkReply::finished, this, [this, reply, requestId, eventId]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit redactFailed(requestId, QString::fromUtf8(reply->readAll()));
+            return;
+        }
+        emit redactSucceeded(requestId, eventId);
+    });
 }
 
 void MatrixClient::sendReaction(const QString& roomId, const QString& targetEventId,
@@ -1547,8 +1561,9 @@ void MatrixClient::sendReaction(const QString& roomId, const QString& targetEven
 
 void MatrixClient::redactReaction(const QString& roomId, const QString& reactionEventId)
 {
-    // Reuse redactEvent — same server route for any event id.
-    redactEvent(roomId, reactionEventId, QString());
+    // Reuse redactEvent — same server route for any event id. No request id:
+    // nothing is waiting on the answer for a reaction toggle.
+    redactEvent(QString(), roomId, reactionEventId, QString());
 }
 
 void MatrixClient::kickUser(const QString& roomId, const QString& userId, const QString& reason)

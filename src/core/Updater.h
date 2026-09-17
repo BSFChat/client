@@ -146,6 +146,15 @@ public:
     // first-paint / login / sync) and every 6 hours thereafter.
     void startAutoCheckSchedule();
 
+    // Network inactivity timeouts. checkNow() and downloadUpdate() both
+    // refuse to start while a check/download is in flight, so a request
+    // that hangs with no timeout wedges the updater for the whole session
+    // — including the manual "Check for updates" button. Qt restarts the
+    // transfer timer on every received chunk, so the download value is a
+    // stall detector, not a deadline on a large artefact.
+    static constexpr int kCheckTimeoutMs = 30 * 1000;
+    static constexpr int kDownloadStallTimeoutMs = 60 * 1000;
+
 signals:
     void stateChanged();
     void progressChanged();
@@ -158,7 +167,6 @@ private:
     QString platformAssetSuffix() const;
 
     void onCheckReply();
-    void onDownloadFinished();
     void onDownloadProgress(qint64 received, qint64 total);
 
     void applyMac(const QString& path);

@@ -1,6 +1,8 @@
 #include "net/ServerConnection.h"
 #include "net/MatrixClient.h"
 #include "net/SyncLoop.h"
+#include "net/AuthError.h"
+#include "net/TokenedReply.h"
 #include "model/RoomListModel.h"
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
@@ -132,6 +134,25 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 
     // Track sync errors for UI
     connect(m_syncLoop, &SyncLoop::syncError, this, [this](const QString& error) {
+        // A dead access token is not a network problem and retrying it can
+        // never succeed. Tokens expire after 90 days and are revoked on
+        // logout/ban/device removal, so this is a state real users reach.
+        // Before this branch the loop retried the same dead bearer token
+        // every 60 s forever behind a "Reconnecting…" banner, with no hint
+        // that signing in again was the only way out.
+        if (AuthError::indicatesDeadAccessToken(error)) {
+            if (m_connectionStatus == 3) return; // already surfaced
+            m_syncLoop->stop();
+            m_connected = false;
+            m_connectionStatus = 3; // session expired
+            m_syncErrorMessage =
+                tr("Your session has expired. Sign in again to reconnect.");
+            emit connectedChanged();
+            emit connectionStatusChanged();
+            emit syncErrorMessageChanged();
+            emit sessionExpired(m_serverUrl);
+            return;
+        }
         m_connectionStatus = 2; // reconnecting
         m_syncErrorMessage = error;
         emit connectionStatusChanged();
@@ -1089,8 +1110,13 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
     // Capture state for the lambda chain
     QString roomId = m_activeRoomId;
 
-    // Upload then send
-    auto conn = QObject::connect(m_client, &MatrixClient::mediaUploaded, this,
+    // Upload then send. The token is what keeps this attachment's reply
+    // apart from a concurrent avatar upload's — see net/TokenedReply.h for
+    // what went wrong without it.
+    const QString uploadId = bsfchat::net::newRequestToken();
+    bsfchat::net::awaitTokenedReply(
+        m_client, this, uploadId,
+        &MatrixClient::mediaUploaded, &MatrixClient::mediaUploadError,
         [this, roomId, fileName, fileSize, mimeType, msgtype](const QString& contentUri) {
             // Build the message event content
             nlohmann::json content;
@@ -1105,19 +1131,18 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
             QByteArray body = QByteArray::fromStdString(content.dump());
             m_client->sendRoomEvent(roomId, "m.room.message", body);
             emit mediaSendCompleted();
-        }, Qt::SingleShotConnection);
-
-    auto errConn = QObject::connect(m_client, &MatrixClient::mediaUploadError, this,
+        },
         [this](const QString& error) {
             emit mediaSendFailed(error);
-        }, Qt::SingleShotConnection);
+        });
 
-    m_client->uploadMedia(fileData, mimeType, fileName);
+    m_client->uploadMedia(uploadId, fileData, mimeType, fileName);
 }
 
 void ServerConnection::createRoom(const QString& name, const QString& topic)
 {
-    m_client->createRoom(name, topic);
+    // Nothing waits on the reply here, but the signal now carries a token.
+    m_client->createRoom(bsfchat::net::newRequestToken(), name, topic);
 }
 
 void ServerConnection::joinRoom(const QString& roomIdOrAlias)
@@ -2123,23 +2148,31 @@ void ServerConnection::createCategory(const QString& name)
 
 void ServerConnection::createChannelInCategory(const QString& name, const QString& categoryId, bool isVoice, bool makePrivate)
 {
+    const QString requestId = bsfchat::net::newRequestToken();
     if (!makePrivate) {
-        m_client->createChannelInCategory(name, categoryId, isVoice);
+        m_client->createChannelInCategory(requestId, name, categoryId, isVoice);
         return;
     }
-    // One-shot hook on the very next createRoomSuccess — once the server
-    // hands us the new room ID, apply @everyone DENY VIEW_CHANNEL so the
-    // channel is invisible to non-admin roles by default. Admins still see
-    // it because ADMINISTRATOR short-circuits to all flags.
-    auto* conn = new QMetaObject::Connection;
-    *conn = connect(m_client, &MatrixClient::createRoomSuccess, this,
-        [this, conn](const QString& roomId) {
-            disconnect(*conn);
-            delete conn;
+    // Once the server hands us THIS channel's room id, apply @everyone DENY
+    // VIEW_CHANNEL so it is invisible to non-admin roles by default. Admins
+    // still see it because ADMINISTRATOR short-circuits to all flags.
+    //
+    // This used to hook "the very next createRoomSuccess" and only
+    // disconnect inside the success branch. If the create failed the hook
+    // stayed armed, so the NEXT channel the admin made — a public one —
+    // silently got everyone-DENY-VIEW and was invisible to the whole server
+    // with nothing in the UI to explain it. Worse, createRoomSuccess is
+    // connection-wide, so starting a DM while a private create was in flight
+    // applied the deny to the DM room instead.
+    bsfchat::net::awaitTokenedReply(
+        m_client, this, requestId,
+        &MatrixClient::createRoomSuccess, &MatrixClient::createRoomError,
+        [this](const QString& roomId) {
             m_client->setChannelPermission(roomId, "role:everyone",
                 /*allow=*/0, /*deny=*/0x0001 /*VIEW_CHANNEL*/);
-        });
-    m_client->createChannelInCategory(name, categoryId, isVoice);
+        },
+        [this](const QString& error) { emit sendFeedback(error, QStringLiteral("error")); });
+    m_client->createChannelInCategory(requestId, name, categoryId, isVoice);
 }
 
 void ServerConnection::moveChannelToCategory(const QString& roomId, const QString& categoryId)
@@ -2377,7 +2410,10 @@ void ServerConnection::uploadServerAvatar(const QString& fileUrl)
     QString mimeType = mimeDb.mimeTypeForFile(filePath).name();
     QFileInfo fileInfo(filePath);
 
-    QObject::connect(m_client, &MatrixClient::mediaUploaded, this,
+    const QString uploadId = bsfchat::net::newRequestToken();
+    bsfchat::net::awaitTokenedReply(
+        m_client, this, uploadId,
+        &MatrixClient::mediaUploaded, &MatrixClient::mediaUploadError,
         [this](const QString& contentUri) {
             // Write the new avatar, preserving the current name. Pick the
             // same target-room heuristic as updateServerName — the server
@@ -2392,9 +2428,10 @@ void ServerConnection::uploadServerAvatar(const QString& fileUrl)
             QByteArray body = QJsonDocument(content).toJson(QJsonDocument::Compact);
             m_client->setRoomState(targetRoom,
                 QString::fromUtf8(bsfchat::event_type::kServerInfo), QString(), body);
-        }, Qt::SingleShotConnection);
+        },
+        [this](const QString& error) { emit mediaSendFailed(error); });
 
-    m_client->uploadMedia(fileData, mimeType, fileInfo.fileName());
+    m_client->uploadMedia(uploadId, fileData, mimeType, fileInfo.fileName());
 }
 
 void ServerConnection::updateAvatarUrl(const QString& url)
@@ -2436,12 +2473,14 @@ void ServerConnection::uploadAvatar(const QString& fileUrl)
     }
     QFileInfo fileInfo(openPath);
 
-    QObject::connect(m_client, &MatrixClient::mediaUploaded, this,
-        [this](const QString& contentUri) {
-            updateAvatarUrl(contentUri);
-        }, Qt::SingleShotConnection);
+    const QString uploadId = bsfchat::net::newRequestToken();
+    bsfchat::net::awaitTokenedReply(
+        m_client, this, uploadId,
+        &MatrixClient::mediaUploaded, &MatrixClient::mediaUploadError,
+        [this](const QString& contentUri) { updateAvatarUrl(contentUri); },
+        [this](const QString& error) { emit mediaSendFailed(error); });
 
-    m_client->uploadMedia(fileData, mimeType, fileInfo.fileName());
+    m_client->uploadMedia(uploadId, fileData, mimeType, fileInfo.fileName());
 }
 
 void ServerConnection::fetchProfile(const QString& userId)
@@ -3393,17 +3432,38 @@ void ServerConnection::setRoomTopic(const QString& roomId, const QString& topic)
 
 void ServerConnection::redactEvent(const QString& roomId, const QString& eventId,
                                     const QString& reason) {
-    m_client->redactEvent(roomId, eventId, reason);
-    // Optimistic removal (U-H5): take the row out now rather than leaving
-    // the author staring at a message they just deleted until the
-    // redaction comes back around over sync. removeMessage is a no-op for
-    // anything that isn't a loaded message row — notably the reaction
-    // event ids this same method redacts when a chip is toggled off — and
-    // is idempotent against the sync-side removal that follows.
+    // Remove the row when the server says the redaction landed, not when we
+    // ask. The removal used to happen up front and MatrixClient::redactEvent
+    // reported nothing at all — the reply was deleteLater'd and dropped — so
+    // a delete the server REFUSED (403 after the user's power level dropped,
+    // or an offline client) looked exactly like one it accepted: the message
+    // vanished, no error, no rollback, and it silently came back on the next
+    // backfill or restart. The user had every reason to believe it was gone.
     //
-    // Scoped to the active room because m_messageModel only ever holds it.
-    if (roomId == m_activeRoomId && m_messageModel)
-        m_messageModel->removeMessage(eventId);
+    // Waiting for the PUT to answer still beats waiting for the redaction to
+    // come back around over sync, which is what the original optimism was
+    // avoiding. removeMessage is a no-op for anything that isn't a loaded
+    // message row — notably the reaction event ids this same method redacts
+    // when a chip is toggled off — and is idempotent against the sync-side
+    // removal that follows.
+    const QString requestId = bsfchat::net::newRequestToken();
+    bsfchat::net::awaitTokenedReply(
+        m_client, this, requestId,
+        &MatrixClient::redactSucceeded, &MatrixClient::redactFailed,
+        [this, roomId](const QString& redactedId) {
+            // Scoped to the active room because m_messageModel only ever
+            // holds it; a room switch mid-flight makes this a no-op and sync
+            // does the removal instead.
+            if (roomId == m_activeRoomId && m_messageModel)
+                m_messageModel->removeMessage(redactedId);
+        },
+        [this](const QString& error) {
+            emit sendFeedback(error.isEmpty()
+                                  ? tr("Couldn't delete that message.")
+                                  : error,
+                              QStringLiteral("error"));
+        });
+    m_client->redactEvent(requestId, roomId, eventId, reason);
 }
 
 QStringList ServerConnection::pinnedEventIds(const QString& roomId) const
@@ -3475,11 +3535,17 @@ void ServerConnection::createDirectMessage(const QString& targetUserId)
     if (targetUserId.isEmpty()) return;
     if (targetUserId == m_userId) return;
 
-    // Stash the peer now; the createRoomSuccess callback only has the
-    // new room id, not the target. SingleShotConnection so successive
-    // DM creations don't stomp each other.
-    QString peer = targetUserId;
-    QObject::connect(m_client, &MatrixClient::createRoomSuccess, this,
+    // Stash the peer now; the reply only carries the new room id, not the
+    // target. The token is what keeps two DMs started back to back apart:
+    // Qt::SingleShotConnection disconnects a slot after it runs, but one
+    // emit still invokes every connected slot, so the first room id used to
+    // be written to BOTH handlers — Alice's room recorded as a DM with Bob,
+    // and Bob's room never recorded as a DM at all.
+    const QString requestId = bsfchat::net::newRequestToken();
+    const QString peer = targetUserId;
+    bsfchat::net::awaitTokenedReply(
+        m_client, this, requestId,
+        &MatrixClient::createRoomSuccess, &MatrixClient::createRoomError,
         [this, peer](const QString& roomId) {
             m_directRoomPeers[roomId] = peer;
             // Persist.
@@ -3492,9 +3558,10 @@ void ServerConnection::createDirectMessage(const QString& targetUserId)
             emit directRoomsChanged();
             // Jump to the new DM room so the user lands straight in it.
             setActiveRoom(roomId);
-        }, Qt::SingleShotConnection);
+        },
+        [this](const QString& error) { emit sendFeedback(error, QStringLiteral("error")); });
 
-    m_client->createDirectMessageRoom(targetUserId);
+    m_client->createDirectMessageRoom(requestId, targetUserId);
 }
 
 bool ServerConnection::isDirectRoom(const QString& roomId) const

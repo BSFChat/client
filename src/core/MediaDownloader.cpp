@@ -27,18 +27,39 @@ QString MediaDownloader::cacheDirPath() const
     return dir;
 }
 
+QString MediaDownloader::cacheKeyForUrl(const QString& url)
+{
+    // The query string is not part of the object's identity.
+    //
+    // Media URLs carry ?access_token=… (MediaUrl.h explains why it cannot be
+    // a header), so hashing the WHOLE url keyed every cached file to the
+    // session token. Every re-login changed the token, every previously
+    // downloaded image and video therefore missed, and the whole cache was
+    // re-fetched over the network while the old copies sat there consuming
+    // the 200 MB budget until eviction happened to reach them. With tokens
+    // now expiring after 90 days and re-login being a normal event rather
+    // than a rare one, that is a full media re-download on a schedule.
+    const int q = url.indexOf(QLatin1Char('?'));
+    return q < 0 ? url : url.left(q);
+}
+
 QString MediaDownloader::cachePathFor(const QString& url) const
 {
-    // Hash the full URL so filenames are bounded + collision-safe.
-    // Preserve the extension (if any) so platform decoders can sniff.
-    QByteArray h = QCryptographicHash::hash(url.toUtf8(),
+    // Hash the identity (not the credential) so filenames are bounded +
+    // collision-safe. Preserve the extension (if any) so platform decoders
+    // can sniff — taken from the path for the same reason: with the query
+    // string included, "the last dot" was a dot inside the base64 access
+    // token, so every authenticated download landed under a meaningless
+    // extension and the sniffing this exists for never happened.
+    const QString key = cacheKeyForUrl(url);
+    QByteArray h = QCryptographicHash::hash(key.toUtf8(),
                                             QCryptographicHash::Sha1)
                        .toHex();
     QString ext;
-    int dot = url.lastIndexOf('.');
-    int slash = url.lastIndexOf('/');
-    if (dot > slash && (url.size() - dot) <= 6)
-        ext = url.mid(dot);
+    int dot = key.lastIndexOf('.');
+    int slash = key.lastIndexOf('/');
+    if (dot > slash && (key.size() - dot) <= 6)
+        ext = key.mid(dot);
     return cacheDirPath() + "/" + QString::fromLatin1(h) + ext;
 }
 
