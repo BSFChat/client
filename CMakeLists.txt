@@ -409,6 +409,8 @@ qt_add_qml_module(bsfchat-app
         qml/components/VoiceParticipantList.qml
         qml/components/ParticipantTile.qml
         qml/components/VideoFeedTile.qml
+        qml/components/VideoFullscreenWindow.qml
+        qml/components/VideoPopoutWindow.qml
         qml/components/Icon.qml
         qml/components/ThemedSwitch.qml
         qml/components/ThemedScrollBar.qml
@@ -466,6 +468,13 @@ qt_add_qml_module(bsfchat-app
         # video feeds, shared by VoiceRoom.qml, VideoFeedTile.qml and
         # tests/qml/tst_videostage.qml.
         qml/js/VideoStage.js
+        # Pop-out / fullscreen window policy for those same feeds: which
+        # window owns a feed's fullscreen, what each window opens at, and
+        # the one place the three-way "self preview vs remote stream"
+        # surface routing is written. Shared by VoiceRoom.qml,
+        # VideoFeedTile.qml, VideoPopoutWindow.qml,
+        # VideoFullscreenWindow.qml and tests/qml/tst_videowindows.qml.
+        qml/js/VideoWindows.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt

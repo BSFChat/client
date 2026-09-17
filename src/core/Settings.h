@@ -4,6 +4,7 @@
 #include <QSettings>
 #include <QString>
 #include <QVariantList>
+#include <QVariantMap>
 
 class Settings : public QObject {
     Q_OBJECT
@@ -155,6 +156,26 @@ public:
     void setWindowHeight(int v);
     int windowVisibility() const;
     void setWindowVisibility(int v);
+
+    // Video pop-out window geometry, remembered PER KIND ("screen" /
+    // "camera") rather than per feed: a feed key carries a user id, so
+    // per-feed memory would grow an entry for every person ever watched,
+    // and a screen share and a webcam want very different windows anyway.
+    //
+    // A map rather than eight Q_PROPERTYs because QML reads it once, on
+    // window creation, and writes it back debounced on move/resize —
+    // there is nothing to bind to. Returns { x, y, width, height } with
+    // -1 for anything never stored; qml/js/VideoWindows.js turns that
+    // into concrete geometry (restoreGeometry) and is where the clamping
+    // and the is-that-monitor-still-here check live.
+    //
+    // PUBLIC on purpose: moc records a private Q_INVOKABLE but the
+    // metaobject does not offer it to QML, so it fails at runtime with
+    // "not a function". test_qml_hygiene.cpp fails if one moves up into
+    // the Q_PROPERTY block at the top of the class.
+    Q_INVOKABLE QVariantMap popoutGeometry(const QString& kind) const;
+    Q_INVOKABLE void setPopoutGeometry(const QString& kind,
+                                       int x, int y, int width, int height);
 
     QVariantList audioInputDevices() const;
     QVariantList audioOutputDevices() const;

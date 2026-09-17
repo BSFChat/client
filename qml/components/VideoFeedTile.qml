@@ -1,8 +1,10 @@
 import QtQuick
+import QtQuick.Controls
 import QtMultimedia
 import BSFChat
 
 import "../js/VideoStage.js" as VideoStage
+import "../js/VideoWindows.js" as VideoWindows
 
 // One video surface in the voice room: a remote screen share, a remote
 // camera, our own camera, or our own screen share.
@@ -46,8 +48,21 @@ Rectangle {
     // through this rather than stored on the feed, so a stream going
     // live does not change the feed list and does not rebuild delegates.
     property int liveTick: 0
+    // This feed also has a pop-out window open. The tile STAYS LIVE —
+    // VideoStreamRegistry fans one decoded stream out to every attached
+    // sink, so the window is a second surface and not a theft — and all
+    // this does is say so, because a feed that is on screen twice is
+    // otherwise baffling.
+    property bool poppedOut: false
 
     signal clicked()
+    // The hover actions and the context menu. The tile does not act on
+    // any of these itself: which window owns a feed's fullscreen, and
+    // whether a pop-out opens or merely raises, is policy that lives in
+    // qml/js/VideoWindows.js and is applied by VoiceRoom.
+    signal fullscreenRequested()
+    signal popOutRequested()
+    signal closePopOutRequested()
 
     readonly property bool isScreen: feed && feed.kind === VideoStage.SCREEN
 
@@ -100,23 +115,21 @@ Rectangle {
                                : VideoOutput.PreserveAspectFit
         visible: tile.live
         Component.onCompleted: {
-            if (!tile.feed || !videoSink) return;
-            if (tile.feed.isSelf) {
-                // typeof, not truthiness: neither controller exists on
-                // every platform (src/main.cpp), and naming one that is
-                // not there is a ReferenceError, not undefined.
-                if (tile.isScreen) {
-                    if (typeof screenShare !== "undefined" && screenShare)
-                        screenShare.forwardTo(videoSink);
-                } else if (typeof camera !== "undefined" && camera) {
-                    camera.forwardTo(videoSink);
-                }
-                return;
-            }
             var s = serverManager.activeServer;
-            if (s && s.videoRegistry)
-                s.videoRegistry.attachOutput(tile.feed.userId,
-                                             tile.feed.streamId, videoSink);
+            // The three-way routing (our own preview mirrors its
+            // controller, a remote stream comes from the registry) is in
+            // qml/js/VideoWindows.js because the pop-out and fullscreen
+            // windows need exactly the same rule, and a self-feed sent
+            // down the remote path is a permanently black surface.
+            //
+            // typeof, not truthiness: neither controller exists on every
+            // platform (src/main.cpp), and naming one that is not there
+            // is a ReferenceError, not undefined.
+            VideoWindows.attachFeed(
+                tile.feed, videoSink,
+                s ? s.videoRegistry : null,
+                (typeof screenShare !== "undefined") ? screenShare : null,
+                (typeof camera !== "undefined") ? camera : null);
         }
     }
 
@@ -194,6 +207,7 @@ Rectangle {
     // `=== false` keeps this hidden on builds whose controller does not
     // expose `transmitting`.
     Rectangle {
+        id: notVisibleBadge
         visible: !tile.compact && tile.feed && tile.feed.isSelf === true
                  && (tile.isScreen
                      ? (typeof screenShare !== "undefined" && screenShare
@@ -317,20 +331,151 @@ Rectangle {
         }
     }
 
+    // ── "Popped out" badge ───────────────────────────────────────────
+    //
+    // Top-left, under the "not visible to others" warning when that is
+    // also up (our own feed can be popped out too). Never on a strip
+    // thumbnail: there is no room, and the pop-out window itself is the
+    // more obvious evidence.
+    Rectangle {
+        visible: tile.poppedOut && !tile.compact
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.leftMargin: Theme.sp.s3
+        anchors.topMargin: Theme.sp.s3
+            + (notVisibleBadge.visible ? 22 + Theme.sp.s2 : 0)
+        width: poppedRow.implicitWidth + Theme.sp.s3 * 2
+        height: 22
+        radius: Theme.r1
+        color: Theme.accentGlow
+        border.color: Theme.accent
+        border.width: 1
+        Row {
+            id: poppedRow
+            anchors.centerIn: parent
+            spacing: Theme.sp.s2
+            Icon {
+                anchors.verticalCenter: parent.verticalCenter
+                name: "app-window"
+                size: 10
+                color: Theme.accent
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "POPPED OUT"
+                font.family: Theme.fontSans
+                font.pixelSize: 10
+                font.weight: Theme.fontWeight.semibold
+                font.letterSpacing: Theme.trackWide.sm
+                color: Theme.accent
+            }
+        }
+    }
+
     // ── Picking ──────────────────────────────────────────────────────
     //
     // Clicking a thumbnail promotes it to the stage. Clicking the stage
     // tile only takes keyboard focus, so the arrow keys work without
-    // first hunting for something to click.
+    // first hunting for something to click. Right-click anywhere on a
+    // tile opens the same actions the hover buttons offer, because the
+    // buttons are too small to be the only route to them.
     MouseArea {
+        id: tileMouse
         anchors.fill: parent
         hoverEnabled: true
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
         cursorShape: tile.compact ? Qt.PointingHandCursor : Qt.ArrowCursor
-        onClicked: tile.clicked()
+        onClicked: function(mouse) {
+            if (mouse.button === Qt.RightButton) {
+                feedMenu.popup();
+                return;
+            }
+            tile.clicked();
+        }
         // A quiet lift on hover — enough to read as clickable without
         // competing with the selection highlight.
         onContainsMouseChanged: hoverWash.opacity =
             (containsMouse && tile.compact && !tile.featured) ? 0.10 : 0
+    }
+
+    // ── Hover actions ────────────────────────────────────────────────
+    //
+    // Bottom-right, the one free corner: the identity pill is
+    // bottom-left, the diagnostics overlay top-right, the transmit
+    // warning top-left. Declared AFTER the picking MouseArea so these
+    // get their own clicks rather than promoting the tile to the stage.
+    Row {
+        id: actions
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: tile.compact ? Theme.sp.s2 : Theme.sp.s3
+        spacing: Theme.sp.s2
+        // Strip thumbnails are a few dozen pixels tall; two 26px buttons
+        // would cover the picture. The context menu still reaches them.
+        visible: !tile.compact
+        opacity: tileMouse.containsMouse || popHover.containsMouse
+                 || fullHover.containsMouse ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
+
+        Rectangle {
+            width: 26
+            height: 26
+            radius: Theme.r1
+            color: popHover.containsMouse ? Theme.accent : Qt.rgba(0, 0, 0, 0.6)
+            Icon {
+                anchors.centerIn: parent
+                name: tile.poppedOut ? "x" : "app-window"
+                size: 13
+                color: popHover.containsMouse ? Theme.onAccent : "white"
+            }
+            MouseArea {
+                id: popHover
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: tile.poppedOut ? tile.closePopOutRequested()
+                                          : tile.popOutRequested()
+            }
+            ToolTip.visible: popHover.containsMouse
+            ToolTip.text: tile.poppedOut ? "Close pop-out window" : "Pop out"
+            ToolTip.delay: 400
+        }
+
+        Rectangle {
+            width: 26
+            height: 26
+            radius: Theme.r1
+            color: fullHover.containsMouse ? Theme.accent : Qt.rgba(0, 0, 0, 0.6)
+            Icon {
+                anchors.centerIn: parent
+                name: "expand"
+                size: 13
+                color: fullHover.containsMouse ? Theme.onAccent : "white"
+            }
+            MouseArea {
+                id: fullHover
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: tile.fullscreenRequested()
+            }
+            ToolTip.visible: fullHover.containsMouse
+            ToolTip.text: "Full screen this video"
+            ToolTip.delay: 400
+        }
+    }
+
+    Menu {
+        id: feedMenu
+        MenuItem {
+            text: "Full screen"
+            onTriggered: tile.fullscreenRequested()
+        }
+        MenuItem {
+            text: tile.poppedOut ? "Close pop-out window" : "Pop out"
+            onTriggered: tile.poppedOut ? tile.closePopOutRequested()
+                                        : tile.popOutRequested()
+        }
     }
 
     Rectangle {

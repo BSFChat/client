@@ -618,6 +618,15 @@ void ScreenShareController::forwardTo(QVideoSink* sink)
     if (!sink) return;
     connect(m_sink, &QVideoSink::videoFrameChanged, sink,
         [sink](const QVideoFrame& f) { sink->setVideoFrame(f); });
+    // Replay whatever is on the internal sink right now, the same way
+    // VideoStreamRegistry::attachOutput does for remote streams. A
+    // second surface on an already-running preview (a pop-out, a
+    // fullscreen window) would otherwise be black until the next
+    // capture tick — a third of a second at the 3 fps a static share
+    // settles to. `sink` is the connection's context object, so both
+    // the mirror and this replay die with it.
+    const QVideoFrame current = m_sink->videoFrame();
+    if (current.isValid()) sink->setVideoFrame(current);
 }
 
 void ScreenShareController::openSystemSettings()

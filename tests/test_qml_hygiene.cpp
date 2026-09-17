@@ -526,6 +526,110 @@ private slots:
                  "VoiceRoom no longer repeats its video tiles over _feeds");
     }
 
+    // "Full screen" must mean the VIDEO, not the app window.
+    //
+    // The button in the voice-room header used to do
+    //     Window.window.visibility = Window.FullScreen
+    // which put the whole APP full screen — sidebar, channel list, member
+    // strip, dock and all — with the video still in its little stage
+    // panel in the middle of it. That is the thing the owner asked to
+    // have changed, and it is a one-line regression away at all times:
+    // `Window.window` is in scope in every one of these files and the
+    // wrong version is shorter to write than the right one.
+    //
+    // So: none of the voice-room video files may write ANY window's
+    // visibility. The fullscreen path is a dedicated top-level Window
+    // whose own `visibility:` is a declarative binding on itself, which
+    // is the shape this allows — an assignment with a dot before it is
+    // reaching into somebody else's window and is what fails here.
+    //
+    // VideoPlayerCard.qml is deliberately NOT in this list: the inline
+    // message-timeline player really does full-screen the app window,
+    // that is a different feature, and it has its own rules in
+    // qml/js/PlaybackMath.js.
+    void fullscreenVideoNeverTouchesAnotherWindowsVisibility()
+    {
+        static const QRegularExpression foreignVisibility(
+            QStringLiteral(R"(\.\s*visibility\s*=[^=])"));
+        for (const QString& relative : {
+                 QStringLiteral("/components/VoiceRoom.qml"),
+                 QStringLiteral("/components/VideoFeedTile.qml"),
+                 QStringLiteral("/components/VideoFullscreenWindow.qml"),
+                 QStringLiteral("/components/VideoPopoutWindow.qml")}) {
+            const QString src = withoutComments(readQml(relative));
+            QVERIFY2(!foreignVisibility.match(src).hasMatch(),
+                     qPrintable(relative + QStringLiteral(
+                         " assigns another window's visibility; video"
+                         " fullscreen is its own Window, and the app"
+                         " window must not change state")));
+        }
+
+        // And the fullscreen window really is one: frameless, full
+        // screen, and NOT a transient child. Each of those three is load
+        // bearing on macOS — see the header of the file. Without the
+        // frameless hint Qt takes the NATIVE fullscreen path, which puts
+        // the window in a Space of its own and can strand an empty one
+        // in Mission Control when it is destroyed.
+        const QString fs = withoutComments(
+            readQml(QStringLiteral("/components/VideoFullscreenWindow.qml")));
+        QVERIFY2(fs.contains(QLatin1String("Qt.FramelessWindowHint")),
+                 "the fullscreen window is no longer frameless: Qt would"
+                 " take the native macOS fullscreen path and give it its"
+                 " own Space");
+        QVERIFY2(!fs.contains(QLatin1String("WindowFullscreenButtonHint")),
+                 "WindowFullscreenButtonHint is exactly what puts a macOS"
+                 " window into its own Space; do not add it");
+        QVERIFY2(fs.contains(QLatin1String("visibility: Window.FullScreen")),
+                 "the fullscreen window no longer declares itself full screen");
+        QVERIFY2(fs.contains(QLatin1String("transientParent: null")),
+                 "a transient child is ordered with its parent on macOS and"
+                 " cannot own the screen");
+
+        // The pop-out is an ordinary window, so it must NOT be frameless
+        // (there would be no title bar to move or close it by) and must
+        // not be a transient child (it would float above the app window
+        // forever, which is what the pin toggle is for).
+        const QString po = withoutComments(
+            readQml(QStringLiteral("/components/VideoPopoutWindow.qml")));
+        QVERIFY2(!po.contains(QLatin1String("FramelessWindowHint")),
+                 "a frameless pop-out has no title bar to drag or close");
+        QVERIFY2(po.contains(QLatin1String("transientParent: null")),
+                 "a transient pop-out is always above the app window and"
+                 " follows it between Spaces");
+    }
+
+    // A popped-out feed's in-room tile has to STAY LIVE, which is only
+    // possible because one stream feeds several sinks
+    // (tests/test_video_registry.cpp). The way that gets broken is by
+    // "fixing" the pop-out to take the tile's surface — detaching the
+    // tile, or hiding it, or dropping it out of the feed list while a
+    // window is open. Nothing in the voice room may do any of that.
+    void poppingAFeedOutDoesNotDisturbItsTile()
+    {
+        const QString room = withoutComments(
+            readQml(QStringLiteral("/components/VoiceRoom.qml")));
+        // The feed list is built from the roster and the controllers, not
+        // filtered by what is popped out.
+        QVERIFY2(!room.contains(QLatin1String("detachOutput")),
+                 "VoiceRoom detaches a sink; the tile must keep its own");
+        QVERIFY2(room.contains(QLatin1String("model: room._popouts")),
+                 "pop-out windows are no longer instantiated from the"
+                 " tested VideoWindows state");
+
+        const QString tile = withoutComments(
+            readQml(QStringLiteral("/components/VideoFeedTile.qml")));
+        // `poppedOut` may drive a badge and the button label. It may not
+        // drive the VideoOutput's existence or visibility, which would
+        // black out the tile behind the window.
+        for (const QString& binding : visibleBindings(tile)) {
+            QVERIFY2(!binding.contains(QLatin1String("poppedOut"))
+                         || binding.contains(QLatin1String("tile.poppedOut &&")),
+                     qPrintable(QStringLiteral(
+                         "a tile element is hidden while popped out, which"
+                         " is how the live tile gets lost: ") + binding));
+        }
+    }
+
     // The rc.6 Theme.onScrim trap, checked everywhere rather than only in
     // Theme.qml: QML parses any `on` + Capital identifier as a signal
     // handler, so `property bool onStage: false` is not a property at all,

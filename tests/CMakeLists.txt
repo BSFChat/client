@@ -498,6 +498,24 @@ target_include_directories(test_server_discovery PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_link_libraries(test_server_discovery PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_server_discovery COMMAND test_server_discovery)
 
+# Video surface fan-out (VideoStreamRegistry): one decoded stream feeding
+# several QML sinks at once. That is what lets a popped-out feed keep its
+# in-room tile live, and what makes a fullscreen window a third surface
+# rather than a theft. Needs Qt Multimedia for QVideoSink/QVideoFrame but
+# no decoder, no capture device, no network and no window.
+qt_add_executable(test_video_registry
+    test_video_registry.cpp
+    ${CMAKE_SOURCE_DIR}/src/voice/video/VideoStreamRegistry.cpp
+)
+target_include_directories(test_video_registry PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_video_registry PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test)
+add_test(NAME test_video_registry COMMAND test_video_registry)
+# QTEST_MAIN builds a QApplication for the multimedia types; offscreen so
+# it never opens a window or steals focus from whoever is at the keyboard.
+set_tests_properties(test_video_registry PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 # Source-text guards for QML hazards no test binary can reach (the BSFChat
 # QML module lives inside the app). See the file header for the rc.6 story.
 qt_add_executable(test_qml_hygiene test_qml_hygiene.cpp)
