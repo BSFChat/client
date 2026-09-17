@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # release/** so a stabilisation branch gets the same three-platform +
+    # sanitizer run as main BEFORE it is tagged (tags are only pushed once
+    # that run is green).
+    branches: [main, 'release/**']
     tags: ['v*']
   pull_request:
     branches: [main]
