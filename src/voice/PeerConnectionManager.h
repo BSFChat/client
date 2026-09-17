@@ -197,7 +197,8 @@ private:
     // Build the RTP handler chain (packetizer → SR → NACK → PLI →
     // depacketizer → receiving session) on a track, either one we
     // added (offerer) or one delivered by onTrack (answerer).
-    void attachVideoTrack(VideoStreamId stream, std::shared_ptr<rtc::Track> track);
+    void attachVideoTrack(VideoStreamId stream, std::shared_ptr<rtc::Track> track,
+                          bool adopted);
     void setupLosslessChannel(std::shared_ptr<rtc::DataChannel> dc);
     // Size-checked, exception-safe DataChannel send. Returns false if
     // the frame was dropped (oversized or transport error). Callers
