@@ -353,8 +353,8 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
         // mesh reconciler can re-offer. Disconnected is often a transient
         // ICE blip, so give it a grace period before giving up.
         if (s == PeerConnectionManager::PeerState::Failed) {
+            // removePeer() emits peerDisconnected itself.
             removePeer(userId);
-            emit peerDisconnected(userId);
         } else if (s == PeerConnectionManager::PeerState::Disconnected) {
             startDisconnectGrace(userId);
         } else if (s == PeerConnectionManager::PeerState::Connected) {
@@ -379,7 +379,6 @@ void VoiceEngine::startDisconnectGrace(const QString& userId) {
         qCInfo(logVoice, "peer %s did not recover from disconnect — removing",
               qPrintable(userId));
         removePeer(userId);
-        emit peerDisconnected(userId);
     });
     m_disconnectTimers[userId] = timer;
     timer->start();
@@ -409,7 +408,6 @@ void VoiceEngine::startConnectWatchdog(const QString& userId) {
         qCWarning(logVoice, "peer %s never reached connected — tearing down",
                  qPrintable(userId));
         removePeer(userId);
-        emit peerDisconnected(userId);
     });
     m_connectWatchdogs[userId] = timer;
     timer->start();
@@ -450,6 +448,7 @@ QMap<QString, QString> VoiceEngine::peerStates() const {
 void VoiceEngine::removePeer(const QString& userId) {
     cancelDisconnectGrace(userId);
     cancelConnectWatchdog(userId);
+    const bool held = m_peers.contains(userId);
     if (auto* peer = m_peers.take(userId)) {
         if (m_audioEngine) m_audioEngine->removePeer(userId);
         peer->deleteLater();
@@ -465,6 +464,26 @@ void VoiceEngine::removePeer(const QString& userId) {
     dropRecvPipelines(userId);
     for (int s = 0; s < kVideoStreamCount; ++s)
         m_rrSnapshots.remove({userId, s});
+
+    // ONE exit point for "this peer connection is gone". It used to be
+    // the caller's job to follow removePeer() with peerDisconnected(),
+    // and two of the five call sites did not: the roster prune
+    // (dropPeer, V-M5) and the three replace paths in handleCallInvite
+    // (dead peer / glare loss / new call id).
+    //
+    // That signal is not cosmetic — ServerConnection answers it by
+    // dropping the peer's entry from VideoStreamRegistry and its level
+    // meter. Without it the departed (or restarted) peer keeps its LAST
+    // DECODED FRAME on screen: a member who crashed and was pruned from
+    // the roster leaves a frozen video tile behind, and a peer that
+    // restarted its session shows the dead session's final frame until
+    // the new stream's first IDR lands — which is exactly the "frozen
+    // share" symptom the explicit stream on/off work (S-7) set out to
+    // remove, arriving by a different door.
+    //
+    // Emitting from here makes it structurally impossible to add a
+    // sixth call site that forgets.
+    if (held) emit peerDisconnected(userId);
 }
 
 nlohmann::json VoiceEngine::localCapsJson() {
@@ -982,8 +1001,8 @@ void VoiceEngine::handleCallHangup(const QString& sender, const QString& callId)
         dropInboundCandidates(sender, callId);
         return;
     }
-    removePeer(sender);   // drops this call's parked candidates too
-    emit peerDisconnected(sender);
+    // Drops this call's parked candidates and emits peerDisconnected.
+    removePeer(sender);
 }
 
 void VoiceEngine::setMuted(bool muted) {
