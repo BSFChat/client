@@ -271,17 +271,24 @@ public:
         , m_ptH265(ptH265) {}
 
     // Called from the Qt thread, immediately before the first frame in
-    // the new codec is handed to track->send(). Same thread as the
-    // send, so no locking: outgoing() runs synchronously inside send().
+    // the new codec is handed to track->send(). Track::send() runs the
+    // outgoing chain synchronously on the caller's thread, so the write
+    // and the read that matters are ordered — the flag is atomic only
+    // because PacedRtpSender further down the same chain documents that
+    // outgoing() can also be reached from libdatachannel's network
+    // thread, and a plain bool read there would be a data race for no
+    // reason. (payloadType is a single byte inside libdatachannel's own
+    // config and cannot tear.)
     void setCodec(VideoCodecKind codec) {
         const bool hevc = codec == VideoCodecKind::H265 && m_h265 != nullptr;
-        m_useH265 = hevc;
         m_config->payloadType = hevc ? m_ptH265 : m_ptH264;
+        m_useH265.store(hevc, std::memory_order_relaxed);
     }
 
     void outgoing(rtc::message_vector& messages,
                   const rtc::message_callback& send) override {
-        const auto& pkt = (m_useH265 && m_h265) ? m_h265 : m_h264;
+        const bool hevc = m_useH265.load(std::memory_order_relaxed);
+        const auto& pkt = (hevc && m_h265) ? m_h265 : m_h264;
         if (pkt) pkt->outgoing(messages, send);
     }
 
@@ -291,7 +298,7 @@ private:
     std::shared_ptr<rtc::RtpPacketizationConfig> m_config;
     const uint8_t m_ptH264;
     const uint8_t m_ptH265;
-    bool m_useH265 = false;
+    std::atomic<bool> m_useH265{false};
 };
 
 // The receive half: split an incoming batch by payload type and give
