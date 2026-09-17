@@ -272,11 +272,19 @@ Rectangle {
                 Connections {
                     target: typeof screenShare !== "undefined"
                             ? screenShare : null
+                    // `dock.` is load-bearing. Connections is a QObject, not
+                    // an Item, so an unqualified Window.window attaches to
+                    // Connections itself — which Qt rejects ("Window.window
+                    // does only support types deriving from Item") and
+                    // evaluates to null. The error was then dropped on the
+                    // floor: a screen-share failure raised no toast at all.
+                    // Going through the dock, which is an Item, attaches it
+                    // where it works.
                     function onLastErrorChanged() {
                         var err = screenShare.lastError;
-                        if (err && err.length > 0
-                            && Window.window && Window.window.toastError) {
-                            Window.window.toastError(err);
+                        var win = dock.Window.window;
+                        if (err && err.length > 0 && win && win.toastError) {
+                            win.toastError(err);
                         }
                     }
                 }
@@ -306,9 +314,9 @@ Rectangle {
                             androidPerms.cameraResult.disconnect(once);
                             if (granted) {
                                 camera.start();
-                            } else if (Window.window
-                                       && Window.window.toastError) {
-                                Window.window.toastError(
+                            } else if (dock.Window.window
+                                       && dock.Window.window.toastError) {
+                                dock.Window.window.toastError(
                                     "Camera permission is required.");
                             }
                         };
@@ -320,11 +328,13 @@ Rectangle {
                 }
                 Connections {
                     target: typeof camera !== "undefined" ? camera : null
+                    // Same as the screen-share Connections above: the window
+                    // has to be reached through an Item, or it is null here.
                     function onLastErrorChanged() {
                         var err = camera.lastError;
-                        if (err && err.length > 0
-                            && Window.window && Window.window.toastError) {
-                            Window.window.toastError(err);
+                        var win = dock.Window.window;
+                        if (err && err.length > 0 && win && win.toastError) {
+                            win.toastError(err);
                         }
                     }
                 }
