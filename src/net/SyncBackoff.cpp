@@ -29,6 +29,15 @@ int delayForFailure(int consecutiveFailures, double jitter01)
     return applyJitter(baseDelayMs(consecutiveFailures), jitter01);
 }
 
+bool isNoProgressReply(bool fastReply, bool tokenAdvanced, int payloadItems)
+{
+    if (tokenAdvanced) return false;
+    // A reply that took longer than the floor was a real long poll that
+    // blocked, which no unconditional-200 endpoint does.
+    if (!fastReply) return false;
+    return payloadItems <= 0;
+}
+
 bool indicatesRejectedSinceToken(const QString& errorBody)
 {
     // MatrixClient::syncError forwards the raw response body, which for a
