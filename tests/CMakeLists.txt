@@ -315,7 +315,7 @@ if(BSFCHAT_ENABLE_VOICE)
         # Real sockets, real DTLS handshakes and wall-clock deadlines: under
         # `ctest -j4` on a loaded CI runner this timed out twice in one day
         # (rc.11). Serial, so it never competes with the video pipeline test.
-        set_tests_properties(test_media_loopback PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+        set_tests_properties(test_media_loopback PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
     endif()
 endif()
 

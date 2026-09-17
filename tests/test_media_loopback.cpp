@@ -18,6 +18,14 @@
 #include <vector>
 
 namespace {
+// Every wait on a real handshake (ICE over loopback + DTLS + SCTP) uses this.
+// 10 s was enough on a developer machine and not on a shared CI runner — it
+// timed out on rc.11's macOS and Linux jobs and keeps the sanitizer job red,
+// where the instrumented handshake is several times slower again. Generous on
+// purpose: a healthy run never waits anywhere near this long, so it only
+// affects how quickly a genuinely broken run gives up.
+constexpr auto kSetupWait = std::chrono::seconds(45);
+
 
 constexpr int kPayloadType = 102;
 constexpr const char* kMid = "vscreen";
@@ -66,6 +74,10 @@ std::shared_ptr<rtc::H264RtpPacketizer> buildChain(
 // only, then addTrack + renegotiate on the live connection, exactly
 // like PeerConnectionManager's "Adding video tracks + renegotiating".
 int runCase(bool initialOffer) {
+    // The renegotiated-track path is a CANARY that is expected to time out
+    // (see main); it keeps the short wait so every run does not pay the
+    // full handshake allowance for a failure we already expect.
+    const auto setupWait = initialOffer ? kSetupWait : std::chrono::seconds(10);
     std::printf("--- case: track via %s\n",
                 initialOffer ? "initial offer" : "renegotiation");
     rtc::Configuration cfg; // no ICE servers — loopback host candidates
@@ -133,7 +145,7 @@ int runCase(bool initialOffer) {
         dc = pcA->createDataChannel("kick");
         dc->onOpen([&]() { dcOpen.set({}); });
         pcA->setLocalDescription();
-        if (!dcOpen.wait(std::chrono::seconds(10))) {
+        if (!dcOpen.wait(setupWait)) {
             std::fprintf(stderr, "FAIL: data channel never opened\n");
             return 2;
         }
@@ -144,7 +156,7 @@ int runCase(bool initialOffer) {
         pcA->setLocalDescription();
     }
 
-    if (!sendOpen.wait(std::chrono::seconds(10))) {
+    if (!sendOpen.wait(setupWait)) {
         std::fprintf(stderr, "FAIL: video track never opened over loopback\n");
         return 2;
     }
@@ -177,7 +189,7 @@ int runCase(bool initialOffer) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    if (!received.wait(std::chrono::seconds(5))) {
+    if (!received.wait(setupWait)) {
         std::fprintf(stderr,
             "FAIL: no AU ever surfaced from onFrame on the receiving track — "
             "media receive path is broken for this negotiation shape\n");
@@ -272,7 +284,7 @@ int runControlChannelCase() {
     audioDc->onOpen([&]() { audioOpen.set({}); });
     pcA->setLocalDescription();
 
-    if (!audioOpen.wait(std::chrono::seconds(10))) {
+    if (!audioOpen.wait(kSetupWait)) {
         std::fprintf(stderr, "FAIL: audio channel never opened\n");
         return 2;
     }
@@ -282,7 +294,7 @@ int runControlChannelCase() {
     Latch controlOpen;
     auto controlDc = pcA->createDataChannel("control");
     controlDc->onOpen([&]() { controlOpen.set({}); });
-    if (!controlOpen.wait(std::chrono::seconds(10))) {
+    if (!controlOpen.wait(kSetupWait)) {
         std::fprintf(stderr, "FAIL: control channel never opened\n");
         return 2;
     }
@@ -313,12 +325,12 @@ int runControlChannelCase() {
         reinterpret_cast<const std::byte*>(opus.data()),
         reinterpret_cast<const std::byte*>(opus.data() + opus.size())));
 
-    if (!controlMsg.wait(std::chrono::seconds(10))) {
+    if (!controlMsg.wait(kSetupWait)) {
         std::fprintf(stderr, "FAIL: control message never arrived on the "
                              "control channel\n");
         return 4;
     }
-    if (!audioMsg.wait(std::chrono::seconds(10))) {
+    if (!audioMsg.wait(kSetupWait)) {
         std::fprintf(stderr, "FAIL: audio message never arrived on the "
                              "audio channel\n");
         return 4;
@@ -411,7 +423,7 @@ int runLateAdoptionCase() {
     sendTrack->onOpen([&]() { sendOpen.set({}); });
     pcA->setLocalDescription();
 
-    if (!sendOpen.wait(std::chrono::seconds(10))) {
+    if (!sendOpen.wait(kSetupWait)) {
         std::fprintf(stderr, "FAIL: send track never opened\n");
         return 2;
     }
