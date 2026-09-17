@@ -22,6 +22,16 @@
 // Placeholder logic binds to liveScreenUsers/liveVideoChanged instead
 // of per-frame signals, so tiles no longer rebuild on every frame.
 //
+// MULTI-SINK IS THE POINT. One (user, stream) fans out to ANY number of
+// attached outputs — the tile in the voice room, a popped-out window and
+// a fullscreen window can all be showing the same peer's share at the
+// same time, and none of them is a copy of the decode: the frame is
+// decoded once and handed to each sink. Every path that touches a sink
+// (deliverFrame, dropStream, sweepStale) walks the whole list, and
+// attachOutput replays the last frame so a window opened mid-stream is
+// never blank waiting for the next keyframe. tests/test_video_registry.cpp
+// pins all four halves of that.
+//
 // Lives on the main thread (owned by ServerConnection). deliverFrame
 // is invoked via queued connections from decode workers.
 class VideoStreamRegistry : public QObject {
@@ -41,6 +51,17 @@ public:
     // attaches mid-stream isn't blank until the next frame.
     Q_INVOKABLE void attachOutput(const QString& userId, int streamId,
                                   QVideoSink* target);
+    // Stop mirroring onto `target`. Attaching is idempotent and a sink
+    // that is destroyed detaches itself, so this is only needed when a
+    // sink OUTLIVES its interest in the stream — a pop-out window that
+    // is being reused for a different feed, say. Unknown sinks are
+    // ignored, and the sink is left holding its last frame rather than
+    // being blanked: the caller owns what it shows after it lets go.
+    Q_INVOKABLE void detachOutput(const QString& userId, int streamId,
+                                  QVideoSink* target);
+    // How many QML sinks are mirroring this stream. Test seam, and a
+    // cheap way for diagnostics to answer "is anything looking at it".
+    Q_INVOKABLE int outputCount(const QString& userId, int streamId) const;
     Q_INVOKABLE bool hasLiveVideo(const QString& userId, int streamId) const;
     // True when the sender explicitly told us this stream STOPPED and
     // nothing has arrived since (S-7). QML filters these out of the

@@ -107,6 +107,25 @@ void VideoStreamRegistry::attachOutput(const QString& userId, int streamId,
     if (e.lastFrame.isValid()) target->setVideoFrame(e.lastFrame);
 }
 
+void VideoStreamRegistry::detachOutput(const QString& userId, int streamId,
+                                       QVideoSink* target) {
+    if (!target) return;
+    auto it = m_entries.find({userId, streamId});
+    if (it == m_entries.end()) return;
+    it->outputs.removeAll(target);
+    // The destroyed() handler installed by attachOutput stays connected.
+    // It is harmless — removeAll on a list that no longer holds the sink
+    // is a no-op — and disconnecting it here would also kill the
+    // auto-detach for a LATER re-attach of the same sink, because
+    // attachOutput only installs the connection on a first attach.
+}
+
+int VideoStreamRegistry::outputCount(const QString& userId,
+                                     int streamId) const {
+    auto it = m_entries.constFind({userId, streamId});
+    return it == m_entries.constEnd() ? 0 : int(it->outputs.size());
+}
+
 bool VideoStreamRegistry::hasLiveVideo(const QString& userId, int streamId) const {
     auto it = m_entries.constFind({userId, streamId});
     return it != m_entries.constEnd() && it->live;
