@@ -179,6 +179,32 @@ public:
     int framesSent() const { return m_framesSent; }
     int framesReceived() const { return m_framesReceived; }
 
+    // ---- Which route this connection actually took ----
+    //
+    // Read straight from libdatachannel's getSelectedCandidatePair, and NOT
+    // from what we asked for: `iceTransportPolicy = Relay` is a request made of
+    // the gatherer, and the pair that wins is the outcome. The two are apart
+    // for the several seconds it takes to allocate on the TURN server and run
+    // the connectivity checks, and the UI is only allowed to claim an address
+    // is hidden once the outcome agrees — see voice/IpPrivacy.h.
+    //
+    // `known` is false before a pair has been selected, which is the honest
+    // answer while connecting and the one every caller must handle: treating
+    // "not yet known" as "direct" would show a scary path that is not there,
+    // and treating it as "relayed" would claim a guarantee that is not there.
+    //
+    // The two ends are reported separately because they answer different
+    // questions. `localRelayed` is the privacy one — it is OUR address that is
+    // either going out or not. `remoteRelayed` is the peer's own choice and
+    // only affects whether the media as a whole is travelling through a server,
+    // which is what the diagnostics overlay's "direct" / "relayed" describes.
+    struct SelectedPath {
+        bool known = false;
+        bool localRelayed = false;
+        bool remoteRelayed = false;
+    };
+    SelectedPath selectedPath() const;
+
 signals:
     void localDescriptionReady(const std::string& type, const std::string& sdp);
     void localCandidateReady(const std::string& candidate, const std::string& mid);

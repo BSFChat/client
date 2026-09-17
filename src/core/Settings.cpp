@@ -3,6 +3,7 @@
 #include "core/ReadState.h"
 #include "core/ReleaseSelection.h"
 #include "util/FileLogger.h"
+#include "voice/IpPrivacy.h"
 #include "voice/video/VideoCodecPreference.h"
 
 #include <QLoggingCategory>
@@ -784,6 +785,25 @@ void Settings::setVoiceMode(const QString& v)
     if (v == voiceMode()) return;
     m_settings.setValue("voiceMode", v);
     emit voiceModeChanged();
+}
+
+QString Settings::voiceRelayMode() const
+{
+    // Read through the parser, so whatever is on disk — an older build's value,
+    // a typo, an empty string — resolves to one of the two the rest of the
+    // client knows about. The alternative is a QML combo box with no matching
+    // row and a policy decision that falls through to a default nobody chose.
+    return voice::relayModeToString(voice::relayModeFromString(
+        m_settings.value(QStringLiteral("voice/relayMode"),
+                         QStringLiteral("auto")).toString()));
+}
+
+void Settings::setVoiceRelayMode(const QString& mode)
+{
+    const QString norm = voice::relayModeToString(voice::relayModeFromString(mode));
+    if (norm == voiceRelayMode()) return;
+    m_settings.setValue(QStringLiteral("voice/relayMode"), norm);
+    emit voiceRelayModeChanged();
 }
 
 QString Settings::pttKeySequence() const

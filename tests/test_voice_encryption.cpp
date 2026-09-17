@@ -16,6 +16,7 @@
 #include <QJsonDocument>
 #include <QRegularExpression>
 
+#include "voice/IpPrivacy.h"
 #include "voice/VoiceEncryption.h"
 
 using namespace voice;
@@ -476,6 +477,166 @@ private slots:
         }
         QVERIFY2(scanned > 100, "string-literal extraction found almost nothing — "
                                 "the regex is broken, not the QML");
+    }
+
+    // ---- The IP-privacy surface ------------------------------------
+    //
+    // Exactly the same rule as the media-protection labels above, applied to
+    // the second thing this client can overclaim. "Your IP is hidden" is a
+    // guarantee, it depends on which ICE candidate pair was actually selected,
+    // and QML cannot see that — so it may not say it. The words live in
+    // src/voice/IpPrivacy.cpp and reach the UI through a Q_PROPERTY.
+
+    // The claim may be made in ONE state and only that one.
+    void onlyTheConfirmedStateClaimsTheAddressIsHidden() {
+        QCOMPARE(voice::ipPrivacyBadge(voice::IpExposure::Hidden),
+                 QStringLiteral("IP hidden"));
+        // Pending is policy-set-but-unproven. It must not read as the claim.
+        const QString pending = voice::ipPrivacyBadge(voice::IpExposure::Pending);
+        QVERIFY(!pending.isEmpty());
+        QVERIFY2(pending != voice::ipPrivacyBadge(voice::IpExposure::Hidden),
+                 "the unconfirmed state uses the confirmed state's wording");
+        // Shared says nothing at all — the dock shows no shield. A direct call
+        // is the default, and the default is not a warning.
+        QVERIFY(voice::ipPrivacyBadge(voice::IpExposure::Shared).isEmpty());
+    }
+
+    // The exposure rule itself. Policy alone is never enough, and this is the
+    // whole of the truthfulness requirement in four lines.
+    void theClaimNeedsBothThePolicyAndTheSelectedPair() {
+        using voice::IpExposure;
+        // Relay asked for, every peer confirmed relayed → the claim holds.
+        QCOMPARE(voice::ipExposure(true, 3, 3), IpExposure::Hidden);
+        // One peer not confirmed → no claim.
+        QCOMPARE(voice::ipExposure(true, 3, 2), IpExposure::Pending);
+        // Relay asked for, nothing connected yet → no claim. A shield that
+        // lights up before a single connection exists teaches people to trust
+        // it when it means nothing.
+        QCOMPARE(voice::ipExposure(true, 0, 0), IpExposure::Pending);
+        // Policy is All. No amount of incidentally-relayed pairs makes this a
+        // privacy guarantee — we still gathered and sent our own candidates.
+        QCOMPARE(voice::ipExposure(false, 3, 3), IpExposure::Shared);
+        QCOMPARE(voice::ipExposure(false, 0, 0), IpExposure::Shared);
+    }
+
+    // Every state's detail states the cost, not only the benefit. A privacy
+    // control whose description omits what it takes away is one people turn on
+    // and then blame the app for.
+    void theHiddenDetailStatesWhatItCosts() {
+        const QString d = voice::ipPrivacyDetail(voice::IpExposure::Hidden).toLower();
+        QVERIFY2(d.contains(QStringLiteral("delay")) || d.contains(QStringLiteral("latency")),
+                 "must say relaying adds delay");
+        QVERIFY2(d.contains(QStringLiteral("bandwidth")),
+                 "must say it uses the server's bandwidth");
+        QVERIFY2(d.contains(QStringLiteral("quality")),
+                 "must say it can lower video quality");
+        // And it must not overclaim in the other direction either: the peer's
+        // address is still the peer's to expose.
+        QVERIFY2(d.contains(QStringLiteral("their")),
+                 "must not imply it hides anybody else's address");
+    }
+
+    void everyExposureStateHasDetailText() {
+        for (auto e : {voice::IpExposure::Shared, voice::IpExposure::Pending,
+                       voice::IpExposure::Hidden}) {
+            QVERIFY(!voice::ipPrivacyDetail(e).isEmpty());
+        }
+    }
+
+    // The refusal must name the thing the reader can act on. Naming the wrong
+    // one sends somebody to their server administrator over a switch they
+    // turned on themselves, or the reverse.
+    void eachRefusalNamesWhatTheReaderCanChange() {
+        const QString user =
+            voice::relayRefusalMessage(voice::RelaySource::UserSetting).toLower();
+        QVERIFY2(user.contains(QStringLiteral("hide my ip")),
+                 "the user-setting refusal must name the setting");
+        QVERIFY2(user.contains(QStringLiteral("settings")),
+                 "…and say where it is");
+
+        const QString share =
+            voice::relayRefusalMessage(voice::RelaySource::ShareOption).toLower();
+        QVERIFY2(share.contains(QStringLiteral("sharing")),
+                 "the per-share refusal must say it is about the share");
+
+        // The server case is unchanged and still points at the administrator.
+        const QString server =
+            voice::relayRefusalMessage(voice::RelaySource::Server);
+        QCOMPARE(server, voice::refusalMessage(voice::StartRefusal::RelayOnlyNoTurn));
+        QVERIFY(server.toLower().contains(QStringLiteral("administrator")));
+
+        // None of them may suggest connecting anyway without saying what that
+        // costs — a fall back to P2P publishes the address the user asked to
+        // hide, so the offer has to carry its own consequence.
+        for (const QString& m : {user, share}) {
+            QVERIFY2(m.contains(QStringLiteral("see your ip")),
+                     qPrintable(QStringLiteral("refusal offers a direct connection "
+                                               "without saying peers would then see "
+                                               "the address: %1").arg(m)));
+        }
+    }
+
+    // The dock's shield is bound, not written — same regression check as the
+    // VoiceRoom badge. Without it, deleting the shield would leave the literal
+    // scan below trivially green.
+    void theVoiceDockShieldBindsToTheCppProperty() {
+        const QString src = readAll(QStringLiteral(BSFCHAT_QML_DIR "/components/VoiceDock.qml"));
+        QVERIFY2(!src.isEmpty(), "VoiceDock.qml not readable — has it moved?");
+        const QString code = scanQml(src).code;
+        QVERIFY2(code.contains(QStringLiteral("voiceIpPrivacyBadge")),
+                 "the voice dock must render ServerConnection.voiceIpPrivacyBadge, "
+                 "not a shield label of its own");
+        QVERIFY2(code.contains(QStringLiteral("voiceIpPrivacyDetail")),
+                 "the shield's tooltip must render voiceIpPrivacyDetail — a shield "
+                 "without its cost stated is a guarantee with the price hidden");
+    }
+
+    void theSettingsPrivacyRowBindsToTheCppProperty() {
+        const QString src = readAll(
+            QStringLiteral(BSFCHAT_QML_DIR "/components/ClientSettings.qml"));
+        QVERIFY2(!src.isEmpty(), "ClientSettings.qml not readable — has it moved?");
+        const QString code = scanQml(src).code;
+        QVERIFY2(code.contains(QStringLiteral("voiceIpPrivacyDetail")),
+                 "the Privacy page's live row must render "
+                 "ServerConnection.voiceIpPrivacyDetail verbatim — whether an "
+                 "address is actually hidden is not something QML can work out");
+        QVERIFY2(code.contains(QStringLiteral("voiceRelayMode")),
+                 "the switch must read and write Settings.voiceRelayMode");
+    }
+
+    // No QML file may assert that an address IS hidden, in any phrasing. A
+    // control LABEL describing what a setting does ("Hide my IP address") is
+    // fine and is not matched here — it is an imperative, not a claim about a
+    // call that is running. What is banned is the indicative.
+    void qmlHoldsNoHardCodedIpPrivacyClaim() {
+        const QStringList files = qmlFiles();
+        QVERIFY(files.size() > 10);
+
+        static const QStringList banned = {
+            QStringLiteral("ip is hidden"),   QStringLiteral("ip hidden"),
+            QStringLiteral("ip address is hidden"),
+            QStringLiteral("nobody can see your"),
+            QStringLiteral("no one can see your"),
+            QStringLiteral("your ip is safe"), QStringLiteral("anonymous"),
+            QStringLiteral("untraceable"),     QStringLiteral("fully private"),
+        };
+
+        for (const QString& path : files) {
+            const QString src = readAll(path);
+            QVERIFY2(!src.isEmpty(), qPrintable(path));
+            for (const QString& lit : scanQml(src).literals) {
+                const QString lower = lit.toLower();
+                for (const QString& bad : banned) {
+                    QVERIFY2(!lower.contains(bad),
+                             qPrintable(QStringLiteral("%1 contains %2 — whether an "
+                                                       "address is hidden depends on the "
+                                                       "selected ICE candidate pair, which "
+                                                       "QML cannot see. Put the wording in "
+                                                       "voice/IpPrivacy.cpp and bind it.")
+                                            .arg(path, lit)));
+                }
+            }
+        }
     }
 
     // Only a genuine failure interrupts. A deliberately-unencrypted server is

@@ -20,6 +20,10 @@ Rectangle {
     readonly property string userId:   member ? (member.user_id || "") : ""
     readonly property string dispName: member ? (member.displayName || userId) : ""
     readonly property string peerState: member ? (member.peerState || "new") : "new"
+    // "direct" / "relayed" / "" — see ServerConnection::buildVoiceMembers and
+    // src/voice/IpPrivacy.h. Empty means ICE has not selected a pair yet, which
+    // is a real answer and not a missing one.
+    readonly property string connectionPath: member ? (member.connectionPath || "") : ""
     readonly property bool   isSelf: serverManager.activeServer
                                      && userId === serverManager.activeServer.userId
     // Self = our mic level (we know authoritatively). Remote = smoothed
@@ -226,6 +230,32 @@ Rectangle {
                 elide: Text.ElideRight
                 opacity: text.length > 0 ? 1.0 : 0.0
                 Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
+            }
+        }
+
+        // Connection path — "direct" or "relayed", from the ICE candidate pair
+        // this connection actually selected. Diagnostics, so it follows the
+        // same switch as the video overlay rather than being on all the time.
+        //
+        // Empty (and so invisible) while ICE has not settled: C++ leaves the
+        // key absent rather than guessing, and guessing is exactly what would
+        // make this misleading — "direct" shown for a connection that is about
+        // to come up relayed reads as a leak that is not happening.
+        Item {
+            visible: appSettings.showVideoDiagnostics && !tile.isSelf
+                     && tile.connectionPath.length > 0
+            Layout.alignment: Qt.AlignHCenter
+            Layout.fillWidth: true
+            Layout.preferredHeight: visible ? 14 : 0
+
+            Text {
+                anchors.centerIn: parent
+                horizontalAlignment: Text.AlignHCenter
+                text: tile.connectionPath
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.fontSize.xs
+                color: Theme.fg2
+                elide: Text.ElideRight
             }
         }
 

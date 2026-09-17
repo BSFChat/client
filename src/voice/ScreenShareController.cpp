@@ -1,3 +1,4 @@
+#include "voice/IpPrivacy.h"
 #include "voice/ScreenShareController.h"
 
 #include "voice/video/VideoCodecPreference.h"
@@ -292,6 +293,16 @@ void ScreenShareController::refreshWindows()
 
 void ScreenShareController::startForWindow(int windowIndex)
 {
+    // "Hide my IP while sharing", checked BEFORE anything starts. A share that
+    // began and then found there was no relay would be a share that silently
+    // did not hide the address it promised to hide — the one outcome this
+    // whole feature exists to prevent. Refuse with a reason instead.
+    if (m_hideIpForShare && !canHideIpWhileSharing()) {
+        m_lastError = voice::relayRefusalMessage(voice::RelaySource::ShareOption);
+        emit lastErrorChanged();
+        return;
+    }
+
     if (m_active) return;
     qInfo("[screenshare] startForWindow(%d)", windowIndex);
 #ifdef Q_OS_MACOS
@@ -490,6 +501,16 @@ static void applyEffectiveQuality(Settings* settings, ServerManager* servers)
 
 void ScreenShareController::startForScreen(int screenIndex)
 {
+    // "Hide my IP while sharing", checked BEFORE anything starts. A share that
+    // began and then found there was no relay would be a share that silently
+    // did not hide the address it promised to hide — the one outcome this
+    // whole feature exists to prevent. Refuse with a reason instead.
+    if (m_hideIpForShare && !canHideIpWhileSharing()) {
+        m_lastError = voice::relayRefusalMessage(voice::RelaySource::ShareOption);
+        emit lastErrorChanged();
+        return;
+    }
+
     if (m_active) return;
     qInfo("[screenshare] startForScreen(%d)", screenIndex);
     applyEffectiveQuality(m_settings, m_servers);
@@ -574,6 +595,13 @@ void ScreenShareController::setActiveState(bool active)
         // until the periodic IDR.
         m_pipeline->forceKeyframe();
     }
+    // Before announceStream, and before activeChanged: turning the policy on
+    // rebuilds every peer connection, and the announcement is what tells the
+    // far side a stream is coming. Announcing first would latch "screen share
+    // starting" onto connections that are about to be torn down, and the
+    // rebuilt ones would carry no such announcement — a tile that says
+    // "Starting share…" and never resolves.
+    applyShareIpPrivacy(active);
     announceStream(active);
     emit activeChanged();
 }
@@ -583,6 +611,22 @@ IVoiceTransport* ScreenShareController::currentVoice() const
     if (!m_servers) return nullptr;
     auto* vs = m_servers->voiceServer();
     return vs ? vs->voiceEngine() : nullptr;
+}
+
+
+bool ScreenShareController::canHideIpWhileSharing() const
+{
+    // No voice session yet means the question is unanswerable, and the honest
+    // default is "yes, as far as we know": the option stays offered, and the
+    // check that actually matters runs at start, against a live engine.
+    auto* voice = currentVoice();
+    return !voice || voice->canHideIpAddress();
+}
+
+void ScreenShareController::applyShareIpPrivacy(bool on)
+{
+    if (auto* voice = currentVoice())
+        voice->setStreamIpPrivacy(VideoStreamId::Screen, on && m_hideIpForShare);
 }
 
 void ScreenShareController::announceStream(bool on)

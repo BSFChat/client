@@ -150,6 +150,11 @@ if(BSFCHAT_ENABLE_VOICE)
         # Media-key parsing and the ONE home for security labelling.
         # Read the header before writing any string about voice security.
         src/voice/VoiceEncryption.cpp
+        # "Hide my IP address": the ICE transport-policy decision, and the ONE
+        # home for what the UI may claim about it. Same rule as
+        # VoiceEncryption.cpp above — read the header before writing any string
+        # about whether an address is hidden.
+        src/voice/IpPrivacy.cpp
         # AudioEngine is the GUI-thread facade; AudioWorker is the
         # real-time pipeline that runs on the dedicated audio thread,
         # and AudioPacketQueue is the handoff between them.

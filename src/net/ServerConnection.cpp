@@ -1454,6 +1454,12 @@ QJsonArray ServerConnection::buildVoiceMembers() const
 #ifdef BSFCHAT_VOICE_ENABLED
     if (m_voiceEngine) {
         auto states = m_voiceEngine->peerStates();
+        // "direct" / "relayed", from the SELECTED candidate pair. Absent while
+        // ICE is still choosing, and left absent here rather than defaulted:
+        // the overlay renders nothing for a route it does not know, which is
+        // the only honest thing to show for the seconds a relayed connection
+        // spends allocating on the TURN server. See voice/IpPrivacy.h.
+        auto paths = m_voiceEngine->peerPaths();
         QJsonArray out;
         for (const auto& v : m_voiceMembers) {
             auto obj = v.toObject();
@@ -1462,8 +1468,10 @@ QJsonArray ServerConnection::buildVoiceMembers() const
             stampMediaFlags(obj);
             if (uid == m_userId) {
                 obj["peerState"] = QStringLiteral("connected");
+                obj["connectionPath"] = QString();
             } else {
                 obj["peerState"] = states.value(uid, QStringLiteral("new"));
+                obj["connectionPath"] = paths.value(uid, QString());
             }
             out.append(obj);
         }
@@ -1790,7 +1798,14 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
     // When any peer's connection state changes, re-emit
     // voiceMembersChanged so the UI refreshes the per-peer dot.
     connect(m_voiceEngine, &VoiceEngine::peerStateChanged,
-            this, [this]() { emitVoiceMembersIfChanged(); });
+            this, [this]() {
+        emitVoiceMembersIfChanged();
+        // A peer reaching Connected is exactly when ICE has selected its pair,
+        // so this is the edge on which "Hiding IP…" is able to become "IP
+        // hidden". Without it the shield would sit on the unproven wording
+        // until the next 5 s roster poll happened along.
+        emit voiceIpPrivacyChanged();
+    });
 
     // Dead peer — blank their video surfaces so the UI doesn't keep
     // rendering a frozen last frame.
@@ -1800,6 +1815,10 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
         if (m_peerLevels.remove(userId))
             emit peerLevelChanged(userId);
         emitVoiceMembersIfChanged();
+        // Losing a peer can move the claim in either direction — it can be the
+        // last unconfirmed one (so "hidden" becomes provable) or the last one
+        // at all (so there is nothing left to prove).
+        emit voiceIpPrivacyChanged();
     });
 
     connect(m_voiceEngine, &VoiceEngine::error,
@@ -1811,6 +1830,16 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
     // started nothing. Returning false here makes VoiceSession unwind the
     // join and drop the server-side membership, so the user is not left a
     // ghost in the channel with no engine behind them.
+    // BEFORE start(). start() is where relay-only-with-no-TURN is refused, and
+    // it has to be able to see the user's setting to refuse for the right
+    // reason — or at all. Setting it afterwards would let a join that should
+    // have been refused proceed, gather nothing, and fail silently thirty
+    // seconds later with the UI still claiming the address was hidden.
+    if (m_settings) {
+        m_voiceEngine->setRelayMode(
+            voice::relayModeFromString(m_settings->voiceRelayMode()));
+    }
+
     if (!m_voiceEngine->start(roomId, members, config)) {
         m_voiceEngine->deleteLater();
         m_voiceEngine = nullptr;
@@ -1829,6 +1858,7 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
             ? voice::SessionTransport::Sfu
             : voice::SessionTransport::Mesh,
         /*sfuHasSharedKey=*/false));
+    emit voiceIpPrivacyChanged();
     return true;
 #else
     Q_UNUSED(roomId);
@@ -2070,6 +2100,65 @@ QString ServerConnection::voiceProtectionDetail() const
     return QString();
 }
 
+// ---------------------------------------------------------------------
+// "Hide my IP address" — what the shield is allowed to say
+// ---------------------------------------------------------------------
+// Same rule as the block above, for the same reason. The claim rests on TWO
+// facts that are true at different moments: the local transport policy (a
+// request) and the selected candidate pair (an outcome). voice::ipExposure()
+// combines them; nothing here or in QML is allowed to shortcut it.
+
+QString ServerConnection::voiceIpPrivacyBadge() const
+{
+#ifdef BSFCHAT_VOICE_ENABLED
+    if (m_voiceEngine) {
+        return voice::ipPrivacyBadge(voice::ipExposure(
+            m_voiceEngine->relayOnly(), m_voiceEngine->peerCount(),
+            m_voiceEngine->peersWithLocalRelay()));
+    }
+#endif
+    // No live transport → no claim, and the dock shows no shield.
+    return QString();
+}
+
+QString ServerConnection::voiceIpPrivacyDetail() const
+{
+#ifdef BSFCHAT_VOICE_ENABLED
+    if (m_voiceEngine) {
+        return voice::ipPrivacyDetail(voice::ipExposure(
+            m_voiceEngine->relayOnly(), m_voiceEngine->peerCount(),
+            m_voiceEngine->peersWithLocalRelay()));
+    }
+#endif
+    return QString();
+}
+
+void ServerConnection::applyVoiceRelayMode()
+{
+#ifdef BSFCHAT_VOICE_ENABLED
+    if (!m_voiceEngine || !m_settings) return;
+    // Pushed rather than pulled, so turning the setting on during a call takes
+    // effect on THAT call. The engine decides for itself whether the change
+    // alters the effective policy and, if it does, re-establishes its peers.
+    m_voiceEngine->setRelayMode(
+        voice::relayModeFromString(m_settings->voiceRelayMode()));
+    emit voiceIpPrivacyChanged();
+#endif
+}
+
+void ServerConnection::setShareIpPrivacy(int stream, bool hideIp)
+{
+#ifdef BSFCHAT_VOICE_ENABLED
+    if (!m_voiceEngine) return;
+    if (stream < 0 || stream >= kVideoStreamCount) return;
+    m_voiceEngine->setStreamIpPrivacy(VideoStreamId(stream), hideIp);
+    emit voiceIpPrivacyChanged();
+#else
+    Q_UNUSED(stream);
+    Q_UNUSED(hideIp);
+#endif
+}
+
 void ServerConnection::setVoiceProtection(voice::MediaProtection p)
 {
     if (m_voiceProtectionActive && m_voiceProtection == p) return;
@@ -2080,6 +2169,11 @@ void ServerConnection::setVoiceProtection(voice::MediaProtection p)
 
 void ServerConnection::clearVoiceProtection()
 {
+    // Unconditional, unlike the guard below: the IP-privacy getters read the
+    // ENGINE rather than a cached flag, so what they answer changes the moment
+    // the engine goes, and the dock must be told even when the protection
+    // badge itself was already clear.
+    emit voiceIpPrivacyChanged();
     if (!m_voiceProtectionActive) return;
     m_voiceProtectionActive = false;
     emit voiceProtectionChanged();
@@ -2093,6 +2187,11 @@ void ServerConnection::setSettings(Settings* settings)
         // switching Open-mic → PTT immediately goes silent (and vv).
         connect(settings, &Settings::voiceModeChanged,
                 this, &ServerConnection::applyMicGate);
+        // "Hide my IP address" applies to the call in progress, not only to
+        // the next one. A privacy switch that needs a rejoin to take effect is
+        // one people will believe they have turned on while it is not.
+        connect(settings, &Settings::voiceRelayModeChanged,
+                this, &ServerConnection::applyVoiceRelayMode);
     }
 }
 

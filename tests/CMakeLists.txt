@@ -226,12 +226,28 @@ target_include_directories(test_voice_transport PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_voice_transport PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_voice_transport COMMAND test_voice_transport)
 
+# "Hide my IP address": the ICE transport-policy decision table. Pure logic —
+# no libdatachannel, no TURN server, no network, no audio device — so the whole
+# 2x2x2x2 of (user setting, per-share option, server allow_p2p, TURN present)
+# is asserted without any of them, including the rows whose wrong answer is a
+# silently-published address.
+qt_add_executable(test_ip_privacy
+    test_ip_privacy.cpp
+    ${CMAKE_SOURCE_DIR}/src/voice/IpPrivacy.cpp
+)
+target_include_directories(test_ip_privacy PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_ip_privacy PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_ip_privacy COMMAND test_ip_privacy)
+
 # Media-key parsing and the security labelling. Pure logic — no SDK, no
 # network. The labelling tests assert the ABSENCE of an end-to-end claim,
 # which is the specific mistake this project has already made once.
 qt_add_executable(test_voice_encryption
     test_voice_encryption.cpp
     ${CMAKE_SOURCE_DIR}/src/voice/VoiceEncryption.cpp
+    # The same scan now covers the second thing this client can overclaim —
+    # whether an IP address is hidden. Same rule, same home for the wording.
+    ${CMAKE_SOURCE_DIR}/src/voice/IpPrivacy.cpp
 )
 target_include_directories(test_voice_encryption PRIVATE ${CMAKE_SOURCE_DIR}/src)
 # The labelling tests also scan the QML tree for hard-coded security

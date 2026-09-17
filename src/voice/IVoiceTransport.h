@@ -168,6 +168,34 @@ public:
     // is "connecting".
     virtual QMap<QString, QString> peerStates() const = 0;
 
+    // Which ROUTE each peer's media is taking, keyed by user id, as one of
+    // "direct" / "relayed". A user id absent from the map means the route is
+    // not known yet — ICE has not selected a pair — and callers must render
+    // that as unknown rather than guessing either way.
+    //
+    // Non-pure with an empty default: an SFU has one connection to the server
+    // and every participant is "relayed" by construction, which is a fact about
+    // the transport and not something the overlay learns per peer.
+    virtual QMap<QString, QString> peerPaths() const { return {}; }
+
+    // "Hide my IP address while sharing". Called by ScreenShareController /
+    // CameraController as a share with the option enabled starts and stops.
+    //
+    // Non-pure with an empty default: only the mesh transport exposes the
+    // user's address in the first place. An SFU already relays everything, so
+    // there is nothing for it to change and nothing for it to promise.
+    virtual void setStreamIpPrivacy(VideoStreamId stream, bool hideIp) {
+        Q_UNUSED(stream); Q_UNUSED(hideIp);
+    }
+
+    // Whether relay-only is even possible on this connection — i.e. whether
+    // there is a relay to use. Asked BEFORE a share starts with the option on,
+    // so the share can be refused with a reason instead of starting, quietly
+    // failing to hide anything, and leaving the user believing it did.
+    //
+    // Defaults to true: an SFU relays everything by definition.
+    virtual bool canHideIpAddress() const { return true; }
+
     // Cumulative receive-side counters for the diagnostics overlay:
     // rxFrames / rxBytes / decoded / dropped / width / height / codec.
     // Empty map when nothing is being received for (userId, streamId).

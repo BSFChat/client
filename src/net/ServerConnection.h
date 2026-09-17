@@ -15,6 +15,7 @@
 // Header-only dependency (QString + QJsonObject), safe in non-voice
 // builds. The .cpp side of it is voice-gated, so every CALL into
 // voice:: below sits behind BSFCHAT_VOICE_ENABLED.
+#include "voice/IpPrivacy.h"
 #include "voice/VoiceEncryption.h"
 #include "voice/VoiceStartPolicy.h"
 // The join/leave state machine. Header-only dependency on QObject/QJson
@@ -91,6 +92,19 @@ class ServerConnection : public QObject {
                    NOTIFY voiceProtectionChanged)
     Q_PROPERTY(QString voiceProtectionDetail READ voiceProtectionDetail
                    NOTIFY voiceProtectionChanged)
+    // "Hide my IP address": the LIVE state, not the setting. Same rule and
+    // the same reason as the two above — the strings are written in
+    // src/voice/IpPrivacy.cpp and reach QML only through these properties,
+    // because a claim composed in QML is a claim nothing can check.
+    //
+    // Empty badge means "say nothing": no session, or a direct call, which is
+    // the default and is not a warning. The detail is never empty while a
+    // session is live, because the honest description of a direct call is
+    // still worth reading.
+    Q_PROPERTY(QString voiceIpPrivacyBadge READ voiceIpPrivacyBadge
+                   NOTIFY voiceIpPrivacyChanged)
+    Q_PROPERTY(QString voiceIpPrivacyDetail READ voiceIpPrivacyDetail
+                   NOTIFY voiceIpPrivacyChanged)
     // Remote-video surface registry (VideoStreamRegistry; null when
     // voice is compiled out). QML attaches VideoOutput sinks via its
     // invokables — see VoiceRoom / ParticipantTile.
@@ -159,6 +173,17 @@ public:
     // about a connection that has not been made.
     QString voiceProtectionBadge() const;
     QString voiceProtectionDetail() const;
+    QString voiceIpPrivacyBadge() const;
+    QString voiceIpPrivacyDetail() const;
+    // Pushes Settings::voiceRelayMode into the live engine (and remembers it
+    // for the next start). Connected to the setting's change signal, so
+    // turning it on mid-call takes effect on this call.
+    void applyVoiceRelayMode();
+    // The per-share "Hide my IP while sharing" override, routed from the
+    // screen-share and camera controllers. `stream` picks which one; the
+    // engine relays while either is set, because one peer connection carries
+    // voice and both video streams.
+    Q_INVOKABLE void setShareIpPrivacy(int stream, bool hideIp);
 #ifdef BSFCHAT_VOICE_ENABLED
     // Accessor for the screen-share controller to bind to the
     // currently-running voice engine. Null when no voice session.
@@ -661,6 +686,7 @@ signals:
     void voiceDeafenedChanged();
     void voiceMembersChanged();
     void voiceProtectionChanged();
+    void voiceIpPrivacyChanged();
     void micLevelChanged();
     void micSilentChanged();
     void avatarUrlChanged();

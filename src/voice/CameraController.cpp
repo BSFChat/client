@@ -1,3 +1,4 @@
+#include "voice/IpPrivacy.h"
 #include "voice/CameraController.h"
 
 #include "voice/video/VideoCodecPreference.h"
@@ -175,6 +176,16 @@ void CameraController::start() { startForCamera(-1); }
 
 void CameraController::startForCamera(int index)
 {
+    // "Hide my IP while sharing", checked BEFORE anything starts. A share that
+    // began and then found there was no relay would be a share that silently
+    // did not hide the address it promised to hide — the one outcome this
+    // whole feature exists to prevent. Refuse with a reason instead.
+    if (m_hideIpForShare && !canHideIpWhileSharing()) {
+        m_lastError = voice::relayRefusalMessage(voice::RelaySource::ShareOption);
+        emit lastErrorChanged();
+        return;
+    }
+
     if (m_active) return;
     // Capture cadence follows the user's camera fps (legacy JPEG
     // subsamples from it); re-resolved on every start.
@@ -253,6 +264,8 @@ void CameraController::setActiveState(bool active)
     // frame of a restarted camera would reference a picture no viewer
     // holds. Start clean.
     if (active && m_pipeline) m_pipeline->forceKeyframe();
+    // Before the announcement — see the same call in ScreenShareController.
+    applyShareIpPrivacy(active);
     announceStream(active);
     emit activeChanged();
 }
@@ -262,6 +275,22 @@ IVoiceTransport* CameraController::currentVoice() const
     if (!m_servers) return nullptr;
     auto* vs = m_servers->voiceServer();
     return vs ? vs->voiceEngine() : nullptr;
+}
+
+
+bool CameraController::canHideIpWhileSharing() const
+{
+    // No voice session yet means the question is unanswerable, and the honest
+    // default is "yes, as far as we know": the option stays offered, and the
+    // check that actually matters runs at start, against a live engine.
+    auto* voice = currentVoice();
+    return !voice || voice->canHideIpAddress();
+}
+
+void CameraController::applyShareIpPrivacy(bool on)
+{
+    if (auto* voice = currentVoice())
+        voice->setStreamIpPrivacy(VideoStreamId::Camera, on && m_hideIpForShare);
 }
 
 void CameraController::announceStream(bool on)

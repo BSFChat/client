@@ -30,8 +30,16 @@ Dialog {
 
     // Window lists churn constantly — re-enumerate on every open so
     // the user sees what's on their desktop right now.
-    onOpened: if (typeof screenShare !== "undefined")
-                  screenShare.refreshWindows()
+    onOpened: {
+        if (typeof screenShare === "undefined") return;
+        screenShare.refreshWindows();
+        // Default to whatever the user asked for globally, re-read on every
+        // open rather than bound once: this dialog is created with the window
+        // and reused, so a binding evaluated at construction would show a
+        // stale answer for the rest of the session.
+        hideIpSwitch.checked = appSettings.voiceRelayMode === "relayOnly";
+        screenShare.setHideIpForShare(hideIpSwitch.checked);
+    }
 
     background: Rectangle {
         color: Theme.bg1
@@ -249,6 +257,60 @@ Dialog {
                         dialog.close();
                     }
                 }
+            }
+        }
+
+        // The per-share override on the standing "Hide my IP address" setting.
+        //
+        // It is offered HERE, before the share starts, and not as something to
+        // flip mid-share: one peer connection carries the voice and both video
+        // streams, so honouring it means relaying everything for as long as the
+        // share lasts, and turning it on later means tearing every connection
+        // down and rebuilding it. Starting as you mean to go on costs nothing;
+        // switching costs a reconnect. See src/voice/IpPrivacy.h.
+        //
+        // The wording describes what the option does. It makes no claim about
+        // whether an address IS hidden — that depends on the candidate pair ICE
+        // selects, it is decided in C++, and it is reported by the shield in the
+        // voice dock.
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.sp.s2
+            spacing: Theme.sp.s3
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 0
+                Text {
+                    text: "Hide my IP address while sharing"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    color: hideIpSwitch.enabled ? Theme.fg0 : Theme.fg3
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: hideIpSwitch.enabled
+                        ? "Routes the call through the server for as long as you are "
+                          + "sharing, so nobody in it sees your address. Reconnects "
+                          + "everyone once when the share starts and again when it "
+                          + "ends, and can lower quality if the server is the slowest "
+                          + "link."
+                        : "This server has no relay for calls to go through, so this "
+                          + "option cannot be honoured here."
+                    wrapMode: Text.WordWrap
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xs
+                    color: Theme.fg2
+                }
+            }
+
+            ThemedSwitch {
+                id: hideIpSwitch
+                // Offered disabled, with the reason above, rather than hidden:
+                // an option that silently is not there teaches nobody why.
+                enabled: typeof screenShare !== "undefined"
+                         && screenShare.canHideIpWhileSharing()
+                onToggled: screenShare.setHideIpForShare(checked)
             }
         }
 
