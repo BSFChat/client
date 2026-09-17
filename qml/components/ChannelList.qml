@@ -1151,16 +1151,15 @@ Rectangle {
                                         channelListRoot.muteGeneration;
                                         if (isMuted) return false;
                                         if (modelData.isVoice) return false;
-                                        var lastMsg = modelData.lastMessageTime || 0;
-                                        if (lastMsg <= 0) return false;
-                                        var lastRead = appSettings.lastReadTs(modelData.roomId);
-                                        // lastRead == 0 means we've never recorded a
-                                        // read marker for this room yet. Treat that as
-                                        // "caught up" rather than "all messages new"
-                                        // — otherwise every channel in the tree lights
-                                        // up on first launch.
-                                        if (lastRead <= 0) return false;
-                                        return lastMsg > lastRead;
+                                        // Never-opened channels work because /sync
+                                        // seeds a marker on first sight of a room
+                                        // (core/ReadState.h) — "caught up" for the
+                                        // history a first login arrives with, so the
+                                        // tree doesn't light up wholesale, and
+                                        // comparable against everything after.
+                                        return appSettings.isRoomUnread(
+                                            modelData.roomId,
+                                            modelData.lastMessageTime || 0);
                                     }
                                     // Drag state — while `dragging` is
                                     // true, the row lifts via bg + z
@@ -2267,30 +2266,42 @@ Rectangle {
         ThemedRoomItem {
             text: "Mark as Read"
             iconName: "check"
-            enabled: {
-                channelListRoot.unreadGeneration;
-                if (!serverManager.activeServer) return false;
+            // Newest origin_server_ts in the menu's room, 0 if unknown.
+            readonly property real lastMessageTs: {
+                if (!serverManager.activeServer) return 0;
                 var rid = roomContextMenu.roomId;
-                if (!rid) return false;
-                // Only offer when there's actually something unread.
+                if (!rid) return 0;
                 var s = serverManager.activeServer;
                 var groups = s.categorizedRooms;
                 for (var i = 0; i < groups.length; i++) {
                     var ch = groups[i].channels || [];
                     for (var j = 0; j < ch.length; j++) {
-                        if (ch[j].roomId === rid) {
-                            var lastMsg = ch[j].lastMessageTime || 0;
-                            var lastRead = appSettings.lastReadTs(rid);
-                            return lastMsg > 0 && lastRead < lastMsg;
-                        }
+                        if (ch[j].roomId === rid)
+                            return ch[j].lastMessageTime || 0;
                     }
                 }
-                return false;
+                return 0;
+            }
+            enabled: {
+                channelListRoot.unreadGeneration;
+                // Only offer when there's actually something unread.
+                return appSettings.isRoomUnread(roomContextMenu.roomId,
+                                                lastMessageTs);
             }
             onTriggered: {
-                // setLastReadTs emits lastReadTsChanged, which bumps
+                // The marker is compared against origin_server_ts, so it has
+                // to be written in the SERVER's clock: Date.now() here hid
+                // the next messages behind a fast client clock and left the
+                // dot stuck on behind a slow one. Routed through the
+                // connection so the server-side read marker (and the unread
+                // count it drives) advances with it. lastReadTsChanged bumps
                 // unreadGeneration through the Connections above.
-                appSettings.setLastReadTs(roomContextMenu.roomId, Date.now());
+                var rid = roomContextMenu.roomId;
+                var ts = lastMessageTs;
+                if (!rid || ts <= 0) return;
+                var s = serverManager.activeServer;
+                if (s && s.markRoomRead) s.markRoomRead(rid, ts);
+                else appSettings.setLastReadTs(rid, ts);
             }
         }
 

@@ -176,12 +176,6 @@ private slots:
         // Windows shell registration writes real registry paths through
         // QSettings, which has nothing to do with the profile store.
         const QStringList exempt{QStringLiteral("src/core/UrlHandler.cpp")};
-        // Known offender owned by another workstream (src/voice/**):
-        // AudioWorker.cpp reads the input/output device preference through
-        // a literal pair, so a --profile instance gets the default
-        // profile's devices. Left alone here to avoid a cross-worker
-        // collision; listed so this guard still protects everything else.
-        const QStringList knownOffenders{QStringLiteral("src/voice/AudioWorker.cpp")};
 
         const QString root = QStringLiteral(BSFCHAT_SRC_DIR);
         QStringList sources = filesUnder(root, QStringLiteral("*.cpp"));
@@ -193,7 +187,7 @@ private slots:
             QString rel = path;
             const int cut = rel.indexOf(QStringLiteral("/src/"));
             if (cut >= 0) rel = rel.mid(cut + 1);
-            if (exempt.contains(rel) || knownOffenders.contains(rel)) continue;
+            if (exempt.contains(rel)) continue;
             if (literalPair.match(withoutComments(readAll(path))).hasMatch())
                 offenders << rel;
         }

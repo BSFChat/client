@@ -170,6 +170,13 @@ public:
     // Emits lastReadTsChanged(roomId) when the stored value actually moves,
     // so the channel list can drop its 800 ms unread poll (U-M4).
     Q_INVOKABLE void setLastReadTs(const QString& roomId, qint64 tsMs);
+    // First-sight seeding of the marker (see core/ReadState.h). Writes only
+    // when the room has no marker at all, so it can never move a real one.
+    // Returns true if it wrote.
+    bool seedLastReadTs(const QString& roomId, qint64 seedTs);
+    // The channel-list unread dot. lastMessageTs is the room's newest
+    // origin_server_ts; both sides of the comparison are server clock.
+    Q_INVOKABLE bool isRoomUnread(const QString& roomId, qint64 lastMessageTs) const;
 
     // Muted rooms — the channel list dims them and suppresses their
     // unread dot. Stored as a QStringList under mutedRooms.

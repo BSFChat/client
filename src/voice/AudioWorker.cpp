@@ -2,6 +2,7 @@
 #include "voice/AudioMixer.h"
 #include "voice/JitterBuffer.h"
 #include "voice/AndroidAudioRouting.h"
+#include "core/AppProfile.h"
 
 #include <QAudioFormat>
 #include <QAudioSink>
@@ -89,7 +90,9 @@ bool AudioWorker::startDevices() {
     // Honour the user's selection from Client Settings → Audio; fall back
     // to the OS default if the saved preference isn't present (device
     // unplugged, renamed, etc).
-    QSettings prefs("BSFChat", "BSFChat");
+    // Named through AppProfile so a --profile instance reads its own
+    // device preference — the same store Settings writes to.
+    QSettings prefs(bsfchat::organizationName(), bsfchat::applicationName());
     QString preferredIn  = prefs.value("audio/inputDevice").toString();
     QString preferredOut = prefs.value("audio/outputDevice").toString();
 

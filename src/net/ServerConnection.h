@@ -485,16 +485,16 @@ public:
     Q_INVOKABLE void banFromServer(const QString& userId, const QString& reason = {});
     Q_INVOKABLE void unbanFromServer(const QString& userId);
 
-    // Getter for the Q_PROPERTY declared above. Rebuilds from m_roomMembers
-    // each call (cheap at our expected member counts). Entries:
+    // Getter for the Q_PROPERTY declared above. Returns the snapshot last
+    // published by refreshMemberSnapshots(). Entries:
     //   { userId, displayName, rooms: [roomId...], reason }
-    QVariantList bannedMembers() const;
+    QVariantList bannedMembers() const { return m_bannedMembers; }
     // Server-wide members union. Entries:
     //   { userId, displayName, avatarUrl, rooms: [roomId...] }
     // Only users whose LATEST membership per room is "join" are included;
     // a user who's "join" in one room and "leave" in another still counts
     // as long as at least one room shows them as joined.
-    QVariantList serverMembers() const;
+    QVariantList serverMembers() const { return m_serverMembers; }
 
     Q_INVOKABLE void updateDisplayName(const QString& name);
     // Update the server-wide name (bsfchat.server.info). Requires MANAGE_SERVER.
@@ -936,6 +936,26 @@ private:
     QJsonArray m_serverRoles;
     QVariantList m_categorizedRooms;
     void rebuildCategorizedRooms();
+
+    // Same diff-gated publish as rebuildCategorizedRooms(), for the other
+    // snapshot lists QML rebuilds delegates from (see net/SnapshotGate.h).
+    //
+    // directRooms() stays a fresh build for its callers; m_publishedDirectRooms
+    // only remembers what the last directRoomsChanged() announced, so a sync
+    // pass that moved no DM's order, typing or presence stays silent.
+    QVariantList m_publishedDirectRooms;
+    void refreshDirectRooms();
+
+    // serverMembers / bannedMembers walk every cached member event, so they
+    // are rebuilt only when an input moved (m_roomMembers or the display-name
+    // cache — mark the flag wherever either is written) and announced only
+    // when the rebuilt list differs.
+    QVariantList m_serverMembers;
+    QVariantList m_bannedMembers;
+    bool m_memberSnapshotsDirty = false;
+    QVariantList buildServerMembers() const;
+    QVariantList buildBannedMembers() const;
+    void refreshMemberSnapshots();
 
     // Build the QML-facing voice roster snapshot (display names + media
     // flags + per-peer connection state stamped onto m_voiceMembers).

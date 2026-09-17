@@ -1,5 +1,6 @@
 #include "core/Settings.h"
 #include "core/AppProfile.h"
+#include "core/ReadState.h"
 #include "core/ReleaseSelection.h"
 #include "util/FileLogger.h"
 
@@ -408,6 +409,19 @@ void Settings::setLastReadTs(const QString& roomId, qint64 tsMs)
     if (m_settings.value(key, 0).toLongLong() == tsMs) return;
     m_settings.setValue(key, tsMs);
     emit lastReadTsChanged(roomId);
+}
+
+bool Settings::seedLastReadTs(const QString& roomId, qint64 seedTs)
+{
+    if (roomId.isEmpty() || seedTs <= 0) return false;
+    if (lastReadTs(roomId) > 0) return false;
+    setLastReadTs(roomId, seedTs);
+    return true;
+}
+
+bool Settings::isRoomUnread(const QString& roomId, qint64 lastMessageTs) const
+{
+    return bsfchat::client::isUnread(lastMessageTs, lastReadTs(roomId));
 }
 
 bool Settings::isRoomMuted(const QString& roomId) const
