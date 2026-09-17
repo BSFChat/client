@@ -1622,6 +1622,20 @@ void ServerConnection::setupVoiceSession()
         Q_UNUSED(effectiveMuted);
 #endif
     });
+    // The deafen half of the same seam. It used to reach the engine only
+    // from the deafenedChanged handler below, which cannot fire when the
+    // value has not changed — so joining (or switching channel) while
+    // already deafened built a fresh engine at the undeafened default and
+    // the user heard everybody, with the UI still showing them deafened.
+    // VoiceSession re-applies through this hook every time it starts an
+    // engine.
+    vs->setDeafenGate([this](bool deafened) {
+#ifdef BSFCHAT_VOICE_ENABLED
+        if (m_voiceEngine) m_voiceEngine->setDeafened(deafened);
+#else
+        Q_UNUSED(deafened);
+#endif
+    });
 
     // ---- QML-facing mirrors ---------------------------------------
     connect(vs, &VoiceSession::stateChanged, this, [this]() {
@@ -1659,9 +1673,8 @@ void ServerConnection::setupVoiceSession()
     });
     connect(vs, &VoiceSession::deafenedChanged, this, [this]() {
         m_voiceDeafened = m_voiceSession->deafened();
-#ifdef BSFCHAT_VOICE_ENABLED
-        if (m_voiceEngine) m_voiceEngine->setDeafened(m_voiceDeafened);
-#endif
+        // The engine is driven by setDeafenGate above — one path, which
+        // also covers the join/switch case this handler could not see.
         emit voiceDeafenedChanged();
     });
     connect(vs, &VoiceSession::errorOccurred, this,

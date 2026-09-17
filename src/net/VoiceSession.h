@@ -123,12 +123,23 @@ public:
     using TurnUpdater = std::function<void(const QJsonObject&)>;
     // Apply the effective mic gate to the running transport.
     using MicGate = std::function<void(bool effectiveMuted)>;
+    // Apply the deafen state to the running transport. Separate from
+    // MicGate because they gate opposite directions — mute is capture,
+    // deafen is playback — and, more to the point, because deafen used
+    // to have no hook at all: it reached the engine only through
+    // ServerConnection's deafenedChanged handler, which by definition
+    // does not fire when the value has not changed. A user who was
+    // already deafened and then joined (or switched channel) got a
+    // freshly-built engine at the AudioEngine default, undeafened, and
+    // heard everybody while the UI showed them deafened.
+    using DeafenGate = std::function<void(bool deafened)>;
 
     void setEngineStarter(EngineStarter f) { m_startEngine = std::move(f); }
     void setEngineStopper(EngineStopper f) { m_stopEngine = std::move(f); }
     void setSignalSink(SignalSink f) { m_signalSink = std::move(f); }
     void setTurnUpdater(TurnUpdater f) { m_turnUpdater = std::move(f); }
     void setMicGate(MicGate f) { m_micGate = std::move(f); }
+    void setDeafenGate(DeafenGate f) { m_deafenGate = std::move(f); }
 
     // ---- Intents (UI / app) ----------------------------------------
     // Join `roomId`. Switching channels enqueues the leave of the current
@@ -243,6 +254,7 @@ private:
     void unwind(QString roomId, QString reason);
     void replayBufferedSignals();
     void applyMicGate();
+    void applyDeafenGate();
     void scheduleTurnRefresh(const QJsonObject& config);
     // True when `op` is the request currently awaiting a reply and it
     // concerns `roomId`. Late replies to superseded requests are dropped.
@@ -272,6 +284,11 @@ private:
     // Last gate value handed to the transport, so a redundant apply is
     // free and so a reconnecting engine can be re-gated.
     std::optional<bool> m_appliedGate;
+    // What the running transport was last told about deafening. Reset
+    // whenever a NEW engine is about to be fed, so the state is pushed
+    // again rather than suppressed as a no-op — the same reason
+    // m_appliedGate is reset in onTurnConfig.
+    std::optional<bool> m_appliedDeafen;
 
     // V-H2 — one re-POST per retirement, never a loop.
     bool m_rejoinAttempted = false;
@@ -289,6 +306,7 @@ private:
     SignalSink m_signalSink;
     TurnUpdater m_turnUpdater;
     MicGate m_micGate;
+    DeafenGate m_deafenGate;
 
 public:
     // Bound on the V-C1 replay buffer. A join that never completes must

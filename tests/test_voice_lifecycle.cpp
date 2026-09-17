@@ -171,6 +171,7 @@ public:
             turnUpdates.append(cfg);
         });
         session->setMicGate([this](bool gate) { gates.append(gate); });
+        session->setDeafenGate([this](bool d) { deafenGates.append(d); });
     }
 
     bool startSucceeds = true;
@@ -183,6 +184,7 @@ public:
     QVector<CallSignal> delivered;
     QVector<QJsonObject> turnUpdates;
     QVector<bool> gates;
+    QVector<bool> deafenGates;
 };
 
 // Drives a session all the way to Active, leaving the fakes primed.
@@ -253,6 +255,7 @@ private slots:
     void outboxKeepsTheCandidateBatchUntilItIsAccepted();
     void leavingFlushesTheHangupsStopItselfQueued();
     void aFailedPeerKeepsSayingFailedInsteadOfNew();
+    void joiningWhileDeafenedDeafensTheNewEngine();
 
     // ---- V-L4 -------------------------------------------------------
     void transportSelectorRefusesMixedRoster();
@@ -1163,6 +1166,55 @@ void TestVoiceLifecycle::aFailedPeerKeepsSayingFailedInsteadOfNew()
     // without a second code path.
     QCOMPARE(voice::peerDisplayState(QStringLiteral("connecting"), true),
              QStringLiteral("connecting"));
+}
+
+void TestVoiceLifecycle::joiningWhileDeafenedDeafensTheNewEngine()
+{
+    // Deafen reached the transport only through ServerConnection's
+    // deafenedChanged handler, which by definition cannot fire when the
+    // value has not changed. Every join builds a BRAND NEW VoiceEngine
+    // at the AudioEngine default (undeafened), so a user who was already
+    // deafened — because they deafened before joining, or deafened in
+    // one channel and switched to another — heard everybody, while the
+    // UI and the server both said they were deafened. Mute already had
+    // this covered (V-M7, the m_appliedGate reset in onTurnConfig);
+    // deafen had no hook at all.
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+
+    // Deafen before joining anything.
+    s.toggleDeafen();
+    QVERIFY(s.deafened());
+    QCOMPARE(engine.deafenGates, QVector<bool>{true});
+
+    joinTo(s, net, "!room:x");
+    QCOMPARE(s.state(), VoiceSession::State::Active);
+    QCOMPARE(engine.starts, 1);
+    // THE REGRESSION: the fresh engine is told, even though the value
+    // has not changed since the last time anything was told.
+    QCOMPARE(engine.deafenGates, (QVector<bool>{true, true}));
+    // The join also announced the non-default state to the server, the
+    // way the mic gate already did.
+    net.replyStateOk("!room:x");
+
+    // Mid-call toggles still reach it, and still only on a change.
+    s.toggleDeafen();
+    QVERIFY(!s.deafened());
+    QCOMPARE(engine.deafenGates, (QVector<bool>{true, true, false}));
+    net.replyStateOk("!room:x");
+
+    // Channel switch: another new engine, so the state is pushed again
+    // even though the value is unchanged.
+    s.requestJoin("!other:x");
+    net.replyLeaveOk("!room:x");
+    net.replyJoinOk("!other:x");
+    net.replyTurn(turnConfig());
+    QCOMPARE(s.state(), VoiceSession::State::Active);
+    QCOMPARE(engine.starts, 2);
+    QCOMPARE(engine.deafenGates, (QVector<bool>{true, true, false, false}));
 }
 
 void TestVoiceLifecycle::transportSelectorRefusesMixedRoster()
