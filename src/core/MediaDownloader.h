@@ -35,6 +35,11 @@ public:
     // so we don't need a separate index file.
     void setCacheSizeLimit(qint64 bytes) { m_cacheSizeLimit = bytes; }
 
+    // The part of a media URL that identifies the OBJECT — everything before
+    // the query string, which carries the session access token. Public and
+    // static so the property can be tested without a cache directory.
+    static QString cacheKeyForUrl(const QString& url);
+
 signals:
     void completed(QString remoteUrl, QString localFileUrl);
     void failed(QString remoteUrl, QString error);
