@@ -306,6 +306,41 @@ void Settings::setShowMemberList(bool v) {
     }
 }
 
+QVariantMap Settings::popoutGeometry(const QString& kind) const {
+    // Anything that is not the screen kind is a camera: the caller is
+    // qml/js/VideoWindows.js geometryKey(), but a settings file edited by
+    // hand must not be able to conjure a third bucket.
+    const QString k = (kind == QLatin1String("screen"))
+        ? QStringLiteral("screen") : QStringLiteral("camera");
+    const QString base = QStringLiteral("popout/") + k + QLatin1Char('/');
+    QVariantMap out;
+    out.insert(QStringLiteral("x"),
+               m_settings.value(base + QStringLiteral("x"), -1).toInt());
+    out.insert(QStringLiteral("y"),
+               m_settings.value(base + QStringLiteral("y"), -1).toInt());
+    out.insert(QStringLiteral("width"),
+               m_settings.value(base + QStringLiteral("width"), -1).toInt());
+    out.insert(QStringLiteral("height"),
+               m_settings.value(base + QStringLiteral("height"), -1).toInt());
+    return out;
+}
+
+void Settings::setPopoutGeometry(const QString& kind,
+                                 int x, int y, int width, int height) {
+    const QString k = (kind == QLatin1String("screen"))
+        ? QStringLiteral("screen") : QStringLiteral("camera");
+    const QString base = QStringLiteral("popout/") + k + QLatin1Char('/');
+    // A window that is being destroyed reports 0x0 on some platforms, and
+    // storing that would reopen the next pop-out at the minimum size for
+    // no reason. Refuse anything below the floor VideoWindows.js clamps
+    // to instead of writing it and clamping on the way back out.
+    if (width < 320 || height < 180) return;
+    m_settings.setValue(base + QStringLiteral("x"), x);
+    m_settings.setValue(base + QStringLiteral("y"), y);
+    m_settings.setValue(base + QStringLiteral("width"), width);
+    m_settings.setValue(base + QStringLiteral("height"), height);
+}
+
 int Settings::windowX() const {
     return m_settings.value("window/x", -1).toInt();
 }
