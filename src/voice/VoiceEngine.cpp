@@ -1,5 +1,6 @@
 #include "voice/VoiceEngine.h"
 #include "voice/AudioEngine.h"
+#include "voice/CallSignalCodec.h"
 #include "voice/VoiceStartPolicy.h"
 #include "voice/PeerCaps.h"
 #include "voice/PeerConnectionManager.h"
@@ -166,15 +167,15 @@ void VoiceEngine::stop() {
 
     m_candidateBatchTimer.stop();
 
-    // Send hangup to all peers
+    // Send hangup to all peers. The id comes from the peer object for
+    // the same reason the descriptions do (V-C3) — a hangup carrying an
+    // empty call id is discarded by the far side, which then holds the
+    // connection open until its own watchdog reaps it.
     for (auto it = m_peers.begin(); it != m_peers.end(); ++it) {
-        nlohmann::json content = {
-            {"call_id", m_callIds.value(it.key()).toStdString()},
-            {"to", it.key().toStdString()},
-            {"reason", "user_hangup"},
-            {"version", 1}
-        };
-        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallHangup), content);
+        if (!it.value()) continue;
+        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallHangup),
+                      voice::buildHangup(it.value()->callId(), it.key(),
+                                         "user_hangup"));
     }
 
     // Clean up peers
@@ -762,10 +763,22 @@ void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId,
         }
     }
 
-    m_callIds[sender] = callId;
+    // V-C3. An invite with no call id used to be stored as-is, and from
+    // then on every event of that call — our own answer included — went
+    // out unidentified, which the far side discards. Mint one instead:
+    // our half of the exchange is then always identifiable, and the
+    // peer's unidentified events still match (matchCallId).
+    QString effectiveCallId = callId;
+    if (effectiveCallId.isEmpty()) {
+        effectiveCallId = generateCallId();
+        qCWarning(logVoice, "invite from %s carries no callId — using %s for "
+                 "our half of the call", qPrintable(sender),
+                 qPrintable(effectiveCallId));
+    }
+    m_callIds[sender] = effectiveCallId;
 
     auto config = buildRtcConfig();
-    auto* peer = new PeerConnectionManager(sender, callId, config, this);
+    auto* peer = new PeerConnectionManager(sender, effectiveCallId, config, this);
     m_peers[sender] = peer;
     wirePeer(peer, sender);
     peer->setRemoteCaps(PeerCaps::fromJson(caps));
@@ -785,17 +798,31 @@ void VoiceEngine::handleCallAnswer(const QString& sender, const QString& callId,
                                    const std::string& sdp, const nlohmann::json& caps) {
     qCInfo(logVoice, "recv answer from %s callId=%s sdp_bytes=%zu",
           qPrintable(sender), qPrintable(callId), sdp.size());
-    if (callId != m_callIds.value(sender)) {
-        qCInfo(logVoice, "ignore answer from %s — callId mismatch",
-              qPrintable(sender));
+    const QString held = m_callIds.value(sender);
+    switch (voice::matchCallId(callId, held)) {
+    case voice::CallIdMatch::Reject:
+        qCInfo(logVoice, "ignore answer from %s — callId mismatch (ours %s)",
+              qPrintable(sender), qPrintable(held));
         return;
+    case voice::CallIdMatch::AcceptUnidentified:
+        // V-C3. The peer answered without echoing a call id, which means
+        // it never learned ours. Its answer can still only be about the
+        // one call we have with it, and rejecting it strands the call
+        // for good, so take it and say so.
+        qCWarning(logVoice, "answer from %s carries no callId — accepting it "
+                 "for call %s", qPrintable(sender), qPrintable(held));
+        break;
+    case voice::CallIdMatch::Accept:
+        break;
     }
     if (auto* peer = m_peers.value(sender)) {
         peer->setRemoteCaps(PeerCaps::fromJson(caps));
         peer->applyAnswer(sdp);
         // The remote description is set now, so anything parked for
-        // this call can finally be handed to libdatachannel.
-        replayInboundCandidates(sender, callId);
+        // this call can finally be handed to libdatachannel. Parked
+        // candidates are keyed by the id WE minted, which is what an
+        // unidentified answer resolves to.
+        replayInboundCandidates(sender, held);
         maybeSetupVideoFor(sender);
     } else {
         qCWarning(logVoice, "answer from unknown peer %s",
@@ -805,7 +832,10 @@ void VoiceEngine::handleCallAnswer(const QString& sender, const QString& callId,
 
 void VoiceEngine::handleCallNegotiate(const QString& sender, const QString& callId,
                                       const std::string& type, const std::string& sdp) {
-    if (callId != m_callIds.value(sender)) {
+    // V-C3: an unidentified negotiate (no call id at all) belongs to the
+    // one call we hold with this peer; only a MISMATCHING id is stale.
+    if (voice::matchCallId(callId, m_callIds.value(sender))
+        == voice::CallIdMatch::Reject) {
         qCInfo(logVoice, "ignore negotiate from %s — callId mismatch",
               qPrintable(sender));
         return;
@@ -851,7 +881,10 @@ void VoiceEngine::handleCallCandidates(const QString& sender, const QString& cal
                                         const std::vector<std::pair<std::string, std::string>>& candidates) {
     if (candidates.empty()) return;
     auto* peer = m_peers.value(sender);
-    if (peer && callId == m_callIds.value(sender)) {
+    // V-C3: as for answers — no id means "the call we have with you",
+    // a different id means a call that is not this one.
+    if (peer && voice::matchCallId(callId, m_callIds.value(sender))
+                    != voice::CallIdMatch::Reject) {
         for (const auto& [cand, mid] : candidates) {
             peer->addRemoteCandidate(cand, mid);
         }
@@ -950,57 +983,54 @@ void VoiceEngine::setDeafened(bool deafened) {
 }
 
 void VoiceEngine::onLocalDescription(const QString& peerId, const std::string& type, const std::string& sdp) {
-    auto callId = m_callIds.value(peerId);
+    // V-C3. The call id comes from the PEER OBJECT, not from m_callIds.
+    //
+    // The two are meant to agree, but m_callIds is a side table this
+    // class edits on its own schedule while the peer that will emit the
+    // description lives on: removePeer() erases the map entry and only
+    // deleteLater()s the peer, so every description and candidate batch
+    // that peer emits before the delete actually runs — a queued local
+    // description is exactly that — looked the id up in a map that no
+    // longer had it and went out with `"call_id": ""`.
+    //
+    // An empty id on the wire is not a no-op. The receiving client
+    // stores whatever the invite carried (VoiceEngine::handleCallInvite:
+    // `m_callIds[sender] = callId`) and echoes it back on its answer, so
+    // ONE such invite poisons the whole call: every answer, candidate
+    // batch and negotiate for it then fails our own equality check,
+    // there is no audio, nothing errors, and the 30 s setup watchdog
+    // re-offers into the same wall until somebody leaves the channel.
+    //
+    // PeerConnectionManager::callId() is set in its constructor and is
+    // const for the peer's life, so it cannot go missing while there is
+    // a peer to emit anything at all.
+    auto* peer = m_peers.value(peerId);
+    if (!peer) {
+        // Nothing to identify the call with, and nothing to connect:
+        // this description belongs to a peer we have already dropped.
+        qCInfo(logVoice, "dropping local %s for %s — peer already gone",
+              type.c_str(), qPrintable(peerId));
+        return;
+    }
+    const QString callId = peer->callId();
 
     // After the initial offer/answer round-trip, descriptions are
     // renegotiations (adding video m-lines etc.) and take the
     // bsfchat.call.negotiate path — legacy clients never receive them
     // because renegotiation is only ever triggered toward peers whose
     // caps advertise video_rtp.
-    // "to" is the RECIPIENT of this event. Call signaling rides the
-    // shared room timeline, so in a mesh of 3+ everyone sees everyone
-    // else's invites/answers/candidates. Without an addressee the
-    // receiver could only dispatch on `sender`, so C would apply an
-    // offer A meant for B — and because addPeer() mints a distinct call
-    // id per peer, the call-id mismatch branch in handleCallInvite read
-    // that as "peer restarted" and tore down a working connection. That
-    // is why voice worked 1:1 and collapsed at 3+.
-    //
-    // Receivers that don't understand "to" (older clients) still fall
-    // back to sender-only dispatch, so this is additive on the wire.
-    const std::string to = peerId.toStdString();
-
-    auto* peer = m_peers.value(peerId);
-    if (peer && peer->initialNegotiationDone()) {
-        nlohmann::json content = {
-            {"call_id", callId.toStdString()},
-            {"to", to},
-            {"description", {{"type", type}, {"sdp", sdp}}},
-            {"version", 1}
-        };
-        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallNegotiate), content);
+    if (peer->initialNegotiationDone()) {
+        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallNegotiate),
+                      voice::buildNegotiate(callId, peerId, type, sdp));
         return;
     }
 
     if (type == "offer") {
-        nlohmann::json content = {
-            {"call_id", callId.toStdString()},
-            {"to", to},
-            {"lifetime", 60000},
-            {"offer", {{"type", "offer"}, {"sdp", sdp}}},
-            {"bsfchat_caps", localCapsJson()},
-            {"version", 1}
-        };
-        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallInvite), content);
+        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallInvite),
+                      voice::buildInvite(callId, peerId, sdp, localCapsJson()));
     } else if (type == "answer") {
-        nlohmann::json content = {
-            {"call_id", callId.toStdString()},
-            {"to", to},
-            {"answer", {{"type", "answer"}, {"sdp", sdp}}},
-            {"bsfchat_caps", localCapsJson()},
-            {"version", 1}
-        };
-        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallAnswer), content);
+        sendCallEvent(QString::fromUtf8(bsfchat::event_type::kCallAnswer),
+                      voice::buildAnswer(callId, peerId, sdp, localCapsJson()));
     }
 }
 
@@ -1021,22 +1051,16 @@ void VoiceEngine::flushCandidateBatch() {
             continue;
         }
 
-        auto callId = m_callIds.value(it.key());
-        nlohmann::json candidates = nlohmann::json::array();
-        for (const auto& [cand, mid] : it.value()) {
-            candidates.push_back({
-                {"candidate", cand},
-                {"sdpMid", mid},
-                {"sdpMLineIndex", 0}
-            });
+        // V-C3: the peer owns the call id — see onLocalDescription. A
+        // batch for a peer we no longer hold is dropped rather than sent
+        // unidentified; there is no connection left for it to help.
+        auto* peer = m_peers.value(it.key());
+        if (!peer) {
+            it = m_pendingCandidates.erase(it);
+            continue;
         }
-
-        nlohmann::json content = {
-            {"call_id", callId.toStdString()},
-            {"to", it.key().toStdString()},   // see onLocalDescription
-            {"candidates", candidates},
-            {"version", 1}
-        };
+        const nlohmann::json content =
+            voice::buildCandidates(peer->callId(), it.key(), it.value());
         // V-M2: the batch is handed to the outbox, which keeps it until
         // the server has actually taken it and re-sends it on backoff if
         // not. Candidates are sent exactly ONCE on this path, so before

@@ -11,6 +11,7 @@
 #include "identity/IdentityClient.h"
 #include "core/Settings.h"
 #include "store/LocalCache.h"
+#include "voice/CallSignalCodec.h"
 #include "voice/VoiceRosterReconcile.h"
 #include "voice/VoiceTransportSelector.h"
 #ifdef BSFCHAT_VOICE_ENABLED
@@ -1765,15 +1766,17 @@ void ServerConnection::dispatchCallSignal(const CallSignal& signal)
 {
 #ifdef BSFCHAT_VOICE_ENABLED
     if (!m_voiceEngine) return;
-    nlohmann::json c;
-    try {
-        c = nlohmann::json::parse(signal.payload.toStdString());
-    } catch (const std::exception& e) {
-        qWarning("[voice] unparseable %s from %s: %s", qPrintable(signal.type),
-                 qPrintable(signal.sender), e.what());
+    // V-C3: one codec for both ends of the wire. VoiceEngine builds
+    // these events with voice::build*(); this reads them back with the
+    // same header, so the key set cannot drift between the two files
+    // (see src/voice/CallSignalCodec.h — an unreadable `call_id` is a
+    // silent, permanent call failure).
+    const voice::InboundCall call = voice::parseCallContent(signal.payload);
+    if (!call.valid) {
+        qWarning("[voice] unparseable %s from %s", qPrintable(signal.type),
+                 qPrintable(signal.sender));
         return;
     }
-    if (!c.is_object()) return;
 
     // Call signalling rides the shared room timeline, so every
     // participant sees every other participant's invites/answers/
@@ -1785,37 +1788,24 @@ void ServerConnection::dispatchCallSignal(const CallSignal& signal)
     // Newer clients stamp the recipient in "to". Absent (older client) we
     // keep the old sender-only behaviour rather than dropping the event,
     // so a mixed fleet still connects.
-    std::string toUser;
-    if (auto toIt = c.find("to"); toIt != c.end() && toIt->is_string())
-        toUser = toIt->get<std::string>();
-    if (!toUser.empty() && toUser != m_userId.toStdString()) return;
+    if (!voice::addressedToUs(call.to, m_userId)) return;
 
     const QString& sender = signal.sender;
     const QString& type = signal.type;
     if (type == QString::fromUtf8(bsfchat::event_type::kCallInvite)) {
-        m_voiceEngine->handleCallInvite(sender,
-            QString::fromStdString(c.value("call_id", "")),
-            c.value("offer", nlohmann::json::object()).value("sdp", ""),
-            c.value("bsfchat_caps", nlohmann::json::object()));
+        m_voiceEngine->handleCallInvite(sender, call.callId, call.sdp,
+                                        call.caps);
     } else if (type == QString::fromUtf8(bsfchat::event_type::kCallAnswer)) {
-        m_voiceEngine->handleCallAnswer(sender,
-            QString::fromStdString(c.value("call_id", "")),
-            c.value("answer", nlohmann::json::object()).value("sdp", ""),
-            c.value("bsfchat_caps", nlohmann::json::object()));
+        m_voiceEngine->handleCallAnswer(sender, call.callId, call.sdp,
+                                        call.caps);
     } else if (type == QString::fromUtf8(bsfchat::event_type::kCallNegotiate)) {
-        const auto desc = c.value("description", nlohmann::json::object());
-        m_voiceEngine->handleCallNegotiate(sender,
-            QString::fromStdString(c.value("call_id", "")),
-            desc.value("type", ""), desc.value("sdp", ""));
+        m_voiceEngine->handleCallNegotiate(sender, call.callId, call.sdpType,
+                                           call.sdp);
     } else if (type == QString::fromUtf8(bsfchat::event_type::kCallCandidates)) {
-        std::vector<std::pair<std::string, std::string>> cands;
-        for (const auto& ic : c.value("candidates", nlohmann::json::array()))
-            cands.emplace_back(ic.value("candidate", ""), ic.value("sdpMid", ""));
-        m_voiceEngine->handleCallCandidates(sender,
-            QString::fromStdString(c.value("call_id", "")), cands);
+        m_voiceEngine->handleCallCandidates(sender, call.callId,
+                                            call.candidates);
     } else if (type == QString::fromUtf8(bsfchat::event_type::kCallHangup)) {
-        m_voiceEngine->handleCallHangup(sender,
-            QString::fromStdString(c.value("call_id", "")));
+        m_voiceEngine->handleCallHangup(sender, call.callId);
     }
 #else
     Q_UNUSED(signal);

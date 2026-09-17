@@ -67,6 +67,22 @@ target_include_directories(test_voice_lifecycle PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_voice_lifecycle PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_voice_lifecycle COMMAND test_voice_lifecycle)
 
+# The m.call.* wire format, both ends at once (V-C3): the builders
+# VoiceEngine sends with, taken through the protocol's real sync parser,
+# read back by the parser ServerConnection dispatches with. The failure
+# this exists for — an answer arriving with an empty call id, silently
+# discarded forever — was invisible precisely because the two ends were
+# separate literal key sets in separate files.
+qt_add_executable(test_call_signalling
+    test_call_signalling.cpp
+)
+target_include_directories(test_call_signalling PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_call_signalling PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Test
+)
+add_test(NAME test_call_signalling COMMAND test_call_signalling)
+
 # Codec round-trip tests — only meaningful where a software H.264
 # backend exists (openh264: macOS/Linux desktop).
 if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
