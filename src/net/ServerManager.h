@@ -4,6 +4,7 @@
 #include <QList>
 #include <QStringList>
 
+#include "net/ServerDiscovery.h"
 #include "net/ServerRoster.h"
 
 class ServerConnection;
@@ -48,6 +49,9 @@ public:
     // sidebar focus.
     ServerConnection* voiceServer() const;
 
+    // All four take whatever the user typed. Each resolves it first (see
+    // ServerDiscovery: normalisation + .well-known), so a server entry is
+    // never saved under the marketing domain the user happened to know.
     Q_INVOKABLE void addServer(const QString& url, const QString& username, const QString& password);
     Q_INVOKABLE void addServerWithOidc(const QString& url);
     Q_INVOKABLE void checkLoginFlows(const QString& url);
@@ -145,12 +149,34 @@ signals:
     void serverRemoved(int index);
     void loginError(const QString& serverUrl, const QString& error);
     void loginSuccess(const QString& serverUrl);
+    // Kept for the existing QML bindings, and now honest: `passwordAvailable`
+    // is true only when the server actually advertised m.login.password. It
+    // used to be forced true on any error, which is how a 404 from a web
+    // server produced a registration form. `url` is the RESOLVED homeserver.
     void loginFlowsChecked(const QString& url, bool oidcAvailable, const QString& providerUrl, bool passwordAvailable);
+    // The full story, for the Add-server dialog. `outcome` is one of
+    // "oidc" / "password" / "both" / "no_supported_flow" / "unreachable" /
+    // "not_a_server" (bsfchat::loginFlowKindName). `redirected` means
+    // .well-known sent us somewhere other than what was typed, and `note`
+    // is a non-empty explanation only when discovery had to fall back from
+    // a well-known file that named an unreachable homeserver.
+    void serverProbed(const QString& requestedUrl, const QString& resolvedUrl,
+                      const QString& outcome, const QString& providerUrl,
+                      bool redirected, const QString& note);
     void identityLoginComplete(const QStringList& serverUrls);
     void identityLoginFailed(const QString& error);
     void viewingDmsChanged();
 
 private:
+    // The bodies of addServer / registerServer / addServerWithOidc, once a
+    // homeserver URL has been settled on. Separated so the identity-sync
+    // path — which already holds canonical URLs from /api/servers — can add
+    // a dozen servers without a .well-known round trip each. They still
+    // normalise, which costs nothing and is pure.
+    void addServerResolved(const QString& url, const QString& username, const QString& password);
+    void registerServerResolved(const QString& url, const QString& username, const QString& password);
+    void addServerWithOidcResolved(const QString& url);
+
     void onLoginSuccess(ServerConnection* conn);
     void onLoginFailed(ServerConnection* conn, const QString& error);
     // Replace m_connections[index] with a fresh ServerConnection to
@@ -168,6 +194,10 @@ private:
     // Connection list + active pointer/index. See ServerRoster.h for why
     // the bookkeeping lives there rather than inline.
     ServerRoster<ServerConnection> m_roster;
+    // URL normalisation + .well-known discovery + the login-flow probe.
+    // Constructed in the ctor body because its fetch function parents a
+    // QNetworkAccessManager to `this`.
+    bsfchat::ServerDiscovery m_discovery;
     bool m_viewingDms = false;
 
     // Identity-first login state. m_identityClient runs the OIDC browser

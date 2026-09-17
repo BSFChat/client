@@ -1,4 +1,5 @@
 #include "net/ServerManager.h"
+#include "net/HttpFetch.h"
 #include "net/VoiceQuit.h"
 #include "net/ServerConnection.h"
 #include "net/MatrixClient.h"
@@ -56,6 +57,11 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
         conn->deleteLater();
     };
 
+    // Discovery owns a QNetworkAccessManager parented to this object, so
+    // it cannot be built in the initialiser list before QObject is up.
+    m_discovery = bsfchat::ServerDiscovery(
+        bsfchat::networkFetch(this, bsfchat::kDiscoveryTimeoutMs));
+
     // Restore saved servers
     auto saved = m_settings->savedServers();
     for (const auto& entry : saved) {
@@ -78,6 +84,24 @@ ServerManager::~ServerManager() = default;
 
 void ServerManager::addServer(const QString& url, const QString& username, const QString& password)
 {
+    m_discovery.resolve(url, [this, url, username, password](const bsfchat::Resolution& r) {
+        if (!r.valid()) {
+            emit loginError(url, tr("\"%1\" is not a server address.").arg(url));
+            return;
+        }
+        addServerResolved(r.homeserver, username, password);
+    });
+}
+
+void ServerManager::addServerResolved(const QString& rawUrl, const QString& username,
+                                      const QString& password)
+{
+    const QString url = bsfchat::normaliseServerUrl(rawUrl);
+    if (url.isEmpty()) {
+        emit loginError(rawUrl, tr("\"%1\" is not a server address.").arg(rawUrl));
+        return;
+    }
+
     auto* conn = new ServerConnection(url, this);
     m_roster.append(conn);
     m_serverListModel->addServer(url, url); // Temporary name until login
@@ -103,6 +127,24 @@ void ServerManager::addServer(const QString& url, const QString& username, const
 
 void ServerManager::registerServer(const QString& url, const QString& username, const QString& password)
 {
+    m_discovery.resolve(url, [this, url, username, password](const bsfchat::Resolution& r) {
+        if (!r.valid()) {
+            emit loginError(url, tr("\"%1\" is not a server address.").arg(url));
+            return;
+        }
+        registerServerResolved(r.homeserver, username, password);
+    });
+}
+
+void ServerManager::registerServerResolved(const QString& rawUrl, const QString& username,
+                                           const QString& password)
+{
+    const QString url = bsfchat::normaliseServerUrl(rawUrl);
+    if (url.isEmpty()) {
+        emit loginError(rawUrl, tr("\"%1\" is not a server address.").arg(rawUrl));
+        return;
+    }
+
     auto* conn = new ServerConnection(url, this);
     m_roster.append(conn);
     m_serverListModel->addServer(url, url);
@@ -127,39 +169,51 @@ void ServerManager::registerServer(const QString& url, const QString& username, 
 
 void ServerManager::checkLoginFlows(const QString& url)
 {
-    auto* tempClient = new MatrixClient(this);
-    tempClient->setHomeserver(url);
-    tempClient->getLoginFlows();
+    // This used to probe <what the user typed>/_matrix/client/v3/login
+    // directly and answer *every* failure with
+    // `loginFlowsChecked(url, false, QString(), true)` — "assume
+    // password-only". A URL that was not a BSFChat server at all therefore
+    // produced a password/register form, which is exactly what happened to
+    // someone who typed `bsfchat.com` (the product domain) instead of
+    // `chat.bsfchat.com` (the homeserver): the landing site answers that
+    // path with an nginx 404 page, the dialog offered to register them on
+    // it, and registration failed with the 404 as its error text.
+    //
+    // Now discovery runs first (so `bsfchat.com` reaches `chat.bsfchat.com`
+    // via .well-known when the file is published) and the outcome is
+    // reported for what it is.
+    m_discovery.resolveAndProbe(url, [this, url](const bsfchat::Discovery& d) {
+        const QString resolved = d.resolution.valid() ? d.resolution.homeserver : url;
 
-    connect(tempClient, &MatrixClient::loginFlowsResult, this, [this, url, tempClient](const QJsonArray& flows) {
-        bool oidcAvailable = false;
-        bool passwordAvailable = false;
-        QString providerUrl;
-
-        for (const auto& flowVal : flows) {
-            QJsonObject flow = flowVal.toObject();
-            QString type = flow.value("type").toString();
-            if (type == "m.login.token") {
-                oidcAvailable = true;
-                providerUrl = flow.value("identity_provider").toString();
-            } else if (type == "m.login.password") {
-                passwordAvailable = true;
-            }
-        }
-
-        emit loginFlowsChecked(url, oidcAvailable, providerUrl, passwordAvailable);
-        tempClient->deleteLater();
-    });
-
-    connect(tempClient, &MatrixClient::loginError, this, [this, url, tempClient](const QString& /*error*/) {
-        // On error, assume password-only
-        emit loginFlowsChecked(url, false, QString(), true);
-        tempClient->deleteLater();
+        // Legacy shape, unchanged arity so existing QML keeps binding. The
+        // difference is that passwordAvailable is now the truth.
+        emit loginFlowsChecked(resolved, d.probe.oidc(), d.probe.identityProvider,
+                               d.probe.password());
+        emit serverProbed(url, resolved, bsfchat::loginFlowKindName(d.probe.kind),
+                          d.probe.identityProvider, d.resolution.redirected(),
+                          d.resolution.note);
     });
 }
 
 void ServerManager::addServerWithOidc(const QString& url)
 {
+    m_discovery.resolve(url, [this, url](const bsfchat::Resolution& r) {
+        if (!r.valid()) {
+            emit loginError(url, tr("\"%1\" is not a server address.").arg(url));
+            return;
+        }
+        addServerWithOidcResolved(r.homeserver);
+    });
+}
+
+void ServerManager::addServerWithOidcResolved(const QString& rawUrl)
+{
+    const QString url = bsfchat::normaliseServerUrl(rawUrl);
+    if (url.isEmpty()) {
+        emit loginError(rawUrl, tr("\"%1\" is not a server address.").arg(rawUrl));
+        return;
+    }
+
     auto* conn = new ServerConnection(url, this);
     m_roster.append(conn);
     m_serverListModel->addServer(url, url);
@@ -576,7 +630,11 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
                         if (already) continue;
 
                         addedUrls.append(serverUrl);
-                        addServerWithOidc(serverUrl);
+                        // Already a canonical homeserver URL from the
+                        // identity service — normalise it, but don't spend
+                        // a .well-known round trip per server re-deriving
+                        // what it just told us.
+                        addServerWithOidcResolved(serverUrl);
                     }
 
                     // D-M8: an identity account that belongs to NO server used

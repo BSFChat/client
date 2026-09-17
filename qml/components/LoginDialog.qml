@@ -36,6 +36,68 @@ Dialog {
     // /api/servers fetch + per-server auto-login).
     property bool identitySyncInProgress: false
 
+    // --- What the last probe of the typed URL found (see
+    // ServerManager::serverProbed). Before a probe lands we know nothing,
+    // and `probed` being false is what keeps the password/register form off
+    // screen until the server has told us it accepts passwords. The old
+    // dialog showed that form by default and treated any probe failure as
+    // "password-only", so a URL that was not a server at all — the product
+    // domain, a typo, a web server — got an invitation to register.
+    property bool probed: false
+    // The homeserver we will actually talk to. Differs from what was typed
+    // when .well-known redirected us; shown either way so the user learns
+    // the real address of the server they just joined.
+    property string resolvedUrl: ""
+    // "oidc" | "password" | "both" | "no_supported_flow" | "unreachable" |
+    // "not_a_server". Mirrors bsfchat::loginFlowKindName.
+    property string probeOutcome: ""
+    // Non-empty only when discovery had to fall back from a well-known file
+    // that named a homeserver which did not answer.
+    property string probeNote: ""
+    property bool probeRedirected: false
+
+    function probeFailed() {
+        return dialog.probeOutcome === "not_a_server"
+            || dialog.probeOutcome === "unreachable"
+            || dialog.probeOutcome === "no_supported_flow";
+    }
+
+    function probeSummary() {
+        if (dialog.probeOutcome === "not_a_server")
+            return "No BSFChat server found at " + dialog.resolvedUrl;
+        if (dialog.probeOutcome === "unreachable")
+            return "Could not reach " + dialog.resolvedUrl
+                 + " — check the address, or try again in a moment.";
+        if (dialog.probeOutcome === "no_supported_flow")
+            return dialog.resolvedUrl + " offers no sign-in method this app supports.";
+        if (dialog.probeRedirected)
+            return "Found server at " + dialog.resolvedUrl;
+        return "Server: " + dialog.resolvedUrl;
+    }
+
+    // What the connect buttons send. Prefer the resolved homeserver so the
+    // saved server entry is the real address; fall back to the raw text if
+    // the user somehow gets here before a probe answered (ServerManager
+    // resolves again on its side either way).
+    function targetUrl() {
+        return dialog.resolvedUrl !== "" ? dialog.resolvedUrl : urlField.text.trim();
+    }
+
+    // Every fresh probe starts from "we know nothing" — a stale outcome
+    // from the previous URL must never decide what this URL is offered.
+    function beginCheck(url) {
+        dialog.checkingFlows = true;
+        dialog.probed = false;
+        dialog.oidcAvailable = false;
+        dialog.passwordAvailable = false;
+        dialog.showPasswordFallback = false;
+        dialog.resolvedUrl = "";
+        dialog.probeOutcome = "";
+        dialog.probeNote = "";
+        dialog.probeRedirected = false;
+        serverManager.checkLoginFlows(url);
+    }
+
     background: Rectangle {
         color: Theme.bg1
         radius: Theme.r3
@@ -64,6 +126,16 @@ Dialog {
             dialog.oidcAvailable = oidcAvail;
             dialog.oidcProviderUrl = providerUrl;
             dialog.passwordAvailable = passwordAvail;
+        }
+        // The detail loginFlowsChecked has no room for: which of the six
+        // outcomes happened, and where discovery decided the server lives.
+        function onServerProbed(requestedUrl, resolvedUrl, outcome, providerUrl, redirected, note) {
+            dialog.checkingFlows = false;
+            dialog.probed = true;
+            dialog.resolvedUrl = resolvedUrl;
+            dialog.probeOutcome = outcome;
+            dialog.probeRedirected = redirected;
+            dialog.probeNote = note;
         }
         function onLoginSuccess(serverUrl) {
             dialog.oidcInProgress = false;
@@ -104,6 +176,11 @@ Dialog {
         dialog.oidcInProgress = false;
         dialog.identitySyncInProgress = false;
         dialog.checkingFlows = false;
+        dialog.probed = false;
+        dialog.resolvedUrl = "";
+        dialog.probeOutcome = "";
+        dialog.probeNote = "";
+        dialog.probeRedirected = false;
     }
 
     onClosed: {
@@ -117,6 +194,11 @@ Dialog {
         dialog.showPasswordFallback = false;
         dialog.showManualServer = false;
         dialog.identitySyncInProgress = false;
+        dialog.probed = false;
+        dialog.resolvedUrl = "";
+        dialog.probeOutcome = "";
+        dialog.probeNote = "";
+        dialog.probeRedirected = false;
     }
 
     contentItem: ColumnLayout {
@@ -276,12 +358,8 @@ Dialog {
                     padding: Theme.sp.s3
 
                     onEditingFinished: {
-                        if (text.trim() !== "") {
-                            dialog.checkingFlows = true;
-                            dialog.oidcAvailable = false;
-                            dialog.passwordAvailable = true;
-                            serverManager.checkLoginFlows(text.trim());
-                        }
+                        if (urlField.text.trim() !== "")
+                            dialog.beginCheck(urlField.text.trim());
                     }
                 }
 
@@ -309,11 +387,8 @@ Dialog {
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                     }
                     onClicked: {
-                        dialog.checkingFlows = true;
-                        dialog.oidcAvailable = false;
-                        dialog.passwordAvailable = true;
                         dialog.errorMessage = "";
-                        serverManager.checkLoginFlows(urlField.text.trim());
+                        dialog.beginCheck(urlField.text.trim());
                     }
                 }
             }
@@ -326,6 +401,33 @@ Dialog {
             color: Theme.fg2
             visible: dialog.checkingFlows && dialog.showManualServer
             Layout.alignment: Qt.AlignHCenter
+        }
+
+        // What we found. THE surface for "that is not a server" — the case
+        // the old dialog answered with a registration form. Also names the
+        // homeserver we resolved to, so someone who typed the product
+        // domain learns the address their client is actually using.
+        Text {
+            Layout.fillWidth: true
+            visible: dialog.showManualServer && dialog.probed && !dialog.checkingFlows
+            text: dialog.probeSummary()
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.sm
+            color: dialog.probeFailed() ? Theme.danger : Theme.fg2
+            wrapMode: Text.Wrap
+        }
+
+        // Only set when a well-known file named a homeserver that did not
+        // answer and we fell back to the typed URL. Silence otherwise:
+        // having no well-known file at all is the normal case.
+        Text {
+            Layout.fillWidth: true
+            visible: dialog.showManualServer && dialog.probeNote !== "" && !dialog.checkingFlows
+            text: dialog.probeNote
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.xs
+            color: Theme.fg3
+            wrapMode: Text.Wrap
         }
 
         // OIDC login button
@@ -353,8 +455,25 @@ Dialog {
             onClicked: {
                 dialog.errorMessage = "";
                 dialog.oidcInProgress = true;
-                serverManager.addServerWithOidc(urlField.text.trim());
+                serverManager.addServerWithOidc(dialog.targetUrl());
             }
+        }
+
+        // Identity-only servers (the official one) have no register form to
+        // fall back to, and the button above gives no clue that it will
+        // make an account as well as use one. Say so, in one line, rather
+        // than leaving "where do I sign up?" as the user's problem.
+        Text {
+            Layout.fillWidth: true
+            Layout.topMargin: -Theme.sp.s1
+            visible: dialog.showManualServer && dialog.probed && dialog.oidcAvailable
+                     && !dialog.passwordAvailable && !dialog.checkingFlows
+            text: "No account needed — one is created the first time you sign in."
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.xs
+            color: Theme.fg3
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.Wrap
         }
 
         // When OIDC is available, collapse password behind a link.
@@ -366,7 +485,8 @@ Dialog {
             font.pixelSize: Theme.fontSize.sm
             color: Theme.accent
             horizontalAlignment: Text.AlignHCenter
-            visible: dialog.showManualServer && dialog.oidcAvailable && dialog.passwordAvailable && !dialog.checkingFlows
+            visible: dialog.showManualServer && dialog.probed && dialog.oidcAvailable
+                     && dialog.passwordAvailable && !dialog.checkingFlows
 
             MouseArea {
                 anchors.fill: parent
@@ -379,7 +499,8 @@ Dialog {
         ColumnLayout {
             spacing: Theme.sp.s1
             Layout.fillWidth: true
-            visible: dialog.showManualServer && dialog.passwordAvailable && !dialog.checkingFlows
+            visible: dialog.showManualServer && dialog.probed && dialog.passwordAvailable
+                     && !dialog.checkingFlows
                      && (!dialog.oidcAvailable || dialog.showPasswordFallback)
 
             Text {
@@ -413,7 +534,8 @@ Dialog {
         ColumnLayout {
             spacing: Theme.sp.s1
             Layout.fillWidth: true
-            visible: dialog.showManualServer && dialog.passwordAvailable && !dialog.checkingFlows
+            visible: dialog.showManualServer && dialog.probed && dialog.passwordAvailable
+                     && !dialog.checkingFlows
                      && (!dialog.oidcAvailable || dialog.showPasswordFallback)
 
             Text {
@@ -469,7 +591,12 @@ Dialog {
         RowLayout {
             Layout.fillWidth: true
             spacing: Theme.sp.s3
-            visible: dialog.showManualServer && dialog.passwordAvailable && !dialog.checkingFlows
+            // `probed` is load-bearing: no Register button exists until the
+            // server has said, in a login-flows document of its own, that
+            // it accepts m.login.password. Assuming it did is the entire
+            // bug this dialog is being fixed for.
+            visible: dialog.showManualServer && dialog.probed && dialog.passwordAvailable
+                     && !dialog.checkingFlows
                      && (!dialog.oidcAvailable || dialog.showPasswordFallback)
 
             // Ghost Register — secondary action, soft border, fg1.
@@ -501,7 +628,7 @@ Dialog {
                         return;
                     }
                     dialog.isConnecting = true;
-                    serverManager.registerServer(urlField.text.trim(), usernameField.text.trim(), passwordField.text.trim());
+                    serverManager.registerServer(dialog.targetUrl(), usernameField.text.trim(), passwordField.text.trim());
                 }
             }
 
@@ -533,7 +660,7 @@ Dialog {
                         return;
                     }
                     dialog.isConnecting = true;
-                    serverManager.addServer(urlField.text.trim(), usernameField.text.trim(), passwordField.text.trim());
+                    serverManager.addServer(dialog.targetUrl(), usernameField.text.trim(), passwordField.text.trim());
                 }
             }
         }

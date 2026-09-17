@@ -110,6 +110,8 @@ qt_add_executable(bsfchat-app
     src/net/ServerConnection.cpp
     src/net/VoiceSession.cpp
     src/net/ServerManager.cpp
+    src/net/ServerDiscovery.cpp
+    src/net/HttpFetch.cpp
     src/model/ServerListModel.cpp
     src/model/RoomListModel.cpp
     src/model/MessageModel.cpp

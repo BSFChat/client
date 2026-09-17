@@ -356,6 +356,19 @@ target_include_directories(test_server_roster PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_server_roster PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_server_roster COMMAND test_server_roster)
 
+# Add-server URL resolution: normalisation, Matrix .well-known discovery,
+# and the honest login-flow outcome that replaced "any error means
+# password-only" (which is how `bsfchat.com` produced a registration form
+# for a web server). ServerDiscovery takes its HTTP as a std::function, so
+# this needs no network, no event loop and no Settings.
+qt_add_executable(test_server_discovery
+    test_server_discovery.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/ServerDiscovery.cpp
+)
+target_include_directories(test_server_discovery PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_server_discovery PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_server_discovery COMMAND test_server_discovery)
+
 # Source-text guards for QML hazards no test binary can reach (the BSFChat
 # QML module lives inside the app). See the file header for the rc.6 story.
 qt_add_executable(test_qml_hygiene test_qml_hygiene.cpp)
