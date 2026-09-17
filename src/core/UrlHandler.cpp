@@ -94,13 +94,17 @@ UrlHandler::Acquisition UrlHandler::acquireServer(QLocalServer* server,
 {
     if (!server || name.isEmpty()) return Acquisition::Failed;
 
-    // Try to bind first. A clean failure here is the only honest evidence
-    // that the name is taken, so it must come BEFORE any removeServer().
-    if (server->listen(name)) return Acquisition::Listening;
-
-    // Taken. Is anyone home? A socket file outliving its process (crash,
-    // SIGKILL, a reboot that kept /tmp) still refuses listen() but refuses
-    // connect() too.
+    // Ask first, bind second. The order matters per platform:
+    //   * Windows: QLocalServer is a named pipe, and a second listen() on a
+    //     name that is already served SUCCEEDS (pipes allow multiple
+    //     instances). A bind-first design therefore cannot detect a live
+    //     instance there at all — that is what failed the rc.10 Windows
+    //     job — so the probe has to come first.
+    //   * Unix: a live listener answers the probe; a stale socket file
+    //     (crash, SIGKILL, a reboot that kept /tmp) refuses both the probe
+    //     and the bind, and only then is unlinking it safe.
+    // A probe against a free name fails immediately on both platforms
+    // (ENOENT / ERROR_FILE_NOT_FOUND), so this costs a clean launch nothing.
     {
         QLocalSocket probe;
         probe.connectToServer(name);
@@ -110,7 +114,10 @@ UrlHandler::Acquisition UrlHandler::acquireServer(QLocalServer* server,
         }
     }
 
-    // Nobody answered: stale. Now unlinking it is safe, and only now.
+    if (server->listen(name)) return Acquisition::Listening;
+
+    // Nobody answered and the bind still failed: a stale socket file.
+    // Unlinking it is safe now, and only now.
     QLocalServer::removeServer(name);
     if (server->listen(name)) return Acquisition::Listening;
     return Acquisition::Failed;
