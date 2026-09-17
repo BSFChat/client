@@ -123,7 +123,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         QSettings s;
         s.beginGroup(QStringLiteral("dm/") + QUrl(serverUrl).host());
         for (const auto& rid : s.childKeys()) {
-            m_directRoomPeers[rid] = s.value(rid).toString();
+            m_directRooms.record(rid, s.value(rid).toString());
         }
         s.endGroup();
     }
@@ -2268,7 +2268,7 @@ void ServerConnection::rebuildCategorizedRooms()
         g = cat;
     }
 
-    if (!m_directRoomPeers.isEmpty()) {
+    if (!m_directRooms.peers().isEmpty()) {
         QVariantList filtered;
         for (const auto& g : groups) {
             QVariantMap cat = g.toMap();
@@ -2276,7 +2276,7 @@ void ServerConnection::rebuildCategorizedRooms()
             QVariantList kept;
             for (const auto& c : ch) {
                 auto rid = c.toMap().value("roomId").toString();
-                if (!m_directRoomPeers.contains(rid)) kept.append(c);
+                if (!m_directRooms.contains(rid)) kept.append(c);
             }
             cat["channels"] = kept;
             // Drop empty categories that existed only because of the DMs
@@ -2555,6 +2555,18 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             }
         }
         if (anyChanged) presenceDirty = true;
+    }
+
+    // m.direct — the server's list of our DM rooms. For a DM the OTHER person
+    // opened this is the only signal there is: we are simply joined to a
+    // nameless private room, and without this it was filed under channels and
+    // every "message this user" entry point opened a second room with them.
+    // Folded in before the room loop so the category rebuild at the end of
+    // this pass already leaves the room out of the channel tree.
+    if (response.direct_rooms) {
+        for (const auto& rid : m_directRooms.merge(*response.direct_rooms, m_userId)) {
+            persistDirectRoom(rid);
+        }
     }
 
     for (const auto& [roomIdStr, joinedRoom] : response.rooms.join) {
@@ -3555,55 +3567,95 @@ void ServerConnection::setSelfStatusMessage(const QString& msg)
 }
 
 // ── Direct messages ──────────────────────────────────────────────
-// Tracked client-side in a QSettings group so every device reload
-// picks up its own DM list without needing m.direct account_data
-// round-trips. Server-wide m.direct sync can layer on later.
+// Which rooms are DMs comes from the server's m.direct (processSyncResponse)
+// and from our own creates, and is mirrored into a QSettings group so every
+// reload has its DM list before the first sync answers — and at all, against
+// a server that predates m.direct.
 static QString dmSettingsGroup(const QString& serverUrl) {
     return QStringLiteral("dm/") + QUrl(serverUrl).host();
 }
 
-void ServerConnection::createDirectMessage(const QString& targetUserId)
+void ServerConnection::persistDirectRoom(const QString& roomId)
 {
+    QSettings s;
+    s.beginGroup(dmSettingsGroup(m_serverUrl));
+    s.setValue(roomId, m_directRooms.peerOf(roomId));
+    s.endGroup();
+}
+
+void ServerConnection::createDirectMessage(const QString& rawTargetUserId)
+{
+    // "bob:example.org" is "@bob:example.org". Some entry points fix the
+    // sigil up and some don't; without it here the same person is two
+    // different peers to the lookup below.
+    QString targetUserId = rawTargetUserId.trimmed();
+    if (!targetUserId.startsWith(QLatin1Char('@')) && targetUserId.indexOf(QLatin1Char(':')) > 0)
+        targetUserId.prepend(QLatin1Char('@'));
+
     if (targetUserId.isEmpty()) return;
     if (targetUserId == m_userId) return;
 
+    // Already have one: go there. Once a real sync has told us which rooms
+    // exist, an entry for a room we are no longer in (left, deleted, pruned)
+    // does not count — jumping to it would open an empty pane. Before that
+    // first sync the room list proves nothing, so the stored entry is trusted.
+    const QString existing = m_directRooms.roomWith(targetUserId, [this](const QString& rid) {
+        return !m_firstSyncProcessed || m_roomListModel->hasRoom(rid);
+    });
+    if (!existing.isEmpty()) {
+        setActiveRoom(existing);
+        return;
+    }
+
+    // One on its way: the DM map only learns about a room when /createRoom
+    // answers, so without this a second click during a slow create finds
+    // nothing above and makes a twin. The outstanding reply will take the
+    // user into the room; there is nothing more for this call to do.
+    if (!m_directRooms.beginCreate(targetUserId)) return;
+
     // Stash the peer now; the reply only carries the new room id, not the
-    // target. The token is what keeps two DMs started back to back apart:
-    // Qt::SingleShotConnection disconnects a slot after it runs, but one
-    // emit still invokes every connected slot, so the first room id used to
-    // be written to BOTH handlers — Alice's room recorded as a DM with Bob,
-    // and Bob's room never recorded as a DM at all.
+    // target. The token is what keeps DMs to two DIFFERENT people started
+    // back to back apart: Qt::SingleShotConnection disconnects a slot after
+    // it runs, but one emit still invokes every connected slot, so the first
+    // room id used to be written to BOTH handlers — Alice's room recorded as
+    // a DM with Bob, and Bob's room never recorded as a DM at all.
     const QString requestId = bsfchat::net::newRequestToken();
     const QString peer = targetUserId;
     bsfchat::net::awaitTokenedReply(
         m_client, this, requestId,
         &MatrixClient::createRoomSuccess, &MatrixClient::createRoomError,
         [this, peer](const QString& roomId) {
-            m_directRoomPeers[roomId] = peer;
-            // Persist.
-            QSettings s;
-            s.beginGroup(QStringLiteral("dm/") + QUrl(m_serverUrl).host());
-            s.setValue(roomId, peer);
-            s.endGroup();
-            // Pull the new DM out of the regular category tree.
-            rebuildCategorizedRooms();
-            refreshDirectRooms();
-            // Jump to the new DM room so the user lands straight in it.
+            m_directRooms.endCreate(peer);
+            // The server hands back the existing room when the pair already
+            // has one, and sync may have reported this room before the reply
+            // arrived, so "nothing changed" is a normal outcome here.
+            if (m_directRooms.record(roomId, peer)) {
+                persistDirectRoom(roomId);
+                // Pull the new DM out of the regular category tree.
+                rebuildCategorizedRooms();
+                refreshDirectRooms();  // gated publish: emits only when the list really changed
+            }
+            // Jump to the DM room so the user lands straight in it.
             setActiveRoom(roomId);
         },
-        [this](const QString& error) { emit sendFeedback(error, QStringLiteral("error")); });
+        [this, peer](const QString& error) {
+            // Release the guard, or one failed create locks this peer out
+            // until restart.
+            m_directRooms.endCreate(peer);
+            emit sendFeedback(error, QStringLiteral("error"));
+        });
 
     m_client->createDirectMessageRoom(requestId, targetUserId);
 }
 
 bool ServerConnection::isDirectRoom(const QString& roomId) const
 {
-    return m_directRoomPeers.contains(roomId);
+    return m_directRooms.contains(roomId);
 }
 
 QString ServerConnection::directRoomPeer(const QString& roomId) const
 {
-    return m_directRoomPeers.value(roomId);
+    return m_directRooms.peerOf(roomId);
 }
 
 void ServerConnection::refreshDirectRooms()
@@ -3625,7 +3677,8 @@ void ServerConnection::refreshMemberSnapshots()
 QVariantList ServerConnection::directRooms() const
 {
     QVariantList out;
-    for (auto it = m_directRoomPeers.constBegin(); it != m_directRoomPeers.constEnd(); ++it) {
+    const auto& peers = m_directRooms.peers();
+    for (auto it = peers.constBegin(); it != peers.constEnd(); ++it) {
         QVariantMap m;
         m[QStringLiteral("roomId")] = it.key();
         m[QStringLiteral("peerId")] = it.value();

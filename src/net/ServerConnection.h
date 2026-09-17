@@ -21,6 +21,7 @@
 // (CallSignal is a plain value type), so it is safe in non-voice builds
 // too — the session runs there as well; it simply has no transport to
 // start. See src/net/VoiceSession.h.
+#include "net/DirectRooms.h"
 #include "net/VoiceSession.h"
 
 class MatrixClient;
@@ -541,11 +542,18 @@ public:
     Q_INVOKABLE QString statusMessageFor(const QString& userId) const;
 
     // Direct messages — 1:1 rooms with another user on this server.
-    // createDirectMessage creates+invites then marks the room as DM
-    // locally (persisted per-server in the settings file) so the
-    // channel list can segregate them under "Direct Messages". Matrix
-    // also ships an `m.direct` account_data event; we accept either
-    // signal but for MVP we only write the local store.
+    // Two sources say a room is a DM, and either is enough: the server's
+    // `m.direct` account data in /sync (the only way the INVITED side ever
+    // finds out), and our own successful create. Both are written through to
+    // a per-server QSettings group so the section is there before the first
+    // sync, and against a server too old to send m.direct.
+    //
+    // createDirectMessage is "open the DM with this person", not "create a
+    // room": it jumps to the existing room when there is one, does nothing
+    // when a create for that peer is already in flight (its reply will land
+    // the user in the room), and only otherwise POSTs /createRoom. Callers
+    // must NOT pre-scan directRooms() themselves — that check lived in QML
+    // once, three of five entry points forgot it, and the other two raced.
     Q_INVOKABLE void createDirectMessage(const QString& targetUserId);
     Q_INVOKABLE bool isDirectRoom(const QString& roomId) const;
     Q_INVOKABLE QString directRoomPeer(const QString& roomId) const;
@@ -798,9 +806,11 @@ public:
     // does as of the PresenceHandler addition).
     QMap<QString, QString> m_userPresenceFromSync;
     QMap<QString, QString> m_userStatusMessage;
-    // DM store: roomId -> peer user id. Persisted via Settings under
-    // "dm/<serverUrl>/<roomId>". Loaded once on setup.
-    QMap<QString, QString> m_directRoomPeers;
+    // DM store: roomId -> peer user id, plus the in-flight create guard.
+    // Persisted via Settings under "dm/<server host>/<roomId>"; hydrated on
+    // setup and extended by m.direct on sync.
+    bsfchat::net::DirectRooms m_directRooms;
+    void persistDirectRoom(const QString& roomId);
 #ifdef BSFCHAT_VOICE_ENABLED
     // Per-peer video surfaces (RTP + legacy JPEG unified) — replaces
     // the old per-frame base64 data-URL maps.
