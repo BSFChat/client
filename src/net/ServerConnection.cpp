@@ -3413,17 +3413,38 @@ void ServerConnection::setRoomTopic(const QString& roomId, const QString& topic)
 
 void ServerConnection::redactEvent(const QString& roomId, const QString& eventId,
                                     const QString& reason) {
-    m_client->redactEvent(roomId, eventId, reason);
-    // Optimistic removal (U-H5): take the row out now rather than leaving
-    // the author staring at a message they just deleted until the
-    // redaction comes back around over sync. removeMessage is a no-op for
-    // anything that isn't a loaded message row — notably the reaction
-    // event ids this same method redacts when a chip is toggled off — and
-    // is idempotent against the sync-side removal that follows.
+    // Remove the row when the server says the redaction landed, not when we
+    // ask. The removal used to happen up front and MatrixClient::redactEvent
+    // reported nothing at all — the reply was deleteLater'd and dropped — so
+    // a delete the server REFUSED (403 after the user's power level dropped,
+    // or an offline client) looked exactly like one it accepted: the message
+    // vanished, no error, no rollback, and it silently came back on the next
+    // backfill or restart. The user had every reason to believe it was gone.
     //
-    // Scoped to the active room because m_messageModel only ever holds it.
-    if (roomId == m_activeRoomId && m_messageModel)
-        m_messageModel->removeMessage(eventId);
+    // Waiting for the PUT to answer still beats waiting for the redaction to
+    // come back around over sync, which is what the original optimism was
+    // avoiding. removeMessage is a no-op for anything that isn't a loaded
+    // message row — notably the reaction event ids this same method redacts
+    // when a chip is toggled off — and is idempotent against the sync-side
+    // removal that follows.
+    const QString requestId = bsfchat::net::newRequestToken();
+    bsfchat::net::awaitTokenedReply(
+        m_client, this, requestId,
+        &MatrixClient::redactSucceeded, &MatrixClient::redactFailed,
+        [this, roomId](const QString& redactedId) {
+            // Scoped to the active room because m_messageModel only ever
+            // holds it; a room switch mid-flight makes this a no-op and sync
+            // does the removal instead.
+            if (roomId == m_activeRoomId && m_messageModel)
+                m_messageModel->removeMessage(redactedId);
+        },
+        [this](const QString& error) {
+            emit sendFeedback(error.isEmpty()
+                                  ? tr("Couldn't delete that message.")
+                                  : error,
+                              QStringLiteral("error"));
+        });
+    m_client->redactEvent(requestId, roomId, eventId, reason);
 }
 
 QStringList ServerConnection::pinnedEventIds(const QString& roomId) const

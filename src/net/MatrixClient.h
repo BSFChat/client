@@ -210,7 +210,10 @@ public:
     void setChannelPermission(const QString& roomId, const QString& targetKey,
                               quint64 allow, quint64 deny);
     void setChannelSlowmode(const QString& roomId, int seconds);
-    void redactEvent(const QString& roomId, const QString& eventId, const QString& reason = {});
+    // `requestId` correlates the call with redactSucceeded/redactFailed.
+    // Pass an empty id for a fire-and-forget redaction (reaction toggles).
+    void redactEvent(const QString& requestId, const QString& roomId,
+                     const QString& eventId, const QString& reason = {});
     void kickUser(const QString& roomId, const QString& userId, const QString& reason = {});
     void banUser(const QString& roomId, const QString& userId, const QString& reason = {});
     // Reverses a ban on `userId` in `roomId`. The user goes back to "leave"
@@ -261,6 +264,12 @@ signals:
     void syncSuccess(const bsfchat::SyncResponse& response);
     void syncError(const QString& error);
 
+    // Answers to redactEvent. It used to answer nothing at all: the reply was
+    // deleteLater'd and dropped, so a redaction the server refused (403 after
+    // a demotion, or an offline client) was indistinguishable from one it
+    // accepted.
+    void redactSucceeded(const QString& requestId, const QString& eventId);
+    void redactFailed(const QString& requestId, const QString& error);
     void createRoomSuccess(const QString& requestId, const QString& roomId);
     void createRoomError(const QString& requestId, const QString& error);
 

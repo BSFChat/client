@@ -1509,7 +1509,8 @@ void MatrixClient::setChannelSlowmode(const QString& roomId, int seconds)
                  QString(), payload);
 }
 
-void MatrixClient::redactEvent(const QString& roomId, const QString& eventId, const QString& reason)
+void MatrixClient::redactEvent(const QString& requestId, const QString& roomId,
+                               const QString& eventId, const QString& reason)
 {
     QString txn = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
@@ -1521,7 +1522,14 @@ void MatrixClient::redactEvent(const QString& roomId, const QString& eventId, co
     QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
 
     auto* reply = makeRequest("PUT", path, payload);
-    connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
+    connect(reply, &QNetworkReply::finished, this, [this, reply, requestId, eventId]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit redactFailed(requestId, QString::fromUtf8(reply->readAll()));
+            return;
+        }
+        emit redactSucceeded(requestId, eventId);
+    });
 }
 
 void MatrixClient::sendReaction(const QString& roomId, const QString& targetEventId,
@@ -1553,8 +1561,9 @@ void MatrixClient::sendReaction(const QString& roomId, const QString& targetEven
 
 void MatrixClient::redactReaction(const QString& roomId, const QString& reactionEventId)
 {
-    // Reuse redactEvent — same server route for any event id.
-    redactEvent(roomId, reactionEventId, QString());
+    // Reuse redactEvent — same server route for any event id. No request id:
+    // nothing is waiting on the answer for a reaction toggle.
+    redactEvent(QString(), roomId, reactionEventId, QString());
 }
 
 void MatrixClient::kickUser(const QString& roomId, const QString& userId, const QString& reason)

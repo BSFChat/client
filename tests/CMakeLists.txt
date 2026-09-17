@@ -405,6 +405,18 @@ target_include_directories(test_media_cache_key PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_media_cache_key PRIVATE Qt6::Core Qt6::Network Qt6::Test)
 add_test(NAME test_media_cache_key COMMAND test_media_cache_key)
 
+# Deleting a message must be able to fail. redactEvent reported nothing at
+# all, so a refused delete looked exactly like an accepted one.
+qt_add_executable(test_redaction_result
+    test_redaction_result.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
+)
+target_include_directories(test_redaction_result PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_redaction_result
+    PRIVATE Qt6::Core Qt6::Network Qt6::Test bsfchat_protocol nlohmann_json::nlohmann_json)
+add_test(NAME test_redaction_result COMMAND test_redaction_result)
+
 # 401 classification: the client had no dead-token handling at all, so an
 # expired access token showed as a permanent "Reconnecting…".
 qt_add_executable(test_auth_error
