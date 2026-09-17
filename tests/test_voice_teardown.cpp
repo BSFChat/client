@@ -277,10 +277,17 @@ int main(int argc, char** argv)
                 p.answerer = nullptr;
                 delete victim;
             });
-            for (int i = 0; i < 200 && p.answerer; ++i) {
+            // Bounded by TIME, not iterations: the audio channel is
+            // unordered with no retransmits, and 200 one-millisecond spins
+            // (~0.2 s) was not always enough for the first frame to land on
+            // a loaded CI runner (rc.17's Linux job). A healthy run exits
+            // this loop on the first delivered frame.
+            QElapsedTimer firstFrame;
+            firstFrame.start();
+            for (int i = 0; p.answerer && firstFrame.elapsed() < 10000; ++i) {
                 p.offerer->sendAudioFrame(QByteArray(160, char(i & 0xFF)));
                 p.offerer->sendScreenFrame(QByteArray(512, char(0x7F)));
-                QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
             }
             if (p.answerer) {
                 std::fprintf(stderr,

@@ -98,11 +98,16 @@ void VideoStreamRegistry::attachOutput(const QString& userId, int streamId,
     if (e.outputs.contains(target)) return;
     e.outputs.append(target);
     // Detach automatically when the QML item dies.
+    // `destroyed` fires from ~QObject, by which point the QVideoSink part of
+    // the object is already gone: downcasting the QObject* it hands us is
+    // undefined behaviour (UBSan: "downcast of address which does not point
+    // to an object of type QVideoSink"). The pointer captured here is used
+    // only as a key and never dereferenced.
     connect(target, &QObject::destroyed, this,
-            [this, userId, streamId](QObject* obj) {
+            [this, userId, streamId, target](QObject*) {
         auto it = m_entries.find({userId, streamId});
         if (it != m_entries.end())
-            it->outputs.removeAll(static_cast<QVideoSink*>(obj));
+            it->outputs.removeAll(target);
     });
     if (e.lastFrame.isValid()) target->setVideoFrame(e.lastFrame);
 }
