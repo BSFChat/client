@@ -4,6 +4,7 @@
 #include "voice/VoiceStartPolicy.h"
 #include "voice/VoiceRosterReconcile.h"
 #include "voice/PeerCaps.h"
+#include "voice/video/VideoCodecSelect.h"
 #include "voice/PeerConnectionManager.h"
 #include "voice/video/VideoDecoder.h"
 #include "voice/video/VideoEncoder.h"

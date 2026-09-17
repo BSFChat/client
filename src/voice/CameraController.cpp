@@ -1,6 +1,6 @@
 #include "voice/CameraController.h"
 
-#include "voice/video/VideoCodecSelect.h"
+#include "voice/video/VideoCodecPreference.h"
 #include "voice/IVoiceTransport.h"
 #include "voice/VoiceEngine.h"
 #include "voice/video/VideoRateController.h"

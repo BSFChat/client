@@ -46,7 +46,7 @@
 // waiting for one waits forever. See VoiceTransportSelector.h.
 
 #include "voice/video/VideoCodec.h"
-#include "voice/video/VideoCodecSelect.h"
+#include "voice/video/VideoCodecPreference.h"
 #include "voice/video/VideoDeliveryReport.h"
 
 #include <QObject>

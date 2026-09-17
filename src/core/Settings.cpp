@@ -3,7 +3,7 @@
 #include "core/ReadState.h"
 #include "core/ReleaseSelection.h"
 #include "util/FileLogger.h"
-#include "voice/video/VideoCodecSelect.h"
+#include "voice/video/VideoCodecPreference.h"
 
 #include <QLoggingCategory>
 
