@@ -138,5 +138,7 @@ private slots:
     }
 };
 
-QTEST_MAIN(TestUrlHandler)
+// Core-only: QLocalServer needs no display, and QTEST_MAIN would start a
+// QGuiApplication that aborts on a headless Linux CI runner (rc.12).
+QTEST_GUILESS_MAIN(TestUrlHandler)
 #include "test_url_handler.moc"
