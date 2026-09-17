@@ -350,6 +350,12 @@ endif()
 # component imports the BSFChat module and only the app binary has it
 # (tst_transportbarinput.qml — read its header before trusting it).
 # Everything else in the player is hit-testing against a live window.
+#
+# The same runner picks up tests/qml/tst_videostage.qml, which covers the
+# voice room's video stage (qml/js/VideoStage.js): grid shape, which feed
+# is on the big panel, and where every thumbnail lands. Same reason it
+# lives in a .js file — VoiceRoom.qml imports the BSFChat module, which
+# only the app binary has.
 find_package(Qt6 QUIET COMPONENTS QuickTest)
 if(Qt6QuickTest_FOUND AND NOT ANDROID AND NOT IOS)
     qt_add_executable(test_playback_math qml_test_main.cpp)
