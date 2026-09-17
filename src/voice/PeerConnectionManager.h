@@ -109,6 +109,15 @@ public:
     // compared against the peer's receiver reports to derive loss.
     quint64 videoTxFrames(VideoStreamId stream) const { return m_txFrames[int(stream)]; }
     quint64 videoTxBytes(VideoStreamId stream) const { return m_txBytes[int(stream)]; }
+    // Receive-side packet counters for this peer's stream (S-17).
+    // expected == received + confirmed-lost, so sequence wraparound
+    // needs no handling at this level.
+    quint64 videoRxPackets(VideoStreamId stream) const {
+        return m_video[int(stream)].rxPackets.load(std::memory_order_relaxed);
+    }
+    quint64 videoLostPackets(VideoStreamId stream) const {
+        return m_video[int(stream)].lostPackets.load(std::memory_order_relaxed);
+    }
 
     // ---- Lossless tier (AV1 over a dedicated reliable channel) ----
     // v0.24.5 has no AV1 RTP depacketizer, and lossless wants reliable
@@ -295,6 +304,12 @@ private:
         // consumed by onFrame on the same thread; atomic as cheap
         // insurance against future callers.
         std::atomic<bool> lossPending{false};
+        // Cumulative RTP packet counters for the receiver report
+        // (S-17), written by the RtpGapDetector on libdatachannel's
+        // network thread and read by the 500 ms rr timer on the Qt
+        // thread.
+        std::atomic<quint64> rxPackets{0};
+        std::atomic<quint64> lostPackets{0};
         // First-traffic markers so logs positively show media moving
         // (or not) in each direction — "tracks open, then silence"
         // debugging without these cost a whole evening.

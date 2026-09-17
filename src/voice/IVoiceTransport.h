@@ -46,6 +46,7 @@
 // waiting for one waits forever. See VoiceTransportSelector.h.
 
 #include "voice/video/VideoCodec.h"
+#include "voice/video/VideoDeliveryReport.h"
 
 #include <QObject>
 #include <QString>
@@ -288,13 +289,20 @@ signals:
     // ---- Video send feedback ----
     // Someone needs a keyframe on our outgoing `streamId`.
     void videoKeyframeRequested(int streamId);
-    // Delivered/sent byte ratio for our outgoing `streamId` toward
-    // `userId`. Mesh derives this from hand-rolled app-level receiver
-    // reports; it feeds VideoRateController's AIMD loop. LiveKit has
-    // real RTCP and server-side bandwidth estimation, so an SFU
-    // transport should simply never emit this and let
-    // VideoRateController sit idle rather than feed it worse data.
-    void videoDeliveryRatio(const QString& userId, int streamId, double ratio);
+    // One graded window of receiver feedback for our outgoing
+    // `streamId` toward `userId`: packet loss (primary) plus byte
+    // goodput (secondary). Mesh derives this from hand-rolled
+    // app-level receiver reports; it feeds VideoRateController's
+    // control law. LiveKit has real RTCP and server-side bandwidth
+    // estimation, so an SFU transport should simply never emit this
+    // and let VideoRateController sit idle rather than feed it worse
+    // data.
+    //
+    // Replaces videoDeliveryRatio(): the delivered/sent BYTE ratio it
+    // carried is biased below 1.0 by construction and gave the rate
+    // controller no upward path at all (S-17).
+    void videoDeliveryReport(const QString& userId, int streamId,
+                             const VideoDeliveryReport& report);
     // A peer's lossless channel is rejecting sends — the share
     // controller falls back to H.264 for the rest of the share.
     void losslessSendUnavailable();

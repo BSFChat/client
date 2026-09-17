@@ -7,7 +7,8 @@
 
 Q_LOGGING_CATEGORY(logVideoRate, "bsfchat.video.rate", QtWarningMsg)
 
-constexpr double VideoRateController::kScaleLadder[];
+using videorate::Content;
+using T = videorate::Thresholds;
 
 VideoRateController::VideoRateController(VideoStreamId streamId, QObject* parent)
     : QObject(parent)
@@ -15,6 +16,15 @@ VideoRateController::VideoRateController(VideoStreamId streamId, QObject* parent
 {
     m_timer.setInterval(500);
     connect(&m_timer, &QTimer::timeout, this, &VideoRateController::tick);
+}
+
+qint64 VideoRateController::nowMs() const {
+    return m_testNowMs >= 0 ? m_testNowMs : QDateTime::currentMSecsSinceEpoch();
+}
+
+Content VideoRateController::content() const {
+    return m_streamId == VideoStreamId::Camera ? Content::Camera
+                                               : Content::Screen;
 }
 
 void VideoRateController::setEnvelope(int minKbps, int maxKbps, int fps,
@@ -26,19 +36,47 @@ void VideoRateController::setEnvelope(int minKbps, int maxKbps, int fps,
     m_bitrate = qBound(m_minKbps, m_bitrate, m_maxKbps);
 }
 
+// Where a fresh share opens. NOT "half the envelope": with a camera
+// target of 1500 kbps that produced 750 kbps of 1280x720, which is
+// below the rate at which 720p is worth encoding at all, so the very
+// first frame was already mush and every subsequent decision was made
+// from a hole. The honest answer is resolution-derived — the rate at
+// which the size the user actually asked for is comfortable — clamped
+// into the configured envelope.
+int VideoRateController::startBitrate() const {
+    const Content c = content();
+    const int edge = videorate::edgeForRung(c, m_maxLongEdge, 0);
+    const int fps0 = videorate::fpsForRung(c, m_fps, 0);
+    const int comfort = videorate::comfortKbpsFor(c, edge, fps0);
+    return qBound(m_minKbps, comfort, m_maxKbps);
+}
+
+int VideoRateController::blindCeiling() const {
+    // Never below where the share started: a path that was proven
+    // clean and then lost two reports must not be punished back down
+    // past its own opening bitrate.
+    return qMax(kBlindCeilingKbps, startBitrate());
+}
+
+void VideoRateController::resetState() {
+    m_bitrate = startBitrate();
+    m_rungIdx = 0;
+    m_healthyTicks = m_comfortTicks = m_dwellTicks = m_kfRequests = 0;
+    m_everGoverned = false;
+    m_peers.clear();
+    m_activeSinceMs = nowMs();
+    m_wasBlind = false;
+}
+
 void VideoRateController::setActive(bool active) {
     if (active == m_timer.isActive()) return;
     if (active) {
-        // Fresh share: start mid-envelope rather than inheriting the
-        // previous session's end state — but never above the blind
-        // ceiling, since no delivery reports exist yet by definition.
-        m_bitrate = qBound(m_minKbps,
-                           qMin(m_maxKbps / 2, kBlindCeilingKbps), m_maxKbps);
-        m_scaleIdx = 0;
-        m_stableTicks = m_comfortTicks = m_kfRequests = 0;
-        m_peerRatios.clear();
-        m_activeSinceMs = QDateTime::currentMSecsSinceEpoch();
-        m_wasBlind = false;
+        // A fresh share NEVER inherits the previous one's end state.
+        // In the field a share that had collapsed to 250 kbps / 720 px
+        // reopened straight back into 250 kbps / 720 px, because the
+        // only thing that reset the state was this branch and the
+        // previous share had not passed through it.
+        resetState();
         m_timer.start();
     } else {
         m_timer.stop();
@@ -52,68 +90,125 @@ int VideoRateController::maxKbps() const {
 }
 
 int VideoRateController::longEdge() const {
-    const int edge = int(m_maxLongEdge * kScaleLadder[m_scaleIdx]);
-    return qMax(160, edge & ~1);
+    return qMin(m_maxLongEdge,
+                videorate::edgeForRung(content(), m_maxLongEdge, m_rungIdx));
 }
 
-void VideoRateController::reportDeliveryRatio(const QString& userId, double ratio) {
+int VideoRateController::fps() const {
+    return qMin(m_fps, videorate::fpsForRung(content(), m_fps, m_rungIdx));
+}
+
+void VideoRateController::reportDelivery(const QString& userId,
+                                         const VideoDeliveryReport& r) {
     PeerSample s;
-    s.atMs = QDateTime::currentMSecsSinceEpoch();
-    // Light EWMA per peer so one lucky window doesn't mask loss.
-    const auto prev = m_peerRatios.constFind(userId);
-    s.ratio = prev != m_peerRatios.constEnd()
-        ? 0.5 * prev->ratio + 0.5 * ratio
-        : ratio;
-    m_peerRatios[userId] = s;
+    s.atMs = nowMs();
+    s.report = r;
+    m_peers[userId] = s;
+    if (r.governs()) m_everGoverned = true;
 }
 
 void VideoRateController::reportKeyframeRequest() {
     ++m_kfRequests;
 }
 
-double VideoRateController::worstRecentRatio() const {
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    double worst = 1.0;
-    for (const auto& s : m_peerRatios) {
-        if (now - s.atMs > kPeerSampleTtlMs) continue;
-        worst = std::min(worst, s.ratio);
+VideoRateController::Health
+VideoRateController::classify(qint64 now, QString& worstPeer,
+                              double& worstLossPct, int kf) const {
+    bool anyFresh = false;
+    bool anyGovernor = false;
+    double worst = -1.0;
+    for (auto it = m_peers.constBegin(); it != m_peers.constEnd(); ++it) {
+        if (now - it->atMs > kPeerSampleTtlMs) continue;
+        anyFresh = true;
+        // A peer that reports nothing usable (old client, or a window
+        // with no packets in it) is not allowed to drag the rate down.
+        if (!it->report.governs()) continue;
+        anyGovernor = true;
+        const double loss = it->report.lossPct();
+        if (loss > worst) {
+            worst = loss;
+            worstPeer = it.key();
+        }
     }
-    return worst;
+
+    if (!anyFresh) {
+        return (now - m_activeSinceMs > kBlindGraceMs) ? Health::Blind
+                                                       : Health::NoGovernor;
+    }
+    if (kf >= T::kKeyframeStorm) {
+        worstLossPct = std::max(worst, 0.0);
+        return Health::Cut;
+    }
+    if (!anyGovernor) return Health::NoGovernor;
+
+    worstLossPct = worst;
+    if (worst >= T::kCutPct) return Health::Cut;
+    if (worst >= T::kTrimPct) return Health::Trim;
+    if (worst >= T::kHealthyPct) return Health::Hold;
+    return Health::Healthy;
 }
 
-bool VideoRateController::hasFreshSamples(qint64 nowMs) const {
-    for (const auto& s : m_peerRatios) {
-        if (nowMs - s.atMs <= kPeerSampleTtlMs) return true;
-    }
-    return false;
-}
+void VideoRateController::applyLadder() {
+    const Content c = content();
+    const int floorHere =
+        videorate::rungMinKbps(c, m_maxLongEdge, m_fps, m_rungIdx);
 
-double VideoRateController::bppAt(int longEdge, int kbps) const {
-    // Assume 16:9-ish area for the pixel estimate; exactness doesn't
-    // matter, the bands are heuristic.
-    const double pixels = double(longEdge) * (double(longEdge) * 9.0 / 16.0);
-    return (double(kbps) * 1000.0) / (pixels * double(m_fps));
+    if (m_bitrate < floorHere) {
+        if (m_rungIdx >= videorate::kLadderRungs - 1) return;  // bottom
+        ++m_rungIdx;
+        m_comfortTicks = 0;
+        m_dwellTicks = T::kDwellTicks;
+        qCInfo(logVideoRate, "[%d] quality down → %d px @ %d fps",
+              int(m_streamId), longEdge(), fps());
+        return;
+    }
+    if (m_rungIdx == 0) { m_comfortTicks = 0; return; }
+    // Minimum dwell after any downshift: without it a bitrate sitting
+    // on a rung boundary walks the ladder up and down every second.
+    if (m_dwellTicks > 0) { m_comfortTicks = 0; return; }
+
+    const int upIdx = m_rungIdx - 1;
+    const int comfortThere = videorate::comfortKbpsFor(
+        c, videorate::edgeForRung(c, m_maxLongEdge, upIdx),
+        videorate::fpsForRung(c, m_fps, upIdx));
+    if (m_bitrate < comfortThere) { m_comfortTicks = 0; return; }
+    if (++m_comfortTicks < T::kUpshiftTicks) return;
+
+    m_rungIdx = upIdx;
+    m_comfortTicks = 0;
+    qCInfo(logVideoRate, "[%d] quality up → %d px @ %d fps",
+          int(m_streamId), longEdge(), fps());
 }
 
 void VideoRateController::tick() {
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 now = nowMs();
+    const int kf = m_kfRequests;
+    m_kfRequests = 0;
 
-    // Blind mode: nobody is telling us whether frames arrive (worst-
-    // ratio would read a meaningless 1.0). Hold — never probe upward
-    // on faith — and cap at a rate any plausible path carries. The
-    // startup grace keeps the first reports from racing the clamp.
-    if (!hasFreshSamples(now) && now - m_activeSinceMs > kBlindGraceMs) {
+    QString worstPeer;
+    double worstLoss = 0.0;
+    const Health h = classify(now, worstPeer, worstLoss, kf);
+
+    if (h == Health::Blind) {
         if (!m_wasBlind) {
             m_wasBlind = true;
             qCWarning(logVideoRate,
-                     "[%d] no delivery reports from any peer — holding ≤%d kbps",
-                     int(m_streamId), kBlindCeilingKbps);
+                     "[%d] no delivery reports from any peer — holding at "
+                     "%d kbps%s",
+                     int(m_streamId), m_bitrate,
+                     m_everGoverned ? "" : " (blind ceiling applies)");
         }
-        m_kfRequests = 0;
-        m_stableTicks = 0;
-        if (m_bitrate > kBlindCeilingKbps) {
-            m_bitrate = qMax(m_minKbps, kBlindCeilingKbps);
-            emit forceKeyframe();   // resync receivers at the new rate
+        m_healthyTicks = 0;
+        m_comfortTicks = 0;
+        // The ceiling is for a path that has NEVER answered. Once a
+        // peer has reported real numbers we know what the path does,
+        // so a gap in reporting means "hold", not "descend".
+        if (!m_everGoverned) {
+            const int ceiling = blindCeiling();
+            if (m_bitrate > ceiling) {
+                m_bitrate = qBound(m_minKbps, ceiling, m_maxKbps);
+                emit forceKeyframe();   // resync receivers at the new rate
+            }
         }
         return;
     }
@@ -122,68 +217,72 @@ void VideoRateController::tick() {
         qCInfo(logVideoRate, "[%d] delivery reports resumed", int(m_streamId));
     }
 
-    const double ratio = worstRecentRatio();
-    const int kf = m_kfRequests;
-    m_kfRequests = 0;
-
     const int before = m_bitrate;
-    bool backedOff = false;
+    const int beforeEdge = longEdge();
+    const int beforeFps = fps();
+    if (m_dwellTicks > 0) --m_dwellTicks;
 
-    // Cut gently, recover briskly. The original −40 %/−15 % steps with
-    // a +8 %-per-2 s climb made the bitrate saw-tooth hard enough that
-    // the quality visibly pulsed on every WiFi loss blip; softer cuts
-    // hold quality steadier and the receiver-side loss handling (drop
-    // corrupt AUs, resync on IDR) now covers the actual artefacts.
-    if (ratio < 0.90 || kf >= 3) {
-        m_bitrate = int(m_bitrate * 0.75);
-        backedOff = true;
-        m_stableTicks = 0;
-        m_comfortTicks = 0;
-    } else if (ratio < 0.97) {
-        m_bitrate = int(m_bitrate * 0.90);
-        backedOff = true;
-        m_stableTicks = 0;
-        m_comfortTicks = 0;
-    } else if (++m_stableTicks >= 2) {
-        m_bitrate = int(m_bitrate * 1.08) + 50;
-        m_stableTicks = 0;
-    }
-    m_bitrate = qBound(m_minKbps, m_bitrate, m_maxKbps);
-
-    // Resolution ladder. Downshift when the floor bpp is unreachable
-    // at this size; upshift after sustained comfort at the next size.
-    if (m_scaleIdx < 4 && bppAt(longEdge(), m_bitrate) < kBppFloor) {
-        ++m_scaleIdx;
-        backedOff = true;
-        m_comfortTicks = 0;
-        qCInfo(logVideoRate, "[%d] resolution down → %d px long edge",
-              int(m_streamId), longEdge());
-    } else if (m_scaleIdx > 0) {
-        const int upEdge = qMax(160, int(m_maxLongEdge
-                                * kScaleLadder[m_scaleIdx - 1]) & ~1);
-        if (bppAt(upEdge, m_bitrate) > kBppComfort) {
-            if (++m_comfortTicks >= 10) {
-                --m_scaleIdx;
-                m_comfortTicks = 0;
-                qCInfo(logVideoRate, "[%d] resolution up → %d px long edge",
-                      int(m_streamId), longEdge());
-            }
-        } else {
-            m_comfortTicks = 0;
+    switch (h) {
+    case Health::Healthy:
+        if (++m_healthyTicks >= T::kHealthyTicksBeforeProbe) {
+            const double factor =
+                double(m_bitrate) < T::kFastProbeBelow * double(m_maxKbps)
+                    ? T::kFastProbeFactor : T::kProbeFactor;
+            m_bitrate = int(double(m_bitrate) * factor) + T::kProbeFloorKbps;
         }
+        break;
+    case Health::Hold:
+    case Health::NoGovernor:
+        // Evidence of mild loss, or no evidence at all: stop climbing,
+        // change nothing else. An old peer that sends reports without
+        // the packet counters lands here — reading its silence as
+        // 100 % loss would collapse the share for every other viewer.
+        m_healthyTicks = 0;
+        m_comfortTicks = 0;
+        break;
+    case Health::Trim:
+        m_bitrate = int(double(m_bitrate) * T::kTrimFactor);
+        m_healthyTicks = 0;
+        m_comfortTicks = 0;
+        m_dwellTicks = qMax(m_dwellTicks, T::kDwellTicks / 2);
+        break;
+    case Health::Cut:
+        m_bitrate = int(double(m_bitrate) * T::kCutFactor);
+        m_healthyTicks = 0;
+        m_comfortTicks = 0;
+        m_dwellTicks = T::kDwellTicks;
+        break;
+    case Health::Blind:
+        break;                      // handled above
     }
 
-    if (backedOff) {
+    // The hard floor is the bottom rung's floor: below it there is no
+    // size left to trade, and sending fewer bits than that produces a
+    // picture nobody can use.
+    const int hardFloor = qBound(
+        m_minKbps,
+        videorate::rungMinKbps(content(), m_maxLongEdge, m_fps,
+                               videorate::kLadderRungs - 1),
+        m_maxKbps);
+    m_bitrate = qBound(hardFloor, m_bitrate, m_maxKbps);
+    applyLadder();
+    m_bitrate = qBound(hardFloor, m_bitrate, m_maxKbps);
+
+    if (m_bitrate != before || longEdge() != beforeEdge || fps() != beforeFps) {
+        static const char* kNames[] = {"blind", "no-governor", "healthy",
+                                       "hold", "trim", "cut"};
         qCInfo(logVideoRate,
-              "[%d] back-off: ratio=%.3f kf=%d bitrate %d→%d kbps edge=%d",
-              int(m_streamId), ratio, kf, before, m_bitrate, longEdge());
-        // Deliberately NO forceKeyframe here. An IDR is the largest
-        // frame the encoder can emit — blasting one at the exact
-        // moment the path is congested is how keyframe storms start
-        // (IDR burst → AP queue drops part of it → receiver requests
-        // another IDR → repeat). Receivers that actually lost data
-        // request their own keyframe via keyframeNeeded/PLI, and a
-        // resolution-ladder change rebuilds the encode session, which
-        // opens on an IDR anyway.
+              "[%d] %s: loss=%.2f%% kf=%d peers=%d governor=%s "
+              "bitrate %d→%d kbps %d px @ %d fps",
+              int(m_streamId), kNames[int(h)], worstLoss, kf,
+              int(m_peers.size()),
+              worstPeer.isEmpty() ? "(none)" : qPrintable(worstPeer),
+              before, m_bitrate, longEdge(), fps());
+        // Deliberately NO forceKeyframe on a back-off. An IDR is the
+        // largest frame the encoder can emit — blasting one at the
+        // exact moment the path is congested is how keyframe storms
+        // start. Receivers that actually lost data request their own,
+        // and a ladder change rebuilds the encode session, which opens
+        // on an IDR anyway.
     }
 }

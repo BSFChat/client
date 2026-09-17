@@ -579,21 +579,24 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
         emit peerVideoStreamState(userId, stream, on);
     } else if (t == "rr") {
         // Receiver report for OUR outgoing stream toward `userId`:
-        // cumulative received bytes. Windowed against our cumulative
-        // sent bytes since the previous report → delivery ratio.
+        // cumulative received bytes plus (S-17) cumulative expected /
+        // lost RTP packets. Packets are what the rate controller is
+        // graded on; bytes survive only as a goodput cross-check.
         const int stream = doc.value("stream", 0);
         if (stream < 0 || stream >= kVideoStreamCount) return;
-        auto* peer = m_peers.value(userId);
-        if (!peer) return;
+        if (!m_peers.contains(userId)) return;
         const quint64 rxBytes = doc.value("b", quint64(0));
-        const quint64 txBytes = peer->videoTxBytes(VideoStreamId(stream));
-        // S-3: graded against what we sent in the PREVIOUS window, not
-        // this one. Comparing against this window counted every byte
-        // still in flight as loss, which made each IDR look like
-        // congestion and pulsed the quality on a 500 ms cycle.
-        double ratio = 1.0;
-        if (m_rrSnapshots[{userId, stream}].update(rxBytes, txBytes, ratio))
-            emit videoDeliveryRatio(userId, stream, ratio);
+        // A peer on a build that predates the packet counters sends
+        // neither field. That must read as "no opinion" — not as total
+        // loss, which would collapse the share for everyone else.
+        const bool hasLoss = doc.contains("e") && doc.contains("l");
+        const quint64 expected = hasLoss ? doc.value("e", quint64(0)) : 0;
+        const quint64 lost = hasLoss ? doc.value("l", quint64(0)) : 0;
+        const VideoDeliveryReport report =
+            m_rrSnapshots[{userId, stream}].update(
+                rxBytes, expected, lost, hasLoss,
+                QDateTime::currentMSecsSinceEpoch());
+        emit videoDeliveryReport(userId, stream, report);
     } else {
         qCDebug(logVoice, "unhandled control '%s' from %s",
                t.c_str(), qPrintable(userId));
@@ -605,11 +608,18 @@ void VoiceEngine::sendReceiverReports() {
          it != m_recvPipelines.constEnd(); ++it) {
         auto* peer = m_peers.value(it.key().first);
         if (!peer) continue;
+        // "e"/"l" are cumulative RTP packets expected and confirmed
+        // lost (S-17). Cumulative rather than per-window so a dropped
+        // report costs accuracy for one interval instead of inventing
+        // a loss spike, and so the sender owns the windowing.
+        const VideoStreamId sid = VideoStreamId(it.key().second);
         nlohmann::json rr = {
             {"t", "rr"},
             {"stream", it.key().second},
             {"f", it.value()->rxFrames()},
             {"b", it.value()->rxBytes()},
+            {"e", peer->videoRxPackets(sid) + peer->videoLostPackets(sid)},
+            {"l", peer->videoLostPackets(sid)},
         };
         peer->sendControl(QByteArray::fromStdString(rr.dump()));
     }
