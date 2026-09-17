@@ -21,7 +21,7 @@
 // the peer's decode caps.
 struct PeerCaps {
     bool videoRtp = false;             // understands renegotiation + RTP video tracks
-    QStringList videoCodecs;           // e.g. {"h264"}
+    QStringList videoCodecs;           // e.g. {"h264", "h265"} — DECODE side
     QStringList h264ProfilesDecode;    // e.g. {"cb", "high"}
     QStringList h264ProfilesEncode;    // e.g. {"high"}
     QStringList lossless;              // e.g. {"av1-dc"} — AV1 over reliable data channel
@@ -75,8 +75,12 @@ struct PeerCaps {
     }
 };
 
-// The codec identifier the RTP video path advertises and sends.
+// The codec identifiers the RTP video path advertises and sends.
+// `video_codecs` lists what this build can DECODE; encode capability is
+// local knowledge and is never advertised (a peer has no use for it —
+// it never asks us to send, it only has to be able to receive).
 inline QString videoCodecIdH264() { return QStringLiteral("h264"); }
+inline QString videoCodecIdH265() { return QStringLiteral("h265"); }
 
 // ---------------------------------------------------------------------
 // Who gets which video path (S-1)

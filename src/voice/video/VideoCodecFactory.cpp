@@ -5,6 +5,21 @@
 //   Windows  → Media Foundation (P3)
 //   Linux    → openh264
 //   AV1 lossless → libaom (P7), all desktop platforms
+//
+// H.265/HEVC (S-18) is the first codec whose availability is NOT a
+// compile-time property of the build:
+//   macOS    → VideoToolbox, but only on Macs with an HEVC media
+//              engine, so both directions are probed at runtime.
+//   Windows  → Media Foundation, and ONLY if an HEVC MFT is registered
+//              (vendor driver or the Store HEVC extension). No new
+//              link-time dependency; absent ⇒ never advertised.
+//   Linux    → openh264 decodes H.264 only. No HEVC either way, so a
+//              Linux build advertises h264 alone and every peer keeps
+//              sending it H.264. That is the fallback working, not a
+//              gap.
+// The two h265*Supported() predicates below are the single source of
+// truth for that, read by localCapsJson() (decode → advertised) and by
+// the codec selector (encode → may be chosen).
 
 #include "voice/video/VideoEncoder.h"
 #include "voice/video/VideoDecoder.h"
@@ -26,8 +41,42 @@
 #include "voice/video/AomLosslessDecoder.h"
 #endif
 
+bool VideoEncoder::h265EncodeSupported() {
+#ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
+    return MacVTEncoder::hevcEncodeSupported();
+#elif defined(BSFCHAT_HAVE_MEDIAFOUNDATION)
+    return MFEncoder::hevcEncodeSupported();
+#else
+    return false;
+#endif
+}
+
+bool VideoDecoder::h265DecodeSupported() {
+#ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
+    return MacVTDecoder::hevcDecodeSupported();
+#elif defined(BSFCHAT_HAVE_MEDIAFOUNDATION)
+    return MFDecoder::hevcDecodeSupported();
+#else
+    return false;
+#endif
+}
+
 std::unique_ptr<VideoEncoder> VideoEncoder::create(VideoCodecKind kind,
                                                    bool preferHardware) {
+    if (kind == VideoCodecKind::H265) {
+        // No software fallback on purpose: a software HEVC encoder
+        // cannot hold a realtime 1080p30 screen share on the CPU
+        // budget left over from capture, scaling and Opus, and the
+        // whole point of the codec here is to spend less, not more.
+        if (!h265EncodeSupported()) return nullptr;
+#ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
+        return std::make_unique<MacVTEncoder>();
+#elif defined(BSFCHAT_HAVE_MEDIAFOUNDATION)
+        return std::make_unique<MFEncoder>(preferHardware);
+#else
+        return nullptr;
+#endif
+    }
     if (kind == VideoCodecKind::H264) {
 #ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
         if (preferHardware) return std::make_unique<MacVTEncoder>();
@@ -50,6 +99,10 @@ std::unique_ptr<VideoEncoder> VideoEncoder::create(VideoCodecKind kind,
 }
 
 VideoEncoder::Caps VideoEncoder::queryCaps(VideoCodecKind kind) {
+    if (kind == VideoCodecKind::H265) {
+        if (!h265EncodeSupported()) return {};
+        return {true, false, false};   // hardware, not lossless, no H.264 High axis
+    }
     if (kind == VideoCodecKind::H264) {
 #if defined(BSFCHAT_HAVE_VIDEOTOOLBOX) || defined(BSFCHAT_HAVE_MEDIAFOUNDATION)
         return {true, false, true};
@@ -77,6 +130,16 @@ QStringList VideoEncoder::h264EncodeProfiles() {
 
 std::unique_ptr<VideoDecoder> VideoDecoder::create(VideoCodecKind kind,
                                                    bool preferHardware) {
+    if (kind == VideoCodecKind::H265) {
+        if (!h265DecodeSupported()) return nullptr;
+#ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
+        return std::make_unique<MacVTDecoder>();
+#elif defined(BSFCHAT_HAVE_MEDIAFOUNDATION)
+        return std::make_unique<MFDecoder>();
+#else
+        return nullptr;
+#endif
+    }
     if (kind == VideoCodecKind::H264) {
 #ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
         if (preferHardware) return std::make_unique<MacVTDecoder>();

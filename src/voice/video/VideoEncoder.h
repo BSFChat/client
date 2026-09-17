@@ -47,4 +47,9 @@ public:
     // H.264 profiles this platform can emit, as PeerCaps strings
     // ("cb", "high"), best first.
     static QStringList h264EncodeProfiles();
+    // Can this build, on THIS machine, encode H.265? Runtime-detected
+    // (VideoToolbox media engine / registered MF encoder MFT) and
+    // cached. Purely local knowledge — it is never advertised to
+    // peers, who only care what we can send them, not what we could.
+    static bool h265EncodeSupported();
 };

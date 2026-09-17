@@ -19,8 +19,29 @@ inline constexpr int kVideoStreamCount = 2;
 
 enum class VideoCodecKind {
     H264,
+    H265,
     Av1Lossless,
 };
+
+// The wire/"caps" identifier for a codec, and the inverse. These are
+// the strings that appear in `bsfchat_caps.video_codecs`, in the video
+// diagnostics overlay, and in the SDP rtpmap (upper-cased there by
+// libdatachannel). Kept next to the enum so a new codec cannot be
+// added without naming it.
+inline const char* videoCodecName(VideoCodecKind k) {
+    switch (k) {
+    case VideoCodecKind::H264:        return "h264";
+    case VideoCodecKind::H265:        return "h265";
+    case VideoCodecKind::Av1Lossless: return "av1-lossless";
+    }
+    return "h264";
+}
+
+// True for the codecs that ride RTP video tracks (as opposed to the
+// AV1 lossless tier, which rides a reliable data channel).
+inline bool isRtpVideoCodec(VideoCodecKind k) {
+    return k == VideoCodecKind::H264 || k == VideoCodecKind::H265;
+}
 
 // H.264 bitstream profile actually emitted — negotiated app-level via
 // PeerCaps (the SDP always advertises Constrained Baseline for
@@ -62,7 +83,7 @@ struct EncoderConfig {
 };
 
 struct EncodedFrame {
-    QByteArray data;        // H264: Annex-B access unit (long start codes)
+    QByteArray data;        // H264/H265: Annex-B access unit (long start codes)
                             // AV1: complete temporal unit
     VideoCodecKind codec = VideoCodecKind::H264;
     bool keyframe = false;

@@ -16,14 +16,20 @@ struct MacVTEncoder::CallbackSlot {
     QByteArray annexB;
     bool keyframe = false;
     bool valid = false;
+    // Which parameter-set API the callback must use. Set by init()
+    // before any frame is submitted, read only on the encode thread.
+    bool hevc = false;
 };
 
 namespace {
 
-// AVCC sample buffer → Annex-B access unit. Keyframes get SPS/PPS
-// prepended from the format description so any AU a receiver joins
-// on is self-contained (matches openh264's output shape).
-bool sampleToAnnexB(CMSampleBufferRef sample, QByteArray& out, bool keyframe) {
+// AVCC/HVCC sample buffer → Annex-B access unit. Keyframes get the
+// parameter sets prepended from the format description (SPS+PPS for
+// H.264; VPS+SPS+PPS for HEVC) so any AU a receiver joins on is
+// self-contained — a receiver that starts mid-GOP has no other source
+// for them, and for HEVC the VPS is not optional.
+bool sampleToAnnexB(CMSampleBufferRef sample, QByteArray& out, bool keyframe,
+                    bool hevc) {
     static const char kStartCode[4] = {0, 0, 0, 1};
     out.clear();
 
@@ -31,13 +37,17 @@ bool sampleToAnnexB(CMSampleBufferRef sample, QByteArray& out, bool keyframe) {
         CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sample);
         if (!fmt) return false;
         size_t paramCount = 0;
-        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-            fmt, 0, nullptr, nullptr, &paramCount, nullptr);
+        // MSVC forbids #if inside a macro argument list and this file is
+        // ObjC++ anyway; a plain function pointer keeps the two API
+        // families to one branch instead of two copies of the loop.
+        auto getParamSet = hevc
+            ? &CMVideoFormatDescriptionGetHEVCParameterSetAtIndex
+            : &CMVideoFormatDescriptionGetH264ParameterSetAtIndex;
+        getParamSet(fmt, 0, nullptr, nullptr, &paramCount, nullptr);
         for (size_t i = 0; i < paramCount; ++i) {
             const uint8_t* ps = nullptr;
             size_t psSize = 0;
-            if (CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                    fmt, i, &ps, &psSize, nullptr, nullptr) != noErr)
+            if (getParamSet(fmt, i, &ps, &psSize, nullptr, nullptr) != noErr)
                 return false;
             out.append(kStartCode, 4);
             out.append(reinterpret_cast<const char*>(ps), int(psSize));
@@ -69,6 +79,7 @@ bool sampleToAnnexB(CMSampleBufferRef sample, QByteArray& out, bool keyframe) {
 void compressionCallback(void* refcon, void* /*frameRefcon*/, OSStatus status,
                          VTEncodeInfoFlags flags, CMSampleBufferRef sample) {
     auto* slot = static_cast<MacVTEncoder::CallbackSlot*>(refcon);
+    const bool hevc = slot->hevc;
     slot->valid = false;
     if (status != noErr || !sample) {
         qCWarning(logVTEnc, "compression callback status=%d", int(status));
@@ -84,10 +95,35 @@ void compressionCallback(void* refcon, void* /*frameRefcon*/, OSStatus status,
         keyframe = !CFDictionaryContainsKey(dict, kCMSampleAttachmentKey_NotSync);
     }
     slot->keyframe = keyframe;
-    slot->valid = sampleToAnnexB(sample, slot->annexB, keyframe);
+    slot->valid = sampleToAnnexB(sample, slot->annexB, keyframe, hevc);
 }
 
 } // namespace
+
+bool MacVTEncoder::hevcEncodeSupported() {
+    // VTCopySupportedPropertyDictionaryForEncoder is the cheap, honest
+    // question: it consults the registered encoder list and fails with
+    // kVTCouldNotFindVideoEncoderErr when nothing can encode the codec
+    // at that size. Creating a throwaway compression session would also
+    // work but spins up the media engine on a cold path.
+    static const bool supported = []() -> bool {
+        CFStringRef encoderId = nullptr;
+        CFDictionaryRef props = nullptr;
+        NSDictionary* spec = @{
+            (id)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @YES,
+        };
+        OSStatus status = VTCopySupportedPropertyDictionaryForEncoder(
+            1280, 720, kCMVideoCodecType_HEVC,
+            (__bridge CFDictionaryRef)spec, &encoderId, &props);
+        const bool ok = (status == noErr);
+        if (encoderId) CFRelease(encoderId);
+        if (props) CFRelease(props);
+        qCInfo(logVTEnc, "HEVC encode %s on this Mac (status %d)",
+              ok ? "available" : "unavailable", int(status));
+        return ok;
+    }();
+    return supported;
+}
 
 MacVTEncoder::~MacVTEncoder() {
     destroy();
@@ -105,8 +141,11 @@ void MacVTEncoder::destroy() {
 
 bool MacVTEncoder::init(const EncoderConfig& config) {
     destroy();
-    if (config.codec != VideoCodecKind::H264) return false;
+    if (config.codec != VideoCodecKind::H264 && config.codec != VideoCodecKind::H265)
+        return false;
+    const bool hevc = config.codec == VideoCodecKind::H265;
     if (!m_slot) m_slot = new CallbackSlot;
+    m_slot->hevc = hevc;
 
     VTCompressionSessionRef session = nullptr;
     NSDictionary* encoderSpec = @{
@@ -120,7 +159,8 @@ bool MacVTEncoder::init(const EncoderConfig& config) {
     };
     OSStatus status = VTCompressionSessionCreate(
         kCFAllocatorDefault, config.width, config.height,
-        kCMVideoCodecType_H264, (__bridge CFDictionaryRef)encoderSpec,
+        hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264,
+        (__bridge CFDictionaryRef)encoderSpec,
         (__bridge CFDictionaryRef)sourceAttrs, kCFAllocatorDefault,
         compressionCallback, m_slot, &session);
     if (status != noErr || !session) {
@@ -136,10 +176,14 @@ bool MacVTEncoder::init(const EncoderConfig& config) {
     // No B-frames: flat latency, and keeps the bitstream inside what
     // openh264 receivers decode comfortably.
     setProp(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
+    // HEVC has no baseline/high axis worth exposing here — Main is the
+    // 8-bit 4:2:0 profile every hardware decoder implements, and the
+    // H264Profile setting is meaningless for it.
     setProp(kVTCompressionPropertyKey_ProfileLevel,
-            config.profile == H264Profile::High
-                ? kVTProfileLevel_H264_High_AutoLevel
-                : kVTProfileLevel_H264_Baseline_AutoLevel);
+            hevc ? kVTProfileLevel_HEVC_Main_AutoLevel
+                 : (config.profile == H264Profile::High
+                        ? kVTProfileLevel_H264_High_AutoLevel
+                        : kVTProfileLevel_H264_Baseline_AutoLevel));
     setProp(kVTCompressionPropertyKey_AverageBitRate,
             (__bridge CFTypeRef)@(config.targetBitrateKbps * 1000));
     setProp(kVTCompressionPropertyKey_DataRateLimits,
@@ -154,9 +198,10 @@ bool MacVTEncoder::init(const EncoderConfig& config) {
     VTCompressionSessionPrepareToEncodeFrames(session);
 
     m_config = config;
-    qCInfo(logVTEnc, "VideoToolbox encoder up: %dx%d@%dfps %d kbps %s",
+    qCInfo(logVTEnc, "VideoToolbox %s encoder up: %dx%d@%dfps %d kbps %s",
+          hevc ? "HEVC" : "H.264",
           config.width, config.height, config.fps, config.targetBitrateKbps,
-          config.profile == H264Profile::High ? "high" : "baseline");
+          hevc ? "main" : (config.profile == H264Profile::High ? "high" : "baseline"));
     return true;
 }
 

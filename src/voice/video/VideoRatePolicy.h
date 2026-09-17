@@ -1,5 +1,7 @@
 #pragma once
 
+#include "voice/video/VideoCodec.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -77,25 +79,42 @@ struct Thresholds {
 //           at ~2.7 Mbps.
 // `kComfort` is the bitrate at which the NEXT size up is worth taking;
 // the gap between floor and comfort is what stops the ladder flapping.
-inline constexpr double floorBpp(Content c) {
-    return c == Content::Screen ? 0.0650 : 0.0435;
+//
+// The anchors above are H.264 numbers, measured against H.264. HEVC
+// buys roughly 40 % at equal perceived quality on this kind of content
+// (more on flat screen regions, less on noisy camera), so its floors
+// are 0.6x. This is not cosmetic: the floor is what the ladder uses to
+// decide "this bitrate cannot carry this size, step down". Leaving the
+// H.264 floors in place under HEVC would make the controller drop
+// resolution while the picture was still perfectly sharp — the codec
+// win would be spent on a smaller image instead of a better one.
+inline constexpr double kHevcFloorScale = 0.6;
+
+inline constexpr double floorBpp(Content c, VideoCodecKind codec) {
+    const double h264 = c == Content::Screen ? 0.0650 : 0.0435;
+    return codec == VideoCodecKind::H265 ? h264 * kHevcFloorScale : h264;
 }
-inline constexpr double comfortBpp(Content c) { return floorBpp(c) * 1.6; }
+inline constexpr double comfortBpp(Content c, VideoCodecKind codec) {
+    return floorBpp(c, codec) * 1.6;
+}
 
 // 16:9 is close enough — these bands are judgement, not measurement.
 inline double pixelsAt(int longEdge) {
     return double(longEdge) * (double(longEdge) * 9.0 / 16.0);
 }
 
-// The least bitrate at which `longEdge`@`fps` is worth sending at all.
-inline int minKbpsFor(Content c, int longEdge, int fps) {
-    return int(floorBpp(c) * pixelsAt(longEdge) * double(std::max(fps, 1))
+// The least bitrate at which `longEdge`@`fps` is worth sending at all,
+// in `codec`.
+inline int minKbpsFor(Content c, int longEdge, int fps,
+                      VideoCodecKind codec = VideoCodecKind::H264) {
+    return int(floorBpp(c, codec) * pixelsAt(longEdge) * double(std::max(fps, 1))
                / 1000.0);
 }
 // The bitrate at which `longEdge`@`fps` is comfortable — the bar an
 // upshift has to clear, repeatedly, before it happens.
-inline int comfortKbpsFor(Content c, int longEdge, int fps) {
-    return int(comfortBpp(c) * pixelsAt(longEdge) * double(std::max(fps, 1))
+inline int comfortKbpsFor(Content c, int longEdge, int fps,
+                          VideoCodecKind codec = VideoCodecKind::H264) {
+    return int(comfortBpp(c, codec) * pixelsAt(longEdge) * double(std::max(fps, 1))
                / 1000.0);
 }
 
@@ -142,9 +161,10 @@ inline int fpsForRung(Content c, int maxFps, int idx) {
 // What the controller must never emit below at this rung: sending
 // 250 kbps of 1080p is strictly worse than sending 250 kbps of 480p,
 // and the ladder is what converts one into the other.
-inline int rungMinKbps(Content c, int maxLongEdge, int maxFps, int idx) {
+inline int rungMinKbps(Content c, int maxLongEdge, int maxFps, int idx,
+                       VideoCodecKind codec = VideoCodecKind::H264) {
     return minKbpsFor(c, edgeForRung(c, maxLongEdge, idx),
-                      fpsForRung(c, maxFps, idx));
+                      fpsForRung(c, maxFps, idx), codec);
 }
 
 } // namespace videorate

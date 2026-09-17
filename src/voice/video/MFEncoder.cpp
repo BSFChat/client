@@ -27,7 +27,53 @@ bool ensureMFStartup() {
 
 LONGLONG usToMfTime(qint64 us) { return LONGLONG(us) * 10; } // 100 ns units
 
+// The MF output subtype for a codec we might encode.
+const GUID& mfSubtypeFor(VideoCodecKind kind) {
+    return kind == VideoCodecKind::H265 ? MFVideoFormat_HEVC : MFVideoFormat_H264;
+}
+
+// Is there ANY encoder MFT registered for this subtype? On Windows the
+// HEVC encoder is not part of the base OS — it arrives with the vendor
+// driver's MFT or with the Store "HEVC Video Extensions" package — so
+// this has to be a runtime question, asked of the registry rather than
+// assumed from the SDK headers we compiled against. Absent ⇒ we simply
+// never advertise or select H.265.
+bool anyEncoderMftFor(const GUID& subtype) {
+    MFT_REGISTER_TYPE_INFO inInfo{MFMediaType_Video, MFVideoFormat_NV12};
+    MFT_REGISTER_TYPE_INFO outInfo{MFMediaType_Video, subtype};
+    IMFActivate** activates = nullptr;
+    UINT32 count = 0;
+    // Both flavours: a hardware-only or software-only answer is still
+    // an answer, and MFTEnumEx will not return both without the flags.
+    const UINT32 flavours[] = {
+        MFT_ENUM_FLAG_SORTANDFILTER | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCMFT,
+        MFT_ENUM_FLAG_SORTANDFILTER | MFT_ENUM_FLAG_SYNCMFT,
+    };
+    for (UINT32 flags : flavours) {
+        if (SUCCEEDED(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, flags, &inInfo,
+                                &outInfo, &activates, &count))) {
+            for (UINT32 i = 0; i < count; ++i) activates[i]->Release();
+            CoTaskMemFree(activates);
+            activates = nullptr;
+            if (count > 0) return true;
+            count = 0;
+        }
+    }
+    return false;
+}
+
 } // namespace
+
+bool MFEncoder::hevcEncodeSupported() {
+    static const bool supported = []() -> bool {
+        if (!ensureMFStartup()) return false;
+        const bool ok = anyEncoderMftFor(MFVideoFormat_HEVC);
+        qCInfo(logMFEnc, "HEVC encode %s (encoder MFT %s)",
+              ok ? "available" : "unavailable", ok ? "found" : "not registered");
+        return ok;
+    }();
+    return supported;
+}
 
 MFEncoder::MFEncoder(bool preferHardware)
     : m_preferHardware(preferHardware) {}
@@ -46,7 +92,7 @@ void MFEncoder::destroy() {
 
 bool MFEncoder::createTransform(bool hardware, const EncoderConfig& config) {
     MFT_REGISTER_TYPE_INFO inInfo{MFMediaType_Video, MFVideoFormat_NV12};
-    MFT_REGISTER_TYPE_INFO outInfo{MFMediaType_Video, MFVideoFormat_H264};
+    MFT_REGISTER_TYPE_INFO outInfo{MFMediaType_Video, mfSubtypeFor(config.codec)};
     UINT32 flags = MFT_ENUM_FLAG_SORTANDFILTER
         | (hardware ? (MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCMFT)
                     : MFT_ENUM_FLAG_SYNCMFT);
@@ -87,13 +133,19 @@ bool MFEncoder::configureTypes(const EncoderConfig& config) {
     ComPtr<IMFMediaType> outType;
     if (FAILED(MFCreateMediaType(&outType))) return false;
     outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    outType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+    outType->SetGUID(MF_MT_SUBTYPE, mfSubtypeFor(config.codec));
     outType->SetUINT32(MF_MT_AVG_BITRATE, UINT32(config.targetBitrateKbps) * 1000);
     outType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    outType->SetUINT32(MF_MT_MPEG2_PROFILE,
-                       config.profile == H264Profile::High
-                           ? eAVEncH264VProfile_High
-                           : eAVEncH264VProfile_ConstrainedBase);
+    // HEVC has one profile worth asking for here (Main, 8-bit 4:2:0);
+    // the H264Profile setting does not apply to it. MSVC rejects a
+    // preprocessor conditional inside a macro argument, so this stays a
+    // plain ternary on an already-computed value.
+    const UINT32 mpeg2Profile = config.codec == VideoCodecKind::H265
+        ? UINT32(eAVEncH265VProfile_Main_420_8)
+        : UINT32(config.profile == H264Profile::High
+                     ? eAVEncH264VProfile_High
+                     : eAVEncH264VProfile_ConstrainedBase);
+    outType->SetUINT32(MF_MT_MPEG2_PROFILE, mpeg2Profile);
     MFSetAttributeSize(outType.Get(), MF_MT_FRAME_SIZE,
                        UINT32(config.width), UINT32(config.height));
     MFSetAttributeRatio(outType.Get(), MF_MT_FRAME_RATE,
@@ -164,7 +216,10 @@ bool MFEncoder::configureTypes(const EncoderConfig& config) {
 
 bool MFEncoder::init(const EncoderConfig& config) {
     destroy();
-    if (config.codec != VideoCodecKind::H264) return false;
+    if (config.codec != VideoCodecKind::H264 && config.codec != VideoCodecKind::H265)
+        return false;
+    if (config.codec == VideoCodecKind::H265 && !hevcEncodeSupported())
+        return false;
     if (!ensureMFStartup()) return false;
 
     bool ok = m_preferHardware && createTransform(true, config);
@@ -174,11 +229,13 @@ bool MFEncoder::init(const EncoderConfig& config) {
     }
     if (!ok) {
         destroy();
-        qCWarning(logMFEnc, "no usable H.264 encoder MFT");
+        qCWarning(logMFEnc, "no usable %s encoder MFT",
+                 videoCodecName(config.codec));
         return false;
     }
     m_config = config;
-    qCInfo(logMFEnc, "MF encoder up: %dx%d@%dfps %d kbps (%s, %s)",
+    qCInfo(logMFEnc, "MF %s encoder up: %dx%d@%dfps %d kbps (%s, %s)",
+          videoCodecName(config.codec),
           config.width, config.height, config.fps, config.targetBitrateKbps,
           m_isHardware ? "hardware" : "software",
           m_isAsync ? "async" : "sync");
