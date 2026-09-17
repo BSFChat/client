@@ -478,6 +478,57 @@ private slots:
         QVERIFY(SyncBackoff::kMaxResumeAttempts >= 1);
         QVERIFY(SyncBackoff::kMaxResumeAttempts <= 5);
     }
+
+    // --- no-progress classification --------------------------------------
+    //
+    // This decides whether a SUCCESSFUL /sync is answered with an immediate
+    // re-poll or with a backoff delay, so getting it wrong in the strict
+    // direction is a latency bug, not a wasted request: a client pushed onto
+    // the escalating curve has no request in flight for up to a minute, and
+    // the next message addressed to it waits that long.
+
+    void testEmptyFastReplyIsNoProgress()
+    {
+        // The case the guard exists for: an endpoint answering 200 instantly
+        // with nothing and never moving the token. Re-entering with no floor
+        // is what made this a tight request loop.
+        QVERIFY(SyncBackoff::isNoProgressReply(true, false, 0));
+    }
+
+    void testEphemeralOnlyReplyIsProgress()
+    {
+        // A typing notification or a presence change wakes a long poll and
+        // moves no timeline events, so next_batch stands still. The server is
+        // plainly alive and must not cost the client a backoff — this is the
+        // regression: typing at somebody walked their poll interval out.
+        QVERIFY(!SyncBackoff::isNoProgressReply(true, false, 1));
+        QVERIFY(!SyncBackoff::isNoProgressReply(true, false, 7));
+    }
+
+    void testSlowReplyIsNeverNoProgress()
+    {
+        // A reply that outlasted the floor genuinely blocked, which no
+        // unconditional-200 endpoint does — even with an empty payload.
+        QVERIFY(!SyncBackoff::isNoProgressReply(false, false, 0));
+    }
+
+    void testAdvancedTokenIsAlwaysProgress()
+    {
+        QVERIFY(!SyncBackoff::isNoProgressReply(true, true, 0));
+        QVERIFY(!SyncBackoff::isNoProgressReply(false, true, 0));
+    }
+
+    void testNoProgressCurveStillEscalatesAndCaps()
+    {
+        // The backoff a no-progress reply is answered with is the same curve
+        // as an error's, so a broken 200 cannot spin faster than a broken
+        // connection. Worth pinning: this is the delay a real message waits
+        // behind when the classification above gets it wrong.
+        QCOMPARE(SyncBackoff::baseDelayMs(0), SyncBackoff::kBaseDelayMs);
+        QVERIFY(SyncBackoff::baseDelayMs(1) > SyncBackoff::baseDelayMs(0));
+        QCOMPARE(SyncBackoff::baseDelayMs(100), SyncBackoff::kMaxDelayMs);
+    }
+
 };
 
 QTEST_GUILESS_MAIN(TestSyncResume)

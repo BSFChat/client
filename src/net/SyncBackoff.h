@@ -45,6 +45,26 @@ int applyJitter(int baseDelayMs, double jitter01);
 // baseDelayMs() + applyJitter() in one call.
 int delayForFailure(int consecutiveFailures, double jitter01);
 
+// True when a *successful* /sync reply should be treated as no progress and
+// answered with delayForFailure() rather than an immediate re-poll.
+//
+// The hazard this guards is an endpoint that answers 200 unconditionally — a
+// caching proxy, a reverse proxy pointed at the wrong upstream, a server bug.
+// Re-entering the request with no floor turns that into a tight loop that
+// melts client and server together.
+//
+// `payloadItems` is what the reply actually carried: timeline events plus
+// ephemeral (typing) plus presence. It is the whole reason this is a function
+// rather than `fastReply && !tokenAdvanced` inline. A server may answer a long
+// poll promptly WITHOUT moving next_batch and still be perfectly healthy: a
+// typing notification or a presence change wakes the poll, and neither is a
+// timeline event, so the token stands still. Counting those as no progress put
+// a client that was merely being told somebody is typing onto the escalating
+// curve — 1s, 2s, 4s, up to a minute with no request in flight — so the next
+// real message waited out whatever the counter had reached. A reply that
+// carried something is evidence of a live server, whatever the token did.
+bool isNoProgressReply(bool fastReply, bool tokenAdvanced, int payloadItems);
+
 // True when a /sync error body is the server saying it does not recognise
 // our `since` token — the only class of failure that dropping the token and
 // re-running a full initial sync can actually fix.

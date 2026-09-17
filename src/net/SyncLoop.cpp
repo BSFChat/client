@@ -2,8 +2,27 @@
 #include "net/MatrixClient.h"
 
 #include <QDebug>
+#include <QLoggingCategory>
 #include <QNetworkInformation>
 #include <QRandomGenerator>
+
+// Per-round-trip /sync diagnostics: how long the poll took, whether the token
+// moved, how many events came back, and what we decided to do next.
+//
+// Off by default like the other bsfchat.* categories — this fires on every
+// poll, which is at least twice a minute per client even when nothing is
+// happening. Turn it on for a measurement session with either:
+//
+//   QT_LOGGING_RULES=bsfchat.sync=true ./bsfchat-app
+//
+// or Settings > Advanced > verbose logging, which sets bsfchat.*=true.
+//
+// It exists because "messages take ages" is not a measurable claim. Delivery
+// lag is the gap between the sender's send and the receiver's next sync
+// RETURNING, and only the receiver's client can see the second half of that:
+// whether the poll was answered late, or answered promptly with nothing and
+// then sat out a backoff.
+Q_LOGGING_CATEGORY(logSync, "bsfchat.sync", QtWarningMsg)
 
 SyncLoop::SyncLoop(MatrixClient* client, QObject* parent)
     : QObject(parent)
@@ -57,7 +76,10 @@ void SyncLoop::doSync()
 {
     if (!m_running) return;
     m_requestTimer.start();
-    m_client->sync(m_since, 30000);
+    qCDebug(logSync).nospace()
+        << "/sync -> since=" << (m_since.isEmpty() ? QStringLiteral("(full)") : m_since)
+        << " timeout=" << kSyncTimeoutMs << "ms";
+    m_client->sync(m_since, kSyncTimeoutMs);
 }
 
 void SyncLoop::onSyncSuccess(const bsfchat::SyncResponse& response)
@@ -88,7 +110,38 @@ void SyncLoop::onSyncSuccess(const bsfchat::SyncResponse& response)
     const bool fast = elapsed < SyncBackoff::kMinSyncIntervalMs;
     const bool progressed = m_since != previous;
 
-    if (fast && !progressed) {
+    // Count what the reply actually carried. A long poll can legitimately come
+    // back fast without next_batch moving — typing and presence wake it and
+    // are not timeline events — so the payload is what tells a healthy server
+    // apart from one answering 200 unconditionally. See isNoProgressReply().
+    int events = 0;
+    int ephemeral = 0;
+    for (const auto& [roomId, room] : response.rooms.join) {
+        Q_UNUSED(roomId)
+        events += static_cast<int>(room.timeline.events.size());
+        if (room.ephemeral) ephemeral += static_cast<int>(room.ephemeral->events.size());
+    }
+    const int presence = response.presence
+        ? static_cast<int>(response.presence->events.size()) : 0;
+    const bool noProgress =
+        SyncBackoff::isNoProgressReply(fast, progressed, events + ephemeral + presence);
+
+    if (logSync().isDebugEnabled()) {
+        // A poll that comes back fast with events is healthy (they were
+        // already queued). Fast with nothing and no token movement is the
+        // shape that costs real latency: it is what triggers the no-progress
+        // backoff below, so log the two apart rather than as one "empty".
+        qCDebug(logSync).nospace()
+            << "/sync rt=" << elapsed << "ms rooms=" << response.rooms.join.size()
+            << " events=" << events << " ephemeral=" << ephemeral
+            << " presence=" << presence
+            << " progressed=" << progressed
+            << (noProgress
+                    ? QStringLiteral(" NO-PROGRESS (backoff #%1)").arg(m_noProgressReplies)
+                    : QString());
+    }
+
+    if (noProgress) {
         scheduleSync(SyncBackoff::delayForFailure(
             m_noProgressReplies++,
             QRandomGenerator::global()->generateDouble()));
@@ -123,6 +176,11 @@ void SyncLoop::onSyncError(const QString& error)
 
     const int delay = SyncBackoff::delayForFailure(
         m_consecutiveFailures++, QRandomGenerator::global()->generateDouble());
+    qCDebug(logSync).nospace()
+        << "/sync failed after "
+        << (m_requestTimer.isValid() ? m_requestTimer.elapsed() : -1)
+        << "ms, retry in " << delay << "ms (failure #" << m_consecutiveFailures
+        << "): " << error.left(200);
     m_retryTimer.start(delay);
 
     ensureReachabilityWatch();
