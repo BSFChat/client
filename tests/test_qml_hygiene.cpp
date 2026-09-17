@@ -320,6 +320,102 @@ private slots:
         }
     }
 
+    // The voice room's video has to stay in ONE component, instantiated
+    // by ONE Repeater over the feed list.
+    //
+    // This is the invariant behind "clicking a thumbnail must not make
+    // the picture blink". A feed can be filling the main stage or sitting
+    // in the bottom strip, and the obvious way to build that — a stage
+    // component and a strip component, or a reparent on selection — means
+    // the QML engine destroys the VideoOutput on one side and creates a
+    // fresh one on the other every time the selection changes. A new
+    // VideoOutput has no frames: it shows black until the next one
+    // arrives, which on a 5 fps screen share is a fifth of a second of
+    // nothing, on every click.
+    //
+    // So VideoFeedTile.qml holds the only VideoOutput, VoiceRoom holds a
+    // Repeater over _feeds (whose identity changes only when the set of
+    // feeds changes, never when the selection does), and moving a feed
+    // between stage and strip is a write to x/y/width/height. None of
+    // that is visible to a QML test — VoiceRoom imports the BSFChat
+    // module, which only the app binary has — so it is pinned here.
+    void voiceRoomVideoLivesInOneRepeatedComponent()
+    {
+        static const QRegularExpression videoOutput(
+            QStringLiteral(R"(\bVideoOutput\s*\{)"));
+
+        // Nothing else in the voice room may declare one. ParticipantTile
+        // is named explicitly because it used to: a camera rendered into
+        // the 220x180 avatar tile, which is the complaint this layout
+        // answers, and the tile is not even on screen while a feed exists.
+        for (const QString& relative : {QStringLiteral("/components/VoiceRoom.qml"),
+                                        QStringLiteral("/components/ParticipantTile.qml")}) {
+            const QString src = withoutComments(readQml(relative));
+            QVERIFY2(!videoOutput.match(src).hasMatch(),
+                     qPrintable(relative + QStringLiteral(
+                         " declares a VideoOutput; voice-room video belongs in"
+                         " VideoFeedTile.qml so selection cannot destroy it")));
+        }
+
+        const QString tile = withoutComments(
+            readQml(QStringLiteral("/components/VideoFeedTile.qml")));
+        int outputs = 0;
+        for (auto it = videoOutput.globalMatch(tile); it.hasNext();) {
+            it.next();
+            ++outputs;
+        }
+        QCOMPARE(outputs, 1);
+        // Attached once, on creation. Re-attaching on a property change
+        // would stack duplicate outputs on the same per-peer sink.
+        QVERIFY2(tile.contains(QLatin1String("Component.onCompleted")),
+                 "VideoFeedTile no longer attaches its sink on creation");
+
+        // And the tiles are produced by a Repeater over the feed list,
+        // not by a stage instance plus strip instances.
+        const QString room = withoutComments(
+            readQml(QStringLiteral("/components/VoiceRoom.qml")));
+        static const QRegularExpression feedTile(
+            QStringLiteral(R"(\bVideoFeedTile\s*\{)"));
+        int tiles = 0;
+        for (auto it = feedTile.globalMatch(room); it.hasNext();) {
+            it.next();
+            ++tiles;
+        }
+        QCOMPARE(tiles, 1);
+        QVERIFY2(room.contains(QLatin1String("model: room._feeds")),
+                 "VoiceRoom no longer repeats its video tiles over _feeds");
+    }
+
+    // The rc.6 Theme.onScrim trap, checked everywhere rather than only in
+    // Theme.qml: QML parses any `on` + Capital identifier as a signal
+    // handler, so `property bool onStage: false` is not a property at all,
+    // it is an assignment to a handler for a signal named `stage` — a load
+    // error that makes the component unavailable and takes every file
+    // importing it down too. Theme.qml was where it happened to bite; the
+    // parser rule is global, and a component property is exactly as easy
+    // to name that way as a colour token.
+    void noQmlFileDeclaresASignalHandlerShapedProperty()
+    {
+        static const QRegularExpression decl(
+            QStringLiteral(R"(^\s*(?:readonly\s+)?property\s+\w+\s+(on[A-Z]\w*)\s*:)"),
+            QRegularExpression::MultilineOption);
+        QStringList offenders;
+        for (const QString& path : filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
+                                              QStringLiteral("*.qml"))) {
+            const QString src = withoutComments(readAll(path));
+            for (auto it = decl.globalMatch(src); it.hasNext();) {
+                const QString name = it.next().captured(1);
+                // Grandfathered: its value is a ternary, which the parser
+                // accepts as a handler body. Do not add more.
+                if (name == QLatin1String("onAccent")) continue;
+                offenders << QFileInfo(path).fileName() + QLatin1Char(':') + name;
+            }
+        }
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral("signal-handler-shaped properties (rename them): ")
+                            + offenders.join(QStringLiteral(", "))));
+    }
+
 private:
     static QString readQml(const QString& relative)
     {
