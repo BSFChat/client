@@ -162,7 +162,15 @@ bool VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
 }
 
 void VoiceEngine::stop() {
-    if (!m_running) return;
+    if (!m_running || m_stopping) return;
+    // The hangups below are enqueued into the outbox and flushed through
+    // the same gate as every other signalling event, and that gate
+    // refuses a session that is not running. Clearing m_running first
+    // therefore meant the hangups were queued, refused, and then dropped
+    // by the m_outbox.clear() at the end of this function — nobody was
+    // ever told we left. voice::mayFlushCallEvents() lets a STOPPING
+    // session drain what stop() itself queued; this flag is the input.
+    m_stopping = true;
     m_running = false;
 
     m_candidateBatchTimer.stop();
@@ -215,6 +223,8 @@ void VoiceEngine::stop() {
         m_micLevel = 0.0f;
         emit micLevelChanged(0.0f);
     }
+
+    m_stopping = false;
 }
 
 void VoiceEngine::addPeer(const QString& userId, bool isOfferer) {
@@ -1089,7 +1099,8 @@ void VoiceEngine::sendCallEvent(const QString& eventType, const nlohmann::json& 
 }
 
 void VoiceEngine::flushOutbox() {
-    if (!m_running || m_roomId.isEmpty()) return;
+    if (!voice::mayFlushCallEvents(m_running, m_stopping, !m_roomId.isEmpty()))
+        return;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     for (const auto& entry : m_outbox.due(now)) {
         m_client->sendCallEvent(m_roomId, entry.type, entry.payload, entry.token);

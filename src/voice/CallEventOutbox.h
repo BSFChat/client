@@ -121,4 +121,35 @@ private:
     quint64 m_nextToken = 0;
 };
 
+// ---------------------------------------------------------------------
+// When queued signalling may be handed to the transport
+// ---------------------------------------------------------------------
+// VoiceEngine::flushOutbox() used to be a bare `if (!m_running ||
+// m_roomId.isEmpty()) return;`, and VoiceEngine::stop() clears m_running
+// BEFORE it enqueues one hangup per peer. The result was that leaving a
+// voice channel sent NO hangups at all: every one of them was queued
+// into the outbox, refused by the flush gate because the engine had
+// already stopped, and then thrown away by the m_outbox.clear() two
+// statements later — while the comment above that clear() claimed they
+// "went out immediately".
+//
+// What the far side sees when a hangup is missing is not cosmetic. It
+// keeps the peer connection, the mixer row and the tile for the leaver
+// until its OWN timers give up: 10 s of disconnect grace if ICE happens
+// to notice, otherwise the 30 s setup watchdog, and in a relayed call
+// where the TURN allocation outlives the client, neither fires promptly.
+// The leaver stays visible and "connected" in everyone's voice room for
+// tens of seconds after they left, which is exactly the symptom a leave
+// is supposed to prevent.
+//
+// So the gate needs a third input: a session that is STOPPING is still
+// allowed to drain what stop() itself just queued, even though it is no
+// longer running. Pure predicate so the truth table — including the
+// regression case — can be asserted without an engine.
+inline bool mayFlushCallEvents(bool running, bool stopping, bool haveRoom)
+{
+    if (!haveRoom) return false;
+    return running || stopping;
+}
+
 } // namespace voice

@@ -243,6 +243,11 @@ private:
     QMap<QString, QTimer*> m_connectWatchdogs;
     QJsonObject m_turnConfig;
     bool m_running = false;
+    // True only for the duration of stop(). The outbox flush gate reads
+    // it so the hangups stop() enqueues can still leave, even though
+    // m_running is already false by then — without it, leaving a channel
+    // told nobody. See voice::mayFlushCallEvents().
+    bool m_stopping = false;
     bool m_allowP2P = false;
 
     // Outbound signalling awaiting the server's acknowledgement, with

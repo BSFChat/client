@@ -251,6 +251,7 @@ private slots:
     // ---- V-M2 -------------------------------------------------------
     void outboxRetriesWithBackoffThenGivesUp();
     void outboxKeepsTheCandidateBatchUntilItIsAccepted();
+    void leavingFlushesTheHangupsStopItselfQueued();
 
     // ---- V-L4 -------------------------------------------------------
     void transportSelectorRefusesMixedRoster();
@@ -1082,6 +1083,49 @@ void TestVoiceLifecycle::outboxKeepsTheCandidateBatchUntilItIsAccepted()
 
     // The session ending drops whatever is left — there is no call to
     // send it into.
+    outbox.clear();
+    QVERIFY(outbox.isEmpty());
+}
+
+void TestVoiceLifecycle::leavingFlushesTheHangupsStopItselfQueued()
+{
+    // VoiceEngine::stop() clears m_running and THEN enqueues one
+    // m.call.hangup per peer, which the outbox flush gate refused
+    // because the engine was no longer running — and two statements
+    // later stop() cleared the outbox. Leaving a voice channel therefore
+    // sent nothing to anybody, and each remaining peer held the leaver's
+    // connection, mixer row and tile until its own 10 s disconnect grace
+    // or 30 s setup watchdog expired.
+    //
+    // The gate now takes a third input so the session that is stopping
+    // may still drain what stop() queued.
+
+    // The regression: running is already false when the hangups go in.
+    QVERIFY(voice::mayFlushCallEvents(/*running=*/false, /*stopping=*/true,
+                                      /*haveRoom=*/true));
+    // A stopped, non-stopping engine stays silent: nothing queued after
+    // stop() returns belongs to a call that still exists.
+    QVERIFY(!voice::mayFlushCallEvents(false, false, true));
+    // Normal mid-call sending is unchanged.
+    QVERIFY(voice::mayFlushCallEvents(true, false, true));
+    // No room means no endpoint to PUT to, whatever the other two say.
+    QVERIFY(!voice::mayFlushCallEvents(true, false, false));
+    QVERIFY(!voice::mayFlushCallEvents(false, true, false));
+
+    // And the queue itself hands the hangups over on that first due()
+    // call, before stop()'s clear() discards the rest — i.e. one flush
+    // inside the stopping window is enough for every peer.
+    voice::CallEventOutbox outbox;
+    const qint64 t0 = 1'000;
+    for (const char* peer : {"@a:test", "@b:test", "@c:test"}) {
+        outbox.add("m.call.hangup",
+                   QByteArray("{\"to\":\"") + peer + "\"}", t0);
+    }
+    QCOMPARE(outbox.pendingCount(), 3);
+    const auto due = outbox.due(t0);
+    QCOMPARE(due.size(), 3);
+    for (const auto& entry : due)
+        QCOMPARE(entry.type, QStringLiteral("m.call.hangup"));
     outbox.clear();
     QVERIFY(outbox.isEmpty());
 }
