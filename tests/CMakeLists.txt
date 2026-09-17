@@ -360,6 +360,7 @@ add_test(NAME test_server_roster COMMAND test_server_roster)
 # QML module lives inside the app). See the file header for the rc.6 story.
 qt_add_executable(test_qml_hygiene test_qml_hygiene.cpp)
 target_compile_definitions(test_qml_hygiene PRIVATE
-    BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml")
+    BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml"
+    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test_qml_hygiene PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_qml_hygiene COMMAND test_qml_hygiene)
