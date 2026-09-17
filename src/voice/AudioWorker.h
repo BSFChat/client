@@ -24,6 +24,33 @@
 // and deleted alongside the devices rather than living as a member that
 // the GUI thread might construct.
 //
+// Live device changes
+// -------------------
+// The device in use used to be resolved once, in startDevices(), and
+// then never again: nothing in the client subscribed to
+// QMediaDevices::audio{Inputs,Outputs}Changed. AirPods that connected
+// after join were never used even once macOS had made them the
+// system-wide default, and a device that disappeared mid-call left a
+// dead sink behind.
+//
+// It is now re-resolved on every change notification. Two rules keep
+// that from being worse than the freeze it replaces:
+//
+//   * ONE DIRECTION AT A TIME. openSink()/closeSink() and their capture
+//     counterparts touch nothing else — not the Opus encoder, not a
+//     single JitterBuffer or its playout target, not the pump timer,
+//     not the voice session. Swapping headsets must not cost the call.
+//   * NEVER FOR NOTHING. AudioDevicePolicy answers Keep when the
+//     resolved device id is the one already open, and RestartDebounce
+//     collapses the notification burst a Bluetooth connect produces
+//     into one restart per direction per window. Each restart is an
+//     audible gap, so the bar for performing one is that the device
+//     actually changed.
+//
+// The enumeration itself stays on the GUI thread (see AudioEngine):
+// QMediaDevices wants a thread with an event loop, and this one's
+// exists to service a 20ms deadline.
+//
 // Jitter buffer ownership
 // -----------------------
 // JitterBuffer is not internally synchronised, by design. The rule here
@@ -36,6 +63,9 @@
 #include <QMap>
 #include <QByteArray>
 #include <QString>
+#include <QAudioDevice>
+#include <QAudioFormat>
+#include <QList>
 
 #include <opus.h>
 
@@ -46,6 +76,7 @@
 #include <vector>
 
 #include "voice/AudioPacketQueue.h"
+#include "voice/AudioDevicePolicy.h"
 
 class AudioMixer;
 class QAudioSource;
@@ -115,6 +146,16 @@ public:
     // samples are.
     static constexpr int kPeerLevelEmitFrames = 4;
 
+    // Window for coalescing device-change notifications, per direction.
+    // A Bluetooth connect delivers several in a few hundred
+    // milliseconds — the device appears, becomes the default, settles
+    // its profile — and AirPods deliver more again when the microphone
+    // opens. Acting on each is several audible gaps in a row for one
+    // real change. 500ms is long enough to swallow a normal burst and
+    // short enough that a deliberate switch in Control Centre still
+    // feels immediate.
+    static constexpr int kDeviceDebounceMs = 500;
+
     explicit AudioWorker(std::shared_ptr<bsfchat::voice::AudioPacketQueue> queue,
                          QObject* parent = nullptr);
     ~AudioWorker() override;
@@ -141,10 +182,37 @@ public:
     // encoder, and all per-peer jitter buffers. Idempotent.
     void stopDevices();
 
+    enum class Direction { Input, Output };
+
+    // Hands the worker the GUI thread's view of the system's audio
+    // devices. AudioEngine owns the QMediaDevices and does the
+    // enumeration there, so this thread never calls into Qt Multimedia's
+    // device layer behind the GUI thread's back.
+    //
+    // Both run ON the audio thread: AudioEngine invokes the first with a
+    // BlockingQueuedConnection to seed the worker before startDevices(),
+    // and the second with an ordinary QueuedConnection from the
+    // QMediaDevices change signals. Neither is a slot — they are called
+    // from inside a lambda posted by invokeMethod, which is what avoids
+    // having to register QAudioDevice as a queued-connection metatype.
+    void setDeviceSnapshot(Direction dir, QList<QAudioDevice> devices,
+                           QAudioDevice defaultDevice);
+    // Same, and then re-runs the device policy: restarts that direction
+    // if, and only if, the resolved device id actually changed.
+    // Debounced per direction.
+    void onSystemDevicesChanged(Direction dir, QList<QAudioDevice> devices,
+                                QAudioDevice defaultDevice);
+
 signals:
     void audioFrameReady(const QByteArray& opusFrame);
     void micLevelChanged(float level);
     void peerLevelChanged(const QString& peerId, float level);
+    // The description of the device this direction is now open on, empty
+    // when nothing is. `input` rather than Direction because this one
+    // really does cross threads as a signal, and a bool needs no
+    // metatype registration. AudioEngine publishes it for the settings
+    // dialog's "In use:" caption.
+    void deviceInUseChanged(bool input, const QString& description);
 
 private:
     void onMicDataReady();
@@ -162,6 +230,20 @@ private:
     bool flushPendingPlayback();
     bsfchat::voice::JitterBuffer* jitterFor(const QString& peerId);
     void dropPeer(const QString& peerId);
+
+    // Resolve `dir` against the current snapshot and act on the answer.
+    // The single place a device is chosen, at join and on every change.
+    void evaluateDevice(Direction dir);
+    // Snapshot -> policy input.
+    QList<bsfchat::voice::DeviceInfo> deviceInfos(Direction dir) const;
+    const QAudioDevice* snapshotDevice(Direction dir, const QString& id) const;
+    // Open or close exactly ONE direction. These touch no shared
+    // pipeline state: no encoder, no jitter buffers, no pump timer.
+    void openSource(const QAudioDevice& device);
+    void closeSource();
+    void openSink(const QAudioDevice& device);
+    void closeSink();
+    void setInUse(Direction dir, const QString& id, const QString& description);
 
     std::shared_ptr<bsfchat::voice::AudioPacketQueue> m_queue;
     // Scratch for AudioPacketQueue::drain(), kept as a member so the
@@ -202,6 +284,43 @@ private:
     std::atomic<bool> m_deafened{false};
     uint16_t m_sequence = 0;
     bool m_started = false;
+
+    // Identical for both directions and constant for the life of a
+    // session; a member so a mid-call restart can reopen a device
+    // without rebuilding it.
+    QAudioFormat m_format;
+
+    // The GUI thread's most recent view of the system's devices, per
+    // direction, plus the device it named as the default.
+    QList<QAudioDevice> m_inputSnapshot;
+    QList<QAudioDevice> m_outputSnapshot;
+    QAudioDevice m_defaultInput;
+    QAudioDevice m_defaultOutput;
+
+    // The persisted preference, read once in startDevices(). An empty
+    // description means "follow the system default". The id is only ever
+    // a tie-breaker between devices that share a description — ids are
+    // not stable across reboots on every platform, so the description
+    // stays authoritative.
+    QString m_preferredInput;
+    QString m_preferredOutput;
+    QString m_inputHintId;
+    QString m_outputHintId;
+
+    // What is open right now. The id is what the policy compares; the
+    // description is what the UI shows.
+    QString m_inputInUseId;
+    QString m_outputInUseId;
+    QString m_inputInUseDesc;
+    QString m_outputInUseDesc;
+
+    bsfchat::voice::RestartDebounce m_inputDebounce{kDeviceDebounceMs};
+    bsfchat::voice::RestartDebounce m_outputDebounce{kDeviceDebounceMs};
+    // Created lazily on the audio thread, like the pump timer and for
+    // the same reason: a QTimer must be started and stopped on the
+    // thread that owns it. Single-shot, one per direction.
+    QTimer* m_inputRestartTimer = nullptr;
+    QTimer* m_outputRestartTimer = nullptr;
 
     // EWMA of frame RMS so the UI dot doesn't flicker at the Opus tick rate.
     float m_smoothedLevel = 0.0f;

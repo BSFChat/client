@@ -53,6 +53,30 @@
 //     which the receiver's jitter buffer absorbs. Transmit jitter is
 //     recoverable; a local sink underrun is not, and that is the one
 //     this refactor had to fix.
+//
+// Device enumeration
+// ------------------
+// This class owns the pipeline's single QMediaDevices instance, and it
+// owns it HERE rather than on the audio thread. QMediaDevices needs a
+// thread with a running event loop and delivers its change
+// notifications on the thread that owns it; the audio thread's event
+// loop exists to service a 20ms deadline and dispatches the pump timer,
+// the mic readyRead and a queue drain — nothing else belongs in it.
+//
+// So enumeration happens here, on the GUI thread, and the result is
+// posted to the worker as a plain snapshot. QAudioDevice and QList are
+// implicitly shared with atomic refcounts, so handing a copy to another
+// thread is both cheap and safe.
+//
+// On macOS these notifications cover DEFAULT-device changes as well as
+// plug and unplug: Qt's CoreAudio backend installs CoreAudio property
+// listeners on kAudioHardwarePropertyDefaultInputDevice and
+// kAudioHardwarePropertyDefaultOutputDevice next to
+// kAudioHardwarePropertyDevices (qtmultimedia,
+// src/multimedia/darwin/qdarwinaudiodevices.mm), and publishes the
+// default first in the list with isDefault set — so switching the
+// output in Control Centre reorders the list and signals. Nothing here
+// polls.
 
 #include <QObject>
 #include <QByteArray>
@@ -61,6 +85,7 @@
 #include <memory>
 
 class AudioWorker;
+class QMediaDevices;
 class QThread;
 
 namespace bsfchat::voice { class AudioPacketQueue; }
@@ -108,6 +133,13 @@ private:
     // stop() and the failure path in start().
     void teardownThread();
 
+    // Enumerate one direction on this thread and hand the result to the
+    // worker. `live` distinguishes the seeding call made before
+    // startDevices() — blocking, and never restarts anything — from a
+    // QMediaDevices change notification, which is queued and may
+    // restart that direction.
+    void pushDeviceSnapshot(bool input, bool live);
+
     // How long to wait for the audio thread to finish before giving up
     // and terminating it. Nothing on that thread can block: QAudioSink
     // writes and QAudioSource reads are both non-blocking (they return a
@@ -119,6 +151,9 @@ private:
 
     QThread* m_thread = nullptr;
     AudioWorker* m_worker = nullptr;
+    // Lives for the life of the engine, not of a session: the device
+    // set is worth watching from the moment there is a pipeline to feed.
+    QMediaDevices* m_mediaDevices = nullptr;
     // Authoritative copy of the mic/output gates, held here rather than
     // only in the worker. The worker is created by start() and destroyed
     // by stop(), so without this a setMuted() that arrived before start()

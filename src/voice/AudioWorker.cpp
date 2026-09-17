@@ -8,33 +8,20 @@
 #include <QAudioSink>
 #include <QAudioSource>
 #include <QIODevice>
-#include <QMediaDevices>
 #include <QAudioDevice>
+#include <QDateTime>
 #include <QSettings>
 #include <QThread>
 #include <QTimer>
 #include <cmath>
 #include <cstring>
+#include <utility>
 
-namespace {
-// Look up an audio device (input or output) by its human-readable
-// description. Returns a null QAudioDevice if nothing matches — caller
-// should fall back to QMediaDevices::defaultAudio{Input,Output}().
-QAudioDevice findInputByDescription(const QString& desc) {
-    if (desc.isEmpty()) return {};
-    for (const auto& d : QMediaDevices::audioInputs()) {
-        if (d.description() == desc) return d;
-    }
-    return {};
-}
-QAudioDevice findOutputByDescription(const QString& desc) {
-    if (desc.isEmpty()) return {};
-    for (const auto& d : QMediaDevices::audioOutputs()) {
-        if (d.description() == desc) return d;
-    }
-    return {};
-}
-} // namespace
+// The by-description lookups that used to live here, and the
+// QMediaDevices calls behind them, are gone: resolving a device is now
+// AudioDevicePolicy's job, it happens against a snapshot AudioEngine
+// takes on the GUI thread, and it happens on every change rather than
+// once at join. See the "Live device changes" note in AudioWorker.h.
 
 using bsfchat::voice::AudioPacketQueue;
 
@@ -81,73 +68,54 @@ bool AudioWorker::startDevices() {
     opus_encoder_ctl(m_encoder, OPUS_SET_BITRATE(32000));
     opus_encoder_ctl(m_encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
 
-    // Audio format: 48kHz, mono, 16-bit signed
-    QAudioFormat format;
-    format.setSampleRate(kSampleRate);
-    format.setChannelCount(kChannels);
-    format.setSampleFormat(QAudioFormat::Int16);
+    // Audio format: 48kHz, mono, 16-bit signed. A member, so a mid-call
+    // device switch can reopen without rebuilding it.
+    m_format = QAudioFormat();
+    m_format.setSampleRate(kSampleRate);
+    m_format.setChannelCount(kChannels);
+    m_format.setSampleFormat(QAudioFormat::Int16);
 
     // Honour the user's selection from Client Settings → Audio; fall back
     // to the OS default if the saved preference isn't present (device
     // unplugged, renamed, etc).
     // Named through AppProfile so a --profile instance reads its own
     // device preference — the same store Settings writes to.
+    //
+    // Read once, here: these are the user's stated choice, and the
+    // settings dialog says a new choice applies on the next join. What
+    // IS re-evaluated live is which real device the choice resolves to,
+    // which is a different question and the one that was broken.
     QSettings prefs(bsfchat::organizationName(), bsfchat::applicationName());
-    QString preferredIn  = prefs.value("audio/inputDevice").toString();
-    QString preferredOut = prefs.value("audio/outputDevice").toString();
+    m_preferredInput  = prefs.value("audio/inputDevice").toString();
+    m_preferredOutput = prefs.value("audio/outputDevice").toString();
+    // Tie-breaker only, for the case where several devices share one
+    // description. Written by Settings when the user picks a device.
+    m_inputHintId  = prefs.value("audio/inputDeviceId").toString();
+    m_outputHintId = prefs.value("audio/outputDeviceId").toString();
 
-    auto inputDevice = findInputByDescription(preferredIn);
-    if (inputDevice.isNull()) {
-        if (!preferredIn.isEmpty()) {
-            qWarning("[voice] Preferred input '%s' not found — using system default",
-                     qPrintable(preferredIn));
-        }
-        inputDevice = QMediaDevices::defaultAudioInput();
-    }
-    if (inputDevice.isNull()) {
+    m_inputInUseId.clear();
+    m_outputInUseId.clear();
+    m_inputInUseDesc.clear();
+    m_outputInUseDesc.clear();
+    m_inputDebounce.reset();
+    m_outputDebounce.reset();
+
+    // The same decision procedure every later change goes through, so a
+    // device that was absent at join and appears a second afterwards is
+    // handled by identical code rather than by a special case that only
+    // runs once and is therefore never exercised.
+    //
+    // Input first, and note what is NOT done here: nothing opens the
+    // microphone unless the user selected it or it is the system default
+    // input. Opening the AirPods mic drops them into hands-free mode
+    // system-wide — a quality cliff the user hears in every other app —
+    // so "follow the default output" must never drag the input along
+    // with it.
+    evaluateDevice(Direction::Input);
+    if (m_inputInUseId.isEmpty()) {
         qWarning("[voice] No audio input device available");
-    } else {
-        qInfo("[voice] Input device: %s", qPrintable(inputDevice.description()));
-        // Parented to `this`, which lives on the audio thread, and
-        // constructed here — so the source and the QIODevice it hands
-        // back are both affine to the thread that will drive them.
-        m_audioSource = new QAudioSource(inputDevice, format, this);
-        m_captureDevice = m_audioSource->start();
-        if (m_captureDevice) {
-            // Both ends are audio-thread objects, so this is a direct
-            // connection and the encode happens inline on the device
-            // callback's thread — never a hop through the GUI.
-            connect(m_captureDevice, &QIODevice::readyRead,
-                    this, &AudioWorker::onMicDataReady);
-        } else {
-            qWarning("[voice] QAudioSource::start() returned null — "
-                     "macOS likely still denying microphone access");
-        }
-        // QAudioSource has a State enum we can peek at for a sanity check.
-        qInfo("[voice] QAudioSource initial state=%d error=%d",
-              int(m_audioSource->state()), int(m_audioSource->error()));
     }
-
-    // Start playback — same device-selection logic as input.
-    auto outputDevice = findOutputByDescription(preferredOut);
-    if (outputDevice.isNull()) {
-        if (!preferredOut.isEmpty()) {
-            qWarning("[voice] Preferred output '%s' not found — using system default",
-                     qPrintable(preferredOut));
-        }
-        outputDevice = QMediaDevices::defaultAudioOutput();
-    }
-    if (!outputDevice.isNull()) {
-        qInfo("[voice] Output device: %s", qPrintable(outputDevice.description()));
-        m_audioSink = new QAudioSink(outputDevice, format, this);
-        // Must be set before start(). Bounds the amount of audio the
-        // device holds, and therefore the floor on output latency.
-        m_audioSink->setBufferSize(kFrameBytes * kSinkBufferFrames);
-        m_playbackDevice = m_audioSink->start();
-        if (!m_playbackDevice) {
-            qWarning("[voice] QAudioSink::start() returned null — no playback");
-        }
-    }
+    evaluateDevice(Direction::Output);
 
     m_sequence = 0;
     m_captureBuffer.clear();
@@ -202,19 +170,23 @@ void AudioWorker::stopDevices() {
         m_playbackTimer = nullptr;
     }
 
-    if (m_audioSource) {
-        m_audioSource->stop();
-        delete m_audioSource;
-        m_audioSource = nullptr;
-        m_captureDevice = nullptr;
+    // Cancel any armed device restart before its devices go away. Same
+    // thread-affinity rule as the pump timer: stopped and destroyed on
+    // the thread that started it.
+    for (QTimer** t : {&m_inputRestartTimer, &m_outputRestartTimer}) {
+        if (*t) {
+            (*t)->stop();
+            delete *t;
+            *t = nullptr;
+        }
     }
+    m_inputDebounce.reset();
+    m_outputDebounce.reset();
 
-    if (m_audioSink) {
-        m_audioSink->stop();
-        delete m_audioSink;
-        m_audioSink = nullptr;
-        m_playbackDevice = nullptr;
-    }
+    closeSource();
+    closeSink();
+    setInUse(Direction::Input, QString(), QString());
+    setInUse(Direction::Output, QString(), QString());
 
     if (m_encoder) {
         opus_encoder_destroy(m_encoder);
@@ -526,4 +498,225 @@ void AudioWorker::dropPeer(const QString& peerId) {
     }
     m_peerLevels.remove(peerId);
     m_peerLevelPending.remove(peerId);
+}
+
+// ---------------------------------------------------------------------
+// Live device selection
+// ---------------------------------------------------------------------
+
+void AudioWorker::setDeviceSnapshot(Direction dir, QList<QAudioDevice> devices,
+                                    QAudioDevice defaultDevice) {
+    if (dir == Direction::Input) {
+        m_inputSnapshot = std::move(devices);
+        m_defaultInput = std::move(defaultDevice);
+    } else {
+        m_outputSnapshot = std::move(devices);
+        m_defaultOutput = std::move(defaultDevice);
+    }
+}
+
+void AudioWorker::onSystemDevicesChanged(Direction dir,
+                                         QList<QAudioDevice> devices,
+                                         QAudioDevice defaultDevice) {
+    setDeviceSnapshot(dir, std::move(devices), std::move(defaultDevice));
+
+    // Not in a call. The snapshot above is kept anyway, so the next
+    // startDevices() resolves against current reality rather than
+    // against whatever was true when the engine was created.
+    if (!m_started) return;
+
+    const bool input = (dir == Direction::Input);
+    auto& debounce = input ? m_inputDebounce : m_outputDebounce;
+    QTimer*& timer = input ? m_inputRestartTimer : m_outputRestartTimer;
+
+    // Absorbed into a window that is already armed. Nothing is lost: the
+    // window acts on the snapshot as it stands when it closes, which is
+    // the one we just stored.
+    if (!debounce.onEvent(QDateTime::currentMSecsSinceEpoch())) return;
+
+    if (!timer) {
+        timer = new QTimer(this);
+        timer->setSingleShot(true);
+        connect(timer, &QTimer::timeout, this, [this, dir]() {
+            (dir == Direction::Input ? m_inputDebounce : m_outputDebounce)
+                .onFire();
+            evaluateDevice(dir);
+        });
+    }
+    timer->start(int(debounce.windowMs()));
+}
+
+QList<bsfchat::voice::DeviceInfo> AudioWorker::deviceInfos(Direction dir) const {
+    using bsfchat::voice::DeviceInfo;
+
+    const QList<QAudioDevice>& devices =
+        (dir == Direction::Input) ? m_inputSnapshot : m_outputSnapshot;
+    const QAudioDevice& def =
+        (dir == Direction::Input) ? m_defaultInput : m_defaultOutput;
+    const QString defId = QString::fromLatin1(def.id());
+
+    QList<DeviceInfo> out;
+    out.reserve(devices.size());
+    for (const QAudioDevice& d : devices) {
+        const QString id = QString::fromLatin1(d.id());
+        // Two independent sources for "this is the default": the flag
+        // the backend sets on the device, and the id
+        // QMediaDevices::defaultAudio*() reported in the same snapshot.
+        // Qt's CoreAudio backend sets both; taking either keeps this
+        // honest on a backend that only sets one.
+        out.append(DeviceInfo{
+            id, d.description(),
+            d.isDefault() || (!defId.isEmpty() && id == defId)});
+    }
+    return out;
+}
+
+const QAudioDevice* AudioWorker::snapshotDevice(Direction dir,
+                                                const QString& id) const {
+    const QList<QAudioDevice>& devices =
+        (dir == Direction::Input) ? m_inputSnapshot : m_outputSnapshot;
+    for (const QAudioDevice& d : devices) {
+        if (QString::fromLatin1(d.id()) == id) return &d;
+    }
+    return nullptr;
+}
+
+void AudioWorker::setInUse(Direction dir, const QString& id,
+                           const QString& description) {
+    const bool input = (dir == Direction::Input);
+    QString& inUseId = input ? m_inputInUseId : m_outputInUseId;
+    QString& inUseDesc = input ? m_inputInUseDesc : m_outputInUseDesc;
+    if (inUseId == id && inUseDesc == description) return;
+    inUseId = id;
+    inUseDesc = description;
+    emit deviceInUseChanged(input, description);
+}
+
+void AudioWorker::evaluateDevice(Direction dir) {
+    using bsfchat::voice::DeviceAction;
+    using bsfchat::voice::DeviceDecision;
+
+    const bool input = (dir == Direction::Input);
+    const char* what = input ? "Input" : "Output";
+    const QString& pref = input ? m_preferredInput : m_preferredOutput;
+    const QString& hint = input ? m_inputHintId : m_outputHintId;
+    // Copies, not references: setInUse() below rewrites the members.
+    const QString inUseId = input ? m_inputInUseId : m_outputInUseId;
+    const QString wasDesc = input ? m_inputInUseDesc : m_outputInUseDesc;
+
+    const DeviceDecision d =
+        bsfchat::voice::resolveDevice(pref, hint, deviceInfos(dir), inUseId);
+
+    // By far the common case: a notification burst that resolves to the
+    // device already open. Restarting here would be an audible gap for
+    // no change at all.
+    if (d.action == DeviceAction::Keep) return;
+
+    if (d.action == DeviceAction::None) {
+        if (!inUseId.isEmpty()) {
+            qWarning("[voice] %s device %s went away and there is no "
+                     "replacement — %s is now silent",
+                     what, qPrintable(wasDesc),
+                     input ? "capture" : "playback");
+            if (input) closeSource(); else closeSink();
+            setInUse(dir, QString(), QString());
+        }
+        return;
+    }
+
+    const QAudioDevice* device = snapshotDevice(dir, d.id);
+    if (!device) {
+        // Decision and snapshot disagree, which needs the list to have
+        // changed underneath us. Another notification is already on its
+        // way; do nothing rather than guess.
+        return;
+    }
+
+    const char* why =
+        d.preferenceMissing ? "preferred device gone, using system default"
+        : d.isSystemDefault ? "system default"
+                            : "preferred device";
+    if (inUseId.isEmpty()) {
+        qInfo("[voice] %s device: %s (%s)", what, qPrintable(d.description),
+              why);
+    } else {
+        qInfo("[voice] %s device changed: %s → %s (%s)", what,
+              qPrintable(wasDesc), qPrintable(d.description), why);
+    }
+
+    // ONE direction. The encoder, every peer's jitter buffer and its
+    // adaptive playout target, the pump timer and the voice session
+    // itself are all untouched — a headset switch is not a reason to
+    // rebuild the call.
+    if (input) {
+        closeSource();
+        openSource(*device);
+    } else {
+        closeSink();
+        openSink(*device);
+    }
+    setInUse(dir, d.id, d.description);
+}
+
+void AudioWorker::openSource(const QAudioDevice& device) {
+    if (device.isNull()) return;
+    // Parented to `this`, which lives on the audio thread, and
+    // constructed here — so the source and the QIODevice it hands
+    // back are both affine to the thread that will drive them.
+    m_audioSource = new QAudioSource(device, m_format, this);
+    m_captureDevice = m_audioSource->start();
+    if (m_captureDevice) {
+        // Both ends are audio-thread objects, so this is a direct
+        // connection and the encode happens inline on the device
+        // callback's thread — never a hop through the GUI.
+        connect(m_captureDevice, &QIODevice::readyRead,
+                this, &AudioWorker::onMicDataReady);
+    } else {
+        qWarning("[voice] QAudioSource::start() returned null — "
+                 "macOS likely still denying microphone access");
+    }
+    // QAudioSource has a State enum we can peek at for a sanity check.
+    qInfo("[voice] QAudioSource initial state=%d error=%d",
+          int(m_audioSource->state()), int(m_audioSource->error()));
+}
+
+void AudioWorker::closeSource() {
+    if (m_audioSource) {
+        m_audioSource->stop();
+        delete m_audioSource;
+        m_audioSource = nullptr;
+        m_captureDevice = nullptr;
+    }
+    // Whatever the old device captured but we had not yet encoded. Its
+    // sample stream has no relation to the next device's, and a partial
+    // frame spliced onto the front of the new one is a click.
+    m_captureBuffer.clear();
+    m_captureHead = 0;
+}
+
+void AudioWorker::openSink(const QAudioDevice& device) {
+    if (device.isNull()) return;
+    m_audioSink = new QAudioSink(device, m_format, this);
+    // Must be set before start(). Bounds the amount of audio the
+    // device holds, and therefore the floor on output latency.
+    m_audioSink->setBufferSize(kFrameBytes * kSinkBufferFrames);
+    m_playbackDevice = m_audioSink->start();
+    if (!m_playbackDevice) {
+        qWarning("[voice] QAudioSink::start() returned null — no playback");
+    }
+}
+
+void AudioWorker::closeSink() {
+    if (m_audioSink) {
+        m_audioSink->stop();
+        delete m_audioSink;
+        m_audioSink = nullptr;
+        m_playbackDevice = nullptr;
+    }
+    // The tail of a short write to the device that just went away.
+    // pumpPlayback() already tolerates the gap: it ingests into the
+    // jitter buffers before it looks at the sink, so the few
+    // milliseconds a restart takes cost nothing but the restart.
+    m_playbackPending.clear();
+    m_playbackPendingHead = 0;
 }
