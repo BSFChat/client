@@ -362,6 +362,56 @@ private slots:
         QVERIFY(m.getCategoriesWithChannels().isEmpty());
     }
 
+    // The upgrade path, from the client's side.
+    //
+    // Production runs a server that sends no m.direct at all, so the rooms the
+    // complaint is about are ALREADY loaded, already in the channel tree, and
+    // already counted in the server's unread badge when the fixed server first
+    // tells us what they are. Learning it has to reclassify them where they
+    // stand — a client that only applied m.direct to rooms it had not met yet
+    // would need a reinstall to come right.
+    //
+    // This is ServerConnection::processSyncResponse's order: fold m.direct in,
+    // mark what changed, then republish. Both steps are checked, because the
+    // sidebar and the rail badge read different things.
+    void mDirectArrivingMidSessionReclassifiesRoomsAlreadyLoaded()
+    {
+        RoomListModel m;
+        DirectRooms rooms;
+        const QString me = "@me:x";
+
+        // A session that has been running against the old server: a channel
+        // and a DM, both filed as channels, both unread.
+        m.updateRoomName("!general:x", "general");
+        m.updateRoomName("!dm:x", QString());
+        m.setUnreadCount("!general:x", 0);
+        m.setUnreadCount("!dm:x", 4);
+
+        auto channelIds = [&] {
+            QStringList out;
+            for (const auto& cat : m.getCategoriesWithChannels()) {
+                for (const auto& ch : cat.toMap().value("channels").toList())
+                    out.append(ch.toMap().value("roomId").toString());
+            }
+            return out;
+        };
+        QCOMPARE(channelIds(), (QStringList{"!general:x", "!dm:x"}));
+        QVERIFY(m.totalUnreadCount() > 0);  // the server's icon is lit by a DM
+
+        // The upgraded server's first reply says what the room is.
+        for (const auto& rid : rooms.merge({{"@bob:x", {"!dm:x"}}}, me))
+            m.markDirect(rid);
+
+        QCOMPARE(channelIds(), QStringList{"!general:x"});
+        QCOMPARE(m.totalUnreadCount(), 0);
+        QCOMPARE(rooms.peerOf("!dm:x"), QString("@bob:x"));
+
+        // Restated on every poll from here on. A repeat says nothing changed,
+        // so nothing republishes and the sidebar does not churn.
+        QVERIFY(rooms.merge({{"@bob:x", {"!dm:x"}}}, me).isEmpty());
+        QCOMPARE(channelIds(), QStringList{"!general:x"});
+    }
+
     // Losing sight of a room (a prune, a leave) is not evidence it stopped
     // being a DM — same reasoning as DirectRooms::merge being additive.
     void aPrunedDirectRoomIsStillADirectRoomWhenItComesBack()
