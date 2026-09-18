@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
 import BSFChat
+import "../js/ProfileCardAvatar.js" as ProfileCardAvatar
 
 Popup {
     id: profileCard
@@ -11,6 +12,17 @@ Popup {
     property string profileDisplayName: ""
     property string profileAvatarUrl: ""
     property string serverName: ""
+
+    // The avatar tile's image, or "" for "draw the initial". One binding, read
+    // by both the Image and the initial, so the two can never disagree and
+    // leave an empty tile. Logic in qml/js/ProfileCardAvatar.js so it can be
+    // tested without the BSFChat module.
+    readonly property string avatarSource: {
+        var s = serverManager.activeServer;
+        return ProfileCardAvatar.avatarSource(
+            profileAvatarUrl,
+            s ? function (mxc) { return s.resolveMediaUrl(mxc); } : null);
+    }
 
     // ---- Per-server nickname ----
     // Empty means "no nickname set", matching the API: the endpoint omits the key
@@ -75,9 +87,15 @@ Popup {
 
     onAboutToShow: {
         // Reset per-user state before the fetches land, so reopening the card on a
-        // different member never shows the previous member's nickname.
+        // different member never shows the previous member's nickname — or, as
+        // it did until this reset covered the avatar too, the previous member's
+        // profile picture. The picture is the worse case of the two because the
+        // reply that would have replaced it may never come: fetchProfile is
+        // dropped silently on a network error, and a member with no display
+        // name and no picture is exactly who the homeserver 404s.
         nickname = "";
         editingNickname = false;
+        profileAvatarUrl = ProfileCardAvatar.avatarUrlOnOpen(userId);
         if (userId !== "" && serverManager.activeServer) {
             serverManager.activeServer.fetchProfile(userId);
             serverManager.activeServer.fetchNickname(userId);
@@ -97,9 +115,13 @@ Popup {
         target: serverManager.activeServer
         ignoreUnknownSignals: true
         function onProfileFetched(uid, displayName, avatarUrl) {
+            // A reply for anyone but the member currently on the card is
+            // ignored: the card is shared, so A's reply can land after B is
+            // already showing.
+            profileCard.profileAvatarUrl = ProfileCardAvatar.avatarUrlOnProfile(
+                profileCard.userId, profileCard.profileAvatarUrl, uid, avatarUrl);
             if (uid === profileCard.userId) {
                 profileCard.profileDisplayName = displayName || uid;
-                profileCard.profileAvatarUrl = avatarUrl || "";
             }
         }
         function onNicknameFetched(uid, nick) {
@@ -154,30 +176,21 @@ Popup {
 
                     Image {
                         anchors.fill: parent
-                        source: {
-                            if (profileCard.profileAvatarUrl !== "" && serverManager.activeServer) {
-                                return serverManager.activeServer.resolveMediaUrl(profileCard.profileAvatarUrl);
-                            }
-                            return "";
-                        }
-                        visible: source !== ""
+                        source: profileCard.avatarSource
+                        visible: profileCard.avatarSource !== ""
                         fillMode: Image.PreserveAspectCrop
                         layer.enabled: true
                     }
 
                     Text {
                         anchors.centerIn: parent
-                        text: {
-                            var n = profileCard.profileDisplayName
-                                 || profileCard.userId || "?";
-                            var s = n.replace(/^[^a-zA-Z0-9]+/, "");
-                            return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
-                        }
+                        text: ProfileCardAvatar.initial(profileCard.profileDisplayName,
+                                                        profileCard.userId)
                         font.family: Theme.fontSans
                         font.pixelSize: 28
                         font.weight: Theme.fontWeight.semibold
                         color: Theme.onAccent
-                        visible: profileCard.profileAvatarUrl === ""
+                        visible: profileCard.avatarSource === ""
                     }
                 }
             }

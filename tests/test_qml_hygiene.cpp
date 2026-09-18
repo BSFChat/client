@@ -393,6 +393,58 @@ private slots:
         }
     }
 
+    // ---- Profile card (2026-09-18) -------------------------------------
+    //
+    // The same class of bug as LinkPreview's, in the same shape: one reused
+    // popup, per-user state left over from the previous user. MemberList.qml
+    // and MessageView.qml assign `userId` / `profileDisplayName` onto a single
+    // UserProfileCard instance and call open() again for the next member.
+    // `profileAvatarUrl` was not reset, and the reply that should have
+    // overwritten it need never arrive — MatrixClient::getProfile returns
+    // without emitting on any network error, and an account with neither a
+    // display name nor a picture set is exactly what a homeserver may 404. So
+    // clicking A then B showed B's name over A's photograph.
+    //
+    // The values are tested in tests/qml/tst_profilecardavatar.qml. What only
+    // the source text can show is that the card still CALLS the reset when it
+    // opens, and that the picture and the initial are still decided by one
+    // binding rather than by two that can disagree.
+    void profileCardOpensOnACleanSlate()
+    {
+        const QString src = withoutComments(readQml(QStringLiteral("/components/UserProfileCard.qml")));
+
+        const QString body = blockBody(src, QStringLiteral(R"(onAboutToShow\s*:\s*\{)"));
+        QVERIFY2(!body.isNull(), "UserProfileCard.qml no longer has an onAboutToShow block");
+
+        // Before anything can leave the handler early.
+        const qsizetype exitAt = body.indexOf(QRegularExpression(QStringLiteral(R"(\breturn\b)")));
+        const QString prologue = exitAt >= 0 ? body.left(exitAt) : body;
+
+        static const QRegularExpression clearAvatar(
+            QStringLiteral(R"(\bprofileAvatarUrl\s*=\s*(""|ProfileCardAvatar\.avatarUrlOnOpen\s*\())"));
+        QVERIFY2(prologue.contains(clearAvatar),
+                 "UserProfileCard.qml does not clear profileAvatarUrl when it opens; "
+                 "the previously-shown member's profile picture stays on the card for "
+                 "the next one, and stays for good when their profile fetch never "
+                 "answers");
+
+        static const QRegularExpression clearNickname(QStringLiteral(R"(\bnickname\s*=\s*"")"));
+        QVERIFY2(prologue.contains(clearNickname),
+                 "UserProfileCard.qml does not clear nickname when it opens");
+
+        // One source of truth for the tile: the Image's source and the
+        // initial's visibility must be the same expression, or a URL that
+        // resolves to nothing leaves a tile with neither in it.
+        QVERIFY2(src.contains(QRegularExpression(
+                     QStringLiteral(R"(source\s*:\s*profileCard\.avatarSource\b)"))),
+                 "UserProfileCard.qml's avatar Image no longer sources from "
+                 "profileCard.avatarSource");
+        QVERIFY2(src.contains(QRegularExpression(
+                     QStringLiteral(R"(visible\s*:\s*profileCard\.avatarSource\s*===\s*"")"))),
+                 "UserProfileCard.qml's avatar initial is no longer shown on exactly "
+                 "the condition that the Image has nothing to draw");
+    }
+
     // ---- Add-server dialog (2026-09-17) --------------------------------
     //
     // Same constraint, same technique: LoginDialog.qml imports the BSFChat
@@ -661,6 +713,23 @@ private slots:
     }
 
 private:
+    // The text between the braces of the first block whose opening matches
+    // `opener` (which must end at that block's `{`). Null when there is none.
+    static QString blockBody(const QString& src, const QString& opener)
+    {
+        const qsizetype at = src.indexOf(QRegularExpression(opener));
+        if (at < 0) return QString();
+        qsizetype i = src.indexOf(QLatin1Char('{'), at);
+        if (i < 0) return QString();
+        const qsizetype bodyStart = i + 1;
+        int nesting = 0;
+        for (; i < src.size(); ++i) {
+            if (src.at(i) == QLatin1Char('{')) ++nesting;
+            else if (src.at(i) == QLatin1Char('}') && --nesting == 0) break;
+        }
+        return src.mid(bodyStart, i - bodyStart);
+    }
+
     static QString readQml(const QString& relative)
     {
         QFile f(QStringLiteral(BSFCHAT_QML_DIR) + relative);
