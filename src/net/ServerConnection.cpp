@@ -123,7 +123,12 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         QSettings s;
         s.beginGroup(QStringLiteral("dm/") + QUrl(serverUrl).host());
         for (const auto& rid : s.childKeys()) {
-            m_directRooms.record(rid, s.value(rid).toString());
+            if (m_directRooms.record(rid, s.value(rid).toString())) {
+                // Flag it in the model too, so a DM restored from the cached
+                // room snapshot is out of the channel tree from the first
+                // frame rather than from the first sync.
+                m_roomListModel->markDirect(rid);
+            }
         }
         s.endGroup();
     }
@@ -2672,6 +2677,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
     if (response.direct_rooms) {
         for (const auto& rid : m_directRooms.merge(*response.direct_rooms, m_userId)) {
             persistDirectRoom(rid);
+            m_roomListModel->markDirect(rid);
         }
     }
 
@@ -2730,6 +2736,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 // display-name map that MessageModel reads from.
                 bsfchat::client::upsertMemberEvent(m_roomMembers[roomId], event);
                 m_memberSnapshotsDirty = true;
+                noteDirectMembership(roomId, event);
                 if (event.state_key.has_value()) {
                     QString uid = QString::fromStdString(*event.state_key);
                     QString dn = QString::fromStdString(event.content.data.value("displayname", ""));
@@ -2833,6 +2840,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomMember)) {
                 bsfchat::client::upsertMemberEvent(m_roomMembers[roomId], event);
                 m_memberSnapshotsDirty = true;
+                noteDirectMembership(roomId, event);
                 if (roomId == m_activeRoomId) {
                     m_memberListModel->processEvent(event);
                 }
@@ -3689,6 +3697,40 @@ void ServerConnection::persistDirectRoom(const QString& roomId)
     s.endGroup();
 }
 
+void ServerConnection::recordDirectRoom(const QString& roomId, const QString& peer)
+{
+    if (roomId.isEmpty()) return;
+    // The model is told FIRST and unconditionally. It is what keeps the room
+    // out of this server's channels, and that must not wait on knowing who the
+    // conversation is with: a DM whose peer we cannot name yet is still a DM,
+    // and the failure mode of getting this order wrong is somebody's private
+    // conversation sitting in the sidebar.
+    m_roomListModel->markDirect(roomId);
+    if (peer.isEmpty() || peer == m_userId) return;
+    if (!m_directRooms.record(roomId, peer)) return;
+    persistDirectRoom(roomId);
+}
+
+void ServerConnection::noteDirectMembership(const QString& roomId,
+                                            const bsfchat::RoomEvent& event)
+{
+    // `is_direct` on an m.room.member event is the room saying what it is, and
+    // it is written for BOTH participants. m.direct — the account-data map this
+    // also folds in — is the same fact delivered a different way, but it rides
+    // in one /sync response: a client that has never seen that response (fresh
+    // profile, cleared settings, a sync that errored at the wrong moment) has
+    // nothing else to go on and files the DM under channels. Room state comes
+    // down on every initial sync, so this one cannot go stale.
+    const bool isDirect = event.content.data.value("is_direct", false);
+    if (!isDirect) return;
+    recordDirectRoom(
+        roomId,
+        bsfchat::net::directPeerFromMember(
+            isDirect,
+            event.state_key ? QString::fromStdString(*event.state_key) : QString(),
+            QString::fromStdString(event.sender), m_userId));
+}
+
 void ServerConnection::createDirectMessage(const QString& rawTargetUserId)
 {
     // "bob:example.org" is "@bob:example.org". Some entry points fix the
@@ -3734,13 +3776,13 @@ void ServerConnection::createDirectMessage(const QString& rawTargetUserId)
             m_directRooms.endCreate(peer);
             // The server hands back the existing room when the pair already
             // has one, and sync may have reported this room before the reply
-            // arrived, so "nothing changed" is a normal outcome here.
-            if (m_directRooms.record(roomId, peer)) {
-                persistDirectRoom(roomId);
-                // Pull the new DM out of the regular category tree.
-                rebuildCategorizedRooms();
-                refreshDirectRooms();  // gated publish: emits only when the list really changed
-            }
+            // arrived, so "nothing changed" is a normal outcome here — but the
+            // room may still be sitting in the channel tree from that sync, so
+            // the classification is applied either way.
+            recordDirectRoom(roomId, peer);
+            // Both are gated publishes: they emit only if the snapshot moved.
+            rebuildCategorizedRooms();  // pull the DM out of the category tree
+            refreshDirectRooms();
             // Jump to the DM room so the user lands straight in it.
             setActiveRoom(roomId);
         },
@@ -3756,7 +3798,12 @@ void ServerConnection::createDirectMessage(const QString& rawTargetUserId)
 
 bool ServerConnection::isDirectRoom(const QString& roomId) const
 {
-    return m_directRooms.contains(roomId);
+    // Either source counts. The map is keyed by peer and so only holds a room
+    // once we know who the conversation is with; the model is told the moment
+    // the room says it is direct, peer or no peer. The two disagreeing for a
+    // sync is exactly how a DM ends up shown as a channel, so this answers
+    // yes if either does.
+    return m_directRooms.contains(roomId) || m_roomListModel->isDirect(roomId);
 }
 
 QString ServerConnection::directRoomPeer(const QString& roomId) const

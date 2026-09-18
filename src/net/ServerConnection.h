@@ -837,6 +837,15 @@ public:
     // setup and extended by m.direct on sync.
     bsfchat::net::DirectRooms m_directRooms;
     void persistDirectRoom(const QString& roomId);
+    // The one way a room becomes a DM. Flags it in RoomListModel (which is
+    // what keeps it out of this server's channels) and, when the peer is
+    // known, records and persists it. `peer` may be empty: the isolation half
+    // must not wait on knowing who.
+    void recordDirectRoom(const QString& roomId, const QString& peer);
+    // Classify from the room's own m.room.member state, which carries
+    // `is_direct` for both participants. Independent of m.direct, so a client
+    // that never received that account-data event still gets it right.
+    void noteDirectMembership(const QString& roomId, const bsfchat::RoomEvent& event);
 #ifdef BSFCHAT_VOICE_ENABLED
     // Per-peer video surfaces (RTP + legacy JPEG unified) — replaces
     // the old per-frame base64 data-URL maps.
