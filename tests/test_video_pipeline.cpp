@@ -14,11 +14,17 @@
 #include <QPainter>
 #include <QSignalSpy>
 #include <QVideoFrame>
+#include <QVideoFrameFormat>
 
+#include <atomic>
 #include <cmath>
+#include <memory>
 
+#include "core/AppProfile.h"
 #include "voice/PeerCaps.h"
 #include "voice/video/ReceiverReportEstimator.h"
+#include "voice/video/VideoDecodeHealth.h"
+#include "voice/video/VideoDecoder.h"
 #include "voice/video/RtpSeqTracker.h"
 #include "voice/video/VideoCodecSelect.h"
 #include "voice/video/VideoRatePolicy.h"
@@ -68,6 +74,47 @@ QByteArray annexB(quint8 nalType, int payloadBytes = 32) {
     au.append(QByteArray(payloadBytes, char(0x42)));
     return au;
 }
+
+// HEVC access unit whose NAL is an IRAP picture (IDR_W_RADL, type 19).
+// The receive pipeline scans H.265 units for types 16..23 in bits 1..6
+// of the TWO-byte NAL header, so this is what lets an H.265 stream out
+// of its keyframe wait — and therefore what gets it as far as trying to
+// build a decoder.
+QByteArray hevcIrap(int payloadBytes = 32) {
+    QByteArray au;
+    au.append(char(0)).append(char(0)).append(char(0)).append(char(1));
+    au.append(char(19 << 1));   // nal_unit_type 19, layer id 0
+    au.append(char(1));         // temporal_id_plus1
+    au.append(QByteArray(payloadBytes, char(0x42)));
+    return au;
+}
+
+// ---- Decoder factory stubs (HEVC decode fallback) ------------------
+
+// A backend whose probe said yes and whose init says no — the Windows
+// HEVC MFT from the field report, reproduced on any machine.
+class RefusingDecoder : public VideoDecoder {
+public:
+    bool init(VideoCodecKind) override { return false; }
+    Result decode(const QByteArray&, QVideoFrame&) override {
+        return Result::Error;
+    }
+    void reset() override {}
+};
+
+// A backend that works, so "the fallback codec actually decodes" can be
+// asserted without dragging a real encoder into the test.
+class WorkingStubDecoder : public VideoDecoder {
+public:
+    bool init(VideoCodecKind) override { return true; }
+    Result decode(const QByteArray&, QVideoFrame& out) override {
+        QVideoFrameFormat fmt(QSize(64, 48),
+                              QVideoFrameFormat::Format_ARGB8888);
+        out = QVideoFrame(fmt);
+        return out.isValid() ? Result::Ok : Result::Error;
+    }
+    void reset() override {}
+};
 
 // ---- Rate-controller test helpers (S-17) ---------------------------
 
@@ -129,6 +176,22 @@ class TestVideoPipeline : public QObject {
     Q_OBJECT
 
 private slots:
+
+    void initTestCase() {
+        // videohealth persists its hint through a QSettings built from
+        // the profile-aware application name. Claim a profile of our
+        // own BEFORE anything touches it, so this test cannot reach
+        // into a real BSFChat install and switch H.265 off for the
+        // user — which, given the hint survives restarts, would be a
+        // very quiet way to break their video.
+        bsfchat::setActiveProfile(QStringLiteral("test-videopipeline"));
+    }
+
+    void cleanup() {
+        // Whatever a case installed, the next one starts clean.
+        VideoDecoder::setFactoryForTest({});
+        videohealth::resetForTest();
+    }
 
     // ---- S-1: who gets RTP video, who gets JPEG --------------------
 
@@ -274,6 +337,67 @@ private slots:
         QCOMPARE(select(Preference::Auto, true, room), VideoCodecKind::H265);
     }
 
+    // The HEVC decode fallback, at the selector.
+    //
+    // The field failure: a Windows client's Media Foundation probe
+    // found an HEVC MFT, so its caps claimed "h265", so BOTH Mac
+    // senders flipped their screen shares to H.265 by payload type.
+    // Its real decoder init then failed and it painted two black tiles
+    // for the rest of the call, because caps were a join-time fact and
+    // nothing could contradict them afterwards.
+    //
+    // The safety net makes that viewer RETRACT h265 mid-call. From the
+    // selector's side that is just a viewer whose caps changed, and the
+    // only thing that must be true is that the retraction is as binding
+    // as the original claim.
+    void aViewerThatRetractsHevcPutsTheMeshBackOnH264() {
+        using namespace videocodec;
+        // Two Macs and the Windows client, all claiming H.265.
+        QList<Viewer> room{hevcViewer(), hevcViewer(), hevcViewer()};
+        QCOMPARE(select(Preference::Auto, true, room), VideoCodecKind::H265);
+
+        // Its decoder refused; it re-announced caps without h265.
+        room[2] = h264Viewer();
+        QCOMPARE(select(Preference::Auto, true, room), VideoCodecKind::H264);
+        // "Prefer" is still a preference, not an override — there is no
+        // second encode to give the viewer that cannot decode.
+        QCOMPARE(select(Preference::PreferHevc, true, room),
+                 VideoCodecKind::H264);
+
+        // And it stays H.264 while that viewer is in the room, however
+        // many capable peers join afterwards.
+        room.append(hevcViewer());
+        QCOMPARE(select(Preference::Auto, true, room), VideoCodecKind::H264);
+
+        // Only its LEAVING may lift the veto.
+        room.removeAt(2);
+        QCOMPARE(select(Preference::Auto, true, room), VideoCodecKind::H265);
+    }
+
+    // The retraction travels as a caps JSON round trip (announceLocalCaps
+    // → the peer's `t == "caps"` branch → PeerCaps::fromJson), so the
+    // dropped codec has to survive that, not just the in-memory struct.
+    void theRetractionSurvivesTheCapsJsonRoundTrip() {
+        using namespace videocodec;
+        PeerCaps before = capsWith(true, {QStringLiteral("h264"),
+                                          QStringLiteral("h265")});
+        QVERIFY(PeerCaps::fromJson(before.toJson()).decodes(videoCodecIdH265()));
+        QCOMPARE(select(Preference::Auto, true,
+                        {Viewer{PeerCaps::fromJson(before.toJson()), true}}),
+                 VideoCodecKind::H265);
+
+        // What localCapsJson() now produces on a machine whose H.265
+        // decoder has been proven broken: h264 alone.
+        PeerCaps after = capsWith(true, {QStringLiteral("h264")});
+        const PeerCaps wire = PeerCaps::fromJson(after.toJson());
+        QVERIFY(!wire.decodes(videoCodecIdH265()));
+        QVERIFY(wire.decodes(videoCodecIdH264()));
+        // Still a full RTP video peer — the fallback is H.264, not JPEG.
+        QVERIFY(peerCanReceiveRtpVideo(wire, true, videoCodecIdH264()));
+        QCOMPARE(select(Preference::Auto, true, {Viewer{wire, true}}),
+                 VideoCodecKind::H264);
+    }
+
     void capsArrivingIsATransitionToo() {
         using namespace videocodec;
         QList<Viewer> room{unknownViewer()};
@@ -373,6 +497,143 @@ private slots:
         }
         QTRY_COMPARE_WITH_TIMEOUT(pipe.droppedAus(), quint64(10), 2000);
         QCOMPARE(pipe.keyframeRequests(), quint64(1));
+    }
+
+    // ---- HEVC decode fallback: the receive side --------------------
+
+    // The receiver half of the field failure. A decoder that refuses to
+    // come up must (1) say so exactly once on the wire, because its one
+    // subscriber turns that into a caps correction broadcast to every
+    // peer, and (2) stop rebuilding itself per access unit — the log
+    // that reported this bug had `no decoder available` at 30 lines a
+    // second per stream, which is how it stayed unread for a day.
+    void aRefusedDecoderAnnouncesItselfExactlyOnce() {
+        std::atomic<int> creates{0};
+        VideoDecoder::setFactoryForTest([&creates](VideoCodecKind, bool) {
+            creates.fetch_add(1);
+            return std::unique_ptr<VideoDecoder>(new RefusingDecoder);
+        });
+
+        VideoReceivePipeline pipe(kPeerA, VideoStreamId::Screen,
+                                  VideoCodecKind::H265);
+        pipe.setKeyframeRequestIntervalMs(5000);
+        pipe.setDecoderRetryIntervalMs(5000);   // no retry within this test
+        QSignalSpy spy(&pipe, &VideoReceivePipeline::decoderUnavailable);
+
+        // A second of IRAP pictures: every one of them clears the
+        // keyframe gate and reaches the decoder.
+        for (int i = 0; i < 20; ++i) {
+            pipe.submitAccessUnit(hevcIrap());
+            QTest::qWait(2);
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(pipe.decoderFailures(), quint64(1), 2000);
+        QCOMPARE(creates.load(), 1);        // not one per access unit
+        QCOMPARE(spy.count(), 1);           // and ONE announcement
+        QCOMPARE(pipe.decodedFrames(), quint64(0));
+        // Everything received was dropped rather than queued behind a
+        // decoder that is never going to exist.
+        QCOMPARE(pipe.droppedAus(), quint64(20));
+
+        // The signal has to name the codec, or the subscriber cannot
+        // tell "retract h265" from "retract the only codec we have".
+        QCOMPARE(spy.at(0).at(0).toString(), kPeerA);
+        QCOMPARE(spy.at(0).at(1).toInt(), int(VideoStreamId::Screen));
+        QCOMPARE(spy.at(0).at(2).toInt(), int(VideoCodecKind::H265));
+    }
+
+    // The retry exists (a decoder can refuse because the GPU is
+    // momentarily busy) but it is throttled, and a retry that fails
+    // again must NOT produce a second announcement: the caps are
+    // already corrected and re-broadcasting them is pure noise.
+    void theDecoderRetryIsThrottledAndNeverReAnnounces() {
+        std::atomic<int> creates{0};
+        VideoDecoder::setFactoryForTest([&creates](VideoCodecKind, bool) {
+            creates.fetch_add(1);
+            return std::unique_ptr<VideoDecoder>(new RefusingDecoder);
+        });
+
+        VideoReceivePipeline pipe(kPeerA, VideoStreamId::Screen,
+                                  VideoCodecKind::H265);
+        pipe.setKeyframeRequestIntervalMs(5000);
+        pipe.setDecoderRetryIntervalMs(40);
+        QSignalSpy spy(&pipe, &VideoReceivePipeline::decoderUnavailable);
+
+        for (int i = 0; i < 40; ++i) {
+            pipe.submitAccessUnit(hevcIrap());
+            QTest::qWait(5);
+        }
+        // ~200 ms at a 40 ms retry floor: several attempts, nowhere
+        // near the 40 access units that arrived.
+        QTRY_VERIFY_WITH_TIMEOUT(pipe.decoderFailures() >= 2, 2000);
+        QVERIFY2(pipe.decoderFailures() <= 10,
+                 qPrintable(QStringLiteral("decoder rebuilt %1 times for 40 "
+                                           "access units — throttle is not "
+                                           "holding")
+                            .arg(pipe.decoderFailures())));
+        QCOMPARE(quint64(creates.load()), pipe.decoderFailures());
+        QCOMPARE(spy.count(), 1);
+    }
+
+    // The other half of self-healing: once the sender has re-selected
+    // H.264, the access units arrive under a different payload type and
+    // VoiceEngine::recvPipeline builds a pipeline keyed on the new
+    // codec. That pipeline must be unaffected by the H.265 one's
+    // failure — the latch is per pipeline, not per stream.
+    void anH264StreamAfterAnH265FailureStillDecodes() {
+        VideoDecoder::setFactoryForTest([](VideoCodecKind kind, bool)
+                                        -> std::unique_ptr<VideoDecoder> {
+            if (kind == VideoCodecKind::H265)
+                return std::make_unique<RefusingDecoder>();
+            return std::make_unique<WorkingStubDecoder>();
+        });
+
+        {
+            VideoReceivePipeline hevc(kPeerA, VideoStreamId::Screen,
+                                      VideoCodecKind::H265);
+            hevc.setKeyframeRequestIntervalMs(5000);
+            hevc.setDecoderRetryIntervalMs(5000);
+            QSignalSpy spy(&hevc, &VideoReceivePipeline::decoderUnavailable);
+            for (int i = 0; i < 5; ++i) {
+                hevc.submitAccessUnit(hevcIrap());
+                QTest::qWait(2);
+            }
+            QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 2000);
+            QCOMPARE(hevc.decodedFrames(), quint64(0));
+        }
+
+        // Same peer, same stream, new codec — exactly what
+        // recvPipeline() constructs when the payload type flips to 96.
+        VideoReceivePipeline h264(kPeerA, VideoStreamId::Screen,
+                                  VideoCodecKind::H264);
+        QSignalSpy frames(&h264, &VideoReceivePipeline::frameDecoded);
+        QSignalSpy unavailable(&h264,
+                               &VideoReceivePipeline::decoderUnavailable);
+        for (int i = 0; i < 4; ++i) {
+            // IDR first: a stream never starts on a delta.
+            h264.submitAccessUnit(annexB(i == 0 ? 5 : 1));
+            QTest::qWait(2);
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(h264.decodedFrames() >= 4, 2000);
+        QVERIFY(frames.count() >= 4);
+        QCOMPARE(unavailable.count(), 0);
+        QCOMPARE(h264.decoderFailures(), quint64(0));
+    }
+
+    // The process-wide latch is what stops the caps from re-advertising
+    // h265 on the NEXT call in this process — the bug was not that one
+    // stream went black, it was that every later stream did too.
+    void theH265LatchIsProcessWideAndFiresItsEdgeOnce() {
+        QVERIFY(!videohealth::h265DecodeBroken());
+        // Only the caller that flips it gets the edge. That is the rate
+        // limit on the caps broadcast: two streams × N peers all reach
+        // this, one message goes out.
+        QVERIFY(videohealth::markH265DecodeBroken());
+        QVERIFY(!videohealth::markH265DecodeBroken());
+        QVERIFY(!videohealth::markH265DecodeBroken());
+        QVERIFY(videohealth::h265DecodeBroken());
+
+        videohealth::resetForTest();
+        QVERIFY(!videohealth::h265DecodeBroken());
     }
 
     // ---- S-4: reorder window ---------------------------------------

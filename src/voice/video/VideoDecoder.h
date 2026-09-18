@@ -4,6 +4,7 @@
 
 #include <QStringList>
 #include <QVideoFrame>
+#include <functional>
 #include <memory>
 
 // Abstract video decoder. Mirror of VideoEncoder — one instance per
@@ -36,4 +37,15 @@ public:
     // bsfchat_caps, so a false positive here is a black tile for the
     // user and an unwatchable stream for everyone else in the mesh.
     static bool h265DecodeSupported();
+
+    // Test seam. When set, create() delegates to `f` and the platform
+    // backend matrix is bypassed entirely — which is the only way to
+    // exercise "the probe lied and the decoder refuses" on a machine
+    // whose decoders all work. Pass {} to restore the real factory.
+    //
+    // Set it before any pipeline exists and clear it after: create()
+    // runs on decode worker threads and this is not synchronised.
+    using Factory =
+        std::function<std::unique_ptr<VideoDecoder>(VideoCodecKind, bool)>;
+    static void setFactoryForTest(Factory f);
 };

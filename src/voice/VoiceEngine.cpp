@@ -6,6 +6,7 @@
 #include "voice/PeerCaps.h"
 #include "voice/video/VideoCodecSelect.h"
 #include "voice/PeerConnectionManager.h"
+#include "voice/video/VideoDecodeHealth.h"
 #include "voice/video/VideoDecoder.h"
 #include "voice/video/VideoEncoder.h"
 #include "voice/video/VideoReceivePipeline.h"
@@ -579,11 +580,54 @@ nlohmann::json VoiceEngine::localCapsJson() {
     // decide what to send US. Runtime-probed (VideoToolbox media
     // engine / a registered Media Foundation MFT), so two builds of the
     // same binary on different machines can legitimately disagree.
-    if (VideoDecoder::h265DecodeSupported())
+    //
+    // videohealth overrides the probe: once a decoder has actually
+    // refused to come up, the probe is known to have been wrong and
+    // this list must stop claiming h265 — for the rest of this process
+    // and for every later call in it, not just the one that failed.
+    if (VideoDecoder::h265DecodeSupported() && !videohealth::h265DecodeBroken())
         caps.videoCodecs << videoCodecIdH265();
     if (VideoEncoder::queryCaps(VideoCodecKind::Av1Lossless).losslessSupported)
         caps.lossless << QStringLiteral("av1-dc");
     return caps.toJson();
+}
+
+void VoiceEngine::announceLocalCaps() {
+    if (!m_running) return;
+    // Same shape onControlMessage's `t == "caps"` branch parses, and
+    // the same payload the invite/answer carries — a peer cannot tell
+    // (and must not care) which door our caps arrived through.
+    const nlohmann::json msg = {{"t", "caps"}, {"caps", localCapsJson()}};
+    const QByteArray wire = QByteArray::fromStdString(msg.dump());
+    int sent = 0;
+    for (auto* peer : m_peers) {
+        if (!peer) continue;
+        // sendControl gates on the peer's own caps and buffers until a
+        // reliable channel opens, so a peer still mid-handshake is not
+        // missed — and one that never speaks the control channel never
+        // sent us H.265 in the first place.
+        peer->sendControl(wire);
+        ++sent;
+    }
+    qCInfo(logVoice, "re-announced local caps to %d peer(s): %s", sent,
+          msg.at("caps").dump().c_str());
+}
+
+void VoiceEngine::onDecoderUnavailable(const QString& userId, int streamId,
+                                       int codec) {
+    const VideoCodecKind kind = VideoCodecKind(codec);
+    qCWarning(logVoice, "no %s decoder for %s stream %d",
+             videoCodecName(kind), qPrintable(userId), streamId);
+    // H.265 is the only codec with somewhere to fall back TO: the mesh
+    // always has H.264, and dropping h265 from our caps is what makes
+    // every sender re-select it. Retracting h264 or av1-dc would just
+    // turn a broken stream into no stream.
+    if (kind != VideoCodecKind::H265) return;
+    // THE rate limit. Latching is process-wide and returns true exactly
+    // once, so a flood of undecodable access units — across both
+    // streams and every peer in the mesh — produces one announcement.
+    if (!videohealth::markH265DecodeBroken()) return;
+    announceLocalCaps();
 }
 
 void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json) {
@@ -597,7 +641,30 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
     }
     const std::string t = doc.value("t", "");
     if (t == "caps") {
-        // Mid-call capability refresh.
+        // Mid-call capability refresh — including the RETRACTION a peer
+        // sends when a codec it advertised turns out to be undecodable
+        // on its machine (announceLocalCaps / onDecoderUnavailable).
+        //
+        // Nothing further is needed to act on it, and that is load
+        // bearing rather than an omission:
+        //   * PeerConnectionManager::sendVideoFrame's per-peer backstop
+        //     reads m_remoteCaps directly, so from this instant H.265
+        //     frames toward this peer are dropped rather than sent into
+        //     a decoder that cannot take them;
+        //   * ScreenShareController / CameraController ask
+        //     negotiatedVideoCodec() on EVERY capture tick, so the next
+        //     captured frame re-runs videocodec::select over the new
+        //     caps, gets H.264, and hands VideoSendPipeline a config
+        //     that is not sameSessionAs the running H.265 session — the
+        //     encoder is rebuilt and the first frame out of it is an
+        //     IDR, which is exactly what the recovering viewer needs.
+        //     sendVideoFrame then flips the payload type to 96 with no
+        //     renegotiation, and the viewer's VoiceEngine builds a
+        //     fresh H.264 receive pipeline for the new PT.
+        // Recovery is therefore one capture tick, not one keyframe
+        // interval. (A share of a perfectly static screen produces no
+        // capture tick and so waits for the next pixel to change —
+        // the same pre-existing property as the H.264 profile flip.)
         if (auto* peer = m_peers.value(userId)) {
             peer->setRemoteCaps(PeerCaps::fromJson(doc.value("caps", nlohmann::json::object())));
             maybeSetupVideoFor(userId);
@@ -864,6 +931,11 @@ VideoReceivePipeline* VoiceEngine::recvPipeline(const QString& userId, int strea
         if (auto* peer = m_peers.value(uid))
             peer->requestPeerKeyframe(VideoStreamId(stream));
     });
+    // The codec this machine advertised turned out to be undecodable
+    // here — correct our caps and tell everyone (queued: the pipeline
+    // emits this from its decode worker thread).
+    connect(pipeline, &VideoReceivePipeline::decoderUnavailable,
+            this, &VoiceEngine::onDecoderUnavailable);
     return pipeline;
 }
 
