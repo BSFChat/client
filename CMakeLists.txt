@@ -481,6 +481,12 @@ qt_add_qml_module(bsfchat-app
         # VideoFeedTile.qml, VideoPopoutWindow.qml,
         # VideoFullscreenWindow.qml and tests/qml/tst_videowindows.qml.
         qml/js/VideoWindows.js
+        # What the profile card's avatar tile shows, and the reset that stops
+        # the previously-shown member's picture surviving into the next
+        # member's card. Used by UserProfileCard.qml (the one card instanced
+        # by both MemberList.qml and MessageView.qml) and tested in
+        # tests/qml/tst_profilecardavatar.qml.
+        qml/js/ProfileCardAvatar.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt
