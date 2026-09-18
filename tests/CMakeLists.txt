@@ -453,6 +453,11 @@ endif()
 # is on the big panel, and where every thumbnail lands. Same reason it
 # lives in a .js file — VoiceRoom.qml imports the BSFChat module, which
 # only the app binary has.
+#
+# And tests/qml/tst_channelselection.qml, over qml/js/ChannelSelection.js:
+# which channel-sidebar row is highlighted once the voice CONNECTION and
+# the displayed VIEW disagree. ChannelList.qml imports the BSFChat module
+# too, so the predicate moved out to a .js file to be reachable at all.
 find_package(Qt6 QUIET COMPONENTS QuickTest)
 if(Qt6QuickTest_FOUND AND NOT ANDROID AND NOT IOS)
     qt_add_executable(test_playback_math qml_test_main.cpp)

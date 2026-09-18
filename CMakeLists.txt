@@ -481,6 +481,10 @@ qt_add_qml_module(bsfchat-app
         # VideoFeedTile.qml, VideoPopoutWindow.qml,
         # VideoFullscreenWindow.qml and tests/qml/tst_videowindows.qml.
         qml/js/VideoWindows.js
+        # Which channel-sidebar row counts as "selected" once the voice
+        # connection and the displayed view disagree. Shared by
+        # ChannelList.qml and tests/qml/tst_channelselection.qml.
+        qml/js/ChannelSelection.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt
