@@ -60,6 +60,8 @@ private slots:
     void h265RoundTrip();
     void h265KeyframeCarriesVpsSpsPps();
     void h265DecoderRefusesAMidGopStart();
+    // The advertised capability IS the decoder's capability.
+    void h265DecodeSupportIsHonest();
 #ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
     // Cross-backend interop: the real mac ↔ linux stream matrix.
     void vtEncodesOpenh264Decodes();
@@ -373,6 +375,31 @@ void TestVideoCodec::h265DecoderRefusesAMidGopStart() {
     QVideoFrame out;
     QCOMPARE(int(hevc.dec->decode(idr.data, out)),
              int(VideoDecoder::Result::Ok));
+}
+
+// h265DecodeSupported() is not a hint: VoiceEngine::localCapsJson() puts
+// "h265" in our PeerCaps on the strength of it, and every peer in the
+// mesh then switches its screen share to H.265 with no renegotiation to
+// fall back through. So the predicate has to mean "a decoder for this
+// will start", not "a decoder for this is installed somewhere".
+//
+// A Windows 0.0.45-rc.1 client got that distinction wrong: MFDecoder's
+// probe enumerated an HEVC MFT and said yes, init() then failed
+// negotiating its output type, and both Mac senders spent the call
+// feeding 17,000 access units to a decoder that did not exist, behind
+// two black tiles. This test asks the question that would have failed
+// on that machine. It is backend-agnostic on purpose — it runs the same
+// on VideoToolbox, Media Foundation, or nothing at all.
+void TestVideoCodec::h265DecodeSupportIsHonest() {
+    if (!VideoDecoder::h265DecodeSupported())
+        QSKIP("this machine does not advertise H.265 decode");
+
+    auto dec = VideoDecoder::create(VideoCodecKind::H265);
+    QVERIFY2(dec != nullptr,
+             "h265DecodeSupported() says yes but create() returned nothing");
+    QVERIFY2(dec->init(VideoCodecKind::H265),
+             "h265DecodeSupported() says yes but the decoder will not init "
+             "- peers would be told to send H.265 into a black tile");
 }
 
 #ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
