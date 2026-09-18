@@ -14,6 +14,10 @@ qt_add_executable(test_models
 )
 
 target_include_directories(test_models PRIVATE ${CMAKE_SOURCE_DIR}/src)
+# The /members rebuild guard reads MemberListModel.cpp and net/MemberJson.h to
+# check that every content key the model reads is named in the rebuild.
+target_compile_definitions(test_models PRIVATE
+    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
 
 target_link_libraries(test_models PRIVATE
     bsfchat_protocol

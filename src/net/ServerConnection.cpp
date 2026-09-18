@@ -4,6 +4,7 @@
 #include "net/AuthError.h"
 #include "net/TokenedReply.h"
 #include "net/SnapshotGate.h"
+#include "net/MemberJson.h"
 #include "model/RoomListModel.h"
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
@@ -247,36 +248,18 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     connect(m_client, &MatrixClient::roomMembersResult, this, [this](const QString& roomId, const QJsonArray& members) {
         if (roomId != m_activeRoomId) return;
         m_memberListModel->clear();
+        // The reply is Qt JSON, so each row has to be rebuilt into a
+        // RoomEvent rather than parsed like every other member path. Which
+        // content fields survive that rebuild is net/MemberJson.h's job and
+        // nobody else's — it used to be inline here, and two of the fields
+        // processEvent reads (`bsfchat.nickname`, `avatar_url`) had been
+        // missing since the initial commit.
         for (const auto& memberVal : members) {
-            auto obj = memberVal.toObject();
-            QString type = obj.value("type").toString();
-            if (type != QString::fromUtf8(bsfchat::event_type::kRoomMember)) continue;
-            QString membership = obj.value("content").toObject().value("membership").toString();
-            if (membership != "join") continue;
-
-            QString userId = obj.value("state_key").toString();
-            QString displayName = obj.value("content").toObject().value("displayname").toString();
-            // /members carries `bsfchat.bot` like every other member path.
-            // It has to be copied across explicitly because this handler
-            // rebuilds a RoomEvent field by field rather than parsing one,
-            // and a field left out here is a badge missing on every roster
-            // this path populates — which is the FIRST one a user sees on
-            // opening a channel.
-            const bool isBotAccount =
-                obj.value("content").toObject().value("bsfchat.bot").toBool(false);
-
-            // Build a RoomEvent to feed into processEvent
-            bsfchat::RoomEvent ev;
-            ev.type = std::string(bsfchat::event_type::kRoomMember);
-            ev.sender = userId.toStdString();
-            ev.state_key = userId.toStdString();
-            ev.content.data = {{"membership", "join"}};
-            if (!displayName.isEmpty()) {
-                ev.content.data["displayname"] = displayName.toStdString();
-            }
-            if (isBotAccount) ev.content.data["bsfchat.bot"] = true;
-            recordBotFlag(userId, isBotAccount);
-            m_memberListModel->processEvent(ev);
+            auto ev = bsfchat::client::joinedMemberEventFromJson(memberVal.toObject());
+            if (!ev) continue;
+            recordBotFlag(QString::fromStdString(*ev->state_key),
+                          bsfchat::client::memberEventIsBot(*ev));
+            m_memberListModel->processEvent(*ev);
         }
     });
 
