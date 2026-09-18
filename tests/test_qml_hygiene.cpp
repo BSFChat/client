@@ -152,6 +152,62 @@ private slots:
                      + offenders.join(QStringLiteral(", "))));
     }
 
+    // A settings pane may not lay content out underneath its scrollbar.
+    //
+    // The owner's report, verbatim: "Right now, I can't fully read the
+    // values of some settings because they are 'behind' the scrollbar (the
+    // values are off to the right)." A ScrollBar attached to a Flickable,
+    // ScrollView or ListView is an OVERLAY — Qt gives it no layout box — so
+    // a content item bound to the full viewport width runs underneath it,
+    // and a SettingRow puts its value at exactly that edge.
+    //
+    // The fix is ThemedScrollBar.reservedWidth, subtracted by whoever sizes
+    // the content. Nothing at runtime notices it going missing — the layout
+    // is still valid, just overlapped — and no headless test can measure the
+    // overlap, so this scans for the one shape that always produces it: a
+    // content item bound to the FULL viewport width, i.e. `<id>Flick.width`
+    // or `ListView.view.width`, with no gutter taken back out.
+    //
+    // Panes that inset their content some other way are deliberately NOT
+    // required to subtract anything — ChannelSettings.qml's column sits
+    // 16px in from the ScrollView's edge, which already clears the bar's
+    // 14px, and forcing a second gutter there would just make the dialog
+    // lopsided. The check is about the binding that cannot be safe, not
+    // about the presence of a bar.
+    void settingsPanesReserveRoomForTheirScrollbar()
+    {
+        static const QRegularExpression fullWidth(
+            QStringLiteral(R"((\w*Flick\.width|ListView\.view\.width))"));
+
+        const QStringList panes = filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
+                                             QStringLiteral("*Settings*.qml"));
+        QVERIFY2(!panes.isEmpty(), "no *Settings*.qml found under BSFCHAT_QML_DIR");
+
+        QStringList offenders;
+        int checked = 0;
+        for (const QString& path : panes) {
+            const QString src = withoutComments(readAll(path));
+            if (!src.contains(QStringLiteral("ThemedScrollBar"))) continue;
+            for (const QString& binding : widthBindings(src)) {
+                if (!fullWidth.match(binding).hasMatch()) continue;
+                ++checked;
+                if (binding.contains(QStringLiteral("reservedWidth"))) continue;
+                offenders << QStringLiteral("%1: %2")
+                                 .arg(QFileInfo(path).fileName(), binding);
+            }
+        }
+        QVERIFY2(checked > 0,
+                 "no settings pane binds content to the full viewport width — "
+                 "has the pattern changed? This guard is only meaningful while "
+                 "one does.");
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "content is sized to the full scrolling viewport, so the "
+                     "overlaid scrollbar covers its right edge — subtract "
+                     "ThemedScrollBar.reservedWidth: ")
+                     + offenders.join(QStringLiteral(" | "))));
+    }
+
     // QSettings must be named through AppProfile, never with literals.
     //
     // --profile exists so two accounts can run on one machine, and it works
@@ -735,6 +791,29 @@ private:
         QFile f(QStringLiteral(BSFCHAT_QML_DIR) + relative);
         [&] { QVERIFY2(f.open(QIODevice::ReadOnly | QIODevice::Text), qPrintable(f.fileName())); }();
         return QString::fromUtf8(f.readAll());
+    }
+
+    // Each `width:` binding as one line, with continuation lines folded in.
+    // QML wraps a subtraction onto the next line starting with `-`, and the
+    // whole point of the scrollbar-gutter scan is whether that subtraction
+    // is there, so an unfolded per-line search would report every wrapped
+    // binding as an offender.
+    static QStringList widthBindings(const QString& src)
+    {
+        QStringList out;
+        const QStringList lines = src.split(QLatin1Char('\n'));
+        for (int i = 0; i < lines.size(); ++i) {
+            if (!lines[i].trimmed().startsWith(QLatin1String("width:"))) continue;
+            QString binding = lines[i].trimmed();
+            for (int j = i + 1; j < lines.size(); ++j) {
+                const QString next = lines[j].trimmed();
+                if (!next.startsWith(QLatin1Char('-')) && !next.startsWith(QLatin1Char('+')))
+                    break;
+                binding += QLatin1Char(' ') + next;
+            }
+            out << binding;
+        }
+        return out;
     }
 
     // Each `visible:` binding as one line, continuation lines (those

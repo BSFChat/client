@@ -180,7 +180,9 @@ Each section lists: **source file in mock**, **purpose**, **layout**, **key bind
 - Trailing: unread pill OR voice member count
 - Active state: bg `Theme.bg3`, text `Theme.fg0`, a 2px left accent stripe
 
-**Voice channels:** when active, row expands to show nested member list (16px indent, 22px rows w/ 16×16 avatar + speaking ring).
+**"Active" means the row the MAIN PANE is showing — exactly one, ever.** The voice *connection* and the displayed *view* are orthogonal (§1): joining a voice channel leaves `activeRoomId` on the text channel you were reading, on purpose, so leaving voice puts you back in it. So the predicate is `viewingVoiceRoom ? roomId === activeVoiceRoomId : roomId === activeRoomId`, and it is written once, in `qml/js/ChannelSelection.js`, against the same flag main.qml's pane swap reads. Testing `activeRoomId` and `activeVoiceRoomId` independently — which is what shipped — highlights *two* rows the moment you join voice: the voice channel and the text channel you are no longer looking at. `tests/qml/tst_channelselection.qml` pins the "at most one" invariant. Being connected to voice while reading text is shown by the nested member list below and by the VoiceDock, not by the selected-row highlight.
+
+**Voice channels:** when active, row expands to show nested member list (16px indent, 22px rows w/ 16×16 avatar + speaking ring). That nesting follows the CONNECTION (`activeVoiceRoomId`), not the selected-row rule above, so a call you are in stays visible while you read elsewhere.
 
 **Bottom (VoiceStatusCard, 72h, r2, bg `Theme.bg2`):**
 Shown only when in a voice room. Contains: server/channel name, latency (mono, fg2), disconnect button (danger ghost).

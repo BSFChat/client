@@ -3,11 +3,34 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
 import BSFChat
+import "../js/ChannelSelection.js" as ChannelSelection
 
 Rectangle {
     id: channelListRoot
     color: Theme.bg1
     implicitWidth: Theme.layout.channelSidebarW
+
+    // Everything the selected-row highlight depends on, read HERE and
+    // handed to ChannelSelection.js as a plain object.
+    //
+    // Two reasons it is a snapshot rather than passing the connection
+    // straight through. The binding's dependencies are captured from the
+    // property reads this expression performs, so doing them in QML — all
+    // three, unconditionally, with no branch that can skip one — is the
+    // version whose reactivity is obvious rather than inferred. And it is
+    // evaluated once per change instead of once per visible row.
+    //
+    // It also means the .js file only ever sees plain objects, which is
+    // what tests/qml/tst_channelselection.qml can build.
+    readonly property var selectionView: {
+        var s = serverManager.activeServer;
+        if (!s) return null;
+        return {
+            activeRoomId: s.activeRoomId,
+            activeVoiceRoomId: s.activeVoiceRoomId,
+            viewingVoiceRoom: s.viewingVoiceRoom
+        };
+    }
 
     // Category collapse state
     property var collapsedCategories: ({})
@@ -441,10 +464,14 @@ Rectangle {
                     id: dmRow
                     width: ListView.view ? ListView.view.width : 0
                     height: Theme.isMobile ? 60 : 52
+                    // Same "what is the pane showing" rule as the channel
+                    // rows — a DM is a text room, so it stops being the
+                    // highlighted row while the VoiceRoom is up.
                     readonly property bool isActive: {
                         var s = serverManager.activeServer;
-                        return s && s.serverUrl === modelData.serverUrl
-                            && s.activeRoomId === modelData.roomId;
+                        return !!s && s.serverUrl === modelData.serverUrl
+                            && ChannelSelection.textRowSelected(
+                                   modelData.roomId, channelListRoot.selectionView);
                     }
                     color: isActive ? Theme.bg3
                          : rowMouse.containsMouse ? Theme.bg2 : "transparent"
@@ -808,8 +835,9 @@ Rectangle {
                         width: channelListRoot.width
                         height: 36
 
-                        readonly property bool _active: serverManager.activeServer
-                            && modelData.roomId === serverManager.activeServer.activeRoomId
+                        readonly property bool _active:
+                            ChannelSelection.textRowSelected(
+                                modelData.roomId, channelListRoot.selectionView)
 
                         Rectangle {
                             anchors.fill: parent
@@ -1160,12 +1188,22 @@ Rectangle {
                                     property bool dragging: false
                                     property real dragY: 0
 
+                                    // Selected-row highlight. It follows what the
+                                    // MAIN PANE is showing, not what is loaded:
+                                    // joining voice leaves `activeRoomId` pointing
+                                    // at the text channel you were reading (so
+                                    // leaving voice returns you to it), and the old
+                                    // predicates ignored `viewingVoiceRoom`, so both
+                                    // rows lit up at once. ChannelSelection.js holds
+                                    // the rule and tst_channelselection.qml pins it.
                                     readonly property bool isActiveText:
-                                        !modelData.isVoice && serverManager.activeServer
-                                        && modelData.roomId === serverManager.activeServer.activeRoomId
+                                        !modelData.isVoice
+                                        && ChannelSelection.textRowSelected(
+                                               modelData.roomId, channelListRoot.selectionView)
                                     readonly property bool isActiveVoice:
-                                        modelData.isVoice && serverManager.activeServer
-                                        && modelData.roomId === serverManager.activeServer.activeVoiceRoomId
+                                        modelData.isVoice
+                                        && ChannelSelection.voiceRowSelected(
+                                               modelData.roomId, channelListRoot.selectionView)
                                     readonly property bool isActive: isActiveText || isActiveVoice
 
                                     Rectangle {

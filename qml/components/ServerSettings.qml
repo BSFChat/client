@@ -497,7 +497,7 @@ Popup {
                     contentHeight: overviewPane.implicitHeight
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
-                    ScrollBar.vertical: ThemedScrollBar {}
+                    ScrollBar.vertical: ThemedScrollBar { id: overviewScrollBar }
 
                 ColumnLayout {
                     // id needed so the PolicyRow inline component can be
@@ -508,7 +508,7 @@ Popup {
                     // contentItem): with contentWidth unset the contentItem's
                     // width follows its children, so parent.width is circular
                     // and the column blows out past the right edge.
-                    width: overviewFlick.width
+                    width: overviewFlick.width - overviewScrollBar.reservedWidth
                     spacing: Theme.sp.s7
 
                     TabHeader { title: "Server Overview" }
@@ -936,13 +936,14 @@ Popup {
                         Layout.fillHeight: true
                         clip: true
 
-                        ScrollBar.vertical: ThemedScrollBar {}
+                        ScrollBar.vertical: ThemedScrollBar { id: rolesScrollBar }
                         model: serverManager.activeServer ? serverManager.activeServer.serverRoles : []
                         spacing: 4
 
                         delegate: Column {
                             id: roleDelegate
-                            width: ListView.view ? ListView.view.width : 400
+                            width: (ListView.view ? ListView.view.width : 400)
+                                   - rolesScrollBar.reservedWidth
                             spacing: 2
 
                             property var role: modelData
@@ -1511,7 +1512,7 @@ Popup {
                         visible: serverManager.activeServer
                                  && serverManager.activeServer.serverMembers.length > 0
 
-                        ScrollBar.vertical: ThemedScrollBar {}
+                        ScrollBar.vertical: ThemedScrollBar { id: membersScrollBar }
                         // Server-wide member union (not the active-room model
                         // which only knows about the currently-selected
                         // channel). See ServerConnection::serverMembers.
@@ -1521,7 +1522,8 @@ Popup {
 
                         delegate: Column {
                             id: memberRow
-                            width: ListView.view ? ListView.view.width : 400
+                            width: (ListView.view ? ListView.view.width : 400)
+                                   - membersScrollBar.reservedWidth
                             // D-M3: a Column delegate keeps its implicit height
                             // when hidden, so filtering the list left a run of
                             // blank gaps where the non-matching rows used to be.
@@ -1981,12 +1983,13 @@ Popup {
                         Layout.fillHeight: true
                         clip: true
 
-                        ScrollBar.vertical: ThemedScrollBar {}
+                        ScrollBar.vertical: ThemedScrollBar { id: channelsScrollBar }
                         model: serverManager.activeServer ? serverManager.activeServer.categorizedRooms : []
                         spacing: Theme.sp.s3
 
                         delegate: Column {
-                            width: ListView.view ? ListView.view.width : 400
+                            width: (ListView.view ? ListView.view.width : 400)
+                                   - channelsScrollBar.reservedWidth
                             readonly property string catId: modelData.categoryId || ""
 
                             // Category header — widest-tracked small caps
@@ -2286,12 +2289,13 @@ Popup {
                         Layout.fillHeight: true
                         clip: true
                         visible: parent.banList.length > 0
-                        ScrollBar.vertical: ThemedScrollBar {}
+                        ScrollBar.vertical: ThemedScrollBar { id: bansScrollBar }
                         model: parent.banList
                         spacing: 4
 
                         delegate: Rectangle {
-                            width: ListView.view ? ListView.view.width : 400
+                            width: (ListView.view ? ListView.view.width : 400)
+                                   - bansScrollBar.reservedWidth
                             height: 60
                             radius: Theme.r2
                             color: Theme.bg2

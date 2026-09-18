@@ -487,6 +487,10 @@ qt_add_qml_module(bsfchat-app
         # by both MemberList.qml and MessageView.qml) and tested in
         # tests/qml/tst_profilecardavatar.qml.
         qml/js/ProfileCardAvatar.js
+        # Which channel-sidebar row counts as "selected" once the voice
+        # connection and the displayed view disagree. Shared by
+        # ChannelList.qml and tests/qml/tst_channelselection.qml.
+        qml/js/ChannelSelection.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt
