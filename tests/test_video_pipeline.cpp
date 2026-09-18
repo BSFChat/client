@@ -12,6 +12,7 @@
 #include <QtTest/QtTest>
 #include <QImage>
 #include <QPainter>
+#include <QElapsedTimer>
 #include <QSignalSpy>
 #include <QVideoFrame>
 #include <QVideoFrameFormat>
@@ -558,18 +559,28 @@ private slots:
         pipe.setDecoderRetryIntervalMs(40);
         QSignalSpy spy(&pipe, &VideoReceivePipeline::decoderUnavailable);
 
+        QElapsedTimer clock;
+        clock.start();
         for (int i = 0; i < 40; ++i) {
             pipe.submitAccessUnit(hevcIrap());
             QTest::qWait(5);
         }
-        // ~200 ms at a 40 ms retry floor: several attempts, nowhere
-        // near the 40 access units that arrived.
         QTRY_VERIFY_WITH_TIMEOUT(pipe.decoderFailures() >= 2, 2000);
-        QVERIFY2(pipe.decoderFailures() <= 10,
-                 qPrintable(QStringLiteral("decoder rebuilt %1 times for 40 "
-                                           "access units — throttle is not "
-                                           "holding")
-                            .arg(pipe.decoderFailures())));
+        // The bound is relative to wall time, not to the access-unit
+        // count: a 40 ms floor permits at most one retry per 40 ms of
+        // elapsed time (+1 for the initial attempt, +1 for the edge),
+        // however slowly a loaded CI runner paced the qWait()s. The
+        // first cut of this test assumed the loop took ~200 ms and
+        // failed on GitHub's macOS runner where it took over a second.
+        const qint64 elapsedMs = clock.elapsed();
+        const quint64 allowed = quint64(elapsedMs / 40) + 2;
+        QVERIFY2(pipe.decoderFailures() <= allowed,
+                 qPrintable(QStringLiteral("decoder rebuilt %1 times in %2 ms "
+                                           "for 40 access units (allowed %3) "
+                                           "— throttle is not holding")
+                            .arg(pipe.decoderFailures()).arg(elapsedMs)
+                            .arg(allowed)));
+        QVERIFY(pipe.decoderFailures() < 40);
         QCOMPARE(quint64(creates.load()), pipe.decoderFailures());
         QCOMPARE(spy.count(), 1);
     }
