@@ -24,9 +24,9 @@
 // MEMBERSHIP changes.
 //
 // `started` is a monotonically increasing tick stamped when a feed first
-// appears. It is what "most recently started" means below, and it is
-// preserved across merges so a feed's age doesn't reset when some other
-// feed comes or goes.
+// appears. It is what "oldest first" means in the feed order below, and
+// it is preserved across merges so a feed's age doesn't reset when some
+// other feed comes or goes.
 
 var SCREEN = "screen";
 var CAMERA = "camera";
@@ -48,10 +48,14 @@ function _kindRank(kind) {
     return kind === SCREEN ? 0 : 1;
 }
 
-// Strip order: screen shares first, then cameras; oldest first within a
-// kind, key as the final tie-break so the order is total and stable. The
-// stage grid uses the same order, so a feed does not jump around when it
-// moves between stage and strip.
+// Feed order: screen shares first, then cameras; oldest first within a
+// kind, key as the final tie-break so the order is total and stable.
+// This is the order of the grid AND of the strip, so a feed does not
+// jump around when the view switches between them.
+//
+// Note what this ordering does NOT do any more: it no longer decides
+// what is on the stage. Screens sorting first is a reading order, not a
+// promotion.
 function _compareFeeds(a, b) {
     var ka = _kindRank(a.kind);
     var kb = _kindRank(b.kind);
@@ -116,53 +120,49 @@ function hasKey(feeds, key) {
     return indexOfKey(feeds, key) >= 0;
 }
 
-function hasScreen(feeds) {
-    feeds = feeds || [];
-    for (var i = 0; i < feeds.length; ++i)
-        if (feeds[i].kind === SCREEN) return true;
-    return false;
-}
-
-// Auto-selection: the most recently started screen share, and only if
-// there is no screen share at all, the most recently started camera.
-// A screen share is the thing people are being asked to look at.
-function defaultSelection(feeds) {
-    feeds = feeds || [];
-    var best = null;
-    var i, f;
-    for (i = 0; i < feeds.length; ++i) {
-        f = feeds[i];
-        if (f.kind !== SCREEN) continue;
-        if (!best || f.started >= best.started) best = f;
-    }
-    if (best) return best.key;
-    for (i = 0; i < feeds.length; ++i) {
-        f = feeds[i];
-        if (f.kind !== CAMERA) continue;
-        if (!best || f.started >= best.started) best = f;
-    }
-    return best ? best.key : "";
-}
-
-// The effective selection. An explicit pick survives only while its feed
-// does; when that feed stops we fall back to auto rather than leaving the
-// stage blank. Passing "" is how Escape returns to auto.
-function resolveSelection(feeds, selectedKey) {
+// ── Expansion ────────────────────────────────────────────────────────
+//
+// The grid is the default for ANY mix of feeds. NOTHING is promoted to
+// the stage on its own. A screen share used to be — `hasScreen()` picked
+// the newest one and the stage became a single panel — and the effect
+// was that one person sharing a desktop swept every face in the call
+// into a row of thumbnails without anybody asking for it. Expansion is
+// now a deliberate click and only a click.
+//
+// So `selectedKey` means "the feed the user expanded", and "" means "the
+// grid". It survives a membership change only while its own feed does: a
+// feed that stops while expanded drops the view back to the grid rather
+// than handing the stage to some other feed nobody picked.
+function expandedKey(feeds, selectedKey) {
     if (selectedKey && hasKey(feeds, selectedKey)) return selectedKey;
-    return defaultSelection(feeds);
+    return "";
+}
+
+// A click on a tile. Clicking the expanded feed — either filling the
+// stage or as its "on stage" chip down in the strip — collapses back to
+// the grid; clicking any other feed expands that one instead. Escape is
+// the same thing as collapsing, and VoiceRoom writes "" for it directly.
+function toggleExpanded(feeds, selectedKey, key) {
+    var current = expandedKey(feeds, selectedKey);
+    if (!key || !hasKey(feeds, key)) return current;
+    return current === key ? "" : key;
 }
 
 // What the stage does:
-//   "empty"  nothing to show (the classic participant grid takes over)
-//   "single" one feed, filling the stage
-//   "grid"   cameras only — everybody side by side, including us
-//   "focus"  a screen share is up, so one feed fills the stage and the
-//            rest are pickable from the strip
+//   "empty"     nothing to show (the classic participant grid takes over)
+//   "grid"      every feed at once, each as large as the stage allows —
+//               the default, for screens and cameras alike
+//   "expanded"  the feed the user clicked fills the stage and every
+//               other feed sits in the bottom strip
+//
+// A lone feed is always "grid": a 1×1 grid already fills the stage, and
+// a strip holding one thumbnail of the only feed is a chip that can do
+// nothing.
 function stageMode(feeds, selectedKey) {
     feeds = feeds || [];
     if (feeds.length === 0) return "empty";
-    if (feeds.length === 1) return "single";
-    return hasScreen(feeds) ? "focus" : "grid";
+    if (feeds.length > 1 && expandedKey(feeds, selectedKey)) return "expanded";
+    return "grid";
 }
 
 // Keys currently on the stage, in stage order.
@@ -170,15 +170,9 @@ function stageKeys(feeds, selectedKey) {
     feeds = feeds || [];
     var mode = stageMode(feeds, selectedKey);
     var out = [];
-    var i;
     if (mode === "empty") return out;
-    if (mode === "grid") {
-        for (i = 0; i < feeds.length; ++i) out.push(feeds[i].key);
-        return out;
-    }
-    if (mode === "single") return [feeds[0].key];
-    var sel = resolveSelection(feeds, selectedKey);
-    if (sel) out.push(sel);
+    if (mode === "expanded") return [expandedKey(feeds, selectedKey)];
+    for (var i = 0; i < feeds.length; ++i) out.push(feeds[i].key);
     return out;
 }
 
@@ -194,24 +188,67 @@ function stageCount(feeds, selectedKey) {
     return stageKeys(feeds, selectedKey).length;
 }
 
-// Grid shape for n tiles. 2 is two columns rather than a 2×2 with two
-// holes; 3–4 is 2×2; 5–6 is 3×2; past that the column count stays at 3
-// and rows are added, so the tiles shrink instead of the grid getting
-// unreadably wide.
-function gridDims(n) {
+// ── Grid shape ───────────────────────────────────────────────────────
+//
+// "Each as big as possible" is NOT "as few cells as possible". A feed is
+// aspect-fit inside its cell, so a cell of the wrong shape is mostly
+// letterbox: two feeds on a stage wider than 16:9 are biggest side by
+// side, and on a stage narrower than 16:9 they are biggest stacked — the
+// same two feeds, the same two cells, a different answer. The shape is
+// therefore measured rather than looked up in a table.
+//
+// For every column count 1…n (rows follows as ceil(n/cols)) we fit a
+// TILE_ASPECT rectangle into one cell and keep the largest. Ties go to
+// the wider grid: on a stage that is exactly 16:9 the choice between 3×2
+// and 2×3 is a genuine dead heat, and faces read left to right.
+//
+// On a 16:9-or-wider stage this yields exactly what the owner asked for
+// — 1 fills, 2 side by side, 3–4 as 2×2, 5–6 as 3×2, 7–9 as 3×3, and
+// beyond that the columns grow again so every tile shrinks. On a
+// portrait stage it yields the transpose, down to a single column when
+// the stage is tall and narrow enough for that to win. It genuinely
+// does win there, and a 2-column grid in a phone-shaped stage would be
+// half letterbox.
+//
+// Gaps are deliberately not part of the choice: they are single-digit
+// pixels against a stage of several hundred and would never flip an
+// answer, and leaving them out keeps the shape a pure function of the
+// stage's aspect, which is what makes it testable.
+var TILE_ASPECT = 16 / 9;
+
+function _fittedArea(cellW, cellH, tileAspect) {
+    if (!(cellW > 0) || !(cellH > 0)) return 0;
+    var w = Math.min(cellW, cellH * tileAspect);
+    return w * (w / tileAspect);
+}
+
+function gridDims(n, stageAspect, tileAspect) {
     n = Math.max(0, Math.floor(n || 0));
     if (n <= 0) return { cols: 0, rows: 0 };
     if (n === 1) return { cols: 1, rows: 1 };
-    if (n === 2) return { cols: 2, rows: 1 };
-    if (n <= 4)  return { cols: 2, rows: 2 };
-    if (n <= 6)  return { cols: 3, rows: 2 };
-    return { cols: 3, rows: Math.ceil(n / 3) };
+    if (!(stageAspect > 0)) stageAspect = TILE_ASPECT;
+    if (!(tileAspect > 0)) tileAspect = TILE_ASPECT;
+
+    var bestCols = 1, bestRows = n, bestArea = -1;
+    for (var cols = 1; cols <= n; ++cols) {
+        var rows = Math.ceil(n / cols);
+        // Unit height: only the stage's ratio matters to the choice.
+        var area = _fittedArea(stageAspect / cols, 1 / rows, tileAspect);
+        var better = area > bestArea + 1e-9;
+        var tied = !better && area > bestArea - 1e-9;
+        if (better || tied) {
+            bestCols = cols;
+            bestRows = rows;
+            if (better) bestArea = area;
+        }
+    }
+    return { cols: bestCols, rows: bestRows };
 }
 
 // Geometry of the index-th cell. A short final row is centred, so three
 // feeds read as two over one rather than two over one-hard-left.
 function gridCell(index, n, width, height, gap) {
-    var d = gridDims(n);
+    var d = gridDims(n, (width > 0 && height > 0) ? width / height : 0);
     if (d.cols <= 0 || d.rows <= 0)
         return { x: 0, y: 0, width: 0, height: 0 };
     gap = gap || 0;
@@ -242,18 +279,37 @@ function stripSlot(index, n, width, gap, maxWidth) {
     return { x: (width - total) / 2 + index * (w + gap), width: w };
 }
 
-// Left/right arrow keys walk the strip order. Clamped, not wrapped:
-// holding an arrow should come to rest at an end rather than cycle.
+// Left/right arrows walk WHICH FEED IS EXPANDED, in feed order.
+// Clamped, not wrapped: holding an arrow should come to rest at an end
+// rather than cycle.
+//
+// In the grid they do nothing. Every feed is already on screen there, so
+// there is nothing to walk between, and making an arrow key expand
+// something would be a large unasked-for change of view from a key the
+// user may well have meant for the message list.
 function moveSelection(feeds, selectedKey, delta) {
     feeds = feeds || [];
-    if (feeds.length === 0) return "";
-    var current = resolveSelection(feeds, selectedKey);
+    var current = expandedKey(feeds, selectedKey);
+    if (!current) return "";
     var index = indexOfKey(feeds, current);
-    if (index < 0) index = 0;
+    if (index < 0) return "";
     var next = index + Math.floor(delta || 0);
     if (next < 0) next = 0;
     if (next > feeds.length - 1) next = feeds.length - 1;
     return feeds[next].key;
+}
+
+// Which feed a pointerless action — the header's full-screen button, or
+// `F` — acts on. The expanded feed when there is one; otherwise the tile
+// the pointer is over, because in a grid "this one" can only mean the
+// one being looked at; otherwise the first feed, so the key always does
+// something rather than nothing.
+function focusKeyFor(feeds, selectedKey, hoveredKey) {
+    feeds = feeds || [];
+    var expanded = expandedKey(feeds, selectedKey);
+    if (expanded) return expanded;
+    if (hoveredKey && hasKey(feeds, hoveredKey)) return hoveredKey;
+    return feeds.length > 0 ? feeds[0].key : "";
 }
 
 // The pill drawn over a feed. Kept here so the wording is exercised by
