@@ -192,7 +192,18 @@ jobs:
       # ephemeral ports). Running serially here would let a fixture that
       # shares a fixed path back in without anyone noticing.
       - name: Test
-        run: ctest --test-dir build --output-on-failure -C Release -j4
+        # test_media_loopback drives raw libdatachannel peer connections over
+        # the runner's loopback and intermittently never completes ICE on
+        # GitHub's Ubuntu runners (rc.11, the sanitizer job, release/0.0.44
+        # twice) — on changes that do not touch it, while passing on macOS and
+        # Windows. It covers no video path that test_video_rtp_loopback does
+        # not; that test stays gating everywhere. Excluded on Linux until the
+        # runner-side ICE stall is understood (see PLAN-2026-09.md).
+        shell: bash
+        run: |
+          EXCLUDE=""
+          if [ "${{ matrix.platform }}" = "linux" ]; then EXCLUDE="-E test_media_loopback"; fi
+          ctest --test-dir build --output-on-failure -C Release -j4 $EXCLUDE
 
       # qmllint over the whole QML tree, using the aqt-installed Qt and the
       # build directory's generated qmldir/qmltypes so C++-registered types
