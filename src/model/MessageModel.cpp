@@ -30,6 +30,8 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
     case EventIdRole: return msg.eventId;
     case SenderRole: return msg.sender;
     case SenderDisplayNameRole: return msg.senderDisplayName;
+    case SenderIsBotRole:
+        return m_botRegistry && m_botRegistry->isBot(msg.sender);
     case BodyRole: return msg.body;
     case FormattedBodyRole: return msg.formattedBody;
     case TimestampRole: return msg.timestamp;
@@ -94,7 +96,8 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {ThreadRootIdRole, "threadRootId"},
         {ThreadReplyCountRole, "threadReplyCount"},
         {MentionsMeRole, "mentionsMe"},
-        {MentionsRoomRole, "mentionsRoom"}
+        {MentionsRoomRole, "mentionsRoom"},
+        {SenderIsBotRole, "senderIsBot"}
     };
 }
 
@@ -926,6 +929,12 @@ void MessageModel::clear()
     if (hadMore) emit hasMoreHistoryChanged();
     if (m_loadingHistory) { m_loadingHistory = false; emit loadingHistoryChanged(); }
     emit countChanged();
+}
+
+void MessageModel::refreshBotFlags()
+{
+    if (m_messages.isEmpty()) return;
+    emit dataChanged(index(0), index(m_messages.size() - 1), {SenderIsBotRole});
 }
 
 QString MessageModel::resolveDisplayName(const QString& userId) const

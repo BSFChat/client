@@ -12,6 +12,8 @@
 
 #include <bsfchat/MatrixTypes.h>
 
+#include "util/BotRegistry.h"
+
 class ThreadFilterModel;
 
 class MessageModel : public QAbstractListModel {
@@ -51,7 +53,17 @@ public:
         ThreadRootIdRole,   // If non-empty, this message is part of that thread
         ThreadReplyCountRole, // Count of m.thread replies anchored on this message
         MentionsMeRole,     // m.mentions.user_ids contains the local user
-        MentionsRoomRole    // m.mentions.room — an @room broadcast
+        MentionsRoomRole,   // m.mentions.room — an @room broadcast
+        // True when this message's SENDER is a bot account, for the BOT
+        // badge on the bubble.
+        //
+        // Resolved through the shared BotRegistry at read time, not stamped
+        // onto the row when the event is appended. Stamping would fix the
+        // flag at the instant the message arrived, which for a bot's first
+        // message is before its profile reply has landed — the badge would
+        // then be missing from exactly the messages that introduced the bot,
+        // and nothing would ever go back and correct them.
+        SenderIsBotRole
     };
 
     // A live, role-preserving view of one thread over this model (U-M8),
@@ -237,6 +249,19 @@ public:
     // can resolve @user:host → "Josh" at render time. Not owned.
     void setDisplayNameCache(const QMap<QString, QString>* cache) { m_dnCache = cache; }
 
+    // Bot-flag cache — ServerConnection's, not owned. Same arrangement and
+    // same reasoning as the display-name cache above.
+    void setBotRegistry(const bsfchat::client::BotRegistry* registry)
+    {
+        m_botRegistry = registry;
+    }
+    // Repaint every loaded row's badge after a batch of profile replies moved
+    // at least one flag. Unlike refreshDisplayNames this cannot narrow to the
+    // rows that changed without duplicating the registry's bookkeeping per
+    // message, and it names a single role, so the whole-model span is the
+    // cheaper of the two options.
+    void refreshBotFlags();
+
     void appendEvent(const bsfchat::RoomEvent& event, const QString& ownUserId);
     void appendEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);
     void prependEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);
@@ -372,6 +397,7 @@ private:
     QString m_prevBatchToken;
     bool m_loadingHistory = false;
     const QMap<QString, QString>* m_dnCache = nullptr;
+    const bsfchat::client::BotRegistry* m_botRegistry = nullptr;
     const QString* m_accessToken = nullptr;
 
     MessageEntry eventToEntry(const bsfchat::RoomEvent& event, const QString& ownUserId) const;

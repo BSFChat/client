@@ -7,6 +7,7 @@
 #include "model/RoomListModel.h"
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
+#include "model/BotAdminModel.h"
 #include "util/MemberCache.h"
 #include "util/MentionBadge.h"
 #include "util/ModerationScope.h"
@@ -135,6 +136,88 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     m_messageModel->setDisplayNameCache(&m_userDisplayNames);
     m_memberListModel->setDisplayNameCache(&m_userDisplayNames);
     m_messageModel->setAccessTokenSource(&m_accessToken);
+    m_messageModel->setBotRegistry(&m_botRegistry);
+    m_memberListModel->setBotRegistry(&m_botRegistry);
+
+    m_botProbeTimer = new QTimer(this);
+    // 150 ms between batches of four. A 200-member roster settles in about
+    // seven seconds, which is far longer than anyone waits for a badge but is
+    // also the worst case, and it costs the server a trickle rather than a
+    // spike at the exact moment it is also serving that channel's history.
+    m_botProbeTimer->setInterval(150);
+    connect(m_botProbeTimer, &QTimer::timeout, this, &ServerConnection::drainBotProbes);
+
+    // ── Bot flags: who gets probed, and when ──────────────────────────────
+    //
+    // A user id becomes visible in exactly two places that draw a badge: a
+    // row appearing in the member list, and a row appearing in the message
+    // list. Both are QAbstractListModels, so rowsInserted is a single hook
+    // that covers every path into either of them — the cached-member replay,
+    // the /members fetch, the sync member branch, the cold-start timeline
+    // load, back-pagination and live appends — without a call at each of the
+    // eight sites that append to one of them, which is how such a thing ends
+    // up covering seven.
+    //
+    // This runs per ROW, not per fetch, and that is fine: ensureBotFlag is a
+    // hash lookup against a ledger of everyone already asked about, so a
+    // thousand messages from one bot produce one request. The "never fetch
+    // per message" rule is about the network, and the network is only ever
+    // touched the first time a given user id is seen.
+    connect(m_memberListModel, &QAbstractItemModel::rowsInserted, this,
+            [this](const QModelIndex&, int first, int last) {
+        for (int row = first; row <= last; ++row) {
+            ensureBotFlag(m_memberListModel->data(m_memberListModel->index(row),
+                                                  MemberListModel::UserIdRole).toString());
+        }
+    });
+    connect(m_messageModel, &QAbstractItemModel::rowsInserted, this,
+            [this](const QModelIndex&, int first, int last) {
+        for (int row = first; row <= last; ++row) {
+            ensureBotFlag(m_messageModel->data(m_messageModel->index(row),
+                                               MessageModel::SenderRole).toString());
+        }
+    });
+
+    m_botAdminModel = new BotAdminModel(this);
+    m_botAdminModel->hooks.listBots = [this]() { m_client->listBots(); };
+    m_botAdminModel->hooks.createBot = [this](const QString& localpart,
+                                              const QString& displayName,
+                                              const QString& description) {
+        m_client->createBot(localpart, displayName, description);
+    };
+    m_botAdminModel->hooks.rotateToken = [this](const QString& userId) {
+        m_client->rotateBotToken(userId);
+    };
+    m_botAdminModel->hooks.deactivateBot = [this](const QString& userId) {
+        m_client->deactivateBot(userId);
+    };
+
+    connect(m_client, &MatrixClient::botsListed, m_botAdminModel,
+            &BotAdminModel::onBotsListed);
+    connect(m_client, &MatrixClient::botCreated, m_botAdminModel,
+            &BotAdminModel::onBotCreated);
+    connect(m_client, &MatrixClient::botTokenRotated, m_botAdminModel,
+            &BotAdminModel::onTokenRotated);
+    connect(m_client, &MatrixClient::botDeactivated, m_botAdminModel,
+            &BotAdminModel::onBotDeactivated);
+    connect(m_client, &MatrixClient::botRequestFailed, this,
+            [this](const QString& operation, int status, const QString& error) {
+        // `status` is dropped on purpose rather than shown: the dialog's error
+        // line is read by a server owner, not a developer, and "403" next to
+        // "you do not have permission" is noise. It exists on the signal
+        // because a future caller may want to branch on it.
+        Q_UNUSED(status);
+        m_botAdminModel->onFailed(operation, error);
+    });
+
+    // An admin who can see the bot list has, in one reply, the answer for
+    // every bot on the server — so fold it into the same cache the badges
+    // read. This is the only bulk source that exists (see BotRegistry), and
+    // it is positive-evidence only: nothing here marks anyone human.
+    connect(m_botAdminModel, &BotAdminModel::botSetChanged, this, [this]() {
+        if (m_botRegistry.recordBotList(m_botAdminModel->listedBotUserIds()))
+            flushBotFlagRepaint();
+    });
 
     // Connect sync signals
     connect(m_syncLoop, &SyncLoop::syncCompleted, this, &ServerConnection::processSyncResponse);
@@ -461,7 +544,13 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         m_client->getProfile(m_userId);
     });
 
-    connect(m_client, &MatrixClient::profileResult, this, [this](const QString& userId, const QString& displayName, const QString& avatarUrl) {
+    connect(m_client, &MatrixClient::profileResult, this, [this](const QString& userId, const QString& displayName, const QString& avatarUrl, bool isBot) {
+        // The bot flag first, and unconditionally: this reply is the answer to
+        // a probe whether or not the display name moved, and if it is not
+        // recorded here the user stays Unknown forever — the registry has
+        // already spent their one probe.
+        recordBotFlag(userId, isBot);
+
         // If this is our own profile, update local state
         if (userId == m_userId) {
             if (!displayName.isEmpty() && displayName != m_displayName) {
@@ -575,7 +664,13 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
     // server's canonical answer; old servers without the endpoint just
     // never reply.
     connect(m_client, &MatrixClient::whoamiResult, this,
-        [this](const QString& canonicalId) {
+        [this](const QString& canonicalId, bool isBot) {
+            // Free answer for our own identity — /whoami reports it and this
+            // runs on every session, so the one user whose badge appears in
+            // their own messages never costs a profile probe. Recorded before
+            // the early return below, which fires in the ordinary case where
+            // the stored id was already right.
+            recordBotFlag(canonicalId, isBot);
             if (canonicalId == m_userId) return;
             qWarning() << "stored user id" << m_userId
                        << "differs from server canonical" << canonicalId
@@ -707,6 +802,17 @@ void ServerConnection::loginWithOidc(const QString& providerUrl)
 void ServerConnection::disconnectFromServer()
 {
     m_syncLoop->stop();
+    // Bot flags are per-session facts about THIS server's users, and the
+    // probe ledger is what stops us re-asking. Both have to go, or a
+    // reconnect — which may be as a different account, against a server whose
+    // bot set has changed — would render badges from the previous session and
+    // never issue a probe to correct them.
+    m_botProbeTimer->stop();
+    m_botRegistry.clear();
+    m_botAdminModel->reset();
+    m_messageModel->refreshBotFlags();
+    m_memberListModel->refreshBotFlags();
+
     m_connected = false;
     m_connectionStatus = 0;
     emit connectedChanged();
@@ -3502,6 +3608,74 @@ bool ServerConnection::canChangeNickname() const {
 }
 bool ServerConnection::canManageNicknames() const {
     return (myPermissions(QString()) & permmath::kManageNicknames) != 0;
+}
+// Also SERVER scope, for the same reason. myPermissions() already folds in the
+// ADMINISTRATOR short-circuit, so an admin needs no separate check here and
+// the dialog does not have to ask two questions.
+bool ServerConnection::canManageBots() const {
+    return (myPermissions(QString()) & permmath::kManageBots) != 0;
+}
+
+// ── Bot identity ──────────────────────────────────────────────────────────
+
+bool ServerConnection::isBot(const QString& userId) const {
+    return m_botRegistry.isBot(userId);
+}
+
+void ServerConnection::ensureBotFlag(const QString& userId)
+{
+    if (userId.isEmpty()) return;
+    // enqueueProbe is the once-per-session gate; a repeat caller falls out
+    // here without touching the queue or the network.
+    if (!m_botRegistry.enqueueProbe(userId)) return;
+    startBotProbesIfNeeded();
+}
+
+void ServerConnection::startBotProbesIfNeeded()
+{
+    // Only while there is something to ask about. A permanently running 150 ms
+    // timer would wake an idle client ~400 times a minute for nothing, which is
+    // exactly the kind of cost U-M4 went and removed from the member list.
+    if (!m_botRegistry.hasPendingProbes()) return;
+    if (!m_botProbeTimer->isActive()) m_botProbeTimer->start();
+}
+
+void ServerConnection::drainBotProbes()
+{
+    // Nothing is in flight-tracked here: each probe is a plain GET whose reply
+    // lands in the profileResult handler, and the registry has already marked
+    // the user as asked-about, so a reply that never comes costs one unanswered
+    // request rather than a retry loop.
+    const QStringList batch = m_botRegistry.takeProbeBatch(4);
+    for (const QString& userId : batch) {
+        m_client->getProfile(userId);
+    }
+    if (!m_botRegistry.hasPendingProbes()) m_botProbeTimer->stop();
+}
+
+void ServerConnection::recordBotFlag(const QString& userId, bool isBot)
+{
+    if (!m_botRegistry.record(userId, isBot)) return;
+    flushBotFlagRepaint();
+}
+
+void ServerConnection::flushBotFlagRepaint()
+{
+    // Coalesce. Probes come back in bursts of four and an admin's bot list
+    // arrives all at once; repainting both models per answer would run the
+    // whole member list's bindings four times in one event-loop turn for a
+    // badge that is the same either way. Queued to the end of the turn, so a
+    // burst collapses into one repaint — the same trick as the presence
+    // dirty-flag in processSyncResponse.
+    if (m_botFlagsDirty) return;
+    m_botFlagsDirty = true;
+    QMetaObject::invokeMethod(this, [this]() {
+        m_botFlagsDirty = false;
+        m_messageModel->refreshBotFlags();
+        m_memberListModel->refreshBotFlags();
+        ++m_botFlagsGeneration;
+        emit botFlagsChanged();
+    }, Qt::QueuedConnection);
 }
 int ServerConnection::channelSlowmode(const QString& roomId) const {
     return m_channelSlowmode.value(roomId, 0);

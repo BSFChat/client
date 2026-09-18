@@ -152,6 +152,31 @@ public:
 
     // Profile
     void getProfile(const QString& userId);
+
+    // ── Bot accounts (BSFChat extension) ──────────────────────────────────
+    //
+    // All four are gated server-side on MANAGE_BOTS at SERVER scope. The
+    // client gates the UI on the same flag (ServerConnection::canManageBots)
+    // so the buttons are not offered to someone who would only get a 403, but
+    // the server is the enforcer and these calls report its refusal rather
+    // than assuming it cannot happen.
+    //
+    // THE TOKEN IS RETURNED EXACTLY ONCE, by createBot and rotateBotToken.
+    // The server keeps no retrievable copy. Neither of those two paths logs
+    // its response — not the body, not the status line, not a "created X"
+    // trace — and neither may ever start to: the client mirrors every log
+    // line into a rotating file on disk (util/FileLogger.h), so a debug print
+    // here is a credential written to the user's home directory. The token
+    // travels from the reply straight into BotAdminModel's one-time banner
+    // and is dropped when the operator dismisses it.
+    void listBots();
+    void createBot(const QString& localpart, const QString& displayName,
+                   const QString& description);
+    void rotateBotToken(const QString& userId);
+    // Deactivate, not delete. Idempotent server-side: deactivating an already
+    // deactivated bot succeeds, so a double-click cannot produce an error the
+    // operator has to interpret.
+    void deactivateBot(const QString& userId);
     void setDisplayName(const QString& userId, const QString& displayName);
     void setAvatarUrl(const QString& userId, const QString& avatarUrl);
 
@@ -361,9 +386,39 @@ signals:
 
     // Canonical user id for our token, from GET /account/whoami.
     // Never fired on error (older servers 404 the endpoint).
-    void whoamiResult(const QString& userId);
+    //
+    // `isBot` is the response's `bsfchat.bot`, which the server reports for
+    // the caller. It is false on a server that predates bots, and false for
+    // every human, so it is safe to read unconditionally. Carried here rather
+    // than left to a profile fetch because this is the one identity the
+    // client always has an answer for without asking a second time.
+    void whoamiResult(const QString& userId, bool isBot);
 
-    void profileResult(const QString& userId, const QString& displayName, const QString& avatarUrl);
+    // `isBot` is the profile's `bsfchat.bot` flag. It is a TRI-STATE on the
+    // wire and only two states here, on purpose: a server that does not know
+    // about bots omits the key, and a client that treated "absent" as
+    // anything but false would badge every user on an older server. Absent,
+    // false and a non-boolean all arrive here as false.
+    void profileResult(const QString& userId, const QString& displayName,
+                       const QString& avatarUrl, bool isBot);
+
+    // ── Bot administration replies ────────────────────────────────────────
+    //
+    // `bots` is the raw array from GET /bsfchat/bots.
+    void botsListed(const QJsonArray& bots);
+    // A bot was created. `token` is the ONLY copy that will ever exist — see
+    // the note on createBot. Nothing on the receiving side may store it.
+    void botCreated(const QString& userId, const QString& displayName,
+                    const QString& token);
+    // A rotation succeeded; the bot's previous token is now dead. Same
+    // one-copy rule as botCreated.
+    void botTokenRotated(const QString& userId, const QString& token);
+    void botDeactivated(const QString& userId);
+    // `operation` is "list" / "create" / "rotate" / "deactivate" so the UI can
+    // say which control failed; `status` is the HTTP status (0 for a
+    // transport failure) and `error` the server's decoded message.
+    void botRequestFailed(const QString& operation, int status,
+                          const QString& error);
 
     // Per-server nickname read-back. `nickname` is empty when the user has none —
     // the endpoint omits the key entirely rather than returning "", so empty here

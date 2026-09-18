@@ -7,6 +7,8 @@
 
 #include <bsfchat/MatrixTypes.h>
 
+#include "util/BotRegistry.h"
+
 class MemberListModel : public QAbstractListModel {
     Q_OBJECT
 
@@ -24,7 +26,17 @@ public:
         // role exists so the UI can tell WHY a name is what it is: an admin needs
         // "clear nickname" to be distinguishable from "reset to nothing", and a
         // profile card wants to show the global name underneath.
-        NicknameRole
+        NicknameRole,
+        // True when this member is a bot account, for the BOT badge.
+        //
+        // Read through the shared BotRegistry rather than stored on the row,
+        // because it does not arrive with the member event that creates the
+        // row — the flag lives on the user's PROFILE, and the profile reply
+        // for a member typically lands after the roster has already been
+        // built. Storing it would mean reconciling two arrival orders; a
+        // lookup at read time means the answer is simply whatever is known
+        // now, and the registry's owner repaints when that changes.
+        IsBotRole
     };
 
     explicit MemberListModel(QObject* parent = nullptr);
@@ -50,6 +62,24 @@ public:
     // Re-resolve every member's display name from the cache and refresh.
     void refreshDisplayNames();
 
+    // Bot-flag cache (owned by ServerConnection). Same not-owned pointer
+    // arrangement as the display-name cache above and for the same reason:
+    // the answers arrive on their own schedule from profile replies, and
+    // reading through the owner means nothing here has to be told twice.
+    void setBotRegistry(const bsfchat::client::BotRegistry* registry)
+    {
+        m_botRegistry = registry;
+    }
+    // Repaint every row's badge. Called when a batch of profile replies has
+    // moved at least one flag; cheap enough to do wholesale because it names
+    // the single role that can have changed.
+    void refreshBotFlags();
+
+    // Whether a member is a bot, for QML that has a user id but not a row
+    // (the profile card, the message bubble's sender). Invokable for the
+    // same reason displayNameForUser is — QML calls it directly.
+    Q_INVOKABLE bool isBot(const QString& userId) const;
+
 private:
     int findMember(const QString& userId) const;
 
@@ -63,6 +93,7 @@ private:
 
     QVector<MemberEntry> m_members;
     const QMap<QString, QString>* m_dnCache = nullptr;
+    const bsfchat::client::BotRegistry* m_botRegistry = nullptr;
 
     QString resolveName(const QString& userId, const QString& localName) const;
 };

@@ -608,3 +608,34 @@ target_compile_definitions(test_qml_hygiene PRIVATE
     BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test_qml_hygiene PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_qml_hygiene COMMAND test_qml_hygiene)
+
+# Bot accounts: the badge cache and its fetch policy, the MANAGE_BOTS bit, the
+# two models' badge roles, the management pane's view-model, and source-text
+# guards that a bot's one-time access token never reaches a log file or
+# persisted state.
+#
+# No network, no event loop, no GUI — BotAdminModel reaches the server through
+# std::function hooks (the seam VoiceSession uses for its transport) so the
+# whole dialog can be driven headlessly. The last three cases scan the sources
+# instead of exercising them, in the spirit of test_qml_hygiene: a printed
+# credential is not something a running test can observe.
+qt_add_executable(test_bots
+    test_bots.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MarkdownParser.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MentionRenderer.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/PermissionMath.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
+)
+target_include_directories(test_bots PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_bots PRIVATE
+    BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml"
+    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_bots PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Test
+)
+add_test(NAME test_bots COMMAND test_bots)

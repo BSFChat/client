@@ -25,6 +25,7 @@ QVariant MemberListModel::data(const QModelIndex& index, int role) const
     case AvatarUrlRole: return member.avatarUrl;
     case MembershipRole: return member.membership;
     case NicknameRole: return member.nickname;
+    case IsBotRole: return isBot(member.userId);
     default: return {};
     }
 }
@@ -51,6 +52,25 @@ void MemberListModel::refreshDisplayNames()
     emit dataChanged(index(0), index(m_members.size() - 1), {DisplayNameRole});
 }
 
+bool MemberListModel::isBot(const QString& userId) const
+{
+    // No registry means no answer, and "no answer" renders as human. A badge
+    // that appears a beat late when the profile reply lands is a much smaller
+    // wrong than one that flickers onto every name in the roster while the
+    // replies come in — so the default is always "not a bot", never a guess
+    // from the user id's shape.
+    return m_botRegistry && m_botRegistry->isBot(userId);
+}
+
+void MemberListModel::refreshBotFlags()
+{
+    if (m_members.isEmpty()) return;
+    // Named role, not an empty list: an empty vector means "everything
+    // changed" and would re-run every binding on every delegate, which is the
+    // repaint storm U-M15 fixed for the join branch of processEvent.
+    emit dataChanged(index(0), index(m_members.size() - 1), {IsBotRole});
+}
+
 QHash<int, QByteArray> MemberListModel::roleNames() const
 {
     return {
@@ -58,7 +78,8 @@ QHash<int, QByteArray> MemberListModel::roleNames() const
         {DisplayNameRole, "displayName"},
         {AvatarUrlRole, "avatarUrl"},
         {MembershipRole, "membership"},
-        {NicknameRole, "nickname"}
+        {NicknameRole, "nickname"},
+        {IsBotRole, "isBot"}
     };
 }
 

@@ -821,8 +821,162 @@ void MatrixClient::getProfile(const QString& userId)
             auto j = json::parse(data.toStdString());
             QString displayName = QString::fromStdString(j.value("displayname", ""));
             QString avatarUrl = QString::fromStdString(j.value("avatar_url", ""));
-            emit profileResult(userId, displayName, avatarUrl);
+            // `bsfchat.bot` is absent entirely on a server that predates bot
+            // accounts and on every human account. value<bool>() with a false
+            // default folds "absent", "false" and "null" together, which is
+            // the behaviour we want; a non-boolean value would throw, and the
+            // catch below already treats a malformed profile as no profile.
+            bool isBot = false;
+            if (j.contains("bsfchat.bot") && j["bsfchat.bot"].is_boolean())
+                isBot = j["bsfchat.bot"].get<bool>();
+            emit profileResult(userId, displayName, avatarUrl, isBot);
         } catch (...) {}
+    });
+}
+
+namespace {
+
+// Decode a Matrix error reply into (status, message), the same way setNickname
+// and setRoomState do inline. Factored out here because the four bot calls
+// would otherwise repeat it four times, and because there is one rule they all
+// must follow that is easy to break by copy-paste: this reads ONLY the error
+// fields, never the whole body. A create's SUCCESS body carries the bot's
+// access token, and a helper that stringified an arbitrary body would be one
+// mistaken call site away from putting it in front of a qWarning.
+void decodeMatrixError(QNetworkReply* reply, int* status, QString* message)
+{
+    *status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray body = reply->readAll();
+    QString msg;
+    const auto doc = QJsonDocument::fromJson(body);
+    if (doc.isObject()) {
+        const auto o = doc.object();
+        msg = o.value("error").toString();
+        if (msg.isEmpty()) msg = o.value("errcode").toString();
+    }
+    if (msg.isEmpty()) msg = reply->errorString();
+    *message = msg;
+}
+
+// The bot admin endpoints. Literal rather than a bsfchat::api_path constant
+// because protocol/include/bsfchat/Constants.h is being edited concurrently
+// for the MANAGE_BOTS flag; adding a constant there from here would collide.
+constexpr QLatin1StringView kBotsPath{"/_matrix/client/v3/bsfchat/bots"};
+
+} // namespace
+
+void MatrixClient::listBots()
+{
+    auto* reply = makeRequest("GET", QString(kBotsPath));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            int status = 0;
+            QString msg;
+            decodeMatrixError(reply, &status, &msg);
+            emit botRequestFailed(QStringLiteral("list"), status, msg);
+            return;
+        }
+        const auto doc = QJsonDocument::fromJson(reply->readAll());
+        emit botsListed(doc.object().value("bots").toArray());
+    });
+}
+
+void MatrixClient::createBot(const QString& localpart, const QString& displayName,
+                             const QString& description)
+{
+    QJsonObject body;
+    body["localpart"] = localpart;
+    // The server fills in a sensible default when either is omitted, so an
+    // empty field is sent as an absent key rather than an empty string —
+    // otherwise a bot created without a display name would be named "".
+    if (!displayName.isEmpty()) body["display_name"] = displayName;
+    if (!description.isEmpty()) body["description"] = description;
+
+    auto* reply = makeRequest("POST", QString(kBotsPath),
+                              QJsonDocument(body).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            int status = 0;
+            QString msg;
+            decodeMatrixError(reply, &status, &msg);
+            emit botRequestFailed(QStringLiteral("create"), status, msg);
+            return;
+        }
+        // 201 body: {user_id, display_name, token}. This is the only moment
+        // the token exists outside the server, so it is read straight into
+        // the signal and this scope ends. No trace line, at any level —
+        // see the header note on createBot.
+        const auto o = QJsonDocument::fromJson(reply->readAll()).object();
+        const QString userId = o.value("user_id").toString();
+        const QString name = o.value("display_name").toString();
+        const QString token = o.value("token").toString();
+        if (userId.isEmpty()) {
+            // A 201 we cannot read is worse than an error: the bot exists on
+            // the server and its token has already been spent. Say so plainly
+            // rather than reporting success against an empty id, so the
+            // operator knows to look for it in the list and rotate.
+            emit botRequestFailed(
+                QStringLiteral("create"), 0,
+                QStringLiteral("The server created the bot but the reply could "
+                               "not be read. Find it in the list and rotate its "
+                               "token."));
+            return;
+        }
+        emit botCreated(userId, name, token);
+    });
+}
+
+void MatrixClient::rotateBotToken(const QString& userId)
+{
+    const QString path = QString(kBotsPath) + "/"
+                         + QString::fromUtf8(QUrl::toPercentEncoding(userId))
+                         + "/token";
+    // An empty body, not an absent one: POST with no Content-Length behaves
+    // differently across proxies and the server expects a JSON request.
+    auto* reply = makeRequest("POST", path, QByteArrayLiteral("{}"));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, userId]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            int status = 0;
+            QString msg;
+            decodeMatrixError(reply, &status, &msg);
+            emit botRequestFailed(QStringLiteral("rotate"), status, msg);
+            return;
+        }
+        const auto o = QJsonDocument::fromJson(reply->readAll()).object();
+        const QString token = o.value("token").toString();
+        if (token.isEmpty()) {
+            // Same shape of trouble as an unreadable create, and worse in one
+            // way: the OLD token has already been invalidated server-side, so
+            // the bot is down until someone rotates again successfully.
+            emit botRequestFailed(
+                QStringLiteral("rotate"), 0,
+                QStringLiteral("The server rotated the token but the reply "
+                               "could not be read. The bot's old token no "
+                               "longer works — rotate again."));
+            return;
+        }
+        emit botTokenRotated(userId, token);
+    });
+}
+
+void MatrixClient::deactivateBot(const QString& userId)
+{
+    const QString path = QString(kBotsPath) + "/"
+                         + QString::fromUtf8(QUrl::toPercentEncoding(userId));
+    auto* reply = makeRequest("DELETE", path);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, userId]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            int status = 0;
+            QString msg;
+            decodeMatrixError(reply, &status, &msg);
+            emit botRequestFailed(QStringLiteral("deactivate"), status, msg);
+            return;
+        }
+        emit botDeactivated(userId);
     });
 }
 
@@ -1295,8 +1449,13 @@ void MatrixClient::whoami()
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) return;
         auto doc = QJsonDocument::fromJson(reply->readAll());
-        const QString userId = doc.object().value("user_id").toString();
-        if (!userId.isEmpty()) emit whoamiResult(userId);
+        const auto o = doc.object();
+        const QString userId = o.value("user_id").toString();
+        // Absent on a server without bot support, and on every human account.
+        // toBool(false) collapses absent/null/false, which is what we want —
+        // see the note on the whoamiResult signal.
+        const bool isBot = o.value("bsfchat.bot").toBool(false);
+        if (!userId.isEmpty()) emit whoamiResult(userId, isBot);
     });
 }
 

@@ -11,6 +11,12 @@ Item {
     property string eventId
     property string sender
     property string senderDisplayName
+    // True when this message's sender is a bot account. Set from the model's
+    // senderIsBot role (MessageView binds it) rather than looked up here: a
+    // bubble asking the connection per row would be the per-message fetch the
+    // bot-flag cache exists to prevent, and the model's role is repainted for
+    // it when a flag lands late.
+    property bool senderIsBot: false
     property string body
     property string formattedBody
     property real timestamp
@@ -765,6 +771,14 @@ Item {
                             }
                         }
                     }
+                }
+
+                // Sits between the name and the timestamp — the same place
+                // the member list puts it relative to the name, so the two
+                // views agree about what the pill is attached to.
+                BotBadge {
+                    visible: bubble.senderIsBot
+                    Layout.alignment: Qt.AlignVCenter
                 }
 
                 Text {
