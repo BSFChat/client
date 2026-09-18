@@ -48,11 +48,20 @@ Rectangle {
     // means something. See qml/js/VideoStage.js.
     property int _feedSeq: 0
 
-    // The user's explicit pick from the bottom strip. "" means auto —
-    // the most recently started screen share, else the most recently
-    // started camera. Escape returns here, and so does a pick whose feed
-    // stops.
+    // The feed the user EXPANDED by clicking it. "" is the default and
+    // means the grid — every feed on screen at once. Nothing is ever
+    // written here on the app's own initiative: a screen share starting
+    // used to take the stage by itself and sweep every face into the
+    // strip, and that is exactly what this layout exists to undo.
+    // Escape returns to "", so does clicking the expanded feed again,
+    // and so does that feed ending (_refreshFeeds below).
     property string _selectedKey: ""
+
+    // The tile the pointer is over, "" for none. Only `F` and the header
+    // full-screen button read it, and only in the grid, where "this
+    // video" can only mean the one being looked at. It is deliberately
+    // NOT selection: hovering changes nothing about the layout.
+    property string _hoveredKey: ""
 
     // The capture controllers are context properties that only exist on
     // platforms that have the capture path (see src/main.cpp) — there is
@@ -70,11 +79,11 @@ Rectangle {
         VideoStage.stageMode(_feeds, _selectedKey)
     readonly property int _stageCount:
         VideoStage.stageCount(_feeds, _selectedKey)
-    // The strip only earns its space when there is a choice to make —
-    // that is, when a screen share has pushed the other feeds off the
-    // stage. Cameras on their own are all on the stage already, and a
-    // strip under them would be a second copy of the same pictures.
-    readonly property bool _stripVisible: _stageMode === "focus"
+    // The strip only earns its space when something has been expanded
+    // and the other feeds have nowhere else to be. In the grid every
+    // feed is already on the stage, and a strip under it would be a
+    // second, smaller copy of the same pictures.
+    readonly property bool _stripVisible: _stageMode === "expanded"
 
     function _refreshFeeds() {
         var raw = [];
@@ -124,10 +133,14 @@ Rectangle {
         if (VideoStage.sameFeeds(room._feeds, next)) return;
         room._feedSeq++;
         room._feeds = next;
-        // A pick whose feed has gone falls back to auto rather than
-        // leaving the stage blank.
+        // A feed that ends while it is expanded takes the stage back to
+        // the grid. It does NOT hand the stage to some other feed: the
+        // user expanded that one, and the next-best guess is a view
+        // they never asked for.
         if (room._selectedKey && !VideoStage.hasKey(next, room._selectedKey))
             room._selectedKey = "";
+        if (room._hoveredKey && !VideoStage.hasKey(next, room._hoveredKey))
+            room._hoveredKey = "";
         // And a feed that has gone takes its windows with it: the share
         // stopped, the peer left, or we left the channel. pruneToFeeds
         // returns the SAME array when nothing is stale, which matters —
@@ -247,10 +260,12 @@ Rectangle {
 
     readonly property bool fullscreen: _fullscreenKey !== ""
 
-    // "The feed on the stage" for a keyboard or header action: the
-    // explicit pick while it lives, else the automatic one.
+    // "This video" for a keyboard or header action: the expanded feed
+    // when one is expanded, else whatever the pointer is over, else the
+    // first feed — see VideoStage.focusKeyFor().
     function _stageFeedKey() {
-        return VideoStage.resolveSelection(room._feeds, room._selectedKey);
+        return VideoStage.focusKeyFor(room._feeds, room._selectedKey,
+                                      room._hoveredKey);
     }
 
     function feedForKey(key) {
@@ -708,6 +723,13 @@ Rectangle {
             // Keyboard picking. Scoped to focus rather than a Shortcut
             // on purpose: a window-wide Left/Right would fire inside
             // every settings dialog and text field in the app.
+            //
+            // The arrows walk WHICH FEED IS EXPANDED. In the grid they
+            // do nothing at all — every feed is already visible, so
+            // there is nothing to walk between, and an arrow key that
+            // suddenly expanded something would be a view change nobody
+            // asked for. moveSelection() enforces that; these handlers
+            // stay symmetric with it.
             focus: true
             Keys.onLeftPressed: function(event) {
                 room._selectedKey =
@@ -719,17 +741,18 @@ Rectangle {
                     VideoStage.moveSelection(room._feeds, room._selectedKey, 1);
                 event.accepted = true;
             }
-            // Back to auto. The fullscreen window is a window of its
-            // own now and takes its own Escape while it has focus, so
-            // this one only ever means "drop the pick".
+            // Back to the grid. The fullscreen window is a window of
+            // its own and takes its own Escape while it has focus, so
+            // this one only ever means "collapse".
             Keys.onEscapePressed: function(event) {
                 room._selectedKey = "";
                 event.accepted = true;
             }
-            // F full-screens the feed on the stage. A Keys handler and
-            // not a Shortcut, for the same reason as the arrows above:
-            // a window-wide "F" would fire in every text field in the
-            // app. Bare F only — Cmd-F is search.
+            // F full-screens the expanded feed, or in the grid the one
+            // under the pointer. A Keys handler and not a Shortcut, for
+            // the same reason as the arrows above: a window-wide "F"
+            // would fire in every text field in the app. Bare F only —
+            // Cmd-F is search.
             Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_F
                     && event.modifiers === Qt.NoModifier) {
@@ -738,11 +761,16 @@ Rectangle {
                 }
             }
 
-            // The feed that is on the stage still occupies its slot in
-            // the strip, highlighted, so the strip reads as the whole
-            // set rather than "the others". A chip, not a second copy of
-            // the video: two VideoOutputs on one sink is twice the
+            // The expanded feed still occupies its slot in the strip,
+            // highlighted, so the strip reads as the whole set rather
+            // than "the others". A chip, not a second copy of the
+            // video: two VideoOutputs on one sink is twice the
             // compositing for a thumbnail nobody is looking at.
+            //
+            // It is clickable, and clicking it collapses back to the
+            // grid — the strip is where the eye goes to change what is
+            // expanded, so the one slot that means "show me everything
+            // again" has to live there too.
             Repeater {
                 model: room._feeds
                 delegate: Rectangle {
@@ -795,6 +823,21 @@ Rectangle {
                             elide: Text.ElideRight
                         }
                     }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            feedArea.forceActiveFocus();
+                            room._selectedKey = VideoStage.toggleExpanded(
+                                room._feeds, room._selectedKey,
+                                stageMarker.modelData.key);
+                        }
+                        ToolTip.visible: containsMouse
+                        ToolTip.text: "Back to the grid  (Esc)"
+                        ToolTip.delay: 400
+                        hoverEnabled: true
+                    }
                 }
             }
 
@@ -807,7 +850,11 @@ Rectangle {
                     required property int index
 
                     // Where this feed belongs right now: a stage cell if
-                    // it is on the stage, otherwise its strip slot.
+                    // it is on the stage, otherwise its strip slot. In
+                    // the grid every feed is on the stage and this is
+                    // its cell in the grid; when one feed is expanded
+                    // that feed's cell IS the whole stage (a 1-tile
+                    // grid) and everybody else takes a strip slot.
                     readonly property int stageIndex: VideoStage.stageIndexOf(
                         room._feeds, room._selectedKey, modelData.key)
                     readonly property var cell: {
@@ -827,7 +874,13 @@ Rectangle {
                     feed: modelData
                     displayName: room._displayNameFor(modelData.userId)
                     liveTick: room._shareTick
-                    featured: stageIndex >= 0
+                    // The accent highlight means "this is the one you
+                    // expanded". In the grid nothing is expanded, and
+                    // ringing every tile in accent would say nothing at
+                    // all — so `featured` is deliberately not just
+                    // "on the stage" any more.
+                    featured: room._stageMode === "expanded"
+                              && stageIndex >= 0
                     compact: stageIndex < 0
                     // The tile stays LIVE while its feed is popped out —
                     // that is the whole reason the registry fans one
@@ -839,9 +892,19 @@ Rectangle {
                     width: cell.width
                     height: cell.height
 
+                    // One click, both directions: a grid tile expands,
+                    // the expanded tile collapses, a strip thumbnail
+                    // takes over the stage.
                     onClicked: {
                         feedArea.forceActiveFocus();
-                        room._selectedKey = modelData.key;
+                        room._selectedKey = VideoStage.toggleExpanded(
+                            room._feeds, room._selectedKey, modelData.key);
+                    }
+                    onHoveredChanged: {
+                        if (hovered)
+                            room._hoveredKey = modelData.key;
+                        else if (room._hoveredKey === modelData.key)
+                            room._hoveredKey = "";
                     }
                     onFullscreenRequested:
                         room.toggleFullscreenFor(modelData.key)
@@ -853,7 +916,7 @@ Rectangle {
     }
 
     // ── Classic participant grid ──────────────────────────────────
-    // Shown when no one is screen-sharing. Auto-columns based on
+    // Shown when there is no video at all. Auto-columns based on
     // tile+gap widths; tiles wrap to the next row when the main
     // column narrows.
     ScrollView {

@@ -33,8 +33,10 @@ Rectangle {
     required property var feed
     // Resolved elsewhere — this component does not know the roster.
     property string displayName: ""
-    // True while this feed is the one on the main stage. Drives the
-    // highlight and the fill mode; changing it must never cost a frame.
+    // True while this feed is the one the user EXPANDED to fill the
+    // stage. Drives the accent highlight; changing it must never cost a
+    // frame. False for every tile in the grid, on purpose — see the
+    // binding in VoiceRoom.qml.
     //
     // NOT named `onStage`: QML parses any `on` + Capital identifier as a
     // signal handler, so a property with that name is a load error that
@@ -42,7 +44,9 @@ Rectangle {
     // That is the rc.6 Theme.onScrim bug; tests/test_qml_hygiene.cpp
     // exists because of it.
     property bool featured: false
-    // Strip presentation: smaller type, no diagnostics, click target.
+    // Strip presentation: smaller type, no diagnostics, cropped fill.
+    // Grid tiles are NOT compact however small the grid gets — a grid
+    // tile is a real view of the feed and is aspect-fit like the stage.
     property bool compact: false
     // Bumped by VoiceRoom on every video frame signal. Liveness is read
     // through this rather than stored on the feed, so a stream going
@@ -54,6 +58,22 @@ Rectangle {
     // this does is say so, because a feed that is on screen twice is
     // otherwise baffling.
     property bool poppedOut: false
+
+    // The pointer is somewhere on this tile — including on one of the
+    // hover buttons, which take hover away from the tile's own
+    // MouseArea. VoiceRoom reads it so that `F` in the grid means "the
+    // one I am looking at". Purely advisory: it changes no layout.
+    readonly property bool hovered: tileMouse.containsMouse
+                                    || popHover.containsMouse
+                                    || fullHover.containsMouse
+
+    // Room enough for the hover buttons and the diagnostics line. A
+    // nine-up grid on a small window makes tiles a couple of hundred
+    // pixels wide, and two 26px buttons plus a mono stats line over one
+    // of those is more chrome than picture. The context menu still
+    // reaches every action, so nothing becomes unreachable.
+    readonly property bool _roomyEnoughForChrome: tile.width >= 220
+                                                  && tile.height >= 120
 
     signal clicked()
     // The hover actions and the context menu. The tile does not act on
@@ -266,6 +286,7 @@ Rectangle {
     Rectangle {
         id: diagOverlay
         visible: appSettings.showVideoDiagnostics && !tile.compact
+                 && tile._roomyEnoughForChrome
                  && tile.live && tile.feed && tile.feed.isSelf !== true
         anchors.top: parent.top
         anchors.right: parent.right
@@ -374,17 +395,24 @@ Rectangle {
 
     // ── Picking ──────────────────────────────────────────────────────
     //
-    // Clicking a thumbnail promotes it to the stage. Clicking the stage
-    // tile only takes keyboard focus, so the arrow keys work without
-    // first hunting for something to click. Right-click anywhere on a
-    // tile opens the same actions the hover buttons offer, because the
-    // buttons are too small to be the only route to them.
+    // EVERY tile is clickable now, in both directions: a tile in the
+    // grid expands to fill the stage, the expanded tile collapses back
+    // to the grid, and a strip thumbnail takes the stage from whatever
+    // is on it. VoiceRoom decides which of those a click means
+    // (VideoStage.toggleExpanded); the tile only reports it. That is
+    // why the cursor is a hand everywhere and no longer only over the
+    // strip.
+    //
+    // Right-click anywhere on a tile opens the same actions the hover
+    // buttons offer, because the buttons are too small to be the only
+    // route to them — and on a small grid tile they are not drawn at
+    // all.
     MouseArea {
         id: tileMouse
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton | Qt.RightButton
-        cursorShape: tile.compact ? Qt.PointingHandCursor : Qt.ArrowCursor
+        cursorShape: Qt.PointingHandCursor
         onClicked: function(mouse) {
             if (mouse.button === Qt.RightButton) {
                 feedMenu.popup();
@@ -392,10 +420,6 @@ Rectangle {
             }
             tile.clicked();
         }
-        // A quiet lift on hover — enough to read as clickable without
-        // competing with the selection highlight.
-        onContainsMouseChanged: hoverWash.opacity =
-            (containsMouse && tile.compact && !tile.featured) ? 0.10 : 0
     }
 
     // ── Hover actions ────────────────────────────────────────────────
@@ -410,9 +434,11 @@ Rectangle {
         anchors.bottom: parent.bottom
         anchors.margins: tile.compact ? Theme.sp.s2 : Theme.sp.s3
         spacing: Theme.sp.s2
-        // Strip thumbnails are a few dozen pixels tall; two 26px buttons
-        // would cover the picture. The context menu still reaches them.
-        visible: !tile.compact
+        // Strip thumbnails are a few dozen pixels tall, and a tile in a
+        // nine-up grid on a small window is not much better; two 26px
+        // buttons would cover the picture. The context menu still
+        // reaches them.
+        visible: !tile.compact && tile._roomyEnoughForChrome
         opacity: tileMouse.containsMouse || popHover.containsMouse
                  || fullHover.containsMouse ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
@@ -478,12 +504,18 @@ Rectangle {
         }
     }
 
+    // A quiet lift on hover — enough to read as clickable without
+    // competing with the expanded feed's accent highlight. A BINDING,
+    // not a write from onContainsMouseChanged: clicking the expanded
+    // tile collapses it under a pointer that never moved, and an
+    // imperative wash would sit at the wrong value until the mouse left
+    // and came back.
     Rectangle {
         id: hoverWash
         anchors.fill: parent
         radius: parent.radius
         color: Theme.accent
-        opacity: 0
+        opacity: (tileMouse.containsMouse && !tile.featured) ? 0.10 : 0
         visible: opacity > 0.01
         Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
     }
