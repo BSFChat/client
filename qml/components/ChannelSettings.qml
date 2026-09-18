@@ -317,8 +317,21 @@ Popup {
             Layout.fillHeight: true
             clip: true
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            // Explicit ThemedScrollBar rather than the style default, so
+            // this dialog matches the other two AND so there is something
+            // to subtract a gutter from below.
+            ScrollBar.vertical: ThemedScrollBar { id: channelBodyScrollBar }
 
             ColumnLayout {
+                // No reservedWidth subtraction here, unlike the two panes
+                // built on a bare Flickable: this column is already inset
+                // Theme.sp.s7 (16px) from the ScrollView's right edge, and
+                // the bar's widest state is channelBodyScrollBar.reservedWidth
+                // (14px), so it floats over the margin and never the content.
+                // Taking another gutter out would make the right inset 30px
+                // against a 16px left one, which is visible in a dialog this
+                // narrow. What was wrong was the STYLE default bar this used
+                // to get — wide, with a painted track — sitting in that 16px.
                 width: channelSettings.width - Theme.sp.s7 * 2
                 x: Theme.sp.s7
                 y: Theme.sp.s7

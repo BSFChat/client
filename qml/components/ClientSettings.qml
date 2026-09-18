@@ -413,14 +413,14 @@ Popup {
                     contentHeight: audioCol.implicitHeight
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
-                    ScrollBar.vertical: ThemedScrollBar {}
+                    ScrollBar.vertical: ThemedScrollBar { id: audioScrollBar }
 
                 ColumnLayout {
                     id: audioCol
                     // Bind to the Flickable, NOT parent (the contentItem):
                     // with contentWidth unset the contentItem's width follows
                     // its children, so parent.width is circular.
-                    width: audioColFlick.width
+                    width: audioColFlick.width - audioScrollBar.reservedWidth
                     spacing: Theme.sp.s7
 
                     SectionHeader { text: "Audio" }
@@ -761,7 +761,7 @@ Popup {
                     contentHeight: screenShareCol.implicitHeight
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
-                    ScrollBar.vertical: ThemedScrollBar {}
+                    ScrollBar.vertical: ThemedScrollBar { id: screenShareScrollBar }
 
                     ColumnLayout {
                     id: screenShareCol
@@ -771,7 +771,7 @@ Popup {
                     // `parent.width` is circular and the column blows
                     // out to its implicit width, clipping the row
                     // trailers off the right edge.
-                    width: screenShareFlick.width
+                    width: screenShareFlick.width - screenShareScrollBar.reservedWidth
                     spacing: Theme.sp.s7
 
                     SectionHeader { text: "Screen Share" }
@@ -1111,14 +1111,14 @@ Popup {
                     contentHeight: updatesCol.implicitHeight
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
-                    ScrollBar.vertical: ThemedScrollBar {}
+                    ScrollBar.vertical: ThemedScrollBar { id: updatesScrollBar }
 
                 ColumnLayout {
                     id: updatesCol
                     // Bind to the Flickable, NOT parent (the contentItem):
                     // with contentWidth unset the contentItem's width follows
                     // its children, so parent.width is circular.
-                    width: updatesColFlick.width
+                    width: updatesColFlick.width - updatesScrollBar.reservedWidth
                     spacing: Theme.sp.s7
 
                     SectionHeader { text: "Updates" }
