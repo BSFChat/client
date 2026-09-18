@@ -57,6 +57,18 @@ public:
     // Cumulative keyframe requests this pipeline has emitted. Read by
     // the video diagnostics and asserted on by the unit tests.
     quint64 keyframeRequests() const { return m_kfRequests.load(); }
+    // How many times a decoder refused to come up for this stream.
+    // Counts ATTEMPTS, not access units: the retry is throttled, so a
+    // stream that can never be decoded increments this once per
+    // kDecoderRetryMs rather than once per frame.
+    quint64 decoderFailures() const { return m_decoderFailures.load(); }
+
+    // Spacing between attempts to rebuild a decoder that refused, and
+    // therefore also the spacing of the warning it logs. Production
+    // leaves the default; tests shorten it. Thread-safe.
+    void setDecoderRetryIntervalMs(qint64 ms) {
+        m_decoderRetryIntervalMs.store(qMax(qint64(0), ms));
+    }
 
     // Minimum spacing between keyframe requests. Production leaves the
     // default; tests shorten it so a re-request run doesn't cost a
@@ -72,6 +84,15 @@ signals:
     void frameDecoded(const QString& userId, int streamId,
                       const QVideoFrame& frame);
     void keyframeNeeded(const QString& userId, int streamId);
+    // No decoder could be brought up for this stream's codec on this
+    // machine — the capability probe that made us advertise it was
+    // wrong, and every access unit from here on is undecodable.
+    //
+    // Emitted at most ONCE per pipeline, on the first failure, because
+    // its only subscriber puts a caps correction on the wire. `codec`
+    // is a VideoCodecKind (int so the signal crosses threads without a
+    // registered metatype).
+    void decoderUnavailable(const QString& userId, int streamId, int codec);
 
 private:
     void drainQueue();   // worker thread
@@ -104,11 +125,23 @@ private:
     std::atomic<qint64> m_lastKfRequestMs{0};
     std::atomic<quint64> m_kfRequests{0};
     std::atomic<qint64> m_kfRequestIntervalMs{kKfRequestMinIntervalMs};
+    std::atomic<quint64> m_decoderFailures{0};
+    std::atomic<qint64> m_decoderRetryIntervalMs{kDecoderRetryMs};
 
     // Worker-thread-only state.
     std::unique_ptr<VideoDecoder> m_decoder;
     bool m_waitingForKeyframe = true;   // never decode deltas cold
+    // A decoder refused to come up; don't try again before this time.
+    // 0 = never failed (or recovered). Without it the old code rebuilt
+    // a known-broken decoder once per access unit and logged once per
+    // access unit — 60 lines a second across two streams, which is how
+    // the field log that prompted this work was found and also why it
+    // was unreadable.
+    qint64 m_decoderRetryAtMs = 0;
+    // The decoderUnavailable edge has been spent for this pipeline.
+    bool m_decoderFailureAnnounced = false;
 
     static constexpr int kMaxQueuedAus = 16;
     static constexpr qint64 kKfRequestMinIntervalMs = 700;
+    static constexpr qint64 kDecoderRetryMs = 5000;
 };

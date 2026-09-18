@@ -179,6 +179,9 @@ if(BSFCHAT_ENABLE_VOICE)
         # Codec backends are per-platform; the factory (#ifdef matrix)
         # lives in VideoCodecFactory.cpp.
         src/voice/video/VideoCodecFactory.cpp
+        # Latches "this machine cannot actually decode X", overriding a
+        # capability probe that said otherwise.
+        src/voice/video/VideoDecodeHealth.cpp
         src/voice/video/FrameConverter.cpp
         src/voice/video/VideoSendPipeline.cpp
         src/voice/video/VideoReceivePipeline.cpp

@@ -146,6 +146,12 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
         ${CMAKE_SOURCE_DIR}/src/voice/video/VideoRateController.cpp
         ${CMAKE_SOURCE_DIR}/src/voice/video/VideoReceivePipeline.cpp
         ${CMAKE_SOURCE_DIR}/src/voice/video/VideoSendPipeline.cpp
+        # The "this machine cannot decode what it advertised" latch, and
+        # AppProfile because it persists its hint through a QSettings
+        # keyed on the profile-aware app name — which is also how the
+        # test isolates itself from the real install's settings file.
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoDecodeHealth.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
     )
     # PeerCaps.h parses the caps JSON, so the routing-predicate tests
     # need the same header-only json the app builds against.

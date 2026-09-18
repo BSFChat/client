@@ -273,6 +273,17 @@ private:
     // backends' capability probes (an empty intersection between two
     // peers safely means "no video").
     static nlohmann::json localCapsJson();
+    // Push our CURRENT caps to every connected peer over the reliable
+    // control channel, in the same {"t":"caps","caps":{...}} form the
+    // invite/answer carries. Exists because caps used to be a
+    // join-time fact: this is the mid-call correction path for when
+    // they turn out to have been wrong (see onDecoderUnavailable).
+    void announceLocalCaps();
+    // A receive pipeline could not build a decoder for the codec we
+    // told the mesh we could decode. Latches the failure and, for
+    // H.265, re-announces the corrected caps so the senders re-select
+    // H.264 for the whole mesh.
+    void onDecoderUnavailable(const QString& userId, int streamId, int codec);
     // Dispatch a 0x04 control message ({"t": ...}) from `userId`.
     void onControlMessage(const QString& userId, const QByteArray& json);
     // Add video tracks toward `userId` when we're actively sending

@@ -158,15 +158,55 @@ void VideoReceivePipeline::drainQueue() {
         }
 
         if (!m_decoder) {
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            if (m_decoderRetryAtMs > 0 && now < m_decoderRetryAtMs) {
+                // Known broken and the retry isn't due. Drop the unit
+                // instead of rebuilding a decoder that just refused —
+                // and stay in the keyframe wait, because the gate
+                // above has already consumed this one.
+                m_droppedAus.fetch_add(1);
+                m_waitingForKeyframe = true;
+                continue;
+            }
             m_decoder = VideoDecoder::create(m_codec);
             if (!m_decoder || !m_decoder->init(m_codec)) {
-                qCWarning(logVideoRecv, "[%s/%d] no decoder available",
-                         qPrintable(m_userId), int(m_streamId));
                 m_decoder.reset();
-                QMutexLocker lock(&m_mutex);
-                m_queue.clear();
+                m_decoderFailures.fetch_add(1);
+                m_decoderRetryAtMs =
+                    now + m_decoderRetryIntervalMs.load(std::memory_order_relaxed);
+                m_waitingForKeyframe = true;
+                // Loud once, then once per retry interval. The old code
+                // logged this per access unit forever.
+                qCWarning(logVideoRecv, "[%s/%d] no %s decoder available%s",
+                         qPrintable(m_userId), int(m_streamId),
+                         videoCodecName(m_codec),
+                         m_decoderFailureAnnounced
+                             ? " (still)"
+                             : " — this machine advertised a codec it cannot "
+                               "decode; correcting our caps");
+                // Nothing queued behind this is decodable either, and
+                // holding it would only decode into the tile once some
+                // later codec change built a working decoder.
+                {
+                    QMutexLocker lock(&m_mutex);
+                    m_droppedAus.fetch_add(quint64(m_queue.size()) + 1);
+                    m_queue.clear();
+                }
+                if (!m_decoderFailureAnnounced) {
+                    m_decoderFailureAnnounced = true;
+                    // One announcement per pipeline: the subscriber
+                    // turns this into a caps message to every peer.
+                    emit decoderUnavailable(m_userId, int(m_streamId),
+                                            int(m_codec));
+                }
                 return;
             }
+            // Came up, possibly after an earlier refusal (transient
+            // hardware contention) — reopen the retry gate.
+            // m_decoderFailureAnnounced deliberately stays set: the
+            // caps correction has already gone out, and announcing a
+            // codec's death twice is noise, not new information.
+            m_decoderRetryAtMs = 0;
         }
 
         QVideoFrame frame;

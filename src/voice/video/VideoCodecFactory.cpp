@@ -128,8 +128,22 @@ QStringList VideoEncoder::h264EncodeProfiles() {
 #endif
 }
 
+namespace {
+VideoDecoder::Factory& decoderFactoryOverride() {
+    static VideoDecoder::Factory f;
+    return f;
+}
+} // namespace
+
+void VideoDecoder::setFactoryForTest(Factory f) {
+    decoderFactoryOverride() = std::move(f);
+}
+
 std::unique_ptr<VideoDecoder> VideoDecoder::create(VideoCodecKind kind,
                                                    bool preferHardware) {
+    // One null check per stream — decoders are built once each, not
+    // once per access unit.
+    if (auto& f = decoderFactoryOverride()) return f(kind, preferHardware);
     if (kind == VideoCodecKind::H265) {
         if (!h265DecodeSupported()) return nullptr;
 #ifdef BSFCHAT_HAVE_VIDEOTOOLBOX
