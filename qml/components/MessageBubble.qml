@@ -12,10 +12,10 @@ Item {
     property string sender
     property string senderDisplayName
     // True when this message's sender is a bot account. Set from the model's
-    // senderIsBot role (MessageView binds it) rather than looked up here: a
-    // bubble asking the connection per row would be the per-message fetch the
-    // bot-flag cache exists to prevent, and the model's role is repainted for
-    // it when a flag lands late.
+    // senderIsBot role, which MessageModel stamps onto the row from the
+    // sender's membership at append time — exactly as it stamps the sender's
+    // display name. A bubble that asked the connection per row would turn one
+    // fact about an account into a lookup per rendered message.
     property bool senderIsBot: false
     property string body
     property string formattedBody

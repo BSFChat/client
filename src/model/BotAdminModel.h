@@ -172,9 +172,8 @@ public:
     // to phrase the message; `message` is the server's text.
     void onFailed(const QString& operation, const QString& message);
 
-    // The list of user ids currently known to be bots, for seeding
-    // BotRegistry from the admin view. Deactivated bots are INCLUDED: a
-    // deactivated bot's messages are still in the timeline and were still
+    // The user ids currently listed as bots. Deactivated bots are INCLUDED:
+    // a deactivated bot's messages are still in the timeline and were still
     // written by a bot, so the badge stays.
     QStringList listedBotUserIds() const;
 
@@ -193,9 +192,10 @@ signals:
     // property.
     void tokenIssued(const QString& userId, bool rotation);
 
-    // A bot was created or deactivated. ServerConnection listens so it can
-    // keep BotRegistry (and therefore every badge) in step without waiting
-    // for the profile probe to come round again.
+    // A bot was created or deactivated. ServerConnection listens for one
+    // reason: a bot that has just been created has joined nothing, so no
+    // member event names it anywhere yet. This is the only moment the admin
+    // pane knows something the roster does not.
     void botSetChanged();
 
 private:

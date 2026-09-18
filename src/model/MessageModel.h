@@ -12,8 +12,6 @@
 
 #include <bsfchat/MatrixTypes.h>
 
-#include "util/BotRegistry.h"
-
 class ThreadFilterModel;
 
 class MessageModel : public QAbstractListModel {
@@ -57,12 +55,12 @@ public:
         // True when this message's SENDER is a bot account, for the BOT
         // badge on the bubble.
         //
-        // Resolved through the shared BotRegistry at read time, not stamped
-        // onto the row when the event is appended. Stamping would fix the
-        // flag at the instant the message arrived, which for a bot's first
-        // message is before its profile reply has landed — the badge would
-        // then be missing from exactly the messages that introduced the bot,
-        // and nothing would ever go back and correct them.
+        // Stamped onto the row at append time from the bot-user cache and
+        // re-resolved by refreshBotFlags(), exactly as senderDisplayName is.
+        // A message event carries no `bsfchat.bot` of its own — the flag
+        // rides on m.room.member — so the sender's membership is the source
+        // and this model reads it through ServerConnection the same way it
+        // reads display names.
         SenderIsBotRole
     };
 
@@ -249,17 +247,16 @@ public:
     // can resolve @user:host → "Josh" at render time. Not owned.
     void setDisplayNameCache(const QMap<QString, QString>* cache) { m_dnCache = cache; }
 
-    // Bot-flag cache — ServerConnection's, not owned. Same arrangement and
-    // same reasoning as the display-name cache above.
-    void setBotRegistry(const bsfchat::client::BotRegistry* registry)
-    {
-        m_botRegistry = registry;
-    }
-    // Repaint every loaded row's badge after a batch of profile replies moved
-    // at least one flag. Unlike refreshDisplayNames this cannot narrow to the
-    // rows that changed without duplicating the registry's bookkeeping per
-    // message, and it names a single role, so the whole-model span is the
-    // cheaper of the two options.
+    // The set of user ids known to be bots — ServerConnection's, not owned,
+    // populated from m.room.member content across every room. Same
+    // arrangement and same reasoning as the display-name cache above: a
+    // member event for a room this model is not showing still tells us
+    // something about a sender whose messages it is.
+    void setBotUserCache(const QSet<QString>* cache) { m_botUsers = cache; }
+    // Re-resolve every loaded row's flag from that cache, emitting only the
+    // rows that actually moved — the same coalescing refreshDisplayNames
+    // does, and for the same reason: this runs whenever a member event
+    // arrives, which in a busy room is often.
     void refreshBotFlags();
 
     void appendEvent(const bsfchat::RoomEvent& event, const QString& ownUserId);
@@ -307,6 +304,7 @@ private:
         QString eventId;
         QString sender;
         QString senderDisplayName;
+        bool senderIsBot = false;
         QString body;
         QString formattedBody;
         qint64 timestamp = 0;
@@ -397,7 +395,7 @@ private:
     QString m_prevBatchToken;
     bool m_loadingHistory = false;
     const QMap<QString, QString>* m_dnCache = nullptr;
-    const bsfchat::client::BotRegistry* m_botRegistry = nullptr;
+    const QSet<QString>* m_botUsers = nullptr;
     const QString* m_accessToken = nullptr;
 
     MessageEntry eventToEntry(const bsfchat::RoomEvent& event, const QString& ownUserId) const;
@@ -425,6 +423,7 @@ public:
     QString resolveMediaUrl(const QString& mxcUri) const;
 private:
     QString resolveDisplayName(const QString& userId) const;
+    bool resolveIsBot(const QString& userId) const;
     QVariantList buildReactionsList(const MessageEntry& entry) const;
     // Apply a single reaction record to the target message. Returns the row
     // index so the caller can emit dataChanged, or -1 if the target wasn't

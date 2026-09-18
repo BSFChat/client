@@ -249,8 +249,9 @@ Rectangle {
                                 }
 
                                 // `model.isBot` is MemberListModel's IsBotRole,
-                                // which reads the connection's bot-flag cache.
-                                // No fetch happens here — see BotRegistry.
+                                // read straight off the m.room.member event
+                                // that built this row, beside membership and
+                                // the nickname. Nothing is fetched or awaited.
                                 BotBadge {
                                     visible: model.isBot === true
                                     Layout.alignment: Qt.AlignVCenter

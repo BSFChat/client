@@ -24,9 +24,6 @@
 // start. See src/net/VoiceSession.h.
 #include "net/DirectRooms.h"
 #include "net/VoiceSession.h"
-// Header-only: the bot-flag cache and its probe policy. Held by value
-// because the models take a const pointer to it.
-#include "util/BotRegistry.h"
 
 class MatrixClient;
 class SyncLoop;
@@ -65,11 +62,11 @@ class ServerConnection : public QObject {
     // itself gated on canManageBots(), so a null here would only move the
     // permission check into every binding inside it.
     Q_PROPERTY(BotAdminModel* botAdminModel READ botAdminModel CONSTANT)
-    // Bumped whenever a bot flag is learned or changed, so QML that asks
-    // isBot(userId) directly (the profile card, which has a user id and no
-    // model row) re-evaluates. The member list and the message list do not
-    // need it — they read the flag through a model role and are repainted by
-    // the models' own dataChanged.
+    // Bumped whenever the set of known bot user ids changes, so QML that
+    // asks isBot(userId) directly (the profile card, which has a user id and
+    // no model row) re-evaluates. The member list and the message list do not
+    // need it — they carry the flag on their rows and are repainted by the
+    // models' own dataChanged.
     Q_PROPERTY(int botFlagsGeneration READ botFlagsGeneration NOTIFY botFlagsChanged)
     Q_PROPERTY(QString activeRoomId READ activeRoomId NOTIFY activeRoomIdChanged)
     Q_PROPERTY(QString activeRoomName READ activeRoomName NOTIFY activeRoomNameChanged)
@@ -493,15 +490,11 @@ public:
 
     // ── Bot identity ──────────────────────────────────────────────────────
 
-    // Whether `userId` is a bot account, as far as this client currently
-    // knows. Never asks the network: the answer is whatever the bot-flag
-    // cache holds, and an unprobed user reads as human. Safe to call from a
-    // paint-time binding, which is the point — see util/BotRegistry.h.
+    // Whether `userId` is a bot account. Never asks the network and never
+    // can: the flag rides in `bsfchat.bot` on every m.room.member event the
+    // server serves, so knowing a user exists on this server is the same as
+    // knowing whether they are a bot. Safe from a paint-time binding.
     Q_INVOKABLE bool isBot(const QString& userId) const;
-    // Ask for `userId`'s bot flag if it is not known yet. Idempotent and
-    // cheap: at most one profile request per user per session, queued and
-    // paced. Called for the active room's roster, not per message.
-    Q_INVOKABLE void ensureBotFlag(const QString& userId);
     Q_INVOKABLE int channelSlowmode(const QString& roomId) const;
 
     // Assign/unassign roles for a user (absolute list). Server-side requires MANAGE_ROLES.
@@ -907,26 +900,23 @@ public:
 
     // ── Bot identity state ────────────────────────────────────────────────
     //
-    // The cache both models read through. By value, because its lifetime is
-    // exactly this connection's and both models hold a pointer to it.
-    bsfchat::client::BotRegistry m_botRegistry;
+    // Every user id this connection has seen a `bsfchat.bot` on, populated
+    // from m.room.member content across every room — the direct analogue of
+    // m_userDisplayNames above, and fed from the same places. MessageModel
+    // reads it through a pointer; MemberListModel does not need it, because
+    // the flag is on the member event that builds its rows.
+    //
+    // A SET rather than a map, because the server's encoding is set-or-erase:
+    // `bsfchat.bot` is written only for bots and never as `false`, so absence
+    // is the complete and only representation of "human". There is no third
+    // state, nothing to probe for, and nothing that arrives late.
+    QSet<QString> m_botUserIds;
     BotAdminModel* m_botAdminModel = nullptr;
-    // Paces the profile probes the registry has queued. Switching to a busy
-    // channel makes a whole roster visible at once and every unknown member
-    // wants a profile read; firing them all in one event-loop turn is a burst
-    // against the server for information that only draws a badge. Small
-    // batches on a short timer get the roster settled within a second or two
-    // and are invisible under any other traffic.
-    QTimer* m_botProbeTimer = nullptr;
     int m_botFlagsGeneration = 0;
-    // Set while a run of profile replies is being folded in, so the two
-    // models are repainted once at the end instead of once per reply.
-    bool m_botFlagsDirty = false;
-    void startBotProbesIfNeeded();
-    void drainBotProbes();
-    // Fold one authoritative answer into the cache and schedule the repaint.
+    // Fold one answer into the set and repaint if it moved. Takes the flag as
+    // read off a member event, a profile reply or /whoami — all three carry
+    // the same key with the same meaning.
     void recordBotFlag(const QString& userId, bool isBot);
-    void flushBotFlagRepaint();
     void loadMembersForRoom(const QString& roomId);
 
     // Identity (OIDC)

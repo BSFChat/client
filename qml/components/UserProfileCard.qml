@@ -223,10 +223,8 @@ Popup {
             // The same pill the member list and message bubbles show. This is
             // the one badge site with no model row behind it, so it asks the
             // connection directly — and reads botFlagsGeneration first, or the
-            // Q_INVOKABLE subscribes to nothing and a flag that lands while the
-            // card is open never repaints it. Opening the card already issues
-            // a fetchProfile, which is the reply that carries the flag, so the
-            // late arrival is the NORMAL case here rather than the edge one.
+            // Q_INVOKABLE subscribes to nothing and a card opened on a member
+            // whose first member event arrives a moment later never repaints.
             BotBadge {
                 Layout.alignment: Qt.AlignVCenter
                 visible: {

@@ -3,11 +3,14 @@
 //
 // Three things are pinned here, in that order.
 //
-// 1. THE BADGE. A bot's identity arrives on its PROFILE, not on the member
-//    event that puts it in the roster, so the flag is cached per user and
-//    read at paint time through util/BotRegistry.h. The interesting part is
-//    the fetch policy — one probe per user per session, batched — because
-//    getting it wrong means either no badge or a request per rendered row.
+// 1. THE BADGE. `bsfchat.bot` rides in m.room.member content, alongside
+//    membership and bsfchat.nickname, on every path membership can be
+//    learned from. So it arrives WITH the row that displays it: the member
+//    list reads it straight off the event, and the message list stamps it at
+//    append from the sender's membership, the way it already stamps the
+//    sender's display name. Absence is the server's encoding for "human" —
+//    it never writes `false` — which is what makes a lookup, rather than a
+//    fetch, the whole of the client's job.
 //
 // 2. THE DIALOG'S VIEW-MODEL. BotAdminModel holds every decision the bot
 //    management pane makes. It reaches the network through std::function
@@ -37,10 +40,8 @@
 #include "model/BotAdminModel.h"
 #include "model/MemberListModel.h"
 #include "model/MessageModel.h"
-#include "util/BotRegistry.h"
 #include "util/PermissionMath.h"
 
-using bsfchat::client::BotRegistry;
 namespace permmath = bsfchat::permmath;
 
 // permmath mirrors the bit VALUES but not protocol's `has()` helper — every
@@ -53,7 +54,11 @@ static bool grants(permmath::Flags flags, permmath::Flags p)
 namespace {
 
 // A joined m.room.member event for `userId`, the shape MemberListModel reads.
-bsfchat::RoomEvent memberJoin(const QString& userId, const QString& displayName)
+// `isBot` writes `bsfchat.bot: true`; false leaves the key out entirely,
+// because that is what the server does — it never writes `false`, and a test
+// helper that emitted one would be testing a payload nobody sends.
+bsfchat::RoomEvent memberJoin(const QString& userId, const QString& displayName,
+                              bool isBot = false)
 {
     bsfchat::RoomEvent ev;
     ev.type = "m.room.member";
@@ -61,6 +66,7 @@ bsfchat::RoomEvent memberJoin(const QString& userId, const QString& displayName)
     ev.sender = userId.toStdString();
     ev.content.data["membership"] = "join";
     ev.content.data["displayname"] = displayName.toStdString();
+    if (isBot) ev.content.data["bsfchat.bot"] = true;
     return ev;
 }
 
@@ -156,125 +162,165 @@ class BotsTest : public QObject {
 
 private slots:
 
-    // ─────────────────────── 1. the flag cache ───────────────────────
+    // ───────────── 1. the flag arrives on the member event ─────────────
 
-    void unknownUserIsNotABot()
+    void aMemberEventCarriesTheBotFlag()
     {
-        BotRegistry reg;
-        // The default must be "human", not "unknown rendered as a badge".
-        // Anything else puts a BOT pill on every name in a roster for the
-        // second or two before the profile replies land.
-        QVERIFY(!reg.isBot(QStringLiteral("@josh:server")));
-        QCOMPARE(reg.lookup(QStringLiteral("@josh:server")), BotRegistry::Flag::Unknown);
+        MemberListModel model;
+        model.processEvent(memberJoin(QStringLiteral("@build:server"),
+                                      QStringLiteral("Build Bot"), true));
+        model.processEvent(memberJoin(QStringLiteral("@josh:server"),
+                                      QStringLiteral("Josh")));
+        QCOMPARE(model.rowCount(), 2);
+
+        // The QML binding name. `model.isBot` is what the delegate reads; a
+        // rename here is invisible in QML (undefined is falsy) and would
+        // silently take every badge away.
+        QCOMPARE(model.roleNames().value(MemberListModel::IsBotRole),
+                 QByteArray("isBot"));
+
+        // The badge is right on the FIRST frame of the row — there is no
+        // window in which a bot renders as a human and is corrected later,
+        // because the fact arrives with the row that displays it.
+        QCOMPARE(model.data(model.index(0), MemberListModel::IsBotRole).toBool(), true);
+        QCOMPARE(model.data(model.index(1), MemberListModel::IsBotRole).toBool(), false);
+        QVERIFY(model.isBot(QStringLiteral("@build:server")));
+        QVERIFY(!model.isBot(QStringLiteral("@josh:server")));
+        // Nobody by that name is in the roster, so there is nothing to badge.
+        QVERIFY(!model.isBot(QStringLiteral("@nobody:server")));
     }
 
-    void recordsBothAnswersDistinctly()
+    void anAbsentFlagMeansHumanRatherThanUnknown()
     {
-        BotRegistry reg;
-        QVERIFY(reg.record(QStringLiteral("@bot:server"), true));
-        QVERIFY(reg.record(QStringLiteral("@josh:server"), false));
+        // The server writes `bsfchat.bot` only for bots and never as `false`,
+        // so absence is the complete encoding for "human". The client must
+        // not treat it as a third "we should go and ask" state — there is
+        // nothing to ask, and a client that probed on absence would issue a
+        // request per human in every roster forever.
+        MemberListModel model;
+        bsfchat::RoomEvent ev = memberJoin(QStringLiteral("@josh:server"),
+                                           QStringLiteral("Josh"));
+        QVERIFY(!ev.content.data.contains("bsfchat.bot"));
+        model.processEvent(ev);
+        QCOMPARE(model.data(model.index(0), MemberListModel::IsBotRole).toBool(), false);
 
-        QVERIFY(reg.isBot(QStringLiteral("@bot:server")));
-        QVERIFY(!reg.isBot(QStringLiteral("@josh:server")));
-        // "Known human" is a different state from "never asked" — this is
-        // what stops the probe policy re-asking about everyone forever.
-        QCOMPARE(reg.lookup(QStringLiteral("@josh:server")), BotRegistry::Flag::Human);
-
-        // A repeat of the same answer is not a change, so a caller that
-        // repaints on `true` does not repaint on every duplicate reply.
-        QVERIFY(!reg.record(QStringLiteral("@bot:server"), true));
+        // An explicit false — which the server does not send, but a proxy or
+        // an older recording might — reads the same way.
+        MemberListModel explicitFalse;
+        bsfchat::RoomEvent ev2 = memberJoin(QStringLiteral("@josh:server"),
+                                            QStringLiteral("Josh"));
+        ev2.content.data["bsfchat.bot"] = false;
+        explicitFalse.processEvent(ev2);
+        QCOMPARE(explicitFalse.data(explicitFalse.index(0),
+                                    MemberListModel::IsBotRole).toBool(), false);
     }
 
-    void aUserIsProbedAtMostOncePerSession()
+    void aLaterMemberEventUpdatesTheBadgeAndSaysSo()
     {
-        BotRegistry reg;
-        const QString uid = QStringLiteral("@bot:server");
+        MemberListModel model;
+        model.processEvent(memberJoin(QStringLiteral("@build:server"),
+                                      QStringLiteral("Build Bot")));
+        QCOMPARE(model.data(model.index(0), MemberListModel::IsBotRole).toBool(), false);
 
-        QVERIFY(reg.enqueueProbe(uid));
-        // Every subsequent sighting — another message, a re-join, a channel
-        // switch that rebuilds the roster — must fall out here. This is the
-        // whole "never fetch per message" guarantee.
-        QVERIFY(!reg.enqueueProbe(uid));
-        QVERIFY(!reg.enqueueProbe(uid));
-        QCOMPARE(reg.pendingProbeCount(), qsizetype(1));
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        // A second event for a member already in the roster goes down the
+        // UPDATE branch, which repaints a named list of roles. IsBotRole has
+        // to be in that list or the row keeps the value it was built with —
+        // the U-M15 fix means an omitted role simply never repaints.
+        model.processEvent(memberJoin(QStringLiteral("@build:server"),
+                                      QStringLiteral("Build Bot"), true));
 
-        const QStringList batch = reg.takeProbeBatch(4);
-        QCOMPARE(batch, QStringList{uid});
-        QVERIFY(!reg.hasPendingProbes());
-
-        // Taken but never answered — a 404, a dropped connection. Still must
-        // not be re-queued, or a user whose profile cannot be read becomes a
-        // permanent request loop.
-        QVERIFY(!reg.enqueueProbe(uid));
+        QCOMPARE(model.data(model.index(0), MemberListModel::IsBotRole).toBool(), true);
+        QCOMPARE(spy.count(), 1);
+        const auto roles = spy.at(0).at(2).value<QList<int>>();
+        QVERIFY2(roles.contains(MemberListModel::IsBotRole),
+                 "the member-update branch does not repaint the badge");
+        // Still a NAMED list, not the empty "everything changed" vector that
+        // re-runs every binding on every delegate.
+        QVERIFY(!roles.isEmpty());
     }
 
-    void probesAreHandedOutInBoundedBatches()
+    void messageRowsTakeTheFlagFromTheSendersMembership()
     {
-        BotRegistry reg;
-        for (int i = 0; i < 10; ++i)
-            QVERIFY(reg.enqueueProbe(QStringLiteral("@u%1:server").arg(i)));
+        // A message event carries no `bsfchat.bot` of its own — the flag is
+        // on m.room.member — so MessageModel reads the set ServerConnection
+        // builds from member events, exactly as it reads display names.
+        QSet<QString> botUsers{QStringLiteral("@build:server")};
+        MessageModel model;
+        model.setBotUserCache(&botUsers);
+        const QString me = QStringLiteral("@josh:server");
 
-        // A 10-member roster must not become 10 simultaneous GETs.
-        const QStringList first = reg.takeProbeBatch(4);
-        QCOMPARE(first.size(), 4);
-        QCOMPARE(first.first(), QStringLiteral("@u0:server"));
-        QCOMPARE(reg.pendingProbeCount(), qsizetype(6));
+        model.appendEvent(textMessage(QStringLiteral("@build:server"),
+                                      QStringLiteral("build #41 passed"),
+                                      QStringLiteral("$a")), me);
+        model.appendEvent(textMessage(me, QStringLiteral("nice"),
+                                      QStringLiteral("$b")), me);
 
-        QCOMPARE(reg.takeProbeBatch(4).size(), 4);
-        QCOMPARE(reg.takeProbeBatch(4).size(), 2);
-        QVERIFY(!reg.hasPendingProbes());
-        // Draining an empty queue is what lets the caller stop its timer
-        // without tracking a count of its own.
-        QVERIFY(reg.takeProbeBatch(4).isEmpty());
+        QCOMPARE(model.roleNames().value(MessageModel::SenderIsBotRole),
+                 QByteArray("senderIsBot"));
+        QCOMPARE(model.data(model.index(0), MessageModel::SenderIsBotRole).toBool(), true);
+        QCOMPARE(model.data(model.index(1), MessageModel::SenderIsBotRole).toBool(), false);
     }
 
-    void anAnswerRetiresAnOutstandingProbe()
+    void refreshingFlagsRepaintsOnlyTheRowsThatMoved()
     {
-        BotRegistry reg;
-        const QString uid = QStringLiteral("@bot:server");
-        QVERIFY(reg.enqueueProbe(uid));
+        QSet<QString> botUsers;
+        MessageModel model;
+        model.setBotUserCache(&botUsers);
+        const QString me = QStringLiteral("@josh:server");
 
-        // The admin bot list can settle a user who is already queued. If the
-        // queue entry survived, the client would spend a request asking
-        // something it already knows.
-        QVERIFY(reg.record(uid, true));
-        QVERIFY(!reg.hasPendingProbes());
-        QVERIFY(reg.isBot(uid));
+        // Two bot messages either side of a human one, so a correct
+        // implementation emits two ranges rather than one span over all three.
+        model.appendEvent(textMessage(QStringLiteral("@build:server"),
+                                      QStringLiteral("one"), QStringLiteral("$a")), me);
+        model.appendEvent(textMessage(me, QStringLiteral("two"),
+                                      QStringLiteral("$b")), me);
+        model.appendEvent(textMessage(QStringLiteral("@build:server"),
+                                      QStringLiteral("three"), QStringLiteral("$c")), me);
+
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+
+        // Nothing has moved yet: a refresh driven by an unrelated member
+        // event must be silent, and these run on every member event in a
+        // busy room.
+        model.refreshBotFlags();
+        QCOMPARE(spy.count(), 0);
+
+        botUsers.insert(QStringLiteral("@build:server"));
+        model.refreshBotFlags();
+
+        QCOMPARE(spy.count(), 2);
+        for (int i = 0; i < spy.count(); ++i) {
+            QCOMPARE(spy.at(i).at(2).value<QList<int>>(),
+                     QList<int>{MessageModel::SenderIsBotRole});
+        }
+        QCOMPARE(model.data(model.index(0), MessageModel::SenderIsBotRole).toBool(), true);
+        QCOMPARE(model.data(model.index(1), MessageModel::SenderIsBotRole).toBool(), false);
+        QCOMPARE(model.data(model.index(2), MessageModel::SenderIsBotRole).toBool(), true);
+
+        // Idempotent — a second refresh over settled state says nothing.
+        spy.clear();
+        model.refreshBotFlags();
+        QCOMPARE(spy.count(), 0);
     }
 
-    void theAdminBotListIsPositiveEvidenceOnly()
+    void modelsWithoutACacheNeverBadge()
     {
-        BotRegistry reg;
-        reg.recordBotList({QStringLiteral("@build:server"),
-                           QStringLiteral("@alerts:server")});
+        // Both models are constructed before ServerConnection wires anything
+        // in, and both are used in other tests with no cache at all.
+        MemberListModel members;
+        members.processEvent(memberJoin(QStringLiteral("@build:server"),
+                                        QStringLiteral("Build Bot"), true));
+        // The member list needs no cache — the event is the source.
+        QCOMPARE(members.data(members.index(0), MemberListModel::IsBotRole).toBool(), true);
 
-        QVERIFY(reg.isBot(QStringLiteral("@build:server")));
-        QVERIFY(reg.isBot(QStringLiteral("@alerts:server")));
-
-        // A user absent from the list must stay UNKNOWN, not become Human.
-        // The endpoint's scope belongs to the server — it may paginate, or
-        // narrow to the caller's own bots — and reading absence as "human"
-        // would un-badge real bots for the one person who can see the list.
-        QCOMPARE(reg.lookup(QStringLiteral("@josh:server")), BotRegistry::Flag::Unknown);
-        // Still unknown means still probeable.
-        QVERIFY(reg.enqueueProbe(QStringLiteral("@josh:server")));
-    }
-
-    void clearResetsTheProbeLedgerToo()
-    {
-        BotRegistry reg;
-        const QString uid = QStringLiteral("@bot:server");
-        QVERIFY(reg.record(uid, true));
-        QVERIFY(reg.enqueueProbe(QStringLiteral("@other:server")));
-
-        reg.clear();
-
-        // A reconnect may be a different account against a server whose bot
-        // set has moved. Answers AND the ledger have to go, or the new
-        // session renders the old session's badges and never asks again.
-        QVERIFY(!reg.isBot(uid));
-        QVERIFY(!reg.hasPendingProbes());
-        QVERIFY(reg.enqueueProbe(uid));
+        MessageModel messages;
+        messages.appendEvent(textMessage(QStringLiteral("@build:server"),
+                                         QStringLiteral("hi"), QStringLiteral("$a")),
+                             QStringLiteral("@josh:server"));
+        QCOMPARE(messages.data(messages.index(0),
+                               MessageModel::SenderIsBotRole).toBool(), false);
+        messages.refreshBotFlags(); // must not crash
     }
 
     // ─────────────────────── 2. the permission bit ───────────────────────
@@ -346,110 +392,6 @@ private slots:
         const auto flags = permmath::effectivePermissions(
             {admin}, {QStringLiteral("admin")}, QStringLiteral("@josh:server"), nullptr);
         QVERIFY(grants(flags, permmath::kManageBots));
-    }
-
-    // ─────────────────────── 3. the badge in the models ───────────────────
-
-    void memberListExposesTheBotFlagAsARole()
-    {
-        BotRegistry reg;
-        MemberListModel model;
-        model.setBotRegistry(&reg);
-
-        model.processEvent(memberJoin(QStringLiteral("@build:server"),
-                                      QStringLiteral("Build Bot")));
-        model.processEvent(memberJoin(QStringLiteral("@josh:server"),
-                                      QStringLiteral("Josh")));
-        QCOMPARE(model.rowCount(), 2);
-
-        // The QML binding name. `model.isBot` is what the delegate reads; a
-        // rename here is invisible in QML (undefined is falsy) and would
-        // silently take every badge away.
-        QCOMPARE(model.roleNames().value(MemberListModel::IsBotRole),
-                 QByteArray("isBot"));
-
-        // Nothing known yet — both render as human.
-        QCOMPARE(model.data(model.index(0), MemberListModel::IsBotRole).toBool(), false);
-
-        reg.record(QStringLiteral("@build:server"), true);
-        reg.record(QStringLiteral("@josh:server"), false);
-
-        QCOMPARE(model.data(model.index(0), MemberListModel::IsBotRole).toBool(), true);
-        QCOMPARE(model.data(model.index(1), MemberListModel::IsBotRole).toBool(), false);
-        QVERIFY(model.isBot(QStringLiteral("@build:server")));
-        QVERIFY(!model.isBot(QStringLiteral("@nobody:server")));
-    }
-
-    void memberListRepaintsOnlyTheBadgeRole()
-    {
-        BotRegistry reg;
-        MemberListModel model;
-        model.setBotRegistry(&reg);
-        model.processEvent(memberJoin(QStringLiteral("@build:server"),
-                                      QStringLiteral("Build Bot")));
-
-        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
-        reg.record(QStringLiteral("@build:server"), true);
-        model.refreshBotFlags();
-
-        QCOMPARE(spy.count(), 1);
-        const auto roles = spy.at(0).at(2).value<QList<int>>();
-        // An EMPTY roles list means "everything changed" and re-runs every
-        // binding on every delegate — the repaint storm U-M15 removed from
-        // the join path. Name the one role that moved.
-        QCOMPARE(roles, QList<int>{MemberListModel::IsBotRole});
-    }
-
-    void messageModelBadgesBySenderNotByRow()
-    {
-        BotRegistry reg;
-        MessageModel model;
-        model.setBotRegistry(&reg);
-        const QString me = QStringLiteral("@josh:server");
-
-        model.appendEvent(textMessage(QStringLiteral("@build:server"),
-                                      QStringLiteral("build #41 passed"),
-                                      QStringLiteral("$a")), me);
-        model.appendEvent(textMessage(me, QStringLiteral("nice"),
-                                      QStringLiteral("$b")), me);
-        model.appendEvent(textMessage(QStringLiteral("@build:server"),
-                                      QStringLiteral("build #42 failed"),
-                                      QStringLiteral("$c")), me);
-        QCOMPARE(model.rowCount(), 3);
-
-        QCOMPARE(model.roleNames().value(MessageModel::SenderIsBotRole),
-                 QByteArray("senderIsBot"));
-
-        // The flag lands AFTER the messages — which is the normal order for a
-        // bot's first message, since the profile probe is triggered by that
-        // very message appearing. Resolving at read time rather than stamping
-        // at append time is what makes those rows correct afterwards.
-        reg.record(QStringLiteral("@build:server"), true);
-
-        QCOMPARE(model.data(model.index(0), MessageModel::SenderIsBotRole).toBool(), true);
-        QCOMPARE(model.data(model.index(1), MessageModel::SenderIsBotRole).toBool(), false);
-        QCOMPARE(model.data(model.index(2), MessageModel::SenderIsBotRole).toBool(), true);
-    }
-
-    void modelsWithoutARegistryNeverBadge()
-    {
-        // The models are constructed before ServerConnection wires the
-        // registry in, and both are used in tests with no registry at all.
-        // A null pointer must read as "human", not crash.
-        MemberListModel members;
-        members.processEvent(memberJoin(QStringLiteral("@build:server"),
-                                        QStringLiteral("Build Bot")));
-        QCOMPARE(members.data(members.index(0), MemberListModel::IsBotRole).toBool(), false);
-        QVERIFY(!members.isBot(QStringLiteral("@build:server")));
-        members.refreshBotFlags(); // must not crash
-
-        MessageModel messages;
-        messages.appendEvent(textMessage(QStringLiteral("@build:server"),
-                                         QStringLiteral("hi"), QStringLiteral("$a")),
-                             QStringLiteral("@josh:server"));
-        QCOMPARE(messages.data(messages.index(0),
-                               MessageModel::SenderIsBotRole).toBool(), false);
-        messages.refreshBotFlags();
     }
 
     // ─────────────────── 4. the dialog's view-model ───────────────────
