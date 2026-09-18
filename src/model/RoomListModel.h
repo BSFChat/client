@@ -27,7 +27,8 @@ public:
         ParentIdRole,
         RoomTypeRole,
         SortOrderRole,
-        MentionCountRole
+        MentionCountRole,
+        IsDirectRole
     };
 
     explicit RoomListModel(QObject* parent = nullptr);
@@ -37,6 +38,35 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     void ensureRoom(const QString& roomId);
+
+    // A DM is not one of this server's channels, and the difference is a
+    // property of the ROOM, not a filter somebody remembered to apply. It used
+    // to be the latter: ServerConnection stripped DMs out of the category tree
+    // after the fact, and every other question the model answers about "this
+    // server's channels" — which one to land on, which one a #mention names,
+    // which one to restore, whether the server has unread — still counted
+    // them. So a DM was the mobile shell's landing channel, and a reply in one
+    // lit up the server's badge in the rail.
+    //
+    // Every server-scoped answer below now skips direct rooms. The per-room
+    // lookups (roomDisplayName, unreadCountFor, hasRoom, voiceMembers…) keep
+    // working for them, because the DM page is built out of exactly those.
+    //
+    // Additive by design, like the m.direct merge it is fed from: nothing that
+    // has been marked direct is ever un-marked by a later sync that simply
+    // didn't mention it.
+    //
+    // Held as a set of ids beside the rows rather than as a field on one,
+    // because the two facts arrive in either order: m.direct is folded in
+    // BEFORE the room loop of a sync pass, and the persisted DM map is read at
+    // construction, both of which can name a room this model has not met. A
+    // mark that had to wait for a row would be dropped, and the room would
+    // spend that sync in the channel tree — which is the bug. Marking does not
+    // create a row: an id with no room is simply a classification waiting for
+    // one, and inventing a row would resurrect DMs the user has left.
+    void markDirect(const QString& roomId);
+    Q_INVOKABLE bool isDirect(const QString& roomId) const;
+
     void updateRoomName(const QString& roomId, const QString& name);
     void updateRoomTopic(const QString& roomId, const QString& topic);
     void updateLastMessage(const QString& roomId, const QString& message, qint64 timestamp);
@@ -149,4 +179,5 @@ private:
     };
 
     QVector<RoomEntry> m_rooms;
+    QSet<QString> m_directRoomIds;
 };

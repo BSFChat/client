@@ -15,6 +15,16 @@
 // createDirectMessage's control flow over a fake client, so the scenarios run
 // without a network, an event loop or a QSettings file.
 
+//
+// The second half of the same question is where a DM is ALLOWED to appear. A
+// DM used to be excluded from the sidebar by a filter ServerConnection applied
+// to the category tree afterwards, over its own map — so every other answer
+// RoomListModel gives about "this server's channels" still counted DMs: which
+// channel to land on, which one a #mention names, which one to restore, and
+// whether the server has anything unread. RoomListModel now owns the
+// classification, and the tests below pin each of those.
+
+#include "model/RoomListModel.h"
 #include "net/DirectRooms.h"
 #include "net/TokenedReply.h"
 
@@ -216,6 +226,204 @@ private slots:
         QCOMPARE(r.roomWith("@bob:x", [](const QString& rid) { return rid != "!a:x"; }),
                  QString("!m:x"));
         QVERIFY(r.roomWith("@nobody:x", any).isEmpty());
+    }
+
+    // ── Classifying a DM from the room's own membership state ────────────
+    //
+    // m.direct rides in exactly one /sync response. A client that never saw
+    // that response has nothing else to go on — which is how a DM ends up in
+    // a server's channel list for the side that did not open it. The member
+    // events carry `is_direct` for BOTH participants, in room state, which
+    // comes down on every initial sync.
+
+    void eitherSideNamesThePeerFromMembershipState()
+    {
+        using bsfchat::net::directPeerFromMember;
+        const QString me = "@me:x", them = "@bob:x";
+
+        // The invited side. The event about US was written by whoever opened
+        // the DM, so the sender is the peer.
+        QCOMPARE(directPeerFromMember(true, me, them, me), them);
+        // Either side reading the event about the OTHER person.
+        QCOMPARE(directPeerFromMember(true, them, them, me), them);
+        QCOMPARE(directPeerFromMember(true, them, me, me), them);
+
+        // The creator reading their own join names nobody — both fields are
+        // them. The peer's event in the same room answers it.
+        QVERIFY(directPeerFromMember(true, me, me, me).isEmpty());
+
+        // A plain channel's membership says nothing, whoever it is about.
+        QVERIFY(directPeerFromMember(false, them, them, me).isEmpty());
+        QVERIFY(directPeerFromMember(false, me, them, me).isEmpty());
+        // A member event with no state key cannot name anyone.
+        QVERIFY(directPeerFromMember(true, "", them, me).isEmpty());
+    }
+
+    // ── A DM is never one of this server's channels ──────────────────────
+
+    // A category tree built over a DM put it in the sidebar as a nameless
+    // channel — the reported bug, exactly.
+    void directRoomsAreNotInTheChannelTree()
+    {
+        RoomListModel m;
+        m.updateRoomName("!general:x", "general");
+        m.updateRoomName("!dm:x", QString());
+
+        auto channelIds = [&] {
+            QStringList out;
+            for (const auto& cat : m.getCategoriesWithChannels()) {
+                for (const auto& ch : cat.toMap().value("channels").toList())
+                    out.append(ch.toMap().value("roomId").toString());
+            }
+            return out;
+        };
+        QCOMPARE(channelIds(), (QStringList{"!general:x", "!dm:x"}));
+
+        m.markDirect("!dm:x");
+        QCOMPARE(channelIds(), QStringList{"!general:x"});
+        QVERIFY(m.isDirect("!dm:x"));
+        QVERIFY(!m.isDirect("!general:x"));
+
+        // The room itself is still fully addressable — the DM page is built
+        // out of exactly these lookups.
+        QVERIFY(m.hasRoom("!dm:x"));
+        QCOMPARE(m.roomDisplayName("!dm:x"), QString("!dm:x"));
+    }
+
+    // A section that held nothing but DMs must not survive as an empty header.
+    void aCategoryLeftEmptyByItsDmsDoesNotLinger()
+    {
+        RoomListModel m;
+        m.updateRoomName("!cat:x", "Text Channels");
+        m.updateRoomType("!cat:x", "category");
+        m.updateRoomName("!dm:x", QString());
+        m.updateParentId("!dm:x", "!cat:x");
+        m.markDirect("!dm:x");
+
+        for (const auto& cat : m.getCategoriesWithChannels()) {
+            QVERIFY(cat.toMap().value("channels").toList().isEmpty());
+        }
+    }
+
+    // Every other server-scoped answer the model gives. Each of these had a
+    // DM as a legitimate result.
+    void directRoomsAreNotAServersChannelInAnyOtherSense()
+    {
+        RoomListModel m;
+        // The DM sorts first, which is what made it the landing channel.
+        m.updateRoomName("!dm:x", "bob");
+        m.updateRoomName("!general:x", "general");
+        m.markDirect("!dm:x");
+
+        // Landing channel on launch.
+        QCOMPARE(m.firstTextRoomId(), QString("!general:x"));
+
+        // #mention resolution. A DM carries the peer's name, so "#bob" used to
+        // hand whoever typed it a link into a private conversation.
+        QCOMPARE(m.roomIdForName("bob"), QString());
+        QCOMPARE(m.roomIdForName("general"), QString("!general:x"));
+
+        // Which channel this server reopens — including when the DM is the
+        // remembered one, which it would be right after reading it.
+        QCOMPARE(m.restoreTargetRoomId("!dm:x", true), QString("!general:x"));
+        QCOMPARE(m.restoreTargetRoomId("!general:x", true), QString("!general:x"));
+
+        // The badge on the server's icon in the rail. A DM's unread belongs to
+        // the DM section, not to this server's channels.
+        m.setUnreadCount("!dm:x", 3);
+        m.setMentionCount("!dm:x", 2);
+        QCOMPARE(m.totalUnreadCount(), 0);
+        QCOMPARE(m.totalMentionCount(), 0);
+        // But the DM page still sees its own counts.
+        QCOMPARE(m.unreadCountFor("!dm:x"), 3);
+        QCOMPARE(m.mentionCountFor("!dm:x"), 2);
+
+        m.setUnreadCount("!general:x", 1);
+        QCOMPARE(m.totalUnreadCount(), 1);
+    }
+
+    // The classification and the room arrive in either order: m.direct is
+    // folded in BEFORE the room loop of a sync pass, and the persisted DM map
+    // is read before any sync at all. A mark that had to wait for a row would
+    // be dropped and the room would spend that sync in the channel tree.
+    void markingARoomNotYetSyncedStillClassifiesIt()
+    {
+        RoomListModel m;
+        m.markDirect("!dm:x");
+        QVERIFY(m.isDirect("!dm:x"));
+        // And it did NOT invent a row — a DM the user has left must not be
+        // resurrected by its leftover settings entry.
+        QCOMPARE(m.rowCount(), 0);
+        QVERIFY(!m.hasRoom("!dm:x"));
+
+        // When the room does arrive, it arrives already classified.
+        m.updateRoomName("!dm:x", QString());
+        QCOMPARE(m.rowCount(), 1);
+        QVERIFY(m.getCategoriesWithChannels().isEmpty());
+    }
+
+    // The upgrade path, from the client's side.
+    //
+    // Production runs a server that sends no m.direct at all, so the rooms the
+    // complaint is about are ALREADY loaded, already in the channel tree, and
+    // already counted in the server's unread badge when the fixed server first
+    // tells us what they are. Learning it has to reclassify them where they
+    // stand — a client that only applied m.direct to rooms it had not met yet
+    // would need a reinstall to come right.
+    //
+    // This is ServerConnection::processSyncResponse's order: fold m.direct in,
+    // mark what changed, then republish. Both steps are checked, because the
+    // sidebar and the rail badge read different things.
+    void mDirectArrivingMidSessionReclassifiesRoomsAlreadyLoaded()
+    {
+        RoomListModel m;
+        DirectRooms rooms;
+        const QString me = "@me:x";
+
+        // A session that has been running against the old server: a channel
+        // and a DM, both filed as channels, both unread.
+        m.updateRoomName("!general:x", "general");
+        m.updateRoomName("!dm:x", QString());
+        m.setUnreadCount("!general:x", 0);
+        m.setUnreadCount("!dm:x", 4);
+
+        auto channelIds = [&] {
+            QStringList out;
+            for (const auto& cat : m.getCategoriesWithChannels()) {
+                for (const auto& ch : cat.toMap().value("channels").toList())
+                    out.append(ch.toMap().value("roomId").toString());
+            }
+            return out;
+        };
+        QCOMPARE(channelIds(), (QStringList{"!general:x", "!dm:x"}));
+        QVERIFY(m.totalUnreadCount() > 0);  // the server's icon is lit by a DM
+
+        // The upgraded server's first reply says what the room is.
+        for (const auto& rid : rooms.merge({{"@bob:x", {"!dm:x"}}}, me))
+            m.markDirect(rid);
+
+        QCOMPARE(channelIds(), QStringList{"!general:x"});
+        QCOMPARE(m.totalUnreadCount(), 0);
+        QCOMPARE(rooms.peerOf("!dm:x"), QString("@bob:x"));
+
+        // Restated on every poll from here on. A repeat says nothing changed,
+        // so nothing republishes and the sidebar does not churn.
+        QVERIFY(rooms.merge({{"@bob:x", {"!dm:x"}}}, me).isEmpty());
+        QCOMPARE(channelIds(), QStringList{"!general:x"});
+    }
+
+    // Losing sight of a room (a prune, a leave) is not evidence it stopped
+    // being a DM — same reasoning as DirectRooms::merge being additive.
+    void aPrunedDirectRoomIsStillADirectRoomWhenItComesBack()
+    {
+        RoomListModel m;
+        m.updateRoomName("!dm:x", QString());
+        m.markDirect("!dm:x");
+        m.removeRoom("!dm:x");
+
+        m.updateRoomName("!dm:x", QString());
+        QVERIFY(m.isDirect("!dm:x"));
+        QVERIFY(m.getCategoriesWithChannels().isEmpty());
     }
 };
 

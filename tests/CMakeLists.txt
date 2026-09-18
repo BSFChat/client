@@ -527,11 +527,17 @@ target_include_directories(test_tokened_reply PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_tokened_reply PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_tokened_reply COMMAND test_tokened_reply)
 
-# One DM room per peer: the existing-room lookup, the in-flight create guard
-# and the m.direct merge that lets the INVITED side recognise a DM at all.
-# Header-only (src/net/DirectRooms.h); the protocol lib is not needed because
-# merge() takes the plain std::map that SyncResponse::direct_rooms holds.
-qt_add_executable(test_direct_rooms test_direct_rooms.cpp)
+# One DM room per peer: the existing-room lookup, the in-flight create guard,
+# the m.direct merge that lets the INVITED side recognise a DM at all, and —
+# the other half of the same question — that a room recognised as a DM by
+# EITHER side is kept out of every one of this server's channel lists.
+# DirectRooms.h is header-only; RoomListModel is where the exclusion lives and
+# pulls in nothing but Qt Core (ChannelRestore.h and VoiceRoster.h are headers
+# too), so this still needs neither the protocol lib nor a network.
+qt_add_executable(test_direct_rooms
+    test_direct_rooms.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
+)
 target_include_directories(test_direct_rooms PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_direct_rooms PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_direct_rooms COMMAND test_direct_rooms)

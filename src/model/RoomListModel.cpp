@@ -64,6 +64,7 @@ QVariant RoomListModel::data(const QModelIndex& index, int role) const
     case ParentIdRole: return room.parentId;
     case RoomTypeRole: return room.roomType;
     case SortOrderRole: return room.sortOrder;
+    case IsDirectRole: return m_directRoomIds.contains(room.roomId);
     default: return {};
     }
 }
@@ -84,7 +85,8 @@ QHash<int, QByteArray> RoomListModel::roleNames() const
         {VoiceMembersRole, "voiceMembers"},
         {ParentIdRole, "parentId"},
         {RoomTypeRole, "roomType"},
-        {SortOrderRole, "sortOrder"}
+        {SortOrderRole, "sortOrder"},
+        {IsDirectRole, "isDirect"}
     };
 }
 
@@ -107,6 +109,22 @@ void RoomListModel::ensureRoom(const QString& roomId)
     entry.roomId = roomId;
     m_rooms.append(std::move(entry));
     endInsertRows();
+}
+
+void RoomListModel::markDirect(const QString& roomId)
+{
+    if (roomId.isEmpty()) return;
+    if (m_directRoomIds.contains(roomId)) return;
+    m_directRoomIds.insert(roomId);
+    // The row may not exist yet — see the header. When it does, repaint it:
+    // the sidebar has to lose the channel it was drawing.
+    int idx = findRoom(roomId);
+    if (idx >= 0) emit dataChanged(index(idx), index(idx), {IsDirectRole});
+}
+
+bool RoomListModel::isDirect(const QString& roomId) const
+{
+    return m_directRoomIds.contains(roomId);
 }
 
 void RoomListModel::updateRoomName(const QString& roomId, const QString& name)
@@ -190,8 +208,14 @@ int RoomListModel::mentionCountFor(const QString& roomId) const
 
 int RoomListModel::totalMentionCount() const
 {
+    // Server-scoped: this is the badge on the server's icon in the rail. A DM
+    // is not in this server's channels, so it does not light this up — the DM
+    // section carries its own.
     int total = 0;
-    for (const auto& room : m_rooms) total += room.mentionCount;
+    for (const auto& room : m_rooms) {
+        if (m_directRoomIds.contains(room.roomId)) continue;
+        total += room.mentionCount;
+    }
     return total;
 }
 
@@ -206,8 +230,10 @@ void RoomListModel::setUnreadCount(const QString& roomId, int count)
 
 int RoomListModel::totalUnreadCount() const
 {
+    // Server-scoped — see totalMentionCount.
     int total = 0;
     for (const auto& room : m_rooms) {
+        if (m_directRoomIds.contains(room.roomId)) continue;
         total += room.unreadCount;
     }
     return total;
@@ -228,6 +254,9 @@ QString RoomListModel::roomIdForName(const QString& name) const
         // Only match text channels — voice channels wouldn't make sense
         // as a #mention target. roomType is empty for regular text rooms.
         if (r.isVoice) continue;
+        // #name is a CHANNEL reference. A DM is not one, and resolving to one
+        // would hand whoever typed it a link into a private conversation.
+        if (m_directRoomIds.contains(r.roomId)) continue;
         if (QString::compare(r.displayName, needle, Qt::CaseInsensitive) == 0)
             return r.roomId;
     }
@@ -268,6 +297,10 @@ QString RoomListModel::firstTextRoomId() const
     // a different room than what's visually on top of the drawer
     // would be confusing.
     for (const auto& r : m_rooms) {
+        // A DM is not a landing channel for a server: opening the app must not
+        // drop the user into somebody's private conversation because it
+        // happened to sort first.
+        if (m_directRoomIds.contains(r.roomId)) continue;
         if (!r.isVoice && r.roomType != "m.space")
             return r.roomId;
     }
@@ -322,6 +355,11 @@ ChannelRestoreChoice RoomListModel::restoreChoice(const QString& remembered,
     QVector<ChannelRestoreCandidate> candidates;
     candidates.reserve(m_rooms.size());
     for (const auto& r : m_rooms) {
+        // "Which channel does this server open on" — a DM is not an answer,
+        // including as the remembered one: bringing a server to the
+        // foreground must not reopen a private conversation as if it were one
+        // of that server's rooms.
+        if (m_directRoomIds.contains(r.roomId)) continue;
         candidates.append({r.roomId, r.isVoice,
                            r.roomType == QStringLiteral("category")
                                || r.roomType == QStringLiteral("m.space")});
@@ -436,6 +474,11 @@ QVariantList RoomListModel::getCategoriesWithChannels() const
     for (int i = 0; i < m_rooms.size(); ++i) {
         const auto& room = m_rooms[i];
         if (room.roomType == QStringLiteral("category")) continue;
+        // The DM never enters the tree in the first place. ServerConnection
+        // also strips DMs from the result, but that filter runs over ITS map:
+        // a room this model knows is direct and that map does not (or the
+        // reverse) used to show up as a channel. One source of truth.
+        if (m_directRoomIds.contains(room.roomId)) continue;
 
         QString catId = room.parentId;
         if (catId.isEmpty() || !categoryChannels.contains(catId)) {

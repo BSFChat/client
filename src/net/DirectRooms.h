@@ -99,4 +99,28 @@ private:
     QSet<QString> m_creating;         // peers with a /createRoom outstanding
 };
 
+// Who the DM is with, according to one m.room.member event that carries
+// `is_direct`. Empty when this particular event cannot say.
+//
+// m.direct is account data: it arrives in a single /sync response, and a client
+// that never saw that one response — a fresh profile, cleared settings, a sync
+// that errored at the wrong moment — has nothing to classify the room by and
+// files somebody's DM under the server's channels. The membership events carry
+// the same fact in ROOM state, which comes down on every initial sync.
+//
+// A DM has two of these events and either side can read both:
+//   - the event about US was written by the person who opened the DM, so the
+//     sender is the peer;
+//   - the event about THEM names them in its state key.
+// The one case that answers nothing is the creator reading their own join,
+// where both fields are the creator — the other member's event covers it, and
+// the room is marked direct regardless of whether a peer could be named.
+inline QString directPeerFromMember(bool isDirect, const QString& stateKey,
+                                    const QString& sender, const QString& selfId)
+{
+    if (!isDirect || stateKey.isEmpty()) return {};
+    const QString peer = stateKey == selfId ? sender : stateKey;
+    return peer == selfId ? QString() : peer;
+}
+
 } // namespace bsfchat::net
