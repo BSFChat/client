@@ -33,6 +33,20 @@ target_include_directories(test_profile PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_profile PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_profile COMMAND test_profile)
 
+# Profile/nickname reply parsing. The regression it guards is a server
+# answering a bare `null` for an account with no display name and no picture,
+# which threw out of nlohmann's value() and into an empty catch — no signal, no
+# log, callers waiting forever. Header-only, so no server and no GUI app.
+qt_add_executable(test_reply_fields
+    test_reply_fields.cpp
+)
+target_include_directories(test_reply_fields PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_reply_fields PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Test
+)
+add_test(NAME test_reply_fields COMMAND test_reply_fields)
+
 # Startup-cost path: the persisted sync token + room snapshot that lets a
 # launch skip the server's initial /sync, and the retry schedule that keeps a
 # downed server from being dialled every 5s forever. Both are deliberately
