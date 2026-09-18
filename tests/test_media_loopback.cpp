@@ -81,6 +81,12 @@ int runCase(bool initialOffer) {
     std::printf("--- case: track via %s\n",
                 initialOffer ? "initial offer" : "renegotiation");
     rtc::Configuration cfg; // no ICE servers — loopback host candidates
+    // Pin ICE to loopback. On GitHub's hosted runners (several interfaces,
+    // IPv6, docker bridges) libjuice's default 'any' bind let two in-process
+    // peers gather candidates on addresses that never connect to each other,
+    // and the handshake waited out its full timeout — on Linux and macOS,
+    // on changes unrelated to this test. Locally it always passed.
+    cfg.bindAddress = "127.0.0.1";
 
     auto pcA = std::make_shared<rtc::PeerConnection>(cfg);
     auto pcB = std::make_shared<rtc::PeerConnection>(cfg);
@@ -234,6 +240,12 @@ int runCase(bool initialOffer) {
 int runControlChannelCase() {
     std::printf("--- case: reliable control channel + legacy dispatch\n");
     rtc::Configuration cfg;
+    // Pin ICE to loopback. On GitHub's hosted runners (several interfaces,
+    // IPv6, docker bridges) libjuice's default 'any' bind let two in-process
+    // peers gather candidates on addresses that never connect to each other,
+    // and the handshake waited out its full timeout — on Linux and macOS,
+    // on changes unrelated to this test. Locally it always passed.
+    cfg.bindAddress = "127.0.0.1";
 
     auto pcA = std::make_shared<rtc::PeerConnection>(cfg);
     auto pcB = std::make_shared<rtc::PeerConnection>(cfg);
@@ -394,6 +406,12 @@ int runControlChannelCase() {
 int runLateAdoptionCase() {
     std::printf("--- case: track adopted after it is already open\n");
     rtc::Configuration cfg;
+    // Pin ICE to loopback. On GitHub's hosted runners (several interfaces,
+    // IPv6, docker bridges) libjuice's default 'any' bind let two in-process
+    // peers gather candidates on addresses that never connect to each other,
+    // and the handshake waited out its full timeout — on Linux and macOS,
+    // on changes unrelated to this test. Locally it always passed.
+    cfg.bindAddress = "127.0.0.1";
 
     auto pcA = std::make_shared<rtc::PeerConnection>(cfg);
     auto pcB = std::make_shared<rtc::PeerConnection>(cfg);
