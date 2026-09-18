@@ -6,6 +6,8 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+class QMediaDevices;
+
 class Settings : public QObject {
     Q_OBJECT
     Q_PROPERTY(int fontSize READ fontSize WRITE setFontSize NOTIFY fontSizeChanged)
@@ -58,13 +60,28 @@ class Settings : public QObject {
     // NOTIFY, not CONSTANT: the lists are enumerated fresh on every read, so
     // a headset plugged in after startup does show up — but with CONSTANT no
     // binding ever re-read them, so the combo boxes were frozen at the set of
-    // devices present when the dialog first loaded. refreshAudioDevices() is
-    // called from the settings dialog's onOpened, which is when a user who
-    // just plugged something in looks for it. (A live QMediaDevices hot-plug
-    // subscription would be strictly better but belongs in the constructor,
-    // which is being edited elsewhere this cycle.)
+    // devices present when the dialog first loaded.
+    //
+    // audioDevicesChanged is now driven by a live QMediaDevices hot-plug
+    // subscription owned by the constructor, not only by the dialog's
+    // onAboutToShow. Re-enumerating on open was still one open too late for
+    // the case that prompted this: a Bluetooth headset that connects WHILE
+    // the dialog is open — which is exactly what a user who cannot find
+    // their AirPods in the list does next.
+    //
+    // The first entry of each list is the "follow the system default"
+    // choice: stored as an empty string, flagged with systemDefault:true,
+    // and labelled with the device it currently resolves to ("System
+    // default (Josh's AirPods Pro)"), so the list says which device that
+    // actually is instead of leaving the user to guess.
     Q_PROPERTY(QVariantList audioInputDevices READ audioInputDevices NOTIFY audioDevicesChanged)
     Q_PROPERTY(QVariantList audioOutputDevices READ audioOutputDevices NOTIFY audioDevicesChanged)
+    // The device the voice pipeline is ACTUALLY on right now, empty when
+    // not in a call. Distinct from the preference above, which can be
+    // "system default" or can name a device that has since gone away.
+    // See core/AudioDeviceStatus.h.
+    Q_PROPERTY(QString audioInputInUse READ audioInputInUse NOTIFY audioInUseChanged)
+    Q_PROPERTY(QString audioOutputInUse READ audioOutputInUse NOTIFY audioInUseChanged)
 
 public:
     // Re-publish the device lists. Cheap (a QMediaDevices enumeration).
@@ -78,6 +95,17 @@ public:
     // (the combo-box resync) with it. tests/test_qml_hygiene.cpp now fails
     // the build if any Q_INVOKABLE drifts back under a non-public specifier.
     Q_INVOKABLE void refreshAudioDevices();
+
+    // Persist a device choice from the combo boxes. The description is
+    // the key, exactly as before — ids are not stable across reboots on
+    // every platform. The id rides along as a hint so that when several
+    // devices share one description the pipeline can prefer whichever
+    // one the user actually picked. Empty description == follow the
+    // system default.
+    Q_INVOKABLE void selectAudioInputDevice(const QString& description,
+                                            const QString& id);
+    Q_INVOKABLE void selectAudioOutputDevice(const QString& description,
+                                             const QString& id);
 
     explicit Settings(QObject* parent = nullptr);
 
@@ -179,6 +207,8 @@ public:
 
     QVariantList audioInputDevices() const;
     QVariantList audioOutputDevices() const;
+    QString audioInputInUse() const;
+    QString audioOutputInUse() const;
 
     // Category collapse state
     QStringList collapsedCategories() const;
@@ -360,6 +390,8 @@ signals:
     void lastReadTsChanged(const QString& roomId);
     // The available audio input/output device sets may have changed.
     void audioDevicesChanged();
+    // The device the voice pipeline is on has changed.
+    void audioInUseChanged();
 
     void fontSizeChanged();
     void themeChanged();
@@ -384,4 +416,9 @@ signals:
 
 private:
     mutable QSettings m_settings;
+    // One instance for the whole process, owned here because Settings is
+    // a QML singleton on the GUI thread and QMediaDevices wants a thread
+    // with an event loop. Its only job is to keep audioDevicesChanged
+    // firing while a dialog is open.
+    QMediaDevices* m_mediaDevices = nullptr;
 };

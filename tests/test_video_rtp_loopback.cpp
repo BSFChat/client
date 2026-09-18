@@ -202,6 +202,12 @@ struct BringUpOptions {
 Peers bringUpPair(const BringUpOptions& opts = {})
 {
     rtc::Configuration cfg;   // no ICE servers — loopback host candidates
+    // Pin ICE to loopback. On GitHub's hosted runners (several interfaces,
+    // IPv6, docker bridges) libjuice's default 'any' bind let two in-process
+    // peers gather candidates on addresses that never connect to each other,
+    // and the handshake waited out its full timeout — on Linux and macOS,
+    // on changes unrelated to this test. Locally it always passed.
+    cfg.bindAddress = "127.0.0.1";
     Peers p;
     p.offerer = new PeerConnectionManager(
         QStringLiteral("@b:test"), QStringLiteral("call-rx"), cfg);

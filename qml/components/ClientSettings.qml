@@ -428,31 +428,61 @@ Popup {
                     SettingRow {
                         title: "Input device"
                         description: "Microphone used in voice channels."
-                        ThemedComboBox {
-                            id: inputCombo
-                            implicitWidth: 260
-                            model: appSettings.audioInputDevices
-                            textRole: "description"
-                            Component.onCompleted: selectByDescription(appSettings.audioInputDevice)
-                            // The device list is re-enumerated on every dialog
-                            // open (and was CONSTANT before, so it never
-                            // changed at all). When it does change, currentIndex
-                            // points into the OLD list and would silently select
-                            // a different device, so re-resolve by name.
-                            onModelChanged: selectByDescription(appSettings.audioInputDevice)
-                            onActivated: {
-                                var item = model[currentIndex];
-                                appSettings.audioInputDevice = item.description === "System default" ? "" : item.description;
-                            }
-                            function selectByDescription(desc) {
-                                for (var i = 0; i < model.length; i++) {
-                                    if ((desc === "" && model[i].description === "System default")
-                                        || model[i].description === desc) {
-                                        currentIndex = i;
-                                        return;
-                                    }
+                        Column {
+                            spacing: 2
+                            ThemedComboBox {
+                                id: inputCombo
+                                implicitWidth: 260
+                                model: appSettings.audioInputDevices
+                                textRole: "description"
+                                Component.onCompleted: selectByDescription(appSettings.audioInputDevice)
+                                // The list is re-enumerated on every dialog open
+                                // AND whenever QMediaDevices reports a change, so
+                                // it can now move while the dialog is open — which
+                                // is the whole point: a Bluetooth headset that
+                                // connects right now should appear right now. When
+                                // it moves, currentIndex points into the OLD list
+                                // and would silently select a different device, so
+                                // re-resolve.
+                                onModelChanged: selectByDescription(appSettings.audioInputDevice)
+                                onActivated: {
+                                    var item = model[currentIndex];
+                                    // The id rides along as a tie-breaker for
+                                    // devices that share a description; the
+                                    // description stays the stored key.
+                                    appSettings.selectAudioInputDevice(
+                                        item.systemDefault ? "" : item.description,
+                                        item.systemDefault ? "" : item.id);
                                 }
-                                currentIndex = 0;
+                                // "" means "follow the system default", which is
+                                // the flagged first entry. Matched on the flag and
+                                // not on the label, because the label now carries
+                                // the current default's name inside it.
+                                function selectByDescription(desc) {
+                                    for (var i = 0; i < model.length; i++) {
+                                        if ((desc === "" && model[i].systemDefault === true)
+                                            || (desc !== "" && model[i].description === desc)) {
+                                            currentIndex = i;
+                                            return;
+                                        }
+                                    }
+                                    currentIndex = 0;
+                                }
+                            }
+                            // What the pipeline is ACTUALLY on, which the
+                            // preference above does not tell you: it may say
+                            // "system default", or name a device that has since
+                            // gone away and been fallen back from. That gap is
+                            // exactly what someone who cannot hear anything is
+                            // trying to see.
+                            Text {
+                                width: 260
+                                visible: appSettings.audioInputInUse.length > 0
+                                text: "In use: " + appSettings.audioInputInUse
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.xs
+                                color: Theme.fg3
+                                elide: Text.ElideRight
                             }
                         }
                     }
@@ -486,31 +516,61 @@ Popup {
                     SettingRow {
                         title: "Output device"
                         description: "Speakers / headphones used for voice + notification sounds."
-                        ThemedComboBox {
-                            id: outputCombo
-                            implicitWidth: 260
-                            model: appSettings.audioOutputDevices
-                            textRole: "description"
-                            Component.onCompleted: selectByDescription(appSettings.audioOutputDevice)
-                            // The device list is re-enumerated on every dialog
-                            // open (and was CONSTANT before, so it never
-                            // changed at all). When it does change, currentIndex
-                            // points into the OLD list and would silently select
-                            // a different device, so re-resolve by name.
-                            onModelChanged: selectByDescription(appSettings.audioOutputDevice)
-                            onActivated: {
-                                var item = model[currentIndex];
-                                appSettings.audioOutputDevice = item.description === "System default" ? "" : item.description;
-                            }
-                            function selectByDescription(desc) {
-                                for (var i = 0; i < model.length; i++) {
-                                    if ((desc === "" && model[i].description === "System default")
-                                        || model[i].description === desc) {
-                                        currentIndex = i;
-                                        return;
-                                    }
+                        Column {
+                            spacing: 2
+                            ThemedComboBox {
+                                id: outputCombo
+                                implicitWidth: 260
+                                model: appSettings.audioOutputDevices
+                                textRole: "description"
+                                Component.onCompleted: selectByDescription(appSettings.audioOutputDevice)
+                                // The list is re-enumerated on every dialog open
+                                // AND whenever QMediaDevices reports a change, so
+                                // it can now move while the dialog is open — which
+                                // is the whole point: a Bluetooth headset that
+                                // connects right now should appear right now. When
+                                // it moves, currentIndex points into the OLD list
+                                // and would silently select a different device, so
+                                // re-resolve.
+                                onModelChanged: selectByDescription(appSettings.audioOutputDevice)
+                                onActivated: {
+                                    var item = model[currentIndex];
+                                    // The id rides along as a tie-breaker for
+                                    // devices that share a description; the
+                                    // description stays the stored key.
+                                    appSettings.selectAudioOutputDevice(
+                                        item.systemDefault ? "" : item.description,
+                                        item.systemDefault ? "" : item.id);
                                 }
-                                currentIndex = 0;
+                                // "" means "follow the system default", which is
+                                // the flagged first entry. Matched on the flag and
+                                // not on the label, because the label now carries
+                                // the current default's name inside it.
+                                function selectByDescription(desc) {
+                                    for (var i = 0; i < model.length; i++) {
+                                        if ((desc === "" && model[i].systemDefault === true)
+                                            || (desc !== "" && model[i].description === desc)) {
+                                            currentIndex = i;
+                                            return;
+                                        }
+                                    }
+                                    currentIndex = 0;
+                                }
+                            }
+                            // What the pipeline is ACTUALLY on, which the
+                            // preference above does not tell you: it may say
+                            // "system default", or name a device that has since
+                            // gone away and been fallen back from. That gap is
+                            // exactly what someone who cannot hear anything is
+                            // trying to see.
+                            Text {
+                                width: 260
+                                visible: appSettings.audioOutputInUse.length > 0
+                                text: "In use: " + appSettings.audioOutputInUse
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.xs
+                                color: Theme.fg3
+                                elide: Text.ElideRight
                             }
                         }
                     }
@@ -534,7 +594,7 @@ Popup {
                     InfoBanner {
                         icon: "signal"
                         tint: Theme.warn
-                        text: "Device changes apply the next time you join a voice channel — leave and rejoin to pick up a new selection mid-call."
+                        text: "Picking a specific device here applies the next time you join a voice channel. \"System default\" is live: BSFChat follows the system output as you change it mid-call, and falls back to it if the device you chose disappears."
                     }
 
                     SectionHeader {

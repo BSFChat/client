@@ -1,5 +1,6 @@
 #include "core/Settings.h"
 #include "core/AppProfile.h"
+#include "core/AudioDeviceStatus.h"
 #include "core/ReadState.h"
 #include "core/ReleaseSelection.h"
 #include "util/FileLogger.h"
@@ -35,6 +36,21 @@ Settings::Settings(QObject* parent)
 {
     if (verboseVoiceLogging())
         applyVerboseVoiceLogging(true);
+
+    // Live device lists. Re-enumerating only on dialog open was one open
+    // too late for the case that prompted this: a Bluetooth headset that
+    // connects while the dialog is already open never appeared at all.
+    m_mediaDevices = new QMediaDevices(this);
+    connect(m_mediaDevices, &QMediaDevices::audioInputsChanged,
+            this, &Settings::audioDevicesChanged);
+    connect(m_mediaDevices, &QMediaDevices::audioOutputsChanged,
+            this, &Settings::audioDevicesChanged);
+    // On macOS these also fire when the system DEFAULT moves, so the
+    // "System default (…)" entry relabels itself as the user switches
+    // output in Control Centre.
+    connect(&bsfchat::AudioDeviceStatus::instance(),
+            &bsfchat::AudioDeviceStatus::changed,
+            this, &Settings::audioInUseChanged);
 }
 
 bool Settings::verboseVoiceLogging() const
@@ -392,16 +408,29 @@ void Settings::setWindowVisibility(int v) {
 }
 
 namespace {
-QVariantList devicesToList(const QList<QAudioDevice>& devices) {
+QVariantList devicesToList(const QList<QAudioDevice>& devices,
+                           const QAudioDevice& defaultDevice) {
     QVariantList out;
+    // First entry: "follow the system default", stored as an empty
+    // string. Naming the device it currently resolves to is the whole
+    // difference between a row that tells the user nothing and one that
+    // answers "so which device IS it using?" on sight.
+    //
+    // `systemDefault` rather than matching the label text: the label now
+    // contains a device name, so QML can no longer recognise this entry
+    // by comparing it against a literal.
     QVariantMap def;
-    def["description"] = QStringLiteral("System default");
+    def["description"] = defaultDevice.isNull()
+        ? QStringLiteral("System default")
+        : QStringLiteral("System default (%1)").arg(defaultDevice.description());
     def["id"] = QString();
+    def["systemDefault"] = true;
     out.append(def);
     for (const auto& d : devices) {
         QVariantMap m;
         m["description"] = d.description();
         m["id"] = QString::fromLatin1(d.id());
+        m["systemDefault"] = false;
         out.append(m);
     }
     return out;
@@ -409,10 +438,34 @@ QVariantList devicesToList(const QList<QAudioDevice>& devices) {
 } // namespace
 
 QVariantList Settings::audioInputDevices() const {
-    return devicesToList(QMediaDevices::audioInputs());
+    return devicesToList(QMediaDevices::audioInputs(),
+                         QMediaDevices::defaultAudioInput());
 }
 QVariantList Settings::audioOutputDevices() const {
-    return devicesToList(QMediaDevices::audioOutputs());
+    return devicesToList(QMediaDevices::audioOutputs(),
+                         QMediaDevices::defaultAudioOutput());
+}
+
+QString Settings::audioInputInUse() const {
+    return bsfchat::AudioDeviceStatus::instance().inputInUse();
+}
+QString Settings::audioOutputInUse() const {
+    return bsfchat::AudioDeviceStatus::instance().outputInUse();
+}
+
+void Settings::selectAudioInputDevice(const QString& description,
+                                      const QString& id) {
+    // Hint first, then the authoritative key — so a reader that wakes on
+    // audioInputDeviceChanged never sees the new description paired with
+    // the previous device's id.
+    m_settings.setValue("audio/inputDeviceId", id);
+    setAudioInputDevice(description);
+}
+
+void Settings::selectAudioOutputDevice(const QString& description,
+                                       const QString& id) {
+    m_settings.setValue("audio/outputDeviceId", id);
+    setAudioOutputDevice(description);
 }
 
 void Settings::refreshAudioDevices()

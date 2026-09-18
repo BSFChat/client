@@ -215,6 +215,23 @@ if(BSFCHAT_ENABLE_VOICE)
     set_tests_properties(test_audio_handoff PROPERTIES TIMEOUT 120)
 endif()
 
+# Live audio device selection: which device the voice pipeline should be
+# on, given the saved preference, the current device set and what is
+# already open — plus the debounce that collapses a Bluetooth connect's
+# notification burst into one restart.
+#
+# The bug this covers is that the answer used to be computed once, at
+# join, so AirPods that connected mid-call were never used even after
+# macOS made them the system default. Re-deciding on every change means
+# the decision has to be pure, which is also the only way to test
+# "switches back when the headset reappears" on a box with no sound card.
+# Header-only, no Qt Multimedia, no audio thread — so it runs everywhere,
+# including builds configured without BSFCHAT_ENABLE_VOICE.
+qt_add_executable(test_audio_device_policy test_audio_device_policy.cpp)
+target_include_directories(test_audio_device_policy PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_audio_device_policy PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_audio_device_policy COMMAND test_audio_device_policy)
+
 # Mesh-vs-SFU transport selection. Pure logic — no transport instances,
 # no libdatachannel, no LiveKit SDK, no audio device, no network — so it
 # runs everywhere including builds configured without BSFCHAT_ENABLE_VOICE.

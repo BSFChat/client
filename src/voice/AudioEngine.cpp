@@ -1,7 +1,10 @@
 #include "voice/AudioEngine.h"
 #include "voice/AudioPacketQueue.h"
 #include "voice/AudioWorker.h"
+#include "core/AudioDeviceStatus.h"
 
+#include <QAudioDevice>
+#include <QMediaDevices>
 #include <QThread>
 
 using bsfchat::voice::AudioPacketQueue;
@@ -10,6 +13,45 @@ AudioEngine::AudioEngine(QObject* parent)
     : QObject(parent)
     , m_queue(std::make_shared<AudioPacketQueue>())
 {
+    // The subscription nothing in this client had. Without it the
+    // device in use was whatever startDevices() resolved at join and
+    // stayed that way: AirPods connected mid-call were never used even
+    // once macOS had made them the system default, and a device that
+    // disappeared left a dead sink. See the "Device enumeration" note in
+    // the header for why this instance lives on this thread.
+    m_mediaDevices = new QMediaDevices(this);
+    connect(m_mediaDevices, &QMediaDevices::audioInputsChanged,
+            this, [this]() { pushDeviceSnapshot(true, true); });
+    connect(m_mediaDevices, &QMediaDevices::audioOutputsChanged,
+            this, [this]() { pushDeviceSnapshot(false, true); });
+}
+
+void AudioEngine::pushDeviceSnapshot(bool input, bool live)
+{
+    AudioWorker* worker = m_worker;
+    // No pipeline to reconfigure. start() seeds the worker itself, from
+    // the device set as it stands at that moment.
+    if (!worker) return;
+
+    const auto dir = input ? AudioWorker::Direction::Input
+                           : AudioWorker::Direction::Output;
+    const QList<QAudioDevice> devices = input ? QMediaDevices::audioInputs()
+                                              : QMediaDevices::audioOutputs();
+    const QAudioDevice def = input ? QMediaDevices::defaultAudioInput()
+                                   : QMediaDevices::defaultAudioOutput();
+
+    // A captured lambda rather than a slot invocation, deliberately:
+    // QAudioDevice is not registered as a queued-connection metatype,
+    // and capturing by value means it never has to be.
+    if (live) {
+        QMetaObject::invokeMethod(worker, [worker, dir, devices, def]() {
+            worker->onSystemDevicesChanged(dir, devices, def);
+        }, Qt::QueuedConnection);
+    } else {
+        QMetaObject::invokeMethod(worker, [worker, dir, devices, def]() {
+            worker->setDeviceSnapshot(dir, devices, def);
+        }, Qt::BlockingQueuedConnection);
+    }
 }
 
 AudioEngine::~AudioEngine() {
@@ -50,11 +92,26 @@ bool AudioEngine::start() {
             this, &AudioEngine::micLevelChanged, Qt::QueuedConnection);
     connect(m_worker, &AudioWorker::peerLevelChanged,
             this, &AudioEngine::peerLevelChanged, Qt::QueuedConnection);
+    // Queued for the same reason as the rest: AudioDeviceStatus is read
+    // by a QML binding and must only ever be touched from here.
+    connect(m_worker, &AudioWorker::deviceInUseChanged, this,
+            [](bool input, const QString& description) {
+                auto& status = bsfchat::AudioDeviceStatus::instance();
+                if (input) status.setInputInUse(description);
+                else       status.setOutputInUse(description);
+            }, Qt::QueuedConnection);
 
     // TimeCritical is the honest description of a 20ms deadline. Where
     // the platform refuses the hint (Linux without CAP_SYS_NICE) Qt
     // warns and runs at default priority, which is what we had before.
     m_thread->start(QThread::TimeCriticalPriority);
+
+    // Seed the worker's view of the device set before it opens anything,
+    // so the join resolves through exactly the same policy as every
+    // later change rather than through a parallel path that only runs
+    // once.
+    pushDeviceSnapshot(true, false);
+    pushDeviceSnapshot(false, false);
 
     // Open the devices on the audio thread and wait for the verdict.
     // Blocking is safe in both directions: this thread is not the audio
@@ -111,6 +168,13 @@ void AudioEngine::teardownThread() {
 
     // Anything the network pushed while we were shutting down.
     if (m_queue) m_queue->clear();
+
+    // The settings dialog's "In use:" captions now describe a pipeline
+    // that no longer exists. Cleared from here rather than from
+    // stopDevices(), whose queued report would arrive after the worker
+    // is gone and be discarded.
+    bsfchat::AudioDeviceStatus::instance().setInputInUse(QString());
+    bsfchat::AudioDeviceStatus::instance().setOutputInUse(QString());
 }
 
 void AudioEngine::setMuted(bool muted) {
