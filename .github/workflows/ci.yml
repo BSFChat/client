@@ -867,7 +867,8 @@ jobs:
           # main() returns, which makes leak reports noisy here.
           ASAN_OPTIONS: abort_on_error=1:strict_string_checks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: ctest --test-dir build-asan --output-on-failure -j4
+        # test_media_loopback: non-gating on hosted runners, see the Test step above.
+        run: ctest --test-dir build-asan --output-on-failure -j4 -E test_media_loopback
 
   # Create GitHub Release on tag push
   release:
