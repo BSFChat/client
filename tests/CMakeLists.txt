@@ -575,12 +575,28 @@ add_test(NAME test_media_cache_key COMMAND test_media_cache_key)
 qt_add_executable(test_redaction_result
     test_redaction_result.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
     ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
 )
 target_include_directories(test_redaction_result PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_redaction_result
     PRIVATE Qt6::Core Qt6::Network Qt6::Test bsfchat_protocol nlohmann_json::nlohmann_json)
 add_test(NAME test_redaction_result COMMAND test_redaction_result)
+
+# Central 401 detection: one dead-token reply from ANY authenticated endpoint
+# has to end the session, and the watcher that spots it must not eat the body
+# its call site is about to read. Drives the real MatrixClient against a stub
+# homeserver because the ordering hazard only exists against a real reply.
+qt_add_executable(test_token_rejection
+    test_token_rejection.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
+)
+target_include_directories(test_token_rejection PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_token_rejection
+    PRIVATE Qt6::Core Qt6::Network Qt6::Test bsfchat_protocol nlohmann_json::nlohmann_json)
+add_test(NAME test_token_rejection COMMAND test_token_rejection)
 
 # 401 classification: the client had no dead-token handling at all, so an
 # expired access token showed as a permanent "Reconnecting…".
@@ -591,6 +607,16 @@ qt_add_executable(test_auth_error
 target_include_directories(test_auth_error PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_auth_error PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_auth_error COMMAND test_auth_error)
+
+# Recovery from a server-side token purge (the 2026-09-19 incident): what a
+# "reconnect" is allowed to do once the homeserver has rejected our token,
+# and the reversibility that keeps the expired-session surface from latching.
+# Header-only (src/net/SessionAuth.h) — no connection, no event loop, no
+# network, and deliberately no GUI.
+qt_add_executable(test_session_auth test_session_auth.cpp)
+target_include_directories(test_session_auth PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_session_auth PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_session_auth COMMAND test_session_auth)
 
 qt_add_executable(test_server_discovery
     test_server_discovery.cpp

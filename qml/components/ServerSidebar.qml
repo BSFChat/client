@@ -423,7 +423,24 @@ Rectangle {
         ServerCtxItem {
             text: "Reconnect"
             iconName: "signal"
+            // Hidden once the homeserver has rejected our token: a redial
+            // cannot help, and offering it there is what sent people round
+            // the loop in the 2026-09-19 purge. "Sign in again" replaces it.
+            visible: !(serverContextMenu.conn
+                       && serverContextMenu.conn.needsReauth === true)
             onTriggered: serverManager.reconnectServer(serverContextMenu.serverIndex)
+        }
+        ServerCtxItem {
+            text: serverContextMenu.conn
+                  && serverContextMenu.conn.reauthInProgress
+                  ? "Signing in…" : "Sign in again"
+            iconName: "signal"
+            visible: !!serverContextMenu.conn
+                     && serverContextMenu.conn.needsReauth === true
+            enabled: visible
+                     && !serverContextMenu.conn.reauthInProgress
+            onTriggered: serverManager.reauthenticateServer(
+                             serverContextMenu.serverIndex)
         }
 
         MenuSeparator {
