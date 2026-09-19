@@ -568,6 +568,46 @@ private slots:
         }
     }
 
+    // An expired session must offer a way out of itself.
+    //
+    // On 2026-09-19 the homeserver's access_tokens table was purged. Clients
+    // did the right thing all the way up to the last step: they recognised
+    // the 401, stopped retrying, and put up a banner reading "Your session
+    // has expired. Sign in again to reconnect." There was nothing to press.
+    // The only affordance in the product — the server rail's Reconnect —
+    // rebuilt the connection carrying the same dead token, so the server
+    // logged ZERO login attempts while the user retried, and the documented
+    // recovery became "remove the server and add it back".
+    //
+    // The state machine is pinned in test_session_auth and the dispatch in
+    // ServerManager::reconnectServer. This is the half only the QML can get
+    // wrong: a banner that states the problem and offers no action.
+    void expiredSessionBannerOffersAWayOut()
+    {
+        for (const char* file : {"/components/MessageView.qml",
+                                 "/components/ServerSidebar.qml"}) {
+            const QString src = readQml(QLatin1String(file));
+            QVERIFY2(src.contains(QLatin1String("needsReauth")),
+                     qPrintable(QStringLiteral("%1 no longer notices an expired session")
+                                    .arg(QLatin1String(file))));
+            QVERIFY2(src.contains(QLatin1String("serverManager.reauthenticateServer(")),
+                     qPrintable(QStringLiteral(
+                                    "%1 shows the expired state with no way to act on it")
+                                    .arg(QLatin1String(file))));
+        }
+
+        // And the rail must not keep offering the retry that cannot work:
+        // the Reconnect item hides itself once the token has been rejected.
+        const QString rail = readQml(QStringLiteral("/components/ServerSidebar.qml"));
+        const qsizetype at = rail.indexOf(QLatin1String("serverManager.reconnectServer("));
+        QVERIFY2(at >= 0, "the Reconnect item is gone — check this test, not the code");
+        // Its visibility rule is the one mentioning needsReauth ABOVE it.
+        const QString before = rail.left(at);
+        QVERIFY2(before.lastIndexOf(QLatin1String("needsReauth")) > before.lastIndexOf(
+                     QLatin1String("ServerCtxItem {")),
+                 "Reconnect is still offered for a session only a login can fix");
+    }
+
     // The voice room's video has to stay in ONE component, instantiated
     // by ONE Repeater over the feed list.
     //

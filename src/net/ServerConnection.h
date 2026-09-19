@@ -8,6 +8,8 @@
 #include <QVariantList>
 #include <QString>
 #include <QTimer>
+
+#include "net/SessionAuth.h"
 #include <QVector>
 #include <functional>
 
@@ -62,6 +64,16 @@ class ServerConnection : public QObject {
     Q_PROPERTY(bool connected READ isConnected NOTIFY connectedChanged)
     Q_PROPERTY(int connectionStatus READ connectionStatus NOTIFY connectionStatusChanged)
     Q_PROPERTY(QString syncErrorMessage READ syncErrorMessage NOTIFY syncErrorMessageChanged)
+    // The homeserver has stopped accepting this connection's access token
+    // and only a fresh sign-in can revive it. Drives the "Sign in again"
+    // button; `reauthInProgress` is true only while the login round trip is
+    // actually running, so the button can disable itself instead of
+    // launching a second browser flow.
+    //
+    // Deliberately NOT named sessionExpired — that is a signal on this
+    // class, and a property sharing the name would be ambiguous in QML.
+    Q_PROPERTY(bool needsReauth READ needsReauth NOTIFY sessionAuthChanged)
+    Q_PROPERTY(bool reauthInProgress READ reauthInProgress NOTIFY sessionAuthChanged)
     Q_PROPERTY(bool hasUnread READ hasUnread NOTIFY hasUnreadChanged)
     Q_PROPERTY(QString activeVoiceRoomId READ activeVoiceRoomId NOTIFY activeVoiceRoomIdChanged)
     Q_PROPERTY(bool voiceMuted READ voiceMuted NOTIFY voiceMutedChanged)
@@ -156,9 +168,20 @@ public:
     QString activeRoomName() const { return m_activeRoomName; }
     QString activeRoomTopic() const { return m_activeRoomTopic; }
 
-    // 0 = disconnected, 1 = connected/syncing, 2 = reconnecting
+    // 0 = disconnected, 1 = connected/syncing, 2 = reconnecting,
+    // 3 = session expired (see needsReauth)
     int connectionStatus() const { return m_connectionStatus; }
     QString syncErrorMessage() const { return m_syncErrorMessage; }
+    bool needsReauth() const { return m_auth.needsReauth(); }
+    bool reauthInProgress() const { return m_auth.isReauthenticating(); }
+    // What a "reconnect" request should do about this connection. Owned by
+    // SessionAuth so the rule — a token the server has already rejected can
+    // never be retried into working — is pinned by tests/test_session_auth.cpp
+    // rather than re-derived at the call site. ServerManager dispatches on it.
+    bsfchat::client::ReconnectAction reconnectAction() const
+    {
+        return m_auth.actionForReconnect();
+    }
     bool hasUnread() const { return m_hasUnread; }
 
     QString activeVoiceRoomId() const { return m_activeVoiceRoomId; }
@@ -390,6 +413,20 @@ public:
     Q_INVOKABLE void resetUnreadForRoom(const QString& roomId);
 
     Q_INVOKABLE void loginWithOidc(const QString& providerUrl);
+    // Discard whatever credential we are holding and run the server's
+    // current login flow from scratch. The only thing that recovers a
+    // session the homeserver has purged.
+    //
+    // The identity provider is re-read from GET /login on every attempt and
+    // never taken from the persisted server entry. That field is written
+    // once, at first login, from the identity-first flow's URL — so an entry
+    // created by a password login holds an empty string, and any server that
+    // later changes IdP strands every client that stored the old one.
+    Q_INVOKABLE void beginReauth();
+    // Second half of beginReauth() for a server that advertises only
+    // m.login.password: the UI collects the credentials and hands them back.
+    Q_INVOKABLE void reauthWithPassword(const QString& username,
+                                        const QString& password);
     // Returns the identity-provider base URL (e.g. "https://id.bsfchat.com")
     // for the "Manage Account" link. Empty if OIDC was never used.
     Q_INVOKABLE QString identityProviderUrl() const;
@@ -658,6 +695,16 @@ signals:
     // revoked, signed out elsewhere). Sync has been stopped; only a fresh
     // login can revive this connection. ServerManager surfaces it.
     void sessionExpired(const QString& serverUrl);
+    // needsReauth / reauthInProgress moved.
+    void sessionAuthChanged();
+    // beginReauth() found no OIDC flow but the server does take passwords.
+    // The UI must collect them and call reauthWithPassword().
+    void reauthPasswordRequired(const QString& serverUrl, const QString& userId);
+    // A sign-in attempt failed. Distinct from loginFailed on purpose:
+    // ServerManager answers loginFailed by REMOVING the connection, which is
+    // right for a server being added and catastrophic for one the user has
+    // been using for months.
+    void reauthFailed(const QString& error);
     void connectionStatusChanged();
     void syncErrorMessageChanged();
     void activeRoomTopicChanged();
@@ -757,6 +804,18 @@ signals:
 private:
     void startSync();
     void processSyncResponse(const bsfchat::SyncResponse& response);
+    // The homeserver rejected our bearer token, from /sync or from any other
+    // authenticated request. Idempotent: the ten in-flight requests that all
+    // 401 at once raise one banner between them.
+    void onAccessTokenRejected(const QString& errorBody);
+    // Shared tail of every successful login (password, OIDC, re-auth):
+    // install the new credential, clear the expired state, full-sync.
+    void applyLoginResponse(const bsfchat::LoginResponse& response);
+    // Arm (and first disarm) the one-shot handlers for a login reply.
+    void awaitLoginReply();
+    void onLoginAttemptFailed(const QString& error);
+    // Return to a clearable expired state and tell the UI why.
+    void failReauth(const QString& error);
     // `userId`'s latest membership value in every synced room, keyed by room id
     // (empty string where the room has no member event for them). The input to
     // bsfchat::client::moderationRooms(); split out so the three moderation
@@ -801,6 +860,13 @@ private:
     bool m_connected = false;
     // 0=disconnected, 1=connected, 2=reconnecting, 3=session expired
     int m_connectionStatus = 0;
+    // Where we stand with the homeserver's opinion of our token, and what a
+    // reconnect is allowed to do about it. See net/SessionAuth.h.
+    bsfchat::client::SessionAuth m_auth;
+    // Set when a login replaces the credential: the next startSync() must
+    // not re-seed itself from the cached `since`, which belongs to the
+    // session the server just retired.
+    bool m_forceFullSync = false;
     QString m_syncErrorMessage;
     bool m_hasUnread = false;
     bool m_viewingVoiceRoom = false;

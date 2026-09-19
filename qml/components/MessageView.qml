@@ -199,6 +199,39 @@ Rectangle {
                     // dark-mode near-black and the light-mode white.
                     color: Theme.onAccent
                 }
+
+                // The way out. Until this existed the banner named the
+                // problem ("Sign in again to reconnect") and offered nothing
+                // to press: the only affordance in the product was the server
+                // rail's Reconnect, which redialled /sync with the same dead
+                // token and never reached /login. Recovery meant removing the
+                // server and adding it back.
+                Button {
+                    id: reauthButton
+                    Layout.alignment: Qt.AlignVCenter
+                    visible: serverManager.activeServer !== null
+                             && serverManager.activeServer.needsReauth
+                    enabled: visible
+                             && !serverManager.activeServer.reauthInProgress
+                    text: (serverManager.activeServer
+                           && serverManager.activeServer.reauthInProgress)
+                          ? "Signing in…" : "Sign in again"
+                    padding: 0
+                    background: null
+                    contentItem: Text {
+                        text: reauthButton.text
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        font.weight: Theme.fontWeight.semibold
+                        font.underline: reauthButton.enabled
+                                        && reauthButton.hovered
+                        color: Theme.onAccent
+                        opacity: reauthButton.enabled ? 1.0 : 0.6
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    onClicked: serverManager.reauthenticateServer(
+                                   serverManager.activeServerIndex)
+                }
             }
 
             Behavior on Layout.preferredHeight {

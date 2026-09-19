@@ -1,5 +1,6 @@
 #include "net/MatrixClient.h"
 
+#include "net/AuthError.h"
 #include "util/MediaUrl.h"
 
 #include <QDateTime>
@@ -45,7 +46,8 @@ QNetworkReply* MatrixClient::makeRequest(const QString& method, const QString& p
     QNetworkRequest request(buildUrl(path));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
 
-    if (!m_accessToken.isEmpty()) {
+    const bool authenticated = !m_accessToken.isEmpty();
+    if (authenticated) {
         request.setRawHeader("Authorization", ("Bearer " + m_accessToken).toUtf8());
     }
 
@@ -59,7 +61,27 @@ QNetworkReply* MatrixClient::makeRequest(const QString& method, const QString& p
     } else if (method == "DELETE") {
         reply = m_nam.deleteResource(request);
     }
+    if (authenticated) watchForTokenRejection(reply);
     return reply;
+}
+
+void MatrixClient::watchForTokenRejection(QNetworkReply* reply)
+{
+    if (!reply) return;
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        if (reply->error() == QNetworkReply::NoError) return;
+        const int status =
+            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (status != 401) return;
+        // peek(), not readAll(): this slot is connected first and therefore
+        // runs first, and draining the buffer here would hand every existing
+        // call site an empty body. Matrix error objects are a few hundred
+        // bytes; the cap is there so a misbehaving proxy cannot make us copy
+        // a large page.
+        const QString body = QString::fromUtf8(reply->peek(4096));
+        if (!AuthError::indicatesDeadAccessToken(body)) return;
+        emit accessTokenRejected(body);
+    });
 }
 
 void MatrixClient::login(const QString& username, const QString& password)
@@ -192,6 +214,7 @@ void MatrixClient::sync(const QString& since, int timeout)
     request.setTransferTimeout((timeout + 30000));
 
     auto* reply = m_nam.get(request);
+    watchForTokenRejection(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
         auto data = reply->readAll();
@@ -773,6 +796,7 @@ void MatrixClient::uploadMedia(const QString& uploadId, const QByteArray& data,
     }
 
     auto* reply = m_nam.post(request, data);
+    watchForTokenRejection(reply);
     connect(reply, &QNetworkReply::uploadProgress, this,
         [this, filename](qint64 sent, qint64 total) {
             if (total <= 0) return;
@@ -1270,6 +1294,7 @@ void MatrixClient::getRoomMessages(const QString& roomId, const QString& from,
     }
 
     auto* reply = m_nam.get(request);
+    watchForTokenRejection(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         auto data = reply->readAll();

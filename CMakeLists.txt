@@ -429,6 +429,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/InfoBanner.qml
         qml/components/MemberList.qml
         qml/components/LoginDialog.qml
+        qml/components/ReauthDialog.qml
         qml/components/UserProfileCard.qml
         qml/components/UserSettings.qml
         qml/components/ServerSettings.qml

@@ -397,10 +397,31 @@ signals:
 
     void loginFlowsResult(const QJsonArray& flows);
 
+    // The homeserver answered 401 with a dead-token errcode to a request we
+    // sent WITH a bearer header. Emitted once per such reply from whichever
+    // endpoint saw it first, so the connection learns its session is over
+    // from any request rather than only from /sync.
+    //
+    // Before this, the 401 handling hung off SyncLoop alone. Every other
+    // subsystem kept driving the dead token and reported the rejection on
+    // its own surface — in the 2026-09-19 purge the first thing the user
+    // saw was a raw {"errcode":"M_UNKNOWN_TOKEN",...} toast from the voice
+    // join path, not a prompt to sign in.
+    void accessTokenRejected(const QString& errorBody);
+
 private:
     QNetworkReply* makeRequest(const QString& method, const QString& path,
                                 const QByteArray& body = {});
     QUrl buildUrl(const QString& path) const;
+    // Watch one authenticated reply for a 401 that says our token is dead.
+    //
+    // Connected BEFORE the caller's own finished handler, and reads the body
+    // with peek() rather than readAll() precisely because of that ordering —
+    // readAll here would drain the buffer and hand every existing call site
+    // an empty response. Call it only for requests that actually carried an
+    // Authorization header; a 401 from /login is a wrong password, not a
+    // revoked session.
+    void watchForTokenRejection(QNetworkReply* reply);
     // Writes the MSC3952 `m.mentions` block into `content` (no-op for an empty
     // list). Shared by the plain-send, reply and edit paths — see the
     // definition for why the @room sentinel is handled here and not by callers.

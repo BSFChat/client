@@ -239,6 +239,12 @@ ApplicationWindow {
         id: loginDialog
     }
 
+    // Re-authentication for a server already in the sidebar. Opens only for
+    // a password-flow server; an OIDC server signs in through the browser.
+    ReauthDialog {
+        id: reauthDialog
+    }
+
     // (The duplicate loginError / loginSuccess handlers that lived here
     // were removed with D-H5: LoginDialog subscribes to the same two
     // signals itself, so this block was a second writer of the same
@@ -490,6 +496,13 @@ ApplicationWindow {
         }
         function onIdentityLoginFailed(error) {
             toastError("Identity login failed: " + error);
+        }
+        function onReauthFailed(index, serverUrl, error) {
+            // The browser-based OIDC flow has no dialog of its own to report
+            // through; ReauthDialog shows the password case inline. A failed
+            // sign-in has to say so somewhere, or the button looks broken and
+            // the banner still reads "Signing in…".
+            if (!reauthDialog.opened) toastError("Couldn't sign in: " + error);
         }
     }
     Connections {

@@ -110,6 +110,13 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             } catch (...) {
                 // Leave msg = raw; already user-readable-ish.
             }
+            // Once the session is known dead the composer's failure has one
+            // cause, already named in the banner. Say that instead of the
+            // Matrix error object.
+            if (m_auth.shouldSuppressSubsystemError()) {
+                msg = tr("Your session has expired. Sign in again to reconnect.");
+                kind = QStringLiteral("error");
+            }
             emit sendFeedback(msg, kind);
         });
 
@@ -144,27 +151,27 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         // A dead access token is not a network problem and retrying it can
         // never succeed. Tokens expire after 90 days and are revoked on
         // logout/ban/device removal, so this is a state real users reach.
-        // Before this branch the loop retried the same dead bearer token
-        // every 60 s forever behind a "Reconnecting…" banner, with no hint
-        // that signing in again was the only way out.
         if (AuthError::indicatesDeadAccessToken(error)) {
-            if (m_connectionStatus == 3) return; // already surfaced
-            m_syncLoop->stop();
-            m_connected = false;
-            m_connectionStatus = 3; // session expired
-            m_syncErrorMessage =
-                tr("Your session has expired. Sign in again to reconnect.");
-            emit connectedChanged();
-            emit connectionStatusChanged();
-            emit syncErrorMessageChanged();
-            emit sessionExpired(m_serverUrl);
+            onAccessTokenRejected(error);
             return;
         }
+        // A reconnect banner must never paint over the sign-in prompt: the
+        // sync loop is stopped while the session is expired, but a request
+        // that was already in flight can still land here afterwards.
+        if (m_auth.needsReauth()) return;
         m_connectionStatus = 2; // reconnecting
         m_syncErrorMessage = error;
         emit connectionStatusChanged();
         emit syncErrorMessageChanged();
     });
+
+    // The same verdict from anywhere else. /sync is not the only request
+    // carrying the bearer token, and in the 2026-09-19 purge the first thing
+    // the user saw was a raw {"errcode":"M_UNKNOWN_TOKEN",...} toast from the
+    // voice join path — a subsystem still driving a credential the client
+    // already knew was dead.
+    connect(m_client, &MatrixClient::accessTokenRejected, this,
+            &ServerConnection::onAccessTokenRejected);
 
     // Surface state-event write failures. Each write path that optimistically
     // updates local caches stashes an undo closure in m_pendingStateUndo;
@@ -562,8 +569,34 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
     m_deviceId = deviceId;
     m_displayName = displayName;
     m_client->setAccessToken(accessToken);
+
+    // A restored entry with no token is one whose token the homeserver
+    // already rejected — ServerManager blanks the stored copy on expiry so a
+    // relaunch cannot quietly redial with a credential we know is dead.
+    // Firing /sync anyway would just buy a second 401 behind a
+    // "Reconnecting…" banner, which is the shape of the bug this whole
+    // change exists to remove. Go straight to the state the user can act on.
+    if (accessToken.isEmpty()) {
+        m_auth.noteTokenRejected();
+        m_connected = false;
+        m_connectionStatus = 3;
+        m_syncErrorMessage =
+            tr("Your session has expired. Sign in again to reconnect.");
+        emit connectedChanged();
+        emit connectionStatusChanged();
+        emit syncErrorMessageChanged();
+        emit sessionAuthChanged();
+        emit sessionExpired(m_serverUrl);
+        return;
+    }
+
     m_connected = true;
     m_connectionStatus = 1;
+    // Optimistic — nothing has synced yet — but it used to be set without
+    // telling anybody, so a rebuilt connection sat showing whatever the dead
+    // one last said until the first reply landed.
+    emit connectedChanged();
+    emit connectionStatusChanged();
     startSync();
 
     // Persisted ids can be stale or corrupt (a doubled "@" once shipped
@@ -601,30 +634,73 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
     m_client->whoami();
 }
 
+void ServerConnection::awaitLoginReply()
+{
+    // Qt::SingleShotConnection disconnects a slot AFTER it fires, so the arm
+    // that did not fire stays connected: a failed attempt leaves a live
+    // loginSuccess handler behind, a successful one leaves a live loginError
+    // handler. Adding a second login to the life of one connection — which
+    // is exactly what re-authentication is — therefore double-reported.
+    // Drop both arms before re-arming.
+    disconnect(m_client, &MatrixClient::loginSuccess, this, nullptr);
+    disconnect(m_client, &MatrixClient::loginError, this, nullptr);
+
+    QObject::connect(m_client, &MatrixClient::loginSuccess, this,
+        [this](const bsfchat::LoginResponse& resp) { applyLoginResponse(resp); },
+        Qt::SingleShotConnection);
+    QObject::connect(m_client, &MatrixClient::loginError, this,
+        [this](const QString& error) { onLoginAttemptFailed(error); },
+        Qt::SingleShotConnection);
+}
+
+void ServerConnection::applyLoginResponse(const bsfchat::LoginResponse& resp)
+{
+    m_userId = QString::fromStdString(resp.user_id);
+    m_accessToken = QString::fromStdString(resp.access_token);
+    m_deviceId = QString::fromStdString(resp.device_id);
+    // Only on a first login. Overwriting it on re-auth would replace a real
+    // profile name with the MXID every time a session is renewed.
+    if (m_displayName.isEmpty()) m_displayName = m_userId;
+    m_client->setAccessToken(m_accessToken);
+
+    m_auth.noteAuthenticated();
+    m_connected = true;
+    m_connectionStatus = 1;
+    m_syncErrorMessage.clear();
+
+    // The stream position belonged to the session the server just replaced.
+    // SyncLoop would eventually abandon a rejected `since` on its own, but
+    // paying for one full sync at sign-in is cheaper and deterministic than
+    // three failed polls and a backoff on the way out of an outage.
+    m_forceFullSync = true;
+    m_syncLoop->setSince(QString());
+    if (m_cacheWired) m_cache->clearSyncToken();
+
+    emit userIdChanged();
+    emit displayNameChanged();
+    emit connectedChanged();
+    emit connectionStatusChanged();
+    emit syncErrorMessageChanged();
+    emit sessionAuthChanged();
+    emit loginSucceeded();
+    startSync();
+}
+
+void ServerConnection::onLoginAttemptFailed(const QString& error)
+{
+    if (m_auth.isReauthenticating()) {
+        // Deliberately NOT loginFailed: ServerManager answers that by
+        // removing the connection, which is correct for a server being added
+        // and destroys a server the user has been on for months.
+        failReauth(error);
+        return;
+    }
+    emit loginFailed(error);
+}
+
 void ServerConnection::login(const QString& username, const QString& password)
 {
-    QObject::connect(m_client, &MatrixClient::loginSuccess, this,
-        [this](const bsfchat::LoginResponse& resp) {
-            m_userId = QString::fromStdString(resp.user_id);
-            m_accessToken = QString::fromStdString(resp.access_token);
-            m_deviceId = QString::fromStdString(resp.device_id);
-            m_displayName = m_userId;
-            m_client->setAccessToken(m_accessToken);
-            m_connected = true;
-            m_connectionStatus = 1;
-            emit userIdChanged();
-            emit displayNameChanged();
-            emit connectedChanged();
-            emit connectionStatusChanged();
-            emit loginSucceeded();
-            startSync();
-        }, Qt::SingleShotConnection);
-
-    QObject::connect(m_client, &MatrixClient::loginError, this,
-        [this](const QString& error) {
-            emit loginFailed(error);
-        }, Qt::SingleShotConnection);
-
+    awaitLoginReply();
     m_client->login(username, password);
 }
 
@@ -664,44 +740,164 @@ QString ServerConnection::identityProviderUrl() const
 
 void ServerConnection::loginWithOidc(const QString& providerUrl)
 {
+    // "Fail loudly" — startLogin("") opens no browser, makes no request and
+    // reports nothing, so a caller holding an empty provider URL produced a
+    // button that visibly did nothing. beginReauth() re-reads the provider
+    // from the server precisely so this cannot happen, but the guard belongs
+    // here too: this method is Q_INVOKABLE and ServerManager calls it with a
+    // value parsed out of a login-flows reply.
+    if (providerUrl.isEmpty()) {
+        onLoginAttemptFailed(
+            tr("This server did not say where to sign in "
+               "(no identity provider in its login flows)."));
+        return;
+    }
+
     if (!m_identityClient) {
         m_identityClient = new IdentityClient(this);
+    } else {
+        // Same asymmetry as awaitLoginReply(): the SingleShotConnection that
+        // did not fire is still attached, so a second OIDC attempt on one
+        // connection — i.e. every re-authentication — would report twice.
+        m_identityClient->disconnect(this);
     }
 
     connect(m_identityClient, &IdentityClient::loginCompleted, this,
         [this](const QString& idToken, const QString& /*accessToken*/, const QString& /*refreshToken*/) {
-            // Use the id_token to authenticate with the Matrix server
-            QObject::connect(m_client, &MatrixClient::loginSuccess, this,
-                [this](const bsfchat::LoginResponse& resp) {
-                    m_userId = QString::fromStdString(resp.user_id);
-                    m_accessToken = QString::fromStdString(resp.access_token);
-                    m_deviceId = QString::fromStdString(resp.device_id);
-                    m_displayName = m_userId;
-                    m_client->setAccessToken(m_accessToken);
-                    m_connected = true;
-                    m_connectionStatus = 1;
-                    emit userIdChanged();
-                    emit displayNameChanged();
-                    emit connectedChanged();
-                    emit connectionStatusChanged();
-                    emit loginSucceeded();
-                    startSync();
-                }, Qt::SingleShotConnection);
-
-            QObject::connect(m_client, &MatrixClient::loginError, this,
-                [this](const QString& error) {
-                    emit loginFailed(error);
-                }, Qt::SingleShotConnection);
-
+            // Use the id_token to authenticate with the Matrix server.
+            awaitLoginReply();
             m_client->loginWithToken(idToken);
         }, Qt::SingleShotConnection);
 
     connect(m_identityClient, &IdentityClient::loginFailed, this,
         [this](const QString& error) {
-            emit loginFailed(error);
+            onLoginAttemptFailed(error);
         }, Qt::SingleShotConnection);
 
     m_identityClient->startLogin(providerUrl);
+}
+
+void ServerConnection::onAccessTokenRejected(const QString& errorBody)
+{
+    Q_UNUSED(errorBody);
+    // Ten requests in flight all 401 at once; one banner between them.
+    if (!m_auth.noteTokenRejected()) return;
+
+    m_syncLoop->stop();
+    m_voicePollTimer->stop();
+
+    // Drop the credential here, not just in the UI. Everything downstream
+    // that used to keep the session wedged read it back out: rebuildConnection
+    // copied old->accessToken() onto the replacement object, and settings kept
+    // it across relaunches. A token the server has rejected is not a
+    // credential, and nothing should be able to find one here to retry.
+    m_accessToken.clear();
+    m_client->setAccessToken(QString());
+
+    m_connected = false;
+    m_connectionStatus = 3; // session expired
+    m_syncErrorMessage =
+        tr("Your session has expired. Sign in again to reconnect.");
+    clearVoiceError();
+
+    emit connectedChanged();
+    emit connectionStatusChanged();
+    emit syncErrorMessageChanged();
+    emit sessionAuthChanged();
+    emit sessionExpired(m_serverUrl);
+}
+
+void ServerConnection::failReauth(const QString& error)
+{
+    // Back to Expired, never to a terminal state: the button has to work
+    // again. The version this replaced could only be cleared by removing the
+    // server from the sidebar and adding it back.
+    m_auth.noteReauthFailed();
+    m_connected = false;
+    m_connectionStatus = 3;
+    m_syncErrorMessage =
+        tr("Your session has expired. Sign in again to reconnect.");
+    emit connectedChanged();
+    emit connectionStatusChanged();
+    emit syncErrorMessageChanged();
+    emit sessionAuthChanged();
+    emit reauthFailed(error);
+}
+
+void ServerConnection::beginReauth()
+{
+    if (!m_auth.beginReauth()) return;  // one browser flow at a time
+
+    // Anything still holding the old credential goes quiet first.
+    m_syncLoop->stop();
+    m_voicePollTimer->stop();
+    if (inVoiceChannel()) leaveVoiceChannel();
+    m_accessToken.clear();
+    m_client->setAccessToken(QString());
+    m_connected = false;
+    m_connectionStatus = 3;
+    m_syncErrorMessage = tr("Signing in…");
+    clearVoiceError();
+    emit connectedChanged();
+    emit connectionStatusChanged();
+    emit syncErrorMessageChanged();
+    emit sessionAuthChanged();
+
+    // Ask the server how to sign in, every time, instead of trusting a value
+    // stored at first login. The persisted identityProviderUrl is written
+    // from the identity-first flow's URL and is empty for any entry created
+    // by a password login; a server that switches IdP, or switches from
+    // passwords to OIDC, invalidates every stored copy at once. The answer
+    // is one cheap unauthenticated GET away and is always current.
+    auto* probe = new MatrixClient(this);
+    probe->setHomeserver(m_serverUrl);
+
+    connect(probe, &MatrixClient::loginFlowsResult, this,
+        [this, probe](const QJsonArray& flows) {
+            probe->deleteLater();
+            QString providerUrl;
+            bool passwordFlow = false;
+            for (const auto& v : flows) {
+                const QJsonObject flow = v.toObject();
+                const QString type = flow.value(QStringLiteral("type")).toString();
+                if (type == QLatin1String("m.login.token")) {
+                    const QString p =
+                        flow.value(QStringLiteral("identity_provider")).toString();
+                    if (!p.isEmpty()) providerUrl = p;
+                } else if (type == QLatin1String("m.login.password")) {
+                    passwordFlow = true;
+                }
+            }
+            if (!providerUrl.isEmpty()) {
+                loginWithOidc(providerUrl);
+                return;
+            }
+            if (passwordFlow) {
+                emit reauthPasswordRequired(m_serverUrl, m_userId);
+                return;
+            }
+            failReauth(tr("This server doesn't offer a sign-in method this "
+                          "client supports."));
+        }, Qt::SingleShotConnection);
+
+    connect(probe, &MatrixClient::loginError, this,
+        [this, probe](const QString& error) {
+            probe->deleteLater();
+            failReauth(tr("Couldn't ask %1 how to sign in: %2")
+                           .arg(m_serverUrl, error));
+        }, Qt::SingleShotConnection);
+
+    probe->getLoginFlows();
+}
+
+void ServerConnection::reauthWithPassword(const QString& username,
+                                           const QString& password)
+{
+    // Only reachable as the answer to reauthPasswordRequired. Outside that
+    // window this would be a silent second login on a healthy connection.
+    if (!m_auth.isReauthenticating()) return;
+    awaitLoginReply();
+    m_client->login(username, password);
 }
 
 void ServerConnection::disconnectFromServer()
@@ -724,6 +920,13 @@ void ServerConnection::startSync()
     // because a wrong resume is far worse than a slow one: an incremental
     // sync carries only state that *changed*, so a client that resumes
     // without a matching snapshot comes up with an empty sidebar.
+    //
+    // A login has just replaced the credential, so the cached `since`
+    // belongs to the session the server retired. Skip the RESUME, not the
+    // cache: the snapshot store still has to be opened and wired, or this
+    // process would persist nothing for the next launch.
+    const bool mayResume = !m_forceFullSync;
+    m_forceFullSync = false;
     if (!m_cacheWired && !m_userId.isEmpty()
         && qEnvironmentVariableIntValue("BSFCHAT_NO_SYNC_CACHE") == 0
         && m_cache->open(m_userId, m_serverUrl)) {
@@ -735,7 +938,8 @@ void ServerConnection::startSync()
         // appearing rather than arriving as a delta. Bound the exposure.
         constexpr qint64 kMaxSnapshotAgeMs = 7LL * 24 * 60 * 60 * 1000;
         bsfchat::SyncResponse hydrated;
-        if (LocalCache::isValidSyncToken(token)
+        if (mayResume
+            && LocalCache::isValidSyncToken(token)
             && ageMs >= 0 && ageMs < kMaxSnapshotAgeMs
             && m_cache->buildHydrationSync(hydrated)) {
             m_hydratingFromCache = true;
@@ -2074,6 +2278,13 @@ void ServerConnection::setLocalMediaState(bool screenSharing, bool cameraOn)
 void ServerConnection::setVoiceError(const QString& message)
 {
     if (message.isEmpty()) return;
+    // Every voice REST call carries the same bearer token /sync does, so a
+    // purged session fails them all — and the join path reports its failure
+    // by putting the server's raw error body in a toast. That is how the
+    // 2026-09-19 incident actually presented: a wall of
+    // {"errcode":"M_UNKNOWN_TOKEN",...} rather than a prompt to sign in.
+    // The banner is already saying the true thing.
+    if (m_auth.shouldSuppressSubsystemError()) return;
     m_voiceError = message;
     emit voiceErrorChanged();
     m_voiceErrorTimer->start();
@@ -2627,6 +2838,17 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
         m_syncErrorMessage.clear();
         emit connectionStatusChanged();
         emit syncErrorMessageChanged();
+    }
+    // A reply the server authenticated is the strongest possible evidence
+    // the credential is live, whichever way we came by it. Cheap to assert
+    // every sync; the guard keeps it from spamming QML.
+    if (m_auth.needsReauth()) {
+        m_auth.noteAuthenticated();
+        emit sessionAuthChanged();
+    }
+    if (!m_connected) {
+        m_connected = true;
+        emit connectedChanged();
     }
 
     // Top-level presence block — fold each m.presence event into

@@ -76,7 +76,18 @@ public:
     // Tear down and rebuild the connection with its current URL +
     // credentials — the "it's stuck, kick it" affordance for a server
     // that won't reconnect on its own.
+    //
+    // Now dispatches on the connection's own verdict rather than always
+    // rebuilding. It used to copy the existing access token onto the
+    // replacement object unconditionally, so on 2026-09-19 — when the
+    // server's access_tokens table was purged — the only "try again" button
+    // in the product redialled /sync with the same dead bearer token and
+    // never once touched /login.
     Q_INVOKABLE void reconnectServer(int index);
+    // Discard the connection's credential and run the server's current
+    // login flow. The recovery path for a purged, expired or revoked
+    // session; safe to call on a healthy connection too.
+    Q_INVOKABLE void reauthenticateServer(int index);
 
     bool viewingDms() const { return m_viewingDms; }
     Q_INVOKABLE void setViewingDms(bool v);
@@ -163,6 +174,13 @@ signals:
     void serverProbed(const QString& requestedUrl, const QString& resolvedUrl,
                       const QString& outcome, const QString& providerUrl,
                       bool redirected, const QString& note);
+    // Relayed from the connection at `index`, which has no way to tell the
+    // UI which sidebar row it is. Manager-level so the re-auth dialog can
+    // subscribe once, at startup, instead of being pre-bound to a
+    // particular connection before the flow that needs it has started.
+    void reauthPasswordRequired(int index, const QString& serverUrl,
+                                const QString& userId);
+    void reauthFailed(int index, const QString& serverUrl, const QString& error);
     void identityLoginComplete(const QStringList& serverUrls);
     void identityLoginFailed(const QString& error);
     void viewingDmsChanged();
@@ -178,6 +196,12 @@ private:
     void addServerWithOidcResolved(const QString& url);
 
     void onLoginSuccess(ServerConnection* conn);
+    // Write this connection's live credentials into its settings row,
+    // updating in place when the row exists. onLoginSuccess used to APPEND
+    // unconditionally, which is fine exactly once — a second login on the
+    // same connection (i.e. any re-authentication) left the new token in a
+    // duplicate row while the restore path kept reading the dead one.
+    void persistCredentials(ServerConnection* conn);
     void onLoginFailed(ServerConnection* conn, const QString& error);
     // Replace m_connections[index] with a fresh ServerConnection to
     // `url`, carrying over the old connection's credentials. Emits

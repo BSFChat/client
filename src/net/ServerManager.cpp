@@ -2,6 +2,7 @@
 #include "net/HttpFetch.h"
 #include "net/VoiceQuit.h"
 #include "net/ServerConnection.h"
+#include "net/SessionAuth.h"
 #include "net/MatrixClient.h"
 #include "model/RoomListModel.h"
 #include "model/ServerListModel.h"
@@ -308,8 +309,28 @@ void ServerManager::updateServerUrl(int index, const QString& newUrl)
 
 void ServerManager::reconnectServer(int index)
 {
-    if (index < 0 || index >= m_roster.count()) return;
-    rebuildConnection(index, m_roster.connections()[index]->serverUrl());
+    auto* conn = m_roster.at(index);
+    if (!conn) return;
+
+    // The decision itself lives in SessionAuth (net/SessionAuth.h) so the
+    // rule that matters — a token the homeserver has already rejected can
+    // never be retried into working — is pinned by tests/test_session_auth.cpp
+    // instead of being re-derived here.
+    switch (conn->reconnectAction()) {
+    case bsfchat::client::ReconnectAction::Ignore:
+        return;                                  // a login is already running
+    case bsfchat::client::ReconnectAction::Reauthenticate:
+        conn->beginReauth();
+        return;
+    case bsfchat::client::ReconnectAction::RetryWithToken:
+        rebuildConnection(index, conn->serverUrl());
+        return;
+    }
+}
+
+void ServerManager::reauthenticateServer(int index)
+{
+    if (auto* conn = m_roster.at(index)) conn->beginReauth();
 }
 
 void ServerManager::rebuildConnection(int index, const QString& url)
@@ -506,6 +527,47 @@ void ServerManager::wireConnection(ServerConnection* conn)
     connect(conn, &ServerConnection::activeRoomIdChanged, this,
         [this, conn]() { syncViewingDmsForConnection(this, conn); });
 
+    // Persist credentials on every successful authentication, whoever
+    // started it: the add-server flow, a registration, or a
+    // re-authentication on a connection restored from settings. Wired here
+    // rather than in the add-server path because the restore path has no
+    // add-server path to wire.
+    connect(conn, &ServerConnection::loginSucceeded, this,
+            [this, conn]() { persistCredentials(conn); });
+    connect(conn, &ServerConnection::registerSucceeded, this,
+            [this, conn]() { persistCredentials(conn); });
+
+    // The homeserver has rejected this connection's token. Blank the stored
+    // copy so a relaunch cannot quietly redial with a credential we already
+    // know is dead — which is what made the expired state survive restarts
+    // and leave "remove and re-add the server" as the only way out.
+    connect(conn, &ServerConnection::sessionExpired, this,
+        [this, conn](const QString&) {
+            const int idx = m_roster.indexOf(conn);
+            if (idx < 0) return;
+            auto saved = m_settings->savedServers();
+            if (idx >= saved.size()) return;
+            if (saved[idx].accessToken.isEmpty()) return;
+            auto entry = saved[idx];
+            entry.accessToken.clear();
+            m_settings->updateServer(idx, entry);
+        });
+
+    // Re-auth needs a sidebar index to be actionable from QML; the
+    // connection does not know its own.
+    connect(conn, &ServerConnection::reauthPasswordRequired, this,
+        [this, conn](const QString& serverUrl, const QString& userId) {
+            const int idx = m_roster.indexOf(conn);
+            if (idx < 0) return;
+            emit reauthPasswordRequired(idx, serverUrl, userId);
+        });
+    connect(conn, &ServerConnection::reauthFailed, this,
+        [this, conn](const QString& error) {
+            const int idx = m_roster.indexOf(conn);
+            if (idx < 0) return;
+            emit reauthFailed(idx, conn->serverUrl(), error);
+        });
+
     // Settings plumbed in so the mic gate can read voiceMode / PTT.
     conn->setSettings(m_settings);
 }
@@ -545,14 +607,11 @@ void ServerManager::onLoginSuccess(ServerConnection* conn)
     m_serverListModel->updateServer(index, serverDisplayName, conn->serverUrl());
     emit loginSuccess(conn->serverUrl());
 
-    Settings::ServerEntry entry;
-    entry.url = conn->serverUrl();
-    entry.userId = conn->userId();
-    entry.accessToken = conn->accessToken();
-    entry.deviceId = conn->deviceId();
-    entry.displayName = conn->displayName();
-    entry.identityProviderUrl = m_identityUrl;
-    m_settings->addServer(entry);
+    // The credentials themselves are written by persistCredentials(), wired
+    // in wireConnection() so EVERY connection's login is persisted — not just
+    // the ones added in this process. The version that lived here ran only
+    // for freshly-added servers and only ever appended, so a restored
+    // connection that re-authenticated saved nothing at all.
 
     // If we have a live identity session, push this server to the user's
     // membership list so next launch auto-restores it. Fire and forget — if
@@ -560,6 +619,47 @@ void ServerManager::onLoginSuccess(ServerConnection* conn)
     // not worth failing the whole login over.
     if (m_identityApi && !m_identityAccessToken.isEmpty()) {
         m_identityApi->registerServer(conn->serverUrl(), serverDisplayName);
+    }
+}
+
+void ServerManager::persistCredentials(ServerConnection* conn)
+{
+    const int index = m_roster.indexOf(conn);
+    if (index < 0) return;
+
+    Settings::ServerEntry entry;
+    entry.url = conn->serverUrl();
+    entry.userId = conn->userId();
+    entry.accessToken = conn->accessToken();
+    entry.deviceId = conn->deviceId();
+    entry.displayName = conn->displayName();
+    // The provider this connection actually signed in against, falling back
+    // to the identity-first flow's URL. It used to be m_identityUrl
+    // unconditionally, which is empty for every entry created by a password
+    // login or a per-server OIDC add.
+    //
+    // Read this before concluding an empty value here explains an auth
+    // failure — it does not, and the shape of the field invites exactly that
+    // inference. NOTHING READS THE PERSISTED FIELD. Its only would-be
+    // consumer is the "Manage Account" link (ChannelList.qml), which calls
+    // ServerConnection::identityProviderUrl() — the LIVE IdentityClient, not
+    // this row — and hard-codes id.bsfchat.com when that is empty. And
+    // beginReauth() deliberately re-reads the flows from the server on every
+    // attempt, because a provider stored once at first login goes stale the
+    // moment a deployment changes IdP. A wrong or empty value here cannot
+    // strand anybody. (Wiring it up for the Manage Account link, so a
+    // self-hosted IdP survives a restart, is a separate change.)
+    const QString provider = conn->identityProviderUrl();
+    entry.identityProviderUrl = provider.isEmpty() ? m_identityUrl : provider;
+
+    auto saved = m_settings->savedServers();
+    if (index < saved.size()) {
+        // In place. Appending would leave the live token in a duplicate row
+        // while the restore path kept reading the dead one from this row.
+        entry.identityRefreshToken = saved[index].identityRefreshToken;
+        m_settings->updateServer(index, entry);
+    } else {
+        m_settings->addServer(entry);
     }
 }
 
