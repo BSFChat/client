@@ -24,7 +24,21 @@ public:
         // role exists so the UI can tell WHY a name is what it is: an admin needs
         // "clear nickname" to be distinguishable from "reset to nothing", and a
         // profile card wants to show the global name underneath.
-        NicknameRole
+        NicknameRole,
+        // True when this member is a bot account, for the BOT badge.
+        //
+        // Carried by the member event itself, in `bsfchat.bot`, exactly like
+        // the nickname above — so it arrives with the row rather than after
+        // it, and there is nothing to reconcile. The server derives the flag
+        // from the user id at read time and writes it on every member event
+        // it serves (stored state, /members, initial and incremental sync,
+        // leaves included), and scrubs any forged value out of client-sent
+        // content, so what lands here is both complete and trustworthy.
+        //
+        // ABSENT MEANS FALSE. The server never writes `false`, so a missing
+        // key is the normal encoding for "human" and must not be read as
+        // "unknown" — there is nothing to go and ask.
+        IsBotRole
     };
 
     explicit MemberListModel(QObject* parent = nullptr);
@@ -50,6 +64,11 @@ public:
     // Re-resolve every member's display name from the cache and refresh.
     void refreshDisplayNames();
 
+    // Whether a member is a bot, for QML that has a user id but not a row.
+    // Invokable for the same reason displayNameForUser is — QML calls it
+    // directly. False for anyone not in this room's roster.
+    Q_INVOKABLE bool isBot(const QString& userId) const;
+
 private:
     int findMember(const QString& userId) const;
 
@@ -59,6 +78,7 @@ private:
         QString avatarUrl;
         QString membership;
         QString nickname;
+        bool isBot = false;
     };
 
     QVector<MemberEntry> m_members;

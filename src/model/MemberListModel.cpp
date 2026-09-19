@@ -25,6 +25,7 @@ QVariant MemberListModel::data(const QModelIndex& index, int role) const
     case AvatarUrlRole: return member.avatarUrl;
     case MembershipRole: return member.membership;
     case NicknameRole: return member.nickname;
+    case IsBotRole: return member.isBot;
     default: return {};
     }
 }
@@ -51,6 +52,12 @@ void MemberListModel::refreshDisplayNames()
     emit dataChanged(index(0), index(m_members.size() - 1), {DisplayNameRole});
 }
 
+bool MemberListModel::isBot(const QString& userId) const
+{
+    const int idx = findMember(userId);
+    return idx >= 0 && m_members[idx].isBot;
+}
+
 QHash<int, QByteArray> MemberListModel::roleNames() const
 {
     return {
@@ -58,7 +65,8 @@ QHash<int, QByteArray> MemberListModel::roleNames() const
         {DisplayNameRole, "displayName"},
         {AvatarUrlRole, "avatarUrl"},
         {MembershipRole, "membership"},
-        {NicknameRole, "nickname"}
+        {NicknameRole, "nickname"},
+        {IsBotRole, "isBot"}
     };
 }
 
@@ -87,6 +95,10 @@ void MemberListModel::processEvent(const bsfchat::RoomEvent& event)
     // is only for telling the two apart in admin UI.
     QString nickname = QString::fromStdString(
         event.content.data.value(std::string("bsfchat.nickname"), std::string()));
+    // Absent is the server's encoding for "human" — it never writes `false` —
+    // so a default of false is the whole of the rule, and there is no third
+    // "not known yet" state to represent.
+    bool isBotAccount = event.content.data.value(std::string("bsfchat.bot"), false);
 
     int idx = findMember(userId);
 
@@ -97,16 +109,18 @@ void MemberListModel::processEvent(const bsfchat::RoomEvent& event)
             m_members[idx].avatarUrl = avatarUrl;
             m_members[idx].membership = membership;
             m_members[idx].nickname = nickname;
+            m_members[idx].isBot = isBotAccount;
             // U-M15: an empty role vector means "every role changed", which
             // makes every delegate binding on this row re-evaluate. Name the
-            // four fields this branch can actually move.
+            // five fields this branch can actually move.
             emit dataChanged(index(idx), index(idx),
                              {DisplayNameRole, AvatarUrlRole,
-                              MembershipRole, NicknameRole});
+                              MembershipRole, NicknameRole, IsBotRole});
         } else {
             // Add new member
             beginInsertRows(QModelIndex(), m_members.size(), m_members.size());
-            m_members.append({userId, displayName, avatarUrl, membership, nickname});
+            m_members.append({userId, displayName, avatarUrl, membership,
+                              nickname, isBotAccount});
             endInsertRows();
         }
     } else if (membership == "leave" || membership == "ban") {

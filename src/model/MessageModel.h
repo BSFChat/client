@@ -51,7 +51,17 @@ public:
         ThreadRootIdRole,   // If non-empty, this message is part of that thread
         ThreadReplyCountRole, // Count of m.thread replies anchored on this message
         MentionsMeRole,     // m.mentions.user_ids contains the local user
-        MentionsRoomRole    // m.mentions.room — an @room broadcast
+        MentionsRoomRole,   // m.mentions.room — an @room broadcast
+        // True when this message's SENDER is a bot account, for the BOT
+        // badge on the bubble.
+        //
+        // Stamped onto the row at append time from the bot-user cache and
+        // re-resolved by refreshBotFlags(), exactly as senderDisplayName is.
+        // A message event carries no `bsfchat.bot` of its own — the flag
+        // rides on m.room.member — so the sender's membership is the source
+        // and this model reads it through ServerConnection the same way it
+        // reads display names.
+        SenderIsBotRole
     };
 
     // A live, role-preserving view of one thread over this model (U-M8),
@@ -237,6 +247,18 @@ public:
     // can resolve @user:host → "Josh" at render time. Not owned.
     void setDisplayNameCache(const QMap<QString, QString>* cache) { m_dnCache = cache; }
 
+    // The set of user ids known to be bots — ServerConnection's, not owned,
+    // populated from m.room.member content across every room. Same
+    // arrangement and same reasoning as the display-name cache above: a
+    // member event for a room this model is not showing still tells us
+    // something about a sender whose messages it is.
+    void setBotUserCache(const QSet<QString>* cache) { m_botUsers = cache; }
+    // Re-resolve every loaded row's flag from that cache, emitting only the
+    // rows that actually moved — the same coalescing refreshDisplayNames
+    // does, and for the same reason: this runs whenever a member event
+    // arrives, which in a busy room is often.
+    void refreshBotFlags();
+
     void appendEvent(const bsfchat::RoomEvent& event, const QString& ownUserId);
     void appendEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);
     void prependEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);
@@ -282,6 +304,7 @@ private:
         QString eventId;
         QString sender;
         QString senderDisplayName;
+        bool senderIsBot = false;
         QString body;
         QString formattedBody;
         qint64 timestamp = 0;
@@ -372,6 +395,7 @@ private:
     QString m_prevBatchToken;
     bool m_loadingHistory = false;
     const QMap<QString, QString>* m_dnCache = nullptr;
+    const QSet<QString>* m_botUsers = nullptr;
     const QString* m_accessToken = nullptr;
 
     MessageEntry eventToEntry(const bsfchat::RoomEvent& event, const QString& ownUserId) const;
@@ -399,6 +423,7 @@ public:
     QString resolveMediaUrl(const QString& mxcUri) const;
 private:
     QString resolveDisplayName(const QString& userId) const;
+    bool resolveIsBot(const QString& userId) const;
     QVariantList buildReactionsList(const MessageEntry& entry) const;
     // Apply a single reaction record to the target message. Returns the row
     // index so the caller can emit dataChanged, or -1 if the target wasn't

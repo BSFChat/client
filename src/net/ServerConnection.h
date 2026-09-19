@@ -31,6 +31,7 @@ class LocalCache;
 class RoomListModel;
 class MessageModel;
 class MemberListModel;
+class BotAdminModel;
 #ifdef BSFCHAT_VOICE_ENABLED
 class VoiceEngine;
 class NotificationSounds;
@@ -56,6 +57,17 @@ class ServerConnection : public QObject {
     Q_PROPERTY(RoomListModel* roomListModel READ roomListModel CONSTANT)
     Q_PROPERTY(MessageModel* messageModel READ messageModel CONSTANT)
     Q_PROPERTY(MemberListModel* memberListModel READ memberListModel CONSTANT)
+    // View-model behind the bot management dialog. Always present, even for a
+    // user with no MANAGE_BOTS — the dialog binds to it unconditionally and is
+    // itself gated on canManageBots(), so a null here would only move the
+    // permission check into every binding inside it.
+    Q_PROPERTY(BotAdminModel* botAdminModel READ botAdminModel CONSTANT)
+    // Bumped whenever the set of known bot user ids changes, so QML that
+    // asks isBot(userId) directly (the profile card, which has a user id and
+    // no model row) re-evaluates. The member list and the message list do not
+    // need it — they carry the flag on their rows and are repainted by the
+    // models' own dataChanged.
+    Q_PROPERTY(int botFlagsGeneration READ botFlagsGeneration NOTIFY botFlagsChanged)
     Q_PROPERTY(QString activeRoomId READ activeRoomId NOTIFY activeRoomIdChanged)
     Q_PROPERTY(QString activeRoomName READ activeRoomName NOTIFY activeRoomNameChanged)
     Q_PROPERTY(QString activeRoomTopic READ activeRoomTopic NOTIFY activeRoomTopicChanged)
@@ -243,10 +255,12 @@ public:
     QJsonArray serverRoles() const { return m_serverRoles; }
     QVariantList categorizedRooms() const { return m_categorizedRooms; }
     int permissionsGeneration() const { return m_permissionsGeneration; }
+    int botFlagsGeneration() const { return m_botFlagsGeneration; }
 
     RoomListModel* roomListModel() const { return m_roomListModel; }
     MessageModel* messageModel() const { return m_messageModel; }
     MemberListModel* memberListModel() const { return m_memberListModel; }
+    BotAdminModel* botAdminModel() const { return m_botAdminModel; }
     MatrixClient* client() const { return m_client; }
 
     // Set credentials (for restoring from settings)
@@ -468,6 +482,19 @@ public:
     // does not imply the right to rename yourself.
     Q_INVOKABLE bool canChangeNickname() const;
     Q_INVOKABLE bool canManageNicknames() const;
+    // MANAGE_BOTS, at SERVER scope for the same reason as the two above: a bot
+    // belongs to the server, not to a channel, and the server evaluates the
+    // flag with no room. Passing a room id here would let a per-channel
+    // override open a dialog whose every request the server then refuses.
+    Q_INVOKABLE bool canManageBots() const;
+
+    // ── Bot identity ──────────────────────────────────────────────────────
+
+    // Whether `userId` is a bot account. Never asks the network and never
+    // can: the flag rides in `bsfchat.bot` on every m.room.member event the
+    // server serves, so knowing a user exists on this server is the same as
+    // knowing whether they are a bot. Safe from a paint-time binding.
+    Q_INVOKABLE bool isBot(const QString& userId) const;
     Q_INVOKABLE int channelSlowmode(const QString& roomId) const;
 
     // Assign/unassign roles for a user (absolute list). Server-side requires MANAGE_ROLES.
@@ -708,6 +735,9 @@ signals:
     void myPowerLevelChanged();
     void serverRolesChanged();
     void permissionsChanged();
+    // A bot flag was learned or changed. Coalesced to once per event-loop
+    // turn — see flushBotFlagRepaint().
+    void botFlagsChanged();
     void categorizedRoomsChanged();
     void bannedMembersChanged();
     void serverMembersChanged();
@@ -867,6 +897,26 @@ public:
     // Global userId → display name, populated from all m.room.member events
     // across every room. MessageModel reads from this pointer.
     QMap<QString, QString> m_userDisplayNames;
+
+    // ── Bot identity state ────────────────────────────────────────────────
+    //
+    // Every user id this connection has seen a `bsfchat.bot` on, populated
+    // from m.room.member content across every room — the direct analogue of
+    // m_userDisplayNames above, and fed from the same places. MessageModel
+    // reads it through a pointer; MemberListModel does not need it, because
+    // the flag is on the member event that builds its rows.
+    //
+    // A SET rather than a map, because the server's encoding is set-or-erase:
+    // `bsfchat.bot` is written only for bots and never as `false`, so absence
+    // is the complete and only representation of "human". There is no third
+    // state, nothing to probe for, and nothing that arrives late.
+    QSet<QString> m_botUserIds;
+    BotAdminModel* m_botAdminModel = nullptr;
+    int m_botFlagsGeneration = 0;
+    // Fold one answer into the set and repaint if it moved. Takes the flag as
+    // read off a member event, a profile reply or /whoami — all three carry
+    // the same key with the same meaning.
+    void recordBotFlag(const QString& userId, bool isBot);
     void loadMembersForRoom(const QString& roomId);
 
     // Identity (OIDC)

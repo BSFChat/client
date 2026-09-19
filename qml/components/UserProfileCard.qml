@@ -205,15 +205,35 @@ Popup {
         // name, i.e. the nickname when one is set, so the card agrees with the
         // member list and message authors rather than showing the global name
         // while every other surface shows the nickname.
-        Text {
-            text: profileCard.effectiveName
-            font.family: Theme.fontSans
-            font.pixelSize: Theme.fontSize.xl
-            font.weight: Theme.fontWeight.semibold
-            font.letterSpacing: Theme.trackTight.xl
-            color: Theme.fg0
+        RowLayout {
             Layout.fillWidth: true
-            elide: Text.ElideRight
+            spacing: Theme.sp.s2
+
+            Text {
+                text: profileCard.effectiveName
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xl
+                font.weight: Theme.fontWeight.semibold
+                font.letterSpacing: Theme.trackTight.xl
+                color: Theme.fg0
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+            }
+
+            // The same pill the member list and message bubbles show. This is
+            // the one badge site with no model row behind it, so it asks the
+            // connection directly — and reads botFlagsGeneration first, or the
+            // Q_INVOKABLE subscribes to nothing and a card opened on a member
+            // whose first member event arrives a moment later never repaints.
+            BotBadge {
+                Layout.alignment: Qt.AlignVCenter
+                visible: {
+                    var s = serverManager.activeServer;
+                    if (!s) return false;
+                    s.botFlagsGeneration;
+                    return s.isBot(profileCard.userId);
+                }
+            }
         }
 
         // The account's own name, shown only when a nickname is masking it.

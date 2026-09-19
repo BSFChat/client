@@ -1366,6 +1366,7 @@ Rectangle {
                         highlighted: messageListView.highlightedEventId === model.eventId
                         sender: model.sender
                         senderDisplayName: model.senderDisplayName
+                        senderIsBot: model.senderIsBot === true
                         body: model.body
                         formattedBody: model.formattedBody
                         timestamp: model.timestamp

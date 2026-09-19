@@ -30,6 +30,7 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
     case EventIdRole: return msg.eventId;
     case SenderRole: return msg.sender;
     case SenderDisplayNameRole: return msg.senderDisplayName;
+    case SenderIsBotRole: return msg.senderIsBot;
     case BodyRole: return msg.body;
     case FormattedBodyRole: return msg.formattedBody;
     case TimestampRole: return msg.timestamp;
@@ -94,7 +95,8 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {ThreadRootIdRole, "threadRootId"},
         {ThreadReplyCountRole, "threadReplyCount"},
         {MentionsMeRole, "mentionsMe"},
-        {MentionsRoomRole, "mentionsRoom"}
+        {MentionsRoomRole, "mentionsRoom"},
+        {SenderIsBotRole, "senderIsBot"}
     };
 }
 
@@ -380,6 +382,7 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
     entry.eventId = QString::fromStdString(event.event_id);
     entry.sender = QString::fromStdString(event.sender);
     entry.senderDisplayName = resolveDisplayName(entry.sender);
+    entry.senderIsBot = resolveIsBot(entry.sender);
     entry.timestamp = event.origin_server_ts;
     entry.isOwnMessage = (entry.sender == ownUserId);
 
@@ -926,6 +929,35 @@ void MessageModel::clear()
     if (hadMore) emit hasMoreHistoryChanged();
     if (m_loadingHistory) { m_loadingHistory = false; emit loadingHistoryChanged(); }
     emit countChanged();
+}
+
+bool MessageModel::resolveIsBot(const QString& userId) const
+{
+    return m_botUsers && m_botUsers->contains(userId);
+}
+
+void MessageModel::refreshBotFlags()
+{
+    // Same shape as refreshDisplayNames below, and for the same reason: this
+    // is driven by member events, which arrive constantly, and repainting the
+    // whole model for a flag that moved on one sender would rebuild every
+    // delegate in a busy channel. In practice the flag moves once per bot per
+    // session — the first member event that names it — so this loop almost
+    // always finds nothing and emits nothing.
+    QVector<QPair<int, int>> ranges;
+    for (int i = 0; i < m_messages.size(); ++i) {
+        const bool resolved = resolveIsBot(m_messages[i].sender);
+        if (resolved == m_messages[i].senderIsBot) continue;
+        m_messages[i].senderIsBot = resolved;
+        if (!ranges.isEmpty() && ranges.last().second == i - 1) {
+            ranges.last().second = i;
+        } else {
+            ranges.append({i, i});
+        }
+    }
+    for (const auto& r : ranges) {
+        emit dataChanged(index(r.first), index(r.second), {SenderIsBotRole});
+    }
 }
 
 QString MessageModel::resolveDisplayName(const QString& userId) const

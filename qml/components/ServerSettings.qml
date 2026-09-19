@@ -99,6 +99,14 @@ Popup {
          hint: "Set your own nickname on this server, without changing your account's name elsewhere."},
         {key: "mannick",  label: "Manage nicknames",   flag: 0x1000,
          hint: "Set and clear other members' nicknames. Cannot rename anyone whose role is equal or higher."},
+        // MANAGE_BOTS (0x2000). Listed from the day it exists, because the
+        // paragraph above is the whole reason: the bot endpoints are gated on
+        // this flag server-side, and without a switch here the only account
+        // that could ever create a bot would be an Administrator — a role
+        // most servers hand out to nobody. That is not "a permission with no
+        // UI", it is a feature with no way in.
+        {key: "manbots",  label: "Manage bots",        flag: 0x2000,
+         hint: "Create bot accounts, rotate their tokens, and deactivate them. Server-wide."},
         {key: "admin",    label: "Administrator",      flag: 0x8000,
          hint: "Grants every permission and bypasses all channel overrides. Give sparingly."}
     ]
@@ -437,7 +445,14 @@ Popup {
                 }
 
                 Repeater {
-                    model: ["Overview", "Roles", "Members", "Channels", "Bans"]
+                    // Bots sits after Members because it is a roster of
+                    // accounts, not a server-shape setting, and before
+                    // Channels for the same reason. The section is present
+                    // for everyone but shows a "you don't have permission"
+                    // state without MANAGE_BOTS — hiding the row entirely
+                    // makes the feature undiscoverable to the owner who has
+                    // not yet granted themselves the flag.
+                    model: ["Overview", "Roles", "Members", "Bots", "Channels", "Bans"]
                     delegate: Rectangle {
                         Layout.fillWidth: true
                         height: 36
@@ -1938,7 +1953,25 @@ Popup {
                 }
             }
 
-            // ---- Channels (index 3) ----
+            // ---- Bots (index 3) ----
+            //
+            // The whole surface is BotManagerPane; this wrapper exists only
+            // so the StackLayout child order keeps matching the nav model
+            // above. Inserting here rather than appending is deliberate: the
+            // nav Repeater's `index` IS the StackLayout index, so the two
+            // lists are one ordering expressed twice and a page appended at
+            // the end while its nav row sat in the middle would silently
+            // show the wrong tab for everything after it.
+            Item {
+                BotManagerPane {
+                    anchors.fill: parent
+                    // A StackLayout gives every child the full size but only
+                    // makes the current one visible, which is exactly the
+                    // signal BotManagerPane's onVisibleChanged refresh wants.
+                }
+            }
+
+            // ---- Channels (index 4) ----
             Item {
                 ColumnLayout {
                     anchors.fill: parent
@@ -2208,7 +2241,7 @@ Popup {
                 }
             }
 
-            // ---- Bans (index 4) ----
+            // ---- Bans (index 5) ----
             // Aggregates banned users across every room we've synced. The
             // list is a snapshot — drop to empty-state when there's nothing
             // to show rather than rendering a blank ListView.

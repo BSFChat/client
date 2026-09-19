@@ -34,6 +34,21 @@ constexpr Flags kMentionEveryone = 1ULL << 9;
 constexpr Flags kManageServer    = 1ULL << 10;
 constexpr Flags kChangeNickname  = 1ULL << 11;
 constexpr Flags kManageNicknames = 1ULL << 12;
+// Create bot accounts, rotate their tokens and deactivate them. Evaluated at
+// SERVER scope only — a bot belongs to the server, not to a channel, so a
+// per-channel override must never light up the management dialog (see
+// effectivePermissions below for why that distinction is load-bearing).
+//
+// This mirror is the client's own copy of the bit, exactly as every flag
+// above it is. It is NOT waiting on protocol's Permissions.h to gain
+// kManageBots: this file has always carried the values rather than including
+// that header, so that the permission maths can be unit-tested without the
+// protocol library, and the comment at the top of the namespace is the
+// contract that keeps the two in step. If protocol ever assigns bit 13 to
+// something else, the server and this client disagree about every role's
+// permissions and the mismatch is not subtle — tests/test_bots.cpp pins the
+// value so the change cannot land quietly on this side.
+constexpr Flags kManageBots      = 1ULL << 13;
 constexpr Flags kAdministrator   = 1ULL << 15;
 
 constexpr Flags kEveryoneDefault =
@@ -43,7 +58,7 @@ constexpr Flags kAllFlags =
     kViewChannel | kSendMessages | kAttachFiles | kEmbedLinks | kManageMessages |
     kManageChannels | kManageRoles | kKickMembers | kBanMembers |
     kMentionEveryone | kManageServer | kChangeNickname | kManageNicknames |
-    kAdministrator;
+    kManageBots | kAdministrator;
 
 inline const char* kEveryoneRoleId = "everyone";
 

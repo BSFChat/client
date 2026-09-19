@@ -7,6 +7,7 @@
 #include "model/RoomListModel.h"
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
+#include "model/BotAdminModel.h"
 #include "util/MemberCache.h"
 #include "util/MentionBadge.h"
 #include "util/ModerationScope.h"
@@ -135,6 +136,58 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     m_messageModel->setDisplayNameCache(&m_userDisplayNames);
     m_memberListModel->setDisplayNameCache(&m_userDisplayNames);
     m_messageModel->setAccessTokenSource(&m_accessToken);
+    m_messageModel->setBotUserCache(&m_botUserIds);
+
+    m_botAdminModel = new BotAdminModel(this);
+    m_botAdminModel->hooks.listBots = [this]() { m_client->listBots(); };
+    m_botAdminModel->hooks.createBot = [this](const QString& localpart,
+                                              const QString& displayName,
+                                              const QString& description) {
+        m_client->createBot(localpart, displayName, description);
+    };
+    m_botAdminModel->hooks.rotateToken = [this](const QString& userId) {
+        m_client->rotateBotToken(userId);
+    };
+    m_botAdminModel->hooks.deactivateBot = [this](const QString& userId) {
+        m_client->deactivateBot(userId);
+    };
+
+    connect(m_client, &MatrixClient::botsListed, m_botAdminModel,
+            &BotAdminModel::onBotsListed);
+    connect(m_client, &MatrixClient::botCreated, m_botAdminModel,
+            &BotAdminModel::onBotCreated);
+    connect(m_client, &MatrixClient::botTokenRotated, m_botAdminModel,
+            &BotAdminModel::onTokenRotated);
+    connect(m_client, &MatrixClient::botDeactivated, m_botAdminModel,
+            &BotAdminModel::onBotDeactivated);
+    connect(m_client, &MatrixClient::botRequestFailed, this,
+            [this](const QString& operation, int status, const QString& error) {
+        // `status` is dropped on purpose rather than shown: the dialog's error
+        // line is read by a server owner, not a developer, and "403" next to
+        // "you do not have permission" is noise. It exists on the signal
+        // because a future caller may want to branch on it.
+        Q_UNUSED(status);
+        m_botAdminModel->onFailed(operation, error);
+    });
+
+    // A newly created bot has no member event anywhere yet — it joins nothing
+    // on creation — so this is the one moment the admin pane knows something
+    // the roster does not. Folding it in costs a set insert and means a bot
+    // invited to a channel seconds later is badged from its first frame.
+    //
+    // Nothing else is derived from the bot list: the list is gated on
+    // MANAGE_BOTS, and badging must work for members who hold nothing.
+    connect(m_botAdminModel, &BotAdminModel::botSetChanged, this, [this]() {
+        bool moved = false;
+        for (const QString& id : m_botAdminModel->listedBotUserIds()) {
+            if (!m_botUserIds.contains(id)) { m_botUserIds.insert(id); moved = true; }
+        }
+        if (moved) {
+            m_messageModel->refreshBotFlags();
+            ++m_botFlagsGeneration;
+            emit botFlagsChanged();
+        }
+    });
 
     // Connect sync signals
     connect(m_syncLoop, &SyncLoop::syncCompleted, this, &ServerConnection::processSyncResponse);
@@ -203,6 +256,14 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 
             QString userId = obj.value("state_key").toString();
             QString displayName = obj.value("content").toObject().value("displayname").toString();
+            // /members carries `bsfchat.bot` like every other member path.
+            // It has to be copied across explicitly because this handler
+            // rebuilds a RoomEvent field by field rather than parsing one,
+            // and a field left out here is a badge missing on every roster
+            // this path populates — which is the FIRST one a user sees on
+            // opening a channel.
+            const bool isBotAccount =
+                obj.value("content").toObject().value("bsfchat.bot").toBool(false);
 
             // Build a RoomEvent to feed into processEvent
             bsfchat::RoomEvent ev;
@@ -213,6 +274,8 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             if (!displayName.isEmpty()) {
                 ev.content.data["displayname"] = displayName.toStdString();
             }
+            if (isBotAccount) ev.content.data["bsfchat.bot"] = true;
+            recordBotFlag(userId, isBotAccount);
             m_memberListModel->processEvent(ev);
         }
     });
@@ -461,7 +524,13 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         m_client->getProfile(m_userId);
     });
 
-    connect(m_client, &MatrixClient::profileResult, this, [this](const QString& userId, const QString& displayName, const QString& avatarUrl) {
+    connect(m_client, &MatrixClient::profileResult, this, [this](const QString& userId, const QString& displayName, const QString& avatarUrl, bool isBot) {
+        // The bot flag first, and unconditionally: this reply is the answer to
+        // a probe whether or not the display name moved, and if it is not
+        // recorded here the user stays Unknown forever — the registry has
+        // already spent their one probe.
+        recordBotFlag(userId, isBot);
+
         // If this is our own profile, update local state
         if (userId == m_userId) {
             if (!displayName.isEmpty() && displayName != m_displayName) {
@@ -575,7 +644,13 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
     // server's canonical answer; old servers without the endpoint just
     // never reply.
     connect(m_client, &MatrixClient::whoamiResult, this,
-        [this](const QString& canonicalId) {
+        [this](const QString& canonicalId, bool isBot) {
+            // Free answer for our own identity — /whoami reports it and this
+            // runs on every session, so the one user whose badge appears in
+            // their own messages never costs a profile probe. Recorded before
+            // the early return below, which fires in the ordinary case where
+            // the stored id was already right.
+            recordBotFlag(canonicalId, isBot);
             if (canonicalId == m_userId) return;
             qWarning() << "stored user id" << m_userId
                        << "differs from server canonical" << canonicalId
@@ -707,6 +782,14 @@ void ServerConnection::loginWithOidc(const QString& providerUrl)
 void ServerConnection::disconnectFromServer()
 {
     m_syncLoop->stop();
+    // The bot set is a fact about THIS server's users; a reconnect may be as
+    // a different account against a server whose bot set has moved. The
+    // member list rebuilds itself from fresh member events, so only the
+    // message model's stamped copies need re-resolving.
+    m_botUserIds.clear();
+    m_botAdminModel->reset();
+    m_messageModel->refreshBotFlags();
+
     m_connected = false;
     m_connectionStatus = 0;
     emit connectedChanged();
@@ -2740,6 +2823,12 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 if (event.state_key.has_value()) {
                     QString uid = QString::fromStdString(*event.state_key);
                     QString dn = QString::fromStdString(event.content.data.value("displayname", ""));
+                    // The bot flag rides on the member event itself, so this
+                    // is the same fold as the display name beside it — every
+                    // path that can teach us a name can teach us this too,
+                    // including a LEAVE, which is what keeps a departed bot's
+                    // messages badged.
+                    recordBotFlag(uid, event.content.data.value("bsfchat.bot", false));
                     if (!dn.isEmpty() && m_userDisplayNames.value(uid) != dn) {
                         m_userDisplayNames[uid] = dn;
                         // Push the new name into any views that have
@@ -3503,6 +3592,45 @@ bool ServerConnection::canChangeNickname() const {
 bool ServerConnection::canManageNicknames() const {
     return (myPermissions(QString()) & permmath::kManageNicknames) != 0;
 }
+// Also SERVER scope, for the same reason. myPermissions() already folds in the
+// ADMINISTRATOR short-circuit, so an admin needs no separate check here and
+// the dialog does not have to ask two questions.
+bool ServerConnection::canManageBots() const {
+    return (myPermissions(QString()) & permmath::kManageBots) != 0;
+}
+
+// ── Bot identity ──────────────────────────────────────────────────────────
+
+bool ServerConnection::isBot(const QString& userId) const {
+    return m_botUserIds.contains(userId);
+}
+
+void ServerConnection::recordBotFlag(const QString& userId, bool isBot)
+{
+    // ADDITIVE ONLY. A false is not a retraction and is deliberately dropped
+    // on the floor rather than removing an entry.
+    //
+    // The server derives the flag from the user id, so an id that is a bot's
+    // is a bot's for as long as it exists — there is no event that means "no
+    // longer a bot", and deactivating a bot does not make it one (its old
+    // messages were still written by a bot and keep their badge). Against
+    // that, a removal branch would turn any single path that forgot to carry
+    // the key into a bot silently losing its badge everywhere, from one
+    // stray event. The upside is hypothetical; the downside is a whole class
+    // of bug. A reconnect clears the set outright, which covers the only
+    // case where a stale entry could actually be wrong.
+    if (userId.isEmpty() || !isBot) return;
+    if (!m_botUserIds.contains(userId)) {
+        m_botUserIds.insert(userId);
+        // MessageModel stamps the flag onto its rows, so it needs telling.
+        // The member list does not: the member event that brought this fact
+        // is the same one that built or repainted its row.
+        m_messageModel->refreshBotFlags();
+        ++m_botFlagsGeneration;
+        emit botFlagsChanged();
+    }
+}
+
 int ServerConnection::channelSlowmode(const QString& roomId) const {
     return m_channelSlowmode.value(roomId, 0);
 }

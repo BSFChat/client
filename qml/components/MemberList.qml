@@ -219,21 +219,43 @@ Rectangle {
                             Layout.fillWidth: true
                             spacing: 0
 
-                            Text {
-                                // Bold on hover, tinted by highest role
-                                // normally. Falls back to fg1 for roleless
-                                // members (e.g. @everyone-only).
-                                text: model.displayName
-                                font.family: Theme.fontSans
-                                font.pixelSize: Theme.fontSize.base
-                                font.weight: Theme.fontWeight.medium
-                                color: {
-                                    if (memberMouse.containsMouse) return Theme.fg0;
-                                    return memberDelegate._role ? memberDelegate._roleColor
-                                                                : Theme.fg1;
-                                }
-                                elide: Text.ElideRight
+                            // Name + BOT pill. The pill lives in a RowLayout
+                            // beside the name rather than appended to the
+                            // name's text so that eliding a long name cannot
+                            // eat it: `model.displayName + " BOT"` would be
+                            // truncated from the right, which is precisely
+                            // where the badge would be, and the one row where
+                            // it matters most — a bot with a long name — is
+                            // the one that would lose it.
+                            RowLayout {
                                 Layout.fillWidth: true
+                                spacing: Theme.sp.s2
+
+                                Text {
+                                    // Bold on hover, tinted by highest role
+                                    // normally. Falls back to fg1 for roleless
+                                    // members (e.g. @everyone-only).
+                                    text: model.displayName
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: Theme.fontSize.base
+                                    font.weight: Theme.fontWeight.medium
+                                    color: {
+                                        if (memberMouse.containsMouse) return Theme.fg0;
+                                        return memberDelegate._role ? memberDelegate._roleColor
+                                                                    : Theme.fg1;
+                                    }
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+
+                                // `model.isBot` is MemberListModel's IsBotRole,
+                                // read straight off the m.room.member event
+                                // that built this row, beside membership and
+                                // the nickname. Nothing is fetched or awaited.
+                                BotBadge {
+                                    visible: model.isBot === true
+                                    Layout.alignment: Qt.AlignVCenter
+                                }
                             }
 
                             // Custom status — wins over the role tag
