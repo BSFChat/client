@@ -1,5 +1,6 @@
 #include "net/MatrixClient.h"
 
+#include "net/ReplyFields.h"
 #include "util/MediaUrl.h"
 
 #include <QDateTime>
@@ -328,11 +329,29 @@ void MatrixClient::getRoomMembers(const QString& roomId)
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) return;
-        try {
-            auto doc = QJsonDocument::fromJson(data);
-            auto chunk = doc.object().value("chunk").toArray();
-            emit roomMembersResult(roomId, chunk);
-        } catch (...) {}
+        // QJsonDocument reports rather than throws, so a bad body is caught
+        // here rather than by an exception handler. An absent or non-array
+        // "chunk" is not emitted at all: ServerConnection folds the chunk into
+        // the room's roster, and handing it an empty one would empty the
+        // member list on a malformed reply.
+        QJsonParseError parseError{};
+        const auto doc = QJsonDocument::fromJson(data, &parseError);
+        if (parseError.error != QJsonParseError::NoError) {
+            qWarning().noquote() << "[getRoomMembers] malformed body for" << roomId
+                                 << "-" << parseError.errorString();
+            return;
+        }
+        if (!doc.isObject()) {
+            qWarning().noquote() << "[getRoomMembers] body is not an object for"
+                                 << roomId;
+            return;
+        }
+        const QJsonValue chunk = doc.object().value("chunk");
+        if (!chunk.isArray()) {
+            qWarning().noquote() << "[getRoomMembers] no members array for" << roomId;
+            return;
+        }
+        emit roomMembersResult(roomId, chunk.toArray());
     });
 }
 
@@ -345,14 +364,22 @@ void MatrixClient::getJoinedRooms()
         if (reply->error() != QNetworkReply::NoError) {
             return;
         }
+        // Nothing is emitted for an unreadable body: unlike the profile
+        // fetches, an empty room list is not a harmless "unknown" — it is
+        // indistinguishable from "this account has left everything". A caller
+        // that acted on it would tear the sidebar down. So the failure is
+        // logged and the fetch simply does not answer.
+        QStringList rooms;
         try {
             auto j = json::parse(data.toStdString());
-            QStringList rooms;
-            for (const auto& rid : j["joined_rooms"]) {
+            for (const auto& rid : j.at("joined_rooms")) {
                 rooms.append(QString::fromStdString(rid.get<std::string>()));
             }
-            emit joinedRoomsResult(rooms);
-        } catch (...) {}
+        } catch (const json::exception& e) {
+            qWarning().noquote() << "[getJoinedRooms] unusable body -" << e.what();
+            return;
+        }
+        emit joinedRoomsResult(rooms);
     });
 }
 
@@ -817,20 +844,44 @@ void MatrixClient::getProfile(const QString& userId)
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) return;
-        try {
-            auto j = json::parse(data.toStdString());
-            QString displayName = QString::fromStdString(j.value("displayname", ""));
-            QString avatarUrl = QString::fromStdString(j.value("avatar_url", ""));
-            // `bsfchat.bot` is absent entirely on a server that predates bot
-            // accounts and on every human account. value<bool>() with a false
-            // default folds "absent", "false" and "null" together, which is
-            // the behaviour we want; a non-boolean value would throw, and the
-            // catch below already treats a malformed profile as no profile.
-            bool isBot = false;
-            if (j.contains("bsfchat.bot") && j["bsfchat.bot"].is_boolean())
-                isBot = j["bsfchat.bot"].get<bool>();
-            emit profileResult(userId, displayName, avatarUrl, isBot);
-        } catch (...) {}
+        // profileResult is emitted even when the body makes no sense, because
+        // every consumer treats it as the one and only answer to this fetch:
+        // ServerConnection only overwrites its caches on a non-empty name, and
+        // the profile card renders an empty avatar URL as the member's initial
+        // (see qml/js/ProfileCardAvatar.js). Staying silent instead leaves a
+        // card wearing the previous member's photograph forever. The cost is
+        // that our own cached avatar URL is cleared by a failed fetch; showing
+        // an initial we can justify beats showing a picture we cannot.
+        //
+        // That applies with more force to the bot flag than to either string.
+        // ServerConnection::recordBotFlag is driven off this signal and off
+        // nothing else, and it is the answer to a probe that is spent whether
+        // or not it is understood — so a handler that returned early here left
+        // the account badged Unknown for the rest of the session. The earlier
+        // `catch (...) {}` around this body did exactly that for a server
+        // answering bare `null`, which is the default state of a fresh
+        // registration.
+        const auto fields = bsfchat::client::readStringFields(
+            data.toStdString(), {"displayname", "avatar_url"});
+        if (!fields.warning.isEmpty()) {
+            qWarning().noquote() << "[getProfile] unusable body for" << userId
+                                 << "-" << fields.warning;
+        }
+
+        // `bsfchat.bot` is absent entirely on a server that predates bot
+        // accounts and on every human account. Read through QJsonDocument
+        // rather than nlohmann so that it cannot throw: toBool(false) folds
+        // absent, null and non-boolean together into false, which is the
+        // contract the profileResult signal documents. This is the same idiom
+        // whoami() uses for the same key. It costs a second parse of a body
+        // that is two fields long; not returning early is worth more.
+        const bool isBot = QJsonDocument::fromJson(data)
+                               .object()
+                               .value("bsfchat.bot")
+                               .toBool(false);
+
+        emit profileResult(userId, fields.values.at(0), fields.values.at(1),
+                           isBot);
     });
 }
 
@@ -1007,20 +1058,18 @@ void MatrixClient::getNickname(const QString& userId)
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) return;
-        try {
-            auto j = json::parse(data.toStdString());
-            // The key is absent when no nickname is set, which maps to an empty
-            // QString — the same value the editor uses to mean "cleared".
-            //
-            // is_object() is checked rather than going straight to value(): that
-            // throws on a non-object body, and a server returning bare `null` for
-            // "no nickname" would then be swallowed by the catch below, leaving
-            // the signal unemitted and an editor unable to tell "loaded, none"
-            // from "never answered".
-            QString nick;
-            if (j.is_object()) nick = QString::fromStdString(j.value("nickname", ""));
-            emit nicknameResult(userId, nick);
-        } catch (...) {}
+        // The key is absent when no nickname is set, which maps to an empty
+        // QString — the same value the editor uses to mean "cleared". A body
+        // that cannot be read at all maps there too and says so in the log:
+        // an editor left with no signal cannot tell "loaded, none" from
+        // "never answered", so it would sit disabled forever.
+        const auto fields =
+            bsfchat::client::readStringFields(data.toStdString(), {"nickname"});
+        if (!fields.warning.isEmpty()) {
+            qWarning().noquote() << "[getNickname] unusable body for" << userId
+                                 << "-" << fields.warning;
+        }
+        emit nicknameResult(userId, fields.values.at(0));
     });
 }
 
