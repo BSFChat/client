@@ -794,15 +794,45 @@ signals:
     void registerSucceeded();
     void registerFailed(const QString& error);
     void mediaSendCompleted();
-    // An upload (attachment, avatar, server icon) failed. MessageInput's
-    // in-flight count is decremented on this and on mediaSendCompleted only,
-    // so it must fire even when the text is worthless — and it must not fire
-    // too EARLY either: a caller counts the upload on the line after
-    // sendMediaMessage returns, so an emit from inside that call is a
-    // decrement nobody is there to receive and a composer that never unlocks.
+    // A COMPOSER attachment failed — and nothing else.
+    //
+    // MessageInput's in-flight count is decremented on this and on
+    // mediaSendCompleted only, and that one fact sets three rules for this
+    // signal. Two of them were learned the hard way; both failures looked
+    // identical from the outside, which is the reason they are written down
+    // together:
+    //
+    //   WHOSE. The pair is the composer's alone. A receiver of a bare signal
+    //   cannot tell which upload it describes, so any OTHER upload borrowing
+    //   this one lands a decrement on a count it never incremented — the
+    //   composer unlocks and drops "Uploading…" with the user's file still
+    //   going. The avatar and server-icon uploads used to do exactly that on
+    //   their failure path; they have avatarUploadFailed below.
+    //
+    //   THAT it fires. It must fire even when the text is worthless: a
+    //   swallowed failure leaves the count above zero and the composer
+    //   disabled for the rest of the session.
+    //
+    //   WHEN it fires. Not too early, either. A caller counts the upload on
+    //   the line AFTER sendMediaMessage returns, so an emit from inside that
+    //   call is a decrement nobody is there to receive, and the increment
+    //   that follows it never comes off again.
+    //
     // Emit request failures through emitMediaSendFailed and pre-flight ones
-    // through emitPreflightMediaFailure; never emit this directly.
+    // through emitPreflightMediaFailure; never emit this directly. An upload
+    // that is not the composer's does not belong on this signal at all.
     void mediaSendFailed(const QString& error);
+    // An avatar upload failed — the user's own (uploadAvatar) or the
+    // server's icon (uploadServerAvatar). Separate from mediaSendFailed
+    // because these two are not composer uploads and must not touch the
+    // composer's bookkeeping; main.qml toasts both the same way, which is
+    // all they ever actually shared. Emit through emitAvatarUploadFailed.
+    //
+    // There is deliberately no avatarUploadCompleted: success on these
+    // paths continues into setRoomState / updateAvatarUrl and the user sees
+    // the new image. That asymmetry is why only the failure direction ever
+    // bled into the composer.
+    void avatarUploadFailed(const QString& error);
     void activeVoiceRoomIdChanged();
     // The server retired our voice row and the V-H2 re-join was
     // accepted: same room and same engine, but a NEW membership whose
@@ -1181,6 +1211,14 @@ public:
     // account; the short version is that sendMediaMessage must never emit
     // mediaSendFailed before it returns.
     void emitPreflightMediaFailure(const QString& error);
+
+    // The ONLY place `avatarUploadFailed` is emitted from. Same 401 guard as
+    // emitMediaSendFailed, on its own signal: both avatar call sites are
+    // reply handlers for a request that did go out, so both can carry a 401
+    // body that wants the session sentence instead. The reason it is a
+    // separate signal rather than a fourth caller of emitMediaSendFailed is
+    // in the .cpp, and it is about the counter, not about the wording.
+    void emitAvatarUploadFailed(const QString& error);
 public:
     // Called once at startup by ServerManager so the mic gate can
     // consult voiceMode / PTT prefs without a global singleton.

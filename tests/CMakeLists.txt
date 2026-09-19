@@ -600,12 +600,14 @@ target_link_libraries(test_error_surface_guards PRIVATE
 )
 add_test(NAME test_error_surface_guards COMMAND test_error_surface_guards)
 
-# WHEN the upload failure signals fire, rather than what they say. Same
-# sources as test_error_surface_guards above (it is the same ServerConnection
-# and the same counter), kept as its own target because it pins a different
-# invariant: a pre-flight failure must not be reported before sendMediaMessage
-# has returned to the caller that is about to count the upload. Read the
-# header of the .cpp for the composer lockout it exists to prevent.
+# WHEN the upload failure signals fire and WHOSE upload they describe, rather
+# than what they say. Same sources as test_error_surface_guards above — it is
+# the same ServerConnection and the same counter — kept as its own target
+# because it pins the two invariants that file does not: a pre-flight failure
+# must not be reported before sendMediaMessage has returned to the caller that
+# is about to count the upload, and an upload the composer did not start must
+# never arrive on mediaSendFailed / mediaSendCompleted at all. Read the header
+# of the .cpp for the two composer defects they prevent.
 qt_add_executable(test_composer_upload_lock
     test_composer_upload_lock.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
