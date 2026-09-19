@@ -565,6 +565,11 @@ add_test(NAME test_identity_provider_url COMMAND test_identity_provider_url)
 qt_add_executable(test_error_surface_guards
     test_error_surface_guards.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
+    # ServerConnection gained a MediaTicketCache and a MediaDownloader when
+    # security/media-tickets merged. This target did not exist on that branch,
+    # so it never picked them up — the same cross-branch shape as BotAdminModel.
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
