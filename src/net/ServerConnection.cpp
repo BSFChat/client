@@ -175,6 +175,19 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         // "you do not have permission" is noise. It exists on the signal
         // because a future caller may want to branch on it.
         Q_UNUSED(status);
+        // Defect 3 in net/SessionAuth.h: once the session is known dead, a
+        // subsystem's own 401 is noise about a cause already named on screen.
+        // The bot pane is a subsystem that landed AFTER that state machine, so
+        // it did not pick the guard up by being written alongside it — the
+        // sendFeedback handler above is the same check, and any surface added
+        // later that shows a server error wants it too. Say it once, in the
+        // words the banner uses, instead of a Matrix error object underneath it.
+        if (m_auth.shouldSuppressSubsystemError()) {
+            m_botAdminModel->onFailed(
+                operation,
+                tr("Your session has expired. Sign in again to reconnect."));
+            return;
+        }
         m_botAdminModel->onFailed(operation, error);
     });
 
