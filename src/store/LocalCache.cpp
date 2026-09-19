@@ -63,14 +63,50 @@ LocalCache::~LocalCache()
 
 bool LocalCache::isValidSyncToken(const QString& token)
 {
-    if (token.size() < 2 || token.at(0) != QLatin1Char('s')) return false;
-    // Reject anything but "s" + decimal digits, and cap the length so a
-    // pathological value can't be handed to the server at all.
-    if (token.size() > 24) return false;
-    for (int i = 1; i < token.size(); ++i) {
-        if (!token.at(i).isDigit()) return false;
+    // TWO SPELLINGS, both accepted.
+    //
+    // This used to admit only "s" + decimal digits. The server now mints an
+    // OPAQUE token ("t_" + hex) so that next_batch stops being a server-wide
+    // volume-and-timing oracle — the old form revealed the global stream head
+    // to anyone who could call /sync.
+    //
+    // A validator that knows only the old spelling does not fail loudly here;
+    // it fails silently and expensively. This guards both the write
+    // (recordSync) and the read (open), so against a new server the token is
+    // simply never persisted: a client holding an old s<N> resumes from that
+    // ancient position on every launch, replaying an ever-widening window, and
+    // a fresh client does a full initial sync every launch. Nothing errors, and
+    // in-session polling keeps working because SyncLoop holds the token in
+    // memory — so this is invisible until someone wonders why startup is slow.
+    //
+    // This widening is backward-compatible on its own and MUST ship before or
+    // with the server change, never after it.
+    //
+    // The length cap stays: its job is to stop a pathological stored value
+    // being handed back to the server, which is unchanged by the format.
+    if (token.size() < 2 || token.size() > 64) return false;
+
+    if (token.at(0) == QLatin1Char('s')) {
+        for (int i = 1; i < token.size(); ++i) {
+            if (!token.at(i).isDigit()) return false;
+        }
+        return token.size() <= 24;
     }
-    return true;
+
+    // Opaque form: "t_" followed by lowercase hex. Validated by shape only —
+    // the client cannot and must not interpret the contents.
+    if (token.startsWith(QLatin1String("t_"))) {
+        if (token.size() <= 2) return false;
+        for (int i = 2; i < token.size(); ++i) {
+            const QChar c = token.at(i);
+            const bool hex = (c >= QLatin1Char('0') && c <= QLatin1Char('9'))
+                          || (c >= QLatin1Char('a') && c <= QLatin1Char('f'));
+            if (!hex) return false;
+        }
+        return true;
+    }
+
+    return false;
 }
 
 bool LocalCache::open(const QString& userId, const QString& homeserver)

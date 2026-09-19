@@ -104,6 +104,27 @@ private slots:
         QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("s1")));
         QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("s1234567890")));
 
+        // The opaque form the server mints now. next_batch used to be the raw
+        // global stream head, which handed every authenticated user a
+        // server-wide volume-and-timing oracle; it is now "t_" + hex.
+        //
+        // Both spellings must pass. A client that accepts only the new one
+        // discards a legacy token on upgrade and does a full initial sync;
+        // one that accepts only the old one — which is what this validator
+        // did — silently never PERSISTS the new one, so every launch either
+        // resumes from an ancient position or starts from scratch. Neither
+        // errors, which is what makes this worth pinning.
+        QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("t_0")));
+        QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("t_deadbeef")));
+        QVERIFY(LocalCache::isValidSyncToken(
+            QStringLiteral("t_0123456789abcdef0123456789abcdef")));
+
+        // Shape only — the client must not interpret the contents.
+        QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("t_")));
+        QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("t_DEADBEEF")));  // upper hex
+        QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("t_xyz")));
+        QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("t 42")));
+
         // The server does not reject a token it can't parse — it silently
         // treats it as position 0 and answers with a state-less incremental
         // sync, which is exactly the "resumed into an empty sidebar" failure.
