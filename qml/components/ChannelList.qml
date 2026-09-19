@@ -2114,8 +2114,10 @@ Rectangle {
                     iconName: "shield"
                     onTriggered: {
                         // Open the identity portal in the default browser.
-                        // Uses the provider URL from the OIDC login if
-                        // available; falls back to id.bsfchat.com.
+                        // Uses this server's identity provider — the live
+                        // OIDC session's, or the one restored from settings
+                        // — and falls back to id.bsfchat.com only when the
+                        // server never told us of one.
                         var base = serverManager.activeServer
                             ? serverManager.activeServer.identityProviderUrl()
                             : "";

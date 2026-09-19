@@ -391,8 +391,23 @@ public:
 
     Q_INVOKABLE void loginWithOidc(const QString& providerUrl);
     // Returns the identity-provider base URL (e.g. "https://id.bsfchat.com")
-    // for the "Manage Account" link. Empty if OIDC was never used.
+    // for the "Manage Account" link: the live OIDC session's provider if
+    // this process ran the flow, otherwise the one this connection was
+    // restored with. Empty only when neither is known.
     Q_INVOKABLE QString identityProviderUrl() const;
+    // Seeds the value above from a saved server entry. ServerManager calls
+    // this wherever it builds a connection it isn't going to log in
+    // interactively — the restore loop and rebuildConnection. Without it
+    // "Manage Account" sent every restored session to the hosted portal,
+    // which is the wrong one for a self-hosted identity provider.
+    //
+    // Deliberately NOT a source for re-authentication, which must re-read
+    // the login flows from the server on every attempt: a provider stored
+    // once at first login goes stale the moment a deployment changes its
+    // IdP, and reading it back there would make a live trap of it. The
+    // "Manage Account" link is a different question — an out-of-date
+    // portal address is a wrong link, not a session nobody can recover.
+    void setIdentityProviderUrl(const QString& url);
 
     Q_INVOKABLE void joinVoiceChannel(const QString& roomId);
     Q_INVOKABLE void leaveVoiceChannel();
@@ -871,6 +886,10 @@ public:
 
     // Identity (OIDC)
     IdentityClient* m_identityClient = nullptr;
+    // The provider this connection was restored with, from the saved
+    // server entry. Only read when there is no live m_identityClient,
+    // i.e. on any launch where the OIDC flow hasn't run in-process.
+    QString m_storedIdentityProviderUrl;
 
     // Typing state
     QStringList m_typingUsers;

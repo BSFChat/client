@@ -67,6 +67,10 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
     for (const auto& entry : saved) {
         auto* conn = new ServerConnection(entry.url, this);
         conn->setCredentials(entry.userId, entry.accessToken, entry.deviceId, entry.displayName);
+        // Nothing in this process will run the OIDC flow for a restored
+        // connection, so the "Manage Account" link has no live provider to
+        // read. Hand it the one this entry was saved with.
+        conn->setIdentityProviderUrl(entry.identityProviderUrl);
         m_roster.append(conn);
         QUrl url(entry.url);
         QString serverName = url.host().isEmpty() ? entry.displayName : url.host();
@@ -326,6 +330,10 @@ void ServerManager::rebuildConnection(int index, const QString& url)
     auto* conn = new ServerConnection(url, this);
     conn->setCredentials(old->userId(), old->accessToken(),
                          old->deviceId(), old->displayName());
+    // Same source as the credentials, and for the same reason: the live
+    // object's answer already folds in whatever the restore path seeded,
+    // so this carries the provider across a rebuild either way.
+    conn->setIdentityProviderUrl(old->identityProviderUrl());
     wireConnection(conn);
 
     // Swaps the slot and emits activeServerChanged if this was the active

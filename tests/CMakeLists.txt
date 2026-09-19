@@ -486,6 +486,49 @@ target_include_directories(test_server_roster PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_server_roster PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_server_roster COMMAND test_server_roster)
 
+# "Manage Account" after a restart: the per-server identity provider was
+# persisted and read by nobody, so a self-hosted deployment's users were
+# sent to the hosted portal on every launch after the first. Links the
+# real ServerConnection (voice compiled out here, as everywhere outside
+# bsfchat-app) because the fallback lives in its accessor; the object
+# touches the network only once given credentials, which this never does.
+qt_add_executable(test_identity_provider_url
+    test_identity_provider_url.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
+    ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AudioDeviceStatus.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
+    # The mesh-vs-SFU choice is made on every join regardless of whether
+    # a transport was compiled in, so it is not voice-gated here either.
+    ${CMAKE_SOURCE_DIR}/src/voice/VoiceTransportSelector.cpp
+    ${CMAKE_SOURCE_DIR}/src/store/LocalCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/FileLogger.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MarkdownParser.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MentionRenderer.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/PermissionMath.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
+)
+target_include_directories(test_identity_provider_url PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_identity_provider_url PRIVATE
+    bsfchat_protocol
+    # Gui is for IdentityClient's QDesktopServices::openUrl and Multimedia
+    # for the audio-device names Settings stores; nothing here opens either.
+    # The test is QTEST_GUILESS_MAIN — no QGuiApplication, no window system.
+    Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Network Qt6::Sql Qt6::Test
+    nlohmann_json::nlohmann_json
+)
+add_test(NAME test_identity_provider_url COMMAND test_identity_provider_url)
+
 # Publish gate for the QML snapshot lists (DMs, server members, bans): a
 # changed list must announce itself, an identical rebuild must stay silent
 # (U-H2). Header-only (src/net/SnapshotGate.h), so no ServerConnection needed.
