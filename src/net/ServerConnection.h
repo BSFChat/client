@@ -1062,6 +1062,19 @@ public:
     void reconcileAnnouncedMedia();
     void setVoiceError(const QString& message);
     void clearVoiceError();
+
+    // The ONLY place `sendFeedback` is emitted from. Do not emit it directly.
+    //
+    // sendFeedback drives one toast with several callers — the composer, the
+    // nickname editor, channel and DM creation, message deletion — and every
+    // one of them can fail with a 401 carrying a raw Matrix error object. The
+    // guard used to live in the composer's handler alone, so the other four
+    // printed {"errcode":"M_UNKNOWN_TOKEN",...} underneath the "session has
+    // expired" banner: the 2026-09-19 presentation reached by renaming
+    // yourself instead of joining voice. A rule every caller must remember is
+    // a rule the next caller will not, so it is enforced here instead, the way
+    // setVoiceError above already does it for the voice surface.
+    void emitFeedback(const QString& text, const QString& kind);
 public:
     // Called once at startup by ServerManager so the mic gate can
     // consult voiceMode / PTT prefs without a global singleton.

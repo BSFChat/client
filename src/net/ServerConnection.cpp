@@ -112,14 +112,10 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             } catch (...) {
                 // Leave msg = raw; already user-readable-ish.
             }
-            // Once the session is known dead the composer's failure has one
-            // cause, already named in the banner. Say that instead of the
-            // Matrix error object.
-            if (m_auth.shouldSuppressSubsystemError()) {
-                msg = tr("Your session has expired. Sign in again to reconnect.");
-                kind = QStringLiteral("error");
-            }
-            emit sendFeedback(msg, kind);
+            // The expired-session check that used to sit here now lives in
+            // emitFeedback(), so it covers every caller of this toast rather
+            // than only the composer.
+            emitFeedback(msg, kind);
         });
 
     connect(m_client, &MatrixClient::mediaUploadProgress,
@@ -603,7 +599,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             ? tr("Could not change nickname.")
             : error;
         if (status == 403) text = tr("Not allowed: %1").arg(text);
-        emit sendFeedback(text, QStringLiteral("error"));
+        emitFeedback(text, QStringLiteral("error"));
     });
 
     // Handle leave room success
@@ -719,6 +715,14 @@ void ServerConnection::awaitLoginReply()
     QObject::connect(m_client, &MatrixClient::loginSuccess, this,
         [this](const bsfchat::LoginResponse& resp) { applyLoginResponse(resp); },
         Qt::SingleShotConnection);
+    // Deliberately NOT routed through emitFeedback and deliberately not
+    // gated on shouldSuppressSubsystemError: this is the recovery path, not a
+    // subsystem driving a dead token. The session IS expired while a re-auth
+    // runs, so the guard would suppress precisely the message that says why
+    // signing in just failed — and an unclearable error state with no stated
+    // cause is defect 2 in net/SessionAuth.h, the thing that made the
+    // 2026-09-19 incident survive restarts. A future sweep tidying up the
+    // remaining unguarded error surfaces must leave this one alone.
     QObject::connect(m_client, &MatrixClient::loginError, this,
         [this](const QString& error) { onLoginAttemptFailed(error); },
         Qt::SingleShotConnection);
@@ -794,6 +798,10 @@ void ServerConnection::registerUser(const QString& username, const QString& pass
             startSync();
         }, Qt::SingleShotConnection);
 
+    // Unguarded for the same reason as loginError above: registering is how
+    // you get a live credential, so suppressing its failure on the grounds
+    // that the session is dead hides the only message that can unstick the
+    // user. See the note at the loginError connect in beginPasswordLogin.
     QObject::connect(m_client, &MatrixClient::registerError, this,
         [this](const QString& error) {
             emit registerFailed(error);
@@ -2369,6 +2377,55 @@ void ServerConnection::setVoiceError(const QString& message)
     m_voiceErrorTimer->start();
 }
 
+void ServerConnection::emitFeedback(const QString& text, const QString& kind)
+{
+    // Defect 3 in net/SessionAuth.h. Once the session is known dead every
+    // authenticated request fails for one reason, and that reason is already
+    // on screen in the banner; the server's error object adds nothing a user
+    // can act on and buries the thing they can.
+    //
+    // The text is replaced rather than the signal dropped, deliberately and
+    // for the same reason the bot pane's handler replaces it: a caller may be
+    // holding in-flight state that only its failure path clears (the DM
+    // create guard in startDirectMessage is the live example — swallow its
+    // failure and that peer is locked out until restart). A chokepoint that
+    // silently ate signals would turn a cosmetic problem into a stuck one.
+    if (m_auth.shouldSuppressSubsystemError()) {
+        emit sendFeedback(tr("Your session has expired. Sign in again to "
+                             "reconnect."),
+                          QStringLiteral("error"));
+        return;
+    }
+    emit sendFeedback(text, kind);
+}
+
+// KNOWN STILL UNGUARDED, and left that way on purpose rather than by oversight.
+//
+// Four other surfaces carry a raw server error to the user and do not consult
+// the session state. They were not swept in with this change because, unlike
+// the five feedback callers, they are not one surface with one right answer —
+// each needs a UX decision rather than a mechanical substitution:
+//
+//   * stateWriteFailed (the m.room.state write paths) — QML switches on its
+//     `kind` tag to word the toast per write type, and it carries a status
+//     code the receiver may branch on. Replacing the text centrally would cut
+//     across that.
+//   * searchErrored — renders as inline text inside the search pane, not as a
+//     toast. "Your session has expired" sitting where results go may read
+//     worse than the server's own words, and the banner is already visible.
+//   * notifyLevelFailed — fires beside a local rollback the user can see
+//     happen. The rollback is arguably the whole message; the string may be
+//     redundant either way.
+//   * mediaSendFailed — four call sites, and two of them (avatar and server
+//     icon upload) report into a settings dialog rather than the chat toast.
+//
+// A 401 on any of these still prints a Matrix error object next to the
+// expired-session banner. That is the same defect as the one fixed above, only
+// on surfaces where the fix is not a one-liner. Whoever picks this up: the
+// question to answer per surface is whether the caller holds in-flight state
+// that only its failure path clears — if it does, replace the text, never drop
+// the signal, for the reason spelled out in emitFeedback above.
+
 void ServerConnection::clearVoiceError()
 {
     m_voiceErrorTimer->stop();
@@ -2581,7 +2638,7 @@ void ServerConnection::createChannelInCategory(const QString& name, const QStrin
             m_client->setChannelPermission(roomId, "role:everyone",
                 /*allow=*/0, /*deny=*/0x0001 /*VIEW_CHANNEL*/);
         },
-        [this](const QString& error) { emit sendFeedback(error, QStringLiteral("error")); });
+        [this](const QString& error) { emitFeedback(error, QStringLiteral("error")); });
     m_client->createChannelInCategory(requestId, name, categoryId, isVoice);
 }
 
@@ -3962,10 +4019,10 @@ void ServerConnection::redactEvent(const QString& roomId, const QString& eventId
                 m_messageModel->removeMessage(redactedId);
         },
         [this](const QString& error) {
-            emit sendFeedback(error.isEmpty()
-                                  ? tr("Couldn't delete that message.")
-                                  : error,
-                              QStringLiteral("error"));
+            emitFeedback(error.isEmpty()
+                             ? tr("Couldn't delete that message.")
+                             : error,
+                         QStringLiteral("error"));
         });
     m_client->redactEvent(requestId, roomId, eventId, reason);
 }
@@ -4136,7 +4193,7 @@ void ServerConnection::createDirectMessage(const QString& rawTargetUserId)
             // Release the guard, or one failed create locks this peer out
             // until restart.
             m_directRooms.endCreate(peer);
-            emit sendFeedback(error, QStringLiteral("error"));
+            emitFeedback(error, QStringLiteral("error"));
         });
 
     m_client->createDirectMessageRoom(requestId, targetUserId);
