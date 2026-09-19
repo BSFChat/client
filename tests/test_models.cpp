@@ -1,5 +1,8 @@
 #include <QTest>
 #include <QAbstractListModel>
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QMap>
 #include <QRegularExpression>
 #include <QSignalSpy>
@@ -20,6 +23,7 @@
 #include "util/SearchParser.h"
 #include "util/VoiceRoster.h"
 #include "util/MemberCache.h"
+#include "net/MemberJson.h"
 
 #include <bsfchat/MatrixTypes.h>
 #include <bsfchat/Constants.h>
@@ -43,6 +47,33 @@ private:
             {"body", body}
         };
         return event;
+    }
+
+    // One row of a /members reply, the shape the server sends.
+    QJsonObject membersRow(const QString& userId, const QString& displayName,
+                           const QString& nickname = QString(),
+                           const QString& avatarUrl = QString(),
+                           bool isBot = false,
+                           const QString& membership = QStringLiteral("join"))
+    {
+        QJsonObject content{{"membership", membership}};
+        if (!displayName.isEmpty()) content["displayname"] = displayName;
+        // Absent, not empty: the server omits each of these when unset.
+        if (!nickname.isEmpty()) content["bsfchat.nickname"] = nickname;
+        if (!avatarUrl.isEmpty()) content["avatar_url"] = avatarUrl;
+        if (isBot) content["bsfchat.bot"] = true;
+        return QJsonObject{
+            {"type", QString::fromUtf8(bsfchat::event_type::kRoomMember)},
+            {"sender", userId},
+            {"state_key", userId},
+            {"content", content}};
+    }
+
+    static QString readSource(const QString& path)
+    {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return QString();
+        return QString::fromUtf8(f.readAll());
     }
 
     // A member event as the SERVER writes one once a nickname is set: `displayname`
@@ -481,6 +512,184 @@ private slots:
         // displayNameForUser is Q_INVOKABLE so QML can actually call it; it was a
         // plain member function while MessageBubble.qml already called it.
         QCOMPARE(model.displayNameForUser("@alice:server"), "Ali");
+    }
+
+    // ── the /members roster path ────────────────────────────────────────
+    //
+    // Every other path into MemberListModel hands it an event the protocol
+    // parsed, content copied across whole. /members is the exception: the
+    // reply reaches ServerConnection as Qt JSON, so each row is REBUILT into
+    // a RoomEvent field by field (net/MemberJson.h), and a content key nobody
+    // names in that rebuild is silently dropped.
+    //
+    // Two were: `bsfchat.nickname` and `avatar_url`, from the initial commit.
+    // It is the worst place to drop one, because the handler clears the model
+    // before it runs — so the FIRST roster a user sees on opening a channel is
+    // this one, and the missing field stays missing until the next
+    // m.room.member for that user happens to come over /sync.
+    //
+    // These drive the rebuild into the real model, which is the only assertion
+    // that means anything: a field is "carried" exactly when the role reads it.
+
+    // The regression. Alice has a nickname; the server resolves it into
+    // `displayname` AND sends it separately, and both have to survive.
+    void testMembersReplyCarriesNicknameIntoTheModel()
+    {
+        MemberListModel model;
+        auto ev = bsfchat::client::joinedMemberEventFromJson(
+            membersRow("@alice:server", "Ali", "Ali"));
+        QVERIFY(ev.has_value());
+        model.processEvent(*ev);
+
+        auto idx = model.index(0);
+        QCOMPARE(model.data(idx, MemberListModel::DisplayNameRole).toString(), "Ali");
+        // Was empty before this fix, on every channel open. NicknameRole is
+        // what lets admin UI offer "Remove nickname" only when there is one,
+        // so blank here reads as "Alice has no nickname" — the wrong answer.
+        QCOMPARE(model.data(idx, MemberListModel::NicknameRole).toString(), "Ali");
+    }
+
+    // A member with no nickname must still read as having none, or the fix
+    // would have traded one wrong answer for the opposite one.
+    void testMembersReplyLeavesNicknameEmptyWhenUnset()
+    {
+        MemberListModel model;
+        auto ev = bsfchat::client::joinedMemberEventFromJson(
+            membersRow("@bob:server", "Bob"));
+        QVERIFY(ev.has_value());
+        model.processEvent(*ev);
+
+        QCOMPARE(model.data(model.index(0), MemberListModel::DisplayNameRole).toString(), "Bob");
+        QCOMPARE(model.data(model.index(0), MemberListModel::NicknameRole).toString(), QString());
+    }
+
+    // The other field the rebuild had always dropped. Found while checking
+    // whether nickname was the only one.
+    void testMembersReplyCarriesAvatarUrl()
+    {
+        MemberListModel model;
+        auto ev = bsfchat::client::joinedMemberEventFromJson(
+            membersRow("@alice:server", "Ali", QString(), "mxc://server/abc"));
+        QVERIFY(ev.has_value());
+        model.processEvent(*ev);
+
+        QCOMPARE(model.data(model.index(0), MemberListModel::AvatarUrlRole).toString(),
+                 "mxc://server/abc");
+    }
+
+    // Already carried, pinned so the rebuild cannot lose it again.
+    void testMembersReplyCarriesBotFlag()
+    {
+        MemberListModel model;
+        auto bot = bsfchat::client::joinedMemberEventFromJson(
+            membersRow("@build:server", "Build Bot", QString(), QString(), true));
+        auto human = bsfchat::client::joinedMemberEventFromJson(
+            membersRow("@josh:server", "Josh"));
+        QVERIFY(bot.has_value());
+        QVERIFY(human.has_value());
+        model.processEvent(*bot);
+        model.processEvent(*human);
+
+        QCOMPARE(model.data(model.index(0), MemberListModel::IsBotRole).toBool(), true);
+        QCOMPARE(model.data(model.index(1), MemberListModel::IsBotRole).toBool(), false);
+        // The caller's bot-flag cache reads the same event rather than a
+        // second parse of the JSON, so the two cannot disagree.
+        QVERIFY(bsfchat::client::memberEventIsBot(*bot));
+        QVERIFY(!bsfchat::client::memberEventIsBot(*human));
+    }
+
+    // All four content fields at once, on one member — the realistic row, and
+    // the one that would catch a rebuild that handles each field only when the
+    // others are absent.
+    void testMembersReplyCarriesEveryFieldAtOnce()
+    {
+        MemberListModel model;
+        auto ev = bsfchat::client::joinedMemberEventFromJson(
+            membersRow("@build:server", "Ali", "Ali", "mxc://server/abc", true));
+        QVERIFY(ev.has_value());
+        model.processEvent(*ev);
+
+        auto idx = model.index(0);
+        QCOMPARE(model.data(idx, MemberListModel::UserIdRole).toString(), "@build:server");
+        QCOMPARE(model.data(idx, MemberListModel::DisplayNameRole).toString(), "Ali");
+        QCOMPARE(model.data(idx, MemberListModel::NicknameRole).toString(), "Ali");
+        QCOMPARE(model.data(idx, MemberListModel::AvatarUrlRole).toString(), "mxc://server/abc");
+        QCOMPARE(model.data(idx, MemberListModel::IsBotRole).toBool(), true);
+        QCOMPARE(model.data(idx, MemberListModel::MembershipRole).toString(), "join");
+    }
+
+    // The filter the handler's loop relies on to skip a row rather than build
+    // a useless event from it.
+    void testMembersReplySkipsNonJoinAndNonMemberRows()
+    {
+        QVERIFY(!bsfchat::client::joinedMemberEventFromJson(
+                     membersRow("@alice:server", "Ali", QString(), QString(), false,
+                                QStringLiteral("leave")))
+                     .has_value());
+        QVERIFY(!bsfchat::client::joinedMemberEventFromJson(
+                     membersRow("@alice:server", "Ali", QString(), QString(), false,
+                                QStringLiteral("ban")))
+                     .has_value());
+        QVERIFY(!bsfchat::client::joinedMemberEventFromJson(
+                     membersRow("@alice:server", "Ali", QString(), QString(), false,
+                                QStringLiteral("invite")))
+                     .has_value());
+
+        QJsonObject notAMember = membersRow("@alice:server", "Ali");
+        notAMember["type"] = QStringLiteral("m.room.message");
+        QVERIFY(!bsfchat::client::joinedMemberEventFromJson(notAMember).has_value());
+
+        // A row with no content at all must not throw or produce a member.
+        QVERIFY(!bsfchat::client::joinedMemberEventFromJson(QJsonObject{}).has_value());
+    }
+
+    // The guard that makes the list above maintainable: every content key
+    // MemberListModel::processEvent READS must be named in MemberJson.h.
+    //
+    // Without it, this whole class of bug comes back the next time a field is
+    // added to the model — the model reads it, /sync carries it, the rebuild
+    // does not, and nothing fails. This is a source scan, in the spirit of
+    // test_qml_hygiene.cpp: it cannot prove the rebuild is correct, but it
+    // fails on the commit that introduces the omission.
+    void testMemberJsonNamesEveryContentKeyTheModelReads()
+    {
+        const QString modelSrc =
+            readSource(QStringLiteral(BSFCHAT_SRC_DIR "/model/MemberListModel.cpp"));
+        const QString rebuildSrc =
+            readSource(QStringLiteral(BSFCHAT_SRC_DIR "/net/MemberJson.h"));
+        QVERIFY2(!modelSrc.isEmpty() && !rebuildSrc.isEmpty(),
+                 "sources not readable — check BSFCHAT_SRC_DIR");
+
+        // Matches both spellings the model uses:
+        //   content.data.value("displayname", "")
+        //   content.data.value(std::string("bsfchat.nickname"), std::string())
+        //
+        // Spelled with escapes rather than R"(...)": moc's lexer does not
+        // survive a raw string containing a quote — it loses track of the rest
+        // of the file, finds no Q_OBJECT, and the test links with no vtable.
+        static const QRegularExpression reader(
+            QStringLiteral("content\\.data\\.value\\(\\s*(?:std::string\\(\\s*)?\"([^\"]+)\""));
+
+        QStringList keys;
+        auto it = reader.globalMatch(modelSrc);
+        while (it.hasNext()) {
+            const QString key = it.next().captured(1);
+            if (!keys.contains(key)) keys << key;
+        }
+        // If this trips, the regex stopped matching the model — fix it here
+        // rather than letting the check silently pass on an empty list.
+        QVERIFY2(keys.size() >= 5,
+                 qPrintable(QStringLiteral("expected the model to read at least 5 member "
+                                           "content keys, found: ") + keys.join(", ")));
+
+        for (const QString& key : keys) {
+            QVERIFY2(rebuildSrc.contains(QLatin1Char('"') + key + QLatin1Char('"')),
+                     qPrintable(QStringLiteral(
+                         "MemberListModel::processEvent reads member content key \"%1\", but "
+                         "net/MemberJson.h never names it — every member built from a /members "
+                         "reply will have it blank until /sync happens to resend that member.")
+                         .arg(key)));
+        }
     }
 
     // MarkdownParser tests
