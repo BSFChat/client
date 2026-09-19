@@ -100,30 +100,54 @@ private slots:
 
     void testTokenValidation()
     {
-        QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("s0")));
-        QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("s1")));
-        QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("s1234567890")));
-
-        // The opaque form the server mints now. next_batch used to be the raw
-        // global stream head, which handed every authenticated user a
-        // server-wide volume-and-timing oracle; it is now "t_" + hex.
+        // A real-shaped token as the server mints it now: "t_" + exactly 32
+        // lowercase hex digits, 34 characters in all. next_batch used to be the
+        // raw global stream head, which handed every authenticated user a
+        // server-wide volume-and-timing oracle.
         //
         // Both spellings must pass. A client that accepts only the new one
-        // discards a legacy token on upgrade and does a full initial sync;
-        // one that accepts only the old one — which is what this validator
-        // did — silently never PERSISTS the new one, so every launch either
-        // resumes from an ancient position or starts from scratch. Neither
-        // errors, which is what makes this worth pinning.
-        QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("t_0")));
-        QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("t_deadbeef")));
+        // discards a legacy token on upgrade and does a full initial sync; one
+        // that accepts only the old one — which is what this validator did —
+        // silently never PERSISTS the new one, so every launch either resumes
+        // from an ancient position or starts from scratch. Neither errors,
+        // which is what makes this worth pinning.
+        const QString hex32 = QStringLiteral("0123456789abcdef0123456789abcdef");
+        QCOMPARE(hex32.size(), 32);
+        QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("t_") + hex32));
         QVERIFY(LocalCache::isValidSyncToken(
-            QStringLiteral("t_0123456789abcdef0123456789abcdef")));
+            QStringLiteral("t_") + QString(32, QLatin1Char('f'))));
 
-        // Shape only — the client must not interpret the contents.
+        // Shape only — the client must not interpret the contents — but the
+        // shape is EXACT. The token is compared as a string by the server and
+        // by SyncBackoff's no-progress guard, so a near-miss is not something
+        // to repair into a token we then hand back; it is something to refuse.
+        QVERIFY(!LocalCache::isValidSyncToken(
+            QStringLiteral("t_") + hex32.toUpper()));         // uppercase hex
+        QVERIFY(!LocalCache::isValidSyncToken(
+            QStringLiteral("t_") + hex32.left(31)));          // 31 hex digits
+        QVERIFY(!LocalCache::isValidSyncToken(
+            QStringLiteral("t_") + hex32 + QLatin1Char('0')));// 33 hex digits
         QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("t_")));
-        QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("t_DEADBEEF")));  // upper hex
-        QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("t_xyz")));
+        QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("t_deadbeef")));
+        QVERIFY(!LocalCache::isValidSyncToken(
+            QStringLiteral("t_") + hex32.left(31) + QLatin1Char('g')));  // non-hex
         QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("t 42")));
+        QVERIFY(!LocalCache::isValidSyncToken(
+            QStringLiteral("T_") + hex32));                   // uppercase prefix
+        // No trimming: whitespace is a difference, not noise to be cleaned up.
+        QVERIFY(!LocalCache::isValidSyncToken(
+            QStringLiteral(" t_") + hex32));
+        QVERIFY(!LocalCache::isValidSyncToken(
+            QStringLiteral("t_") + hex32 + QLatin1Char('\n')));
+
+        // Legacy form, still accepted so a token persisted before the upgrade
+        // survives it. The server takes this on the way in for one release.
+        QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("s0")));
+        QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("s1")));
+        QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("s12345")));
+        QVERIFY(LocalCache::isValidSyncToken(QStringLiteral("s1234567890")));
+        QVERIFY(LocalCache::isValidSyncToken(
+            QStringLiteral("s") + QString(19, QLatin1Char('9'))));  // u64 width
 
         // The server does not reject a token it can't parse — it silently
         // treats it as position 0 and answers with a state-less incremental
@@ -131,14 +155,19 @@ private slots:
         // So anything off-shape has to be caught here.
         QVERIFY(!LocalCache::isValidSyncToken(QString()));
         QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("s")));
+        QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("sabc")));
+        QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("s-1")));
         QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("42")));
         QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("t42")));
         QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("s4 2")));
-        QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("s-1")));
         QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("s12a")));
         QVERIFY(!LocalCache::isValidSyncToken(QStringLiteral("sABC")));
         QVERIFY(!LocalCache::isValidSyncToken(
             QStringLiteral("s") + QString(64, QLatin1Char('9'))));
+        // QChar::isDigit() is Unicode-aware and would admit these; the server
+        // would not parse them as the position we think we are at.
+        QVERIFY(!LocalCache::isValidSyncToken(
+            QStringLiteral("s1") + QChar(0x0664)));  // Arabic-Indic four
     }
 
     // --- first run -------------------------------------------------------

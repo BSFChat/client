@@ -66,7 +66,7 @@ bool LocalCache::isValidSyncToken(const QString& token)
     // TWO SPELLINGS, both accepted.
     //
     // This used to admit only "s" + decimal digits. The server now mints an
-    // OPAQUE token ("t_" + hex) so that next_batch stops being a server-wide
+    // OPAQUE token ("t_" + 32 hex) so that next_batch stops being a server-wide
     // volume-and-timing oracle — the old form revealed the global stream head
     // to anyone who could call /sync.
     //
@@ -82,26 +82,42 @@ bool LocalCache::isValidSyncToken(const QString& token)
     // This widening is backward-compatible on its own and MUST ship before or
     // with the server change, never after it.
     //
-    // The length cap stays: its job is to stop a pathological stored value
-    // being handed back to the server, which is unchanged by the format.
-    if (token.size() < 2 || token.size() > 64) return false;
+    // Both arms are EXACT, and deliberately so. The token is compared as a
+    // string — by the server, and by SyncBackoff's no-progress guard here —
+    // so anything that re-spells it rather than rejecting it reads downstream
+    // as forward progress. Hence: no trimming, no case folding, no accepting
+    // a near-miss length. A token that does not match a shape we mint is not
+    // repaired, it is refused.
 
-    if (token.at(0) == QLatin1Char('s')) {
-        for (int i = 1; i < token.size(); ++i) {
-            if (!token.at(i).isDigit()) return false;
-        }
-        return token.size() <= 24;
-    }
-
-    // Opaque form: "t_" followed by lowercase hex. Validated by shape only —
-    // the client cannot and must not interpret the contents.
+    // Opaque form: "t_" + exactly 32 lowercase hex digits (34 total).
+    // Validated by SHAPE ONLY — the client cannot and must not interpret the
+    // contents.
+    static constexpr int kOpaqueHexDigits = 32;
     if (token.startsWith(QLatin1String("t_"))) {
-        if (token.size() <= 2) return false;
+        if (token.size() != 2 + kOpaqueHexDigits) return false;
         for (int i = 2; i < token.size(); ++i) {
             const QChar c = token.at(i);
             const bool hex = (c >= QLatin1Char('0') && c <= QLatin1Char('9'))
                           || (c >= QLatin1Char('a') && c <= QLatin1Char('f'));
             if (!hex) return false;
+        }
+        return true;
+    }
+
+    // Legacy form: "s" + 1..19 decimal digits. The server still accepts this
+    // on the way in for one release and never mints it any more, so this arm
+    // exists only to carry a token persisted before the upgrade. 19 digits is
+    // what an unsigned 64-bit stream position needs; the cap's job is to stop
+    // a pathological stored value being handed back to the server.
+    static constexpr int kMaxLegacyDigits = 19;
+    if (token.size() >= 2 && token.size() <= 1 + kMaxLegacyDigits
+        && token.at(0) == QLatin1Char('s')) {
+        for (int i = 1; i < token.size(); ++i) {
+            // Not QChar::isDigit(): that is Unicode-aware and would admit
+            // e.g. Arabic-Indic digits from a corrupted cache file, which the
+            // server would not parse as the position we think we are at.
+            const QChar c = token.at(i);
+            if (c < QLatin1Char('0') || c > QLatin1Char('9')) return false;
         }
         return true;
     }
