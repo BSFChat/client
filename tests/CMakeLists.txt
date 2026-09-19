@@ -551,6 +551,45 @@ target_link_libraries(test_identity_provider_url PRIVATE
 )
 add_test(NAME test_identity_provider_url COMMAND test_identity_provider_url)
 
+# What each user-visible error surface is allowed to say once the homeserver
+# has stopped accepting our token (the 2026-09-19 purge). Drives the real
+# ServerConnection: no window, no server — MatrixClient's reply signals are
+# emitted by hand and the one genuinely asynchronous path talks to a refused
+# port on localhost. Same source list as test_identity_provider_url, for the
+# same reason (the BotAdminModel* Q_PROPERTY).
+qt_add_executable(test_error_surface_guards
+    test_error_surface_guards.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
+    ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AudioDeviceStatus.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/voice/VoiceTransportSelector.cpp
+    ${CMAKE_SOURCE_DIR}/src/store/LocalCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/FileLogger.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MarkdownParser.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MentionRenderer.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/PermissionMath.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
+)
+target_include_directories(test_error_surface_guards PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_error_surface_guards PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Network Qt6::Sql Qt6::Test
+    nlohmann_json::nlohmann_json
+)
+add_test(NAME test_error_surface_guards COMMAND test_error_surface_guards)
+
 # Publish gate for the QML snapshot lists (DMs, server members, bans): a
 # changed list must announce itself, an identical rebuild must stay silent
 # (U-H2). Header-only (src/net/SnapshotGate.h), so no ServerConnection needed.

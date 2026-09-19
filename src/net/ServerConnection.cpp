@@ -257,6 +257,26 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         else if (eventType == QStringLiteral("bsfchat.channel.settings")) kind = "channel-settings";
         else if (eventType == QStringLiteral("bsfchat.server.roles")) kind = "server-roles";
         else kind = eventType;
+        // Only the third argument is a candidate for replacement. `kind` is
+        // what both receivers switch on to word the toast ("Couldn't save
+        // role assignments", "Couldn't update server name") and `status` is
+        // what they branch on for the 403 phrasing, so substituting the whole
+        // message — or dropping the signal — would cost the user the one part
+        // of the sentence that says WHICH save failed. The server's `error`
+        // is the only part that is worthless once the session is dead: on a
+        // 401 it is the raw {"errcode":"M_UNKNOWN_TOKEN",...} object, and the
+        // receivers append it verbatim after an em dash.
+        //
+        // The signal itself is never dropped: the undo closure above has
+        // already run and both receivers treat this as the end of the write,
+        // so a swallowed failure would leave the settings pane looking as if
+        // the save were still in flight.
+        if (m_auth.shouldSuppressSubsystemError()) {
+            emit stateWriteFailed(kind, status,
+                                  tr("Your session has expired. Sign in "
+                                     "again to reconnect."));
+            return;
+        }
         emit stateWriteFailed(kind, status, error);
     });
 
@@ -348,7 +368,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         // land after the fast one for "alice" and overwrite it.
         if (term != m_searchTerm) return;
         if (!resp.ok) {
-            emit searchErrored(resp.errorMessage);
+            emitSearchError(resp.errorMessage);
             return;
         }
         QVariantList rows;
@@ -375,7 +395,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     connect(m_client, &MatrixClient::searchFailed, this,
             [this](const QString& term, const QString& error) {
         if (term != m_searchTerm) return;
-        emit searchErrored(error);
+        emitSearchError(error);
     });
 
     // ── Per-room notify level ─────────────────────────────────────────────
@@ -404,6 +424,23 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             const QString restored = *it;
             m_pendingNotifyLevelRollback.erase(it);
             emit notifyLevelChanged(roomId, restored);
+            // DELIBERATELY NOT GUARDED, unlike the surfaces above. Two
+            // reasons, and the second is the one that decides it:
+            //
+            //   * the user-visible part of this failure is the rollback, and
+            //     it has already happened — notifyLevelChanged went out on
+            //     the line above and the context-menu checkmark has moved
+            //     back. Nothing here holds in-flight state that only this
+            //     signal clears (m_pendingNotifyLevelRollback is erased
+            //     above, unconditionally);
+            //   * nothing consumes notifyLevelFailed. No QML handler, no C++
+            //     slot, no test — checked across qml/, src/ and tests/. The
+            //     `error` string is not on screen on any code path, so
+            //     substituting it would guard nothing and would add a fourth
+            //     copy of the expired sentence to keep in step.
+            //
+            // If a handler is ever added, guard it then: replace the text,
+            // keep the signal. The rule is in the block below emitFeedback.
             emit notifyLevelFailed(roomId, error);
             return;
         }
@@ -1352,6 +1389,10 @@ QString ServerConnection::messageLink(const QString& eventId) const
 void ServerConnection::sendMediaMessage(const QString& fileUrl)
 {
     if (m_activeRoomId.isEmpty()) {
+        // Raw on purpose — see emitMediaSendFailed. This fires before any
+        // request goes out, so it is never a 401 wearing a local error's
+        // clothes, and "your session has expired" would be a wrong answer to
+        // "which room were you going to put this in?".
         emit mediaSendFailed("No active room");
         return;
     }
@@ -1388,6 +1429,8 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         // User-facing toast: strip the raw URI so we don't bleed
         // /data/… or content://com.android.providers… into the UI.
         QString friendly = displayName.isEmpty() ? "file" : displayName;
+        // Also raw, and for the same reason: a file we cannot open is a local
+        // fact that stays true after the user signs back in.
         emit mediaSendFailed("Couldn't read the selected " + friendly
                              + " — " + file.errorString());
         return;
@@ -1446,7 +1489,7 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
             emit mediaSendCompleted();
         },
         [this](const QString& error) {
-            emit mediaSendFailed(error);
+            emitMediaSendFailed(error);
         });
 
     m_client->uploadMedia(uploadId, fileData, mimeType, fileName);
@@ -2407,32 +2450,89 @@ void ServerConnection::emitFeedback(const QString& text, const QString& kind)
     emit sendFeedback(text, kind);
 }
 
-// KNOWN STILL UNGUARDED, and left that way on purpose rather than by oversight.
+// The search pane's own failure line. Second chokepoint, same rule as
+// emitFeedback, different sentence — and the difference is the point.
 //
-// Four other surfaces carry a raw server error to the user and do not consult
-// the session state. They were not swept in with this change because, unlike
-// the five feedback callers, they are not one surface with one right answer —
-// each needs a UX decision rather than a mechanical substitution:
+// This is not a toast. It replaces the results list inside an open popup,
+// under a search box the user is still typing in, and it sits on screen until
+// the next query rather than fading after five seconds. The banner's "Your
+// session has expired. Sign in again to reconnect." is the right sentence for
+// a toast and the wrong one here: it reads as an answer to the search
+// ("expired… what, my query?") and repeats, word for word, a line already
+// visible a few hundred pixels away. What the user needs told in this
+// particular hole is why there are no results and that retyping will not
+// help.
 //
-//   * stateWriteFailed (the m.room.state write paths) — QML switches on its
-//     `kind` tag to word the toast per write type, and it carries a status
-//     code the receiver may branch on. Replacing the text centrally would cut
-//     across that.
-//   * searchErrored — renders as inline text inside the search pane, not as a
-//     toast. "Your session has expired" sitting where results go may read
-//     worse than the server's own words, and the banner is already visible.
-//   * notifyLevelFailed — fires beside a local rollback the user can see
-//     happen. The rollback is arguably the whole message; the string may be
-//     redundant either way.
-//   * mediaSendFailed — four call sites, and two of them (avatar and server
-//     icon upload) report into a settings dialog rather than the chat toast.
+// The signal is emitted, never dropped, and for a harder reason than
+// emitFeedback's: SearchPopup's `searching` / `loadingMore` flags are cleared
+// by exactly two handlers, onSearchResultsReady and onSearchErrored. Swallow
+// this and the popup spins on a query that will never land, with no way back
+// short of closing and reopening it.
+void ServerConnection::emitSearchError(const QString& message)
+{
+    if (m_auth.shouldSuppressSubsystemError()) {
+        emit searchErrored(tr("Search is unavailable until you sign in "
+                              "again."));
+        return;
+    }
+    emit searchErrored(message);
+}
+
+// The upload surface. Guarded here rather than at the signal, because the
+// four call sites are not the same kind of failure.
 //
-// A 401 on any of these still prints a Matrix error object next to the
-// expired-session banner. That is the same defect as the one fixed above, only
-// on surfaces where the fix is not a one-liner. Whoever picks this up: the
-// question to answer per surface is whether the caller holds in-flight state
-// that only its failure path clears — if it does, replace the text, never drop
-// the signal, for the reason spelled out in emitFeedback above.
+// The three that route through this helper are the reply handlers for an
+// upload that was actually attempted: the composer's attachment, the server
+// icon, and the avatar. Those are the ones that carry a 401 body. The other
+// two emit mediaSendFailed directly and deliberately (see sendMediaMessage) —
+// they fire before any request leaves the process, so their text describes a
+// local fact that a fresh sign-in would not change, and overwriting it with
+// the session sentence would be a confidently wrong diagnosis.
+//
+// Not dropped, for the emitFeedback reason exactly: MessageInput decrements
+// _inFlightUploads on mediaSendCompleted or mediaSendFailed and on nothing
+// else, and while that count is above zero the composer is disabled and reads
+// "Uploading…". A swallowed failure there locks the user out of typing in the
+// channel until the app restarts.
+void ServerConnection::emitMediaSendFailed(const QString& error)
+{
+    if (m_auth.shouldSuppressSubsystemError()) {
+        emit mediaSendFailed(tr("Your session has expired. Sign in again to "
+                                "reconnect."));
+        return;
+    }
+    emit mediaSendFailed(error);
+}
+
+// WHAT IS AND IS NOT GUARDED, now that the four above have been decided.
+//
+// Guarded, each by replacing text and never by dropping a signal:
+//
+//   * sendFeedback, via emitFeedback (the composer, nickname editor, channel
+//     and DM creation, message deletion).
+//   * voiceError, via setVoiceError.
+//   * stateWriteFailed — `kind` and `status` pass through untouched so the
+//     receivers can still say WHICH save failed; only the server's `error`
+//     string, the part that is a raw Matrix object on a 401, is replaced.
+//   * searchErrored, via emitSearchError, with a sentence written for an
+//     inline pane rather than a toast.
+//   * mediaSendFailed, via emitMediaSendFailed, on the three call sites that
+//     report a failed request; the two pre-flight ones stay verbatim.
+//
+// Not guarded, on purpose:
+//
+//   * loginError / registerError — the recovery path. Suppressing the reason
+//     a sign-in failed is what makes the expired state unclearable, which is
+//     defect 2 in net/SessionAuth.h. Their call sites carry the same note.
+//   * notifyLevelFailed — nothing consumes it and the rollback it accompanies
+//     is the user-visible message. The reasoning is at the emit site.
+//
+// The rule, for the next surface somebody adds: ask whether the caller holds
+// in-flight state that only its failure path clears. If it does — and the DM
+// create guard in startDirectMessage is the worked example, where swallowing
+// a failure locks that peer out until restart — replace the text and never
+// drop the signal. Ask second where the text lands: a toast, an inline pane
+// and a settings dialog do not want the same sentence.
 
 void ServerConnection::clearVoiceError()
 {
@@ -2904,7 +3004,7 @@ void ServerConnection::uploadServerAvatar(const QString& fileUrl)
             m_client->setRoomState(targetRoom,
                 QString::fromUtf8(bsfchat::event_type::kServerInfo), QString(), body);
         },
-        [this](const QString& error) { emit mediaSendFailed(error); });
+        [this](const QString& error) { emitMediaSendFailed(error); });
 
     m_client->uploadMedia(uploadId, fileData, mimeType, fileInfo.fileName());
 }
@@ -2953,7 +3053,7 @@ void ServerConnection::uploadAvatar(const QString& fileUrl)
         m_client, this, uploadId,
         &MatrixClient::mediaUploaded, &MatrixClient::mediaUploadError,
         [this](const QString& contentUri) { updateAvatarUrl(contentUri); },
-        [this](const QString& error) { emit mediaSendFailed(error); });
+        [this](const QString& error) { emitMediaSendFailed(error); });
 
     m_client->uploadMedia(uploadId, fileData, mimeType, fileInfo.fileName());
 }
