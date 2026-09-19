@@ -42,6 +42,8 @@
 #include "model/MessageModel.h"
 #include "util/PermissionMath.h"
 
+#include <bsfchat/Permissions.h>
+
 namespace permmath = bsfchat::permmath;
 
 // permmath mirrors the bit VALUES but not protocol's `has()` helper — every
@@ -350,6 +352,52 @@ private slots:
         QVERIFY(grants(permmath::kAllFlags, permmath::kManageBots));
         // ...and emphatically not in @everyone's defaults.
         QVERIFY(!grants(permmath::kEveryoneDefault, permmath::kManageBots));
+    }
+
+    void thePermissionMirrorHasNotDriftedFromProtocol()
+    {
+        // The role-editor test below reconstructs the editor's mask and
+        // compares it to permmath::kAllFlags. Both of those are client-side,
+        // so together they prove the editor covers everything the MIRROR
+        // knows about — and nothing at all about whether the mirror still
+        // matches the server.
+        //
+        // That gap is not hypothetical. ADD_REACTIONS (bit 14) was added to
+        // protocol's kAllFlags while this mirror still ended at bit 13, and
+        // every client-side check stayed green: the editor was missing a
+        // switch for a flag the server enforces, which is the exact failure
+        // the editor test was written to catch, and it could not see it.
+        //
+        // So compare against the authority. permmath deliberately does not
+        // include protocol's header — it carries the values so the permission
+        // maths can be unit-tested without the protocol library — but this
+        // test already links bsfchat_protocol and can hold the two side by
+        // side. A new flag on the server now fails HERE first, and the editor
+        // test fails immediately after it is mirrored, which is the order
+        // that makes both messages readable.
+        QCOMPARE(permmath::kAllFlags,
+                 permmath::Flags(bsfchat::permission::kAllFlags));
+        QCOMPARE(permmath::kEveryoneDefault,
+                 permmath::Flags(bsfchat::permission::kEveryoneDefault));
+
+        // Value-by-value, so a drift report names the bit rather than
+        // printing two hex masks and leaving the reader to diff them.
+        QCOMPARE(permmath::kViewChannel,     permmath::Flags(bsfchat::permission::kViewChannel));
+        QCOMPARE(permmath::kSendMessages,    permmath::Flags(bsfchat::permission::kSendMessages));
+        QCOMPARE(permmath::kAttachFiles,     permmath::Flags(bsfchat::permission::kAttachFiles));
+        QCOMPARE(permmath::kEmbedLinks,      permmath::Flags(bsfchat::permission::kEmbedLinks));
+        QCOMPARE(permmath::kManageMessages,  permmath::Flags(bsfchat::permission::kManageMessages));
+        QCOMPARE(permmath::kManageChannels,  permmath::Flags(bsfchat::permission::kManageChannels));
+        QCOMPARE(permmath::kManageRoles,     permmath::Flags(bsfchat::permission::kManageRoles));
+        QCOMPARE(permmath::kKickMembers,     permmath::Flags(bsfchat::permission::kKickMembers));
+        QCOMPARE(permmath::kBanMembers,      permmath::Flags(bsfchat::permission::kBanMembers));
+        QCOMPARE(permmath::kMentionEveryone, permmath::Flags(bsfchat::permission::kMentionEveryone));
+        QCOMPARE(permmath::kManageServer,    permmath::Flags(bsfchat::permission::kManageServer));
+        QCOMPARE(permmath::kChangeNickname,  permmath::Flags(bsfchat::permission::kChangeNickname));
+        QCOMPARE(permmath::kManageNicknames, permmath::Flags(bsfchat::permission::kManageNicknames));
+        QCOMPARE(permmath::kManageBots,      permmath::Flags(bsfchat::permission::kManageBots));
+        QCOMPARE(permmath::kAddReactions,    permmath::Flags(bsfchat::permission::kAddReactions));
+        QCOMPARE(permmath::kAdministrator,   permmath::Flags(bsfchat::permission::kAdministrator));
     }
 
     void manageBotsIsAServerScopeGrant()

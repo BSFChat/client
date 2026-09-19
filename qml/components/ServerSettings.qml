@@ -74,6 +74,14 @@ Popup {
          hint: ""},
         {key: "embed",    label: "Embed links",        flag: 0x0008,
          hint: ""},
+        // ADD_REACTIONS (0x4000). Out of numeric order on purpose: it belongs
+        // beside "Send messages" because that is the pair a moderator reasons
+        // about. Denying both is a mute; denying only send leaves a
+        // read-mostly channel people can still react in. Before this flag the
+        // server checked nothing on m.reaction, so denying send did not stop
+        // anyone reacting.
+        {key: "react",    label: "Add reactions",      flag: 0x4000,
+         hint: "React to messages with emoji. Separate from sending, so a muted member can be stopped from reacting too."},
         {key: "manmsg",   label: "Manage messages",    flag: 0x0010,
          hint: "Delete anyone's message. Also bypasses slowmode."},
         // MANAGE_CHANNELS is the flag that lets a non-admin CREATE channels and
@@ -1432,8 +1440,13 @@ Popup {
                                 position: maxPos + 1,
                                 // Same as kEveryoneDefault in Permissions.h:
                                 // view + send + attach + embed (0x000f) plus
-                                // CHANGE_NICKNAME (0x0800).
-                                permissions: "0x080f",
+                                // CHANGE_NICKNAME (0x0800) and ADD_REACTIONS
+                                // (0x4000). Reactions are in the default
+                                // because the flag exists to make denying them
+                                // possible, not to make reacting a privilege —
+                                // a new role without it could post but not
+                                // react, which nobody creating a role means.
+                                permissions: "0x480f",
                                 mentionable: false,
                                 hoist: false
                             });

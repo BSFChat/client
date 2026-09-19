@@ -49,16 +49,30 @@ constexpr Flags kManageNicknames = 1ULL << 12;
 // permissions and the mismatch is not subtle — tests/test_bots.cpp pins the
 // value so the change cannot land quietly on this side.
 constexpr Flags kManageBots      = 1ULL << 13;
+// Gate on reacting, separate from kSendMessages. Before it existed the server
+// applied no permission check to m.reaction at all, so a member with
+// SEND_MESSAGES denied could still react — muting somebody was not actually
+// possible. Folding reactions into SEND_MESSAGES would have closed that while
+// conflating two things moderators treat differently: a read-mostly channel
+// where everyone may react but few may post is an ordinary arrangement.
+//
+// In kEveryoneDefault, deliberately and in step with protocol: the point is
+// that denying reactions becomes possible, not that reacting becomes a
+// privilege. A mirror that left it out here would make this client compute a
+// smaller @everyone than the server grants and hide the reaction affordance
+// from every member of a fresh server.
+constexpr Flags kAddReactions    = 1ULL << 14;
 constexpr Flags kAdministrator   = 1ULL << 15;
 
 constexpr Flags kEveryoneDefault =
-    kViewChannel | kSendMessages | kAttachFiles | kEmbedLinks | kChangeNickname;
+    kViewChannel | kSendMessages | kAttachFiles | kEmbedLinks | kChangeNickname |
+    kAddReactions;
 
 constexpr Flags kAllFlags =
     kViewChannel | kSendMessages | kAttachFiles | kEmbedLinks | kManageMessages |
     kManageChannels | kManageRoles | kKickMembers | kBanMembers |
     kMentionEveryone | kManageServer | kChangeNickname | kManageNicknames |
-    kManageBots | kAdministrator;
+    kManageBots | kAddReactions | kAdministrator;
 
 inline const char* kEveryoneRoleId = "everyone";
 
