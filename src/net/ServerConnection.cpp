@@ -814,7 +814,15 @@ QString ServerConnection::identityProviderUrl() const
 {
     if (m_identityClient)
         return m_identityClient->providerUrl();
-    return {};
+    // No OIDC flow ran in this process — the usual case after a restart.
+    // Fall back to what the saved server entry was restored with, so a
+    // self-hosted identity provider survives relaunching the client.
+    return m_storedIdentityProviderUrl;
+}
+
+void ServerConnection::setIdentityProviderUrl(const QString& url)
+{
+    m_storedIdentityProviderUrl = url;
 }
 
 void ServerConnection::loginWithOidc(const QString& providerUrl)
