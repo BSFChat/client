@@ -7,65 +7,54 @@
 
 namespace bsfchat::client {
 
-// Single builder for mxc:// -> HTTP download URLs. Two callers used to
-// assemble this by hand (MessageModel::resolveMediaUrl and
-// MatrixClient::mediaDownloadUrl); they share this so the credential can't
-// end up on one and not the other.
+// THE SESSION TOKEN IS NO LONGER IN MEDIA URLS.
 //
-// The access token rides in the query string rather than an Authorization
-// header because these URLs are handed straight to QML Image.source, which
-// has no way to set headers. The server takes either form — see
-// MediaHandler::authenticate_media.
+// It used to be. `buildMediaDownloadUrl` appended `?access_token=<the viewer's
+// 90-day token>` because QML's Image.source and MediaPlayer.source take a URL
+// and cannot set an Authorization header. That single decision put a live
+// credential in nginx's access log on every media fetch, in the system
+// browser's address bar and history whenever the file card was clicked, and in
+// the clipboard whenever anyone copied a media link — and it was the
+// exfiltration channel of the one-click account takeover in audit finding A1.
 //
-// THIS IS A CREDENTIAL IN A URL, AND IT IS NOT A LOG-HYGIENE PROBLEM.
+// What replaced it: net/MediaTicketCache. The client asks the server for a
+// short-lived signature scoped to one object and one user
+// (POST /_matrix/media/v3/ticket), and puts THAT in the URL as
+// `?mt=…&exp=…`. The server re-runs its own permission check at fetch time, so
+// the ticket points at an authorization rather than being one. A ticket
+// recovered from a log is worth one object, to the user it already belonged to,
+// for five minutes.
 //
-// This comment used to describe the risk as "can be recorded by server access
-// logs and any intervening proxy". That framing is what kept it open. What it
-// actually is:
+// The endpoint path is spelled here and in the server's Server.cpp rather than
+// in the protocol library's api_path:: constants, because adding a constant
+// would put this change in the protocol repo — which has to merge first, and
+// would redden CI on both other repos until it did. Fold it into api_path the
+// next time protocol changes for another reason.
+inline constexpr char kMediaTicketPath[] = "/_matrix/media/v3/ticket";
+
+// The bare, unauthenticated download URL for an mxc URI: no credential, no
+// ticket, no query string at all.
 //
-//   * On production, nginx's default `combined` access_log writes `$request`,
-//     including the query string, so EVERY user's live session token is on
-//     disk in /var/log/nginx/access.log and in every logrotate archive and
-//     backup. Tokens renew on use, so a week-old log line is a working one.
-//     (Tracked as audit finding B4; the nginx side belongs to work package P6.)
+// This is the object's identity, and that is all it is. It is what a ticket
+// gets appended to (MediaTicketCache::composeUrl), what MediaDownloader keys
+// its on-disk cache by, and what a server with `[media] require_auth = false`
+// will serve directly. On a server with require_auth on — the default, and the
+// only sane setting — fetching this on its own gets a 401.
 //
-//   * It is the exfiltration channel for the media takeover. The file card
-//     below hands this URL to Qt.openUrlExternally, so the user's SYSTEM
-//     BROWSER opens the chat origin with the token in location.search. Until
-//     the September 2026 media hardening, an attacker could upload HTML, have
-//     it served inline with the type they chose, and read that token from
-//     their own page. The server side of that is now closed — uploads are
-//     re-typed against an allowlist and anything not inline-safe is served
-//     `Content-Disposition: attachment` with nosniff and a restrictive CSP —
-//     so the page no longer executes. The token is still in the URL.
+// DO NOT ADD A CREDENTIAL PARAMETER BACK TO THIS FUNCTION. If a caller needs a
+// URL that will actually fetch, it needs MediaTicketCache, which is
+// asynchronous on purpose. A synchronous "just give me a working URL" helper is
+// precisely the shape that put a token in a query string for three releases.
 //
-// The durable fix is a short-lived signed media ticket scoped to one object
-// and one viewer, minted by the server and carried as `?mt=`, replacing the
-// session bearer entirely. It is not built yet: Image.source, MediaPlayer's
-// source and the external-open paths all consume this one string, so it needs
-// a mint-and-cache layer in front of all three plus a ticket endpoint on the
-// server. Until then, do not add new call sites, and do not hand the result of
-// this function to anything that shows a URL to the user or to another process.
-//
-// Returns an empty string for a non-mxc URI or an unset homeserver. An empty
-// token yields the old unauthenticated URL, which still works against a
-// server with require_media_auth off.
-inline QString buildMediaDownloadUrl(const QString& homeserver,
-                                     const QString& accessToken,
-                                     const QString& mxcUri)
+// Returns an empty string for a non-mxc URI or an unset homeserver.
+inline QString buildMediaDownloadUrl(const QString& homeserver, const QString& mxcUri)
 {
     if (!mxcUri.startsWith(QStringLiteral("mxc://")) || homeserver.isEmpty())
         return {};
 
-    QString url = homeserver
-                  + QString::fromUtf8(api_path::kMediaDownload)
-                  + mxcUri.mid(6); // strip "mxc://"
-
-    if (!accessToken.isEmpty()) {
-        url += QStringLiteral("?access_token=")
-               + QString::fromUtf8(QUrl::toPercentEncoding(accessToken));
-    }
-    return url;
+    return homeserver
+         + QString::fromUtf8(api_path::kMediaDownload)
+         + mxcUri.mid(6); // strip "mxc://"
 }
 
 } // namespace bsfchat::client

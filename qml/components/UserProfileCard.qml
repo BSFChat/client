@@ -19,6 +19,10 @@ Popup {
     // tested without the BSFChat module.
     readonly property string avatarSource: {
         var s = serverManager.activeServer;
+        // Read and compared, exactly like _permGen below: a media URL carries
+        // a ticket that is fetched asynchronously, so resolveMediaUrl answers
+        // "" until one lands and this binding has to re-run when it does.
+        if (s && s.mediaTicketEpoch < 0) return "";
         return ProfileCardAvatar.avatarSource(
             profileAvatarUrl,
             s ? function (mxc) { return s.resolveMediaUrl(mxc); } : null);

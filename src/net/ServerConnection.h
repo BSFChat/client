@@ -28,6 +28,7 @@
 #include "net/VoiceSession.h"
 
 class MatrixClient;
+class MediaDownloader;
 class SyncLoop;
 class LocalCache;
 class RoomListModel;
@@ -55,6 +56,15 @@ class ServerConnection : public QObject {
     // Server icon — fully-resolved HTTP URL (empty if no icon is set).
     // Stored on the same bsfchat.server.info state event as the name.
     Q_PROPERTY(QString serverAvatarUrl READ serverAvatarUrl NOTIFY serverAvatarUrlChanged)
+    // Bumped every time a media ticket lands. Media URLs are no longer a pure
+    // function of (homeserver, token, mxc) — they carry a short-lived signature
+    // that has to be fetched — so resolveMediaUrl() can answer "" now and
+    // something real a moment later. A QML binding that calls resolveMediaUrl()
+    // must read this too, or it will never re-evaluate and the avatar will stay
+    // blank forever. Read AND COMPARED, not merely touched: a bare property read
+    // is dead-code-eliminated on QML's AOT-compiled path (same trap as
+    // UserProfileCard's _permGen).
+    Q_PROPERTY(int mediaTicketEpoch READ mediaTicketEpoch NOTIFY mediaTicketEpochChanged)
     Q_PROPERTY(QString userId READ userId NOTIFY userIdChanged)
     Q_PROPERTY(RoomListModel* roomListModel READ roomListModel CONSTANT)
     Q_PROPERTY(MessageModel* messageModel READ messageModel CONSTANT)
@@ -706,12 +716,35 @@ public:
     Q_INVOKABLE void setMaxScreenShareQuality(int level);
     Q_INVOKABLE void uploadAvatar(const QString& fileUrl);
     Q_INVOKABLE void fetchProfile(const QString& userId);
+    // The download URL for an mxc URI, or "" when no ticket has been minted for
+    // it yet. See mediaTicketEpoch for what a caller has to do about that.
     Q_INVOKABLE QString resolveMediaUrl(const QString& mxcUri) const;
+    int mediaTicketEpoch() const { return m_mediaTicketEpoch; }
+
+    // Fetch `mxcUri` to the local media cache and hand THE LOCAL FILE to the
+    // desktop, rather than handing a URL to the system browser.
+    //
+    // This is what replaced Qt.openUrlExternally(mediaUrl) at the four media
+    // call sites (the file card and the image escape hatch in MessageBubble,
+    // "Open in browser" in ImageViewer, and the video card's middle-click). That
+    // call put the media URL — and, before tickets, the viewer's 90-day session
+    // token with it — into the system browser's address bar, history and
+    // clipboard, and it is the click that completed the account-takeover chain
+    // in audit finding A1. Nothing about this path involves a browser or a URL
+    // the user can see.
+    //
+    // The fetch carries an Authorization header, because a C++ downloader can:
+    // it does not need a ticket and does not use one.
+    Q_INVOKABLE void openMediaExternally(const QString& mxcUri);
 
 signals:
     void displayNameChanged();
     void serverNameChanged();
     void serverAvatarUrlChanged();
+    void mediaTicketEpochChanged();
+    // The external-open path could not produce a local file. QML surfaces it
+    // the same way a failed media send is surfaced.
+    void mediaOpenFailed(QString error);
     // Bumped whenever presence-relevant state changes (activity
     // observed, self-status set). Views use it as a cheap reactive
     // hook since presenceFor() is a lookup on a regular QMap.
@@ -898,6 +931,12 @@ private:
     QString m_serverName; // set by bsfchat.server.info state event
     QString m_serverAvatarMxc;  // raw mxc:// uri
     QString m_serverAvatarUrl;  // resolved http URL for QML
+    // Incremented on every ticketReady. See the mediaTicketEpoch property.
+    int m_mediaTicketEpoch = 0;
+    // Downloads a media object with an Authorization header and hands the
+    // resulting LOCAL FILE to the desktop. Created on first use — most sessions
+    // never open a file externally. See openMediaExternally().
+    MediaDownloader* m_mediaOpener = nullptr;
     QString m_avatarUrl;
     QString m_activeRoomId;
     QString m_activeRoomName;

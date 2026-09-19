@@ -3,6 +3,7 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 qt_add_executable(test_models
     test_models.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
@@ -518,6 +519,7 @@ qt_add_executable(test_identity_provider_url
     # so this target has to carry the model even though the test never uses it.
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
     ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
@@ -526,6 +528,9 @@ qt_add_executable(test_identity_provider_url
     ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AudioDeviceStatus.cpp
+    # ServerConnection::openMediaExternally downloads with an Authorization
+    # header and opens the local copy, so the downloader comes with it.
+    ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
@@ -614,7 +619,10 @@ qt_add_executable(test_media_cache_key
     ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
 )
 target_include_directories(test_media_cache_key PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_media_cache_key PRIVATE Qt6::Core Qt6::Network Qt6::Test)
+# Qt6::Gui for QDesktopServices: the downloader gained openDownloaded(), which
+# hands a LOCAL file to the desktop so that "open this attachment" never puts a
+# media URL in front of the system browser.
+target_link_libraries(test_media_cache_key PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::Test)
 add_test(NAME test_media_cache_key COMMAND test_media_cache_key)
 
 # Deleting a message must be able to fail. redactEvent reported nothing at
@@ -622,6 +630,7 @@ add_test(NAME test_media_cache_key COMMAND test_media_cache_key)
 qt_add_executable(test_redaction_result
     test_redaction_result.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
     ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
 )
@@ -637,6 +646,7 @@ add_test(NAME test_redaction_result COMMAND test_redaction_result)
 qt_add_executable(test_token_rejection
     test_token_rejection.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
     ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
 )
@@ -715,6 +725,7 @@ qt_add_executable(test_bots
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/util/MarkdownParser.cpp
     ${CMAKE_SOURCE_DIR}/src/util/MentionRenderer.cpp

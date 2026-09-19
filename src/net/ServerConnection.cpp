@@ -9,11 +9,13 @@
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
 #include "model/BotAdminModel.h"
+#include "util/MediaUrl.h"
 #include "util/MemberCache.h"
 #include "util/MentionBadge.h"
 #include "util/ModerationScope.h"
 #include "util/PermissionMath.h"
 #include "identity/IdentityClient.h"
+#include "core/MediaDownloader.h"
 #include "core/Settings.h"
 #include "core/ReadState.h"
 #include "store/LocalCache.h"
@@ -141,6 +143,24 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     m_memberListModel->setDisplayNameCache(&m_userDisplayNames);
     m_messageModel->setAccessTokenSource(&m_accessToken);
     m_messageModel->setBotUserCache(&m_botUserIds);
+
+    // One ticket cache per connection, shared by the two things that resolve
+    // media: the message model (which bakes a URL into each row) and QML's
+    // avatar bindings (which call resolveMediaUrl on demand). Sharing it means
+    // one mint per object rather than one per consumer.
+    m_messageModel->setMediaTicketCache(m_client->mediaTickets());
+    connect(m_client->mediaTickets(), &bsfchat::client::MediaTicketCache::ticketReady,
+            this, [this](const QString& mxcUri, const QString& url) {
+                // The avatar bindings are the reason for the epoch: QML cannot
+                // re-evaluate a binding over a Q_INVOKABLE on its own.
+                ++m_mediaTicketEpoch;
+                emit mediaTicketEpochChanged();
+                if (!m_serverAvatarMxc.isEmpty() && mxcUri == m_serverAvatarMxc
+                    && url != m_serverAvatarUrl) {
+                    m_serverAvatarUrl = url;
+                    emit serverAvatarUrlChanged();
+                }
+            });
 
     m_botAdminModel = new BotAdminModel(this);
     m_botAdminModel->hooks.listBots = [this]() { m_client->listBots(); };
@@ -2966,6 +2986,31 @@ void ServerConnection::fetchProfile(const QString& userId)
 QString ServerConnection::resolveMediaUrl(const QString& mxcUri) const
 {
     return m_client->mediaDownloadUrl(mxcUri);
+}
+
+void ServerConnection::openMediaExternally(const QString& mxcUri)
+{
+    // The bare object URL: no ticket, no token, no query string at all. The
+    // credential goes in a header below, which is the whole difference between
+    // this path and the Qt.openUrlExternally it replaced.
+    const QString remote = bsfchat::client::buildMediaDownloadUrl(m_serverUrl, mxcUri);
+    if (remote.isEmpty()) {
+        emit mediaOpenFailed(QStringLiteral("Not a media link"));
+        return;
+    }
+    if (!m_mediaOpener) {
+        m_mediaOpener = new MediaDownloader(this);
+        connect(m_mediaOpener, &MediaDownloader::failed, this,
+                [this](const QString&, const QString& error) {
+                    emit mediaOpenFailed(error);
+                });
+        connect(m_mediaOpener, &MediaDownloader::openFailed, this,
+                [this](const QString&, const QString& error) {
+                    emit mediaOpenFailed(error);
+                });
+    }
+    m_mediaOpener->setAuthToken(m_accessToken);
+    m_mediaOpener->openDownloaded(remote);
 }
 
 void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response)

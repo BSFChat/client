@@ -52,6 +52,7 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
         return prevDt.date() != curDt.date();
     }
     case MediaUrlRole: return msg.mediaUrl;
+    case MediaMxcRole: return msg.mediaMxc;
     case MediaFileNameRole: return msg.mediaFileName;
     case MediaFileSizeRole: return msg.mediaFileSize;
     case MediaWidthRole: return msg.mediaWidth;
@@ -83,6 +84,7 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {ShowSenderRole, "showSender"},
         {ShowDateSeparator, "showDateSeparator"},
         {MediaUrlRole, "mediaUrl"},
+        {MediaMxcRole, "mediaMxc"},
         {MediaFileNameRole, "mediaFileName"},
         {MediaFileSizeRole, "mediaFileSize"},
         {MediaWidthRole, "mediaWidth"},
@@ -370,10 +372,35 @@ QVariantList MessageModel::searchMessages(const QString& query, int limit) const
     return out;
 }
 
+void MessageModel::setMediaTicketCache(bsfchat::client::MediaTicketCache* cache)
+{
+    if (m_mediaTickets == cache) return;
+    if (m_mediaTickets) m_mediaTickets->disconnect(this);
+    m_mediaTickets = cache;
+    if (!m_mediaTickets) return;
+    connect(m_mediaTickets, &bsfchat::client::MediaTicketCache::ticketReady,
+            this, &MessageModel::onMediaTicketReady);
+}
+
 QString MessageModel::resolveMediaUrl(const QString& mxcUri) const
 {
-    return bsfchat::client::buildMediaDownloadUrl(
-        m_homeserver, m_accessToken ? *m_accessToken : QString(), mxcUri);
+    // "" is a normal answer, not a failure: it means "no ticket yet". The row
+    // is repainted by onMediaTicketReady when one arrives, and MessageBubble
+    // already handles mediaUrl changing after the bubble exists (it had to —
+    // this returned "" before login too).
+    if (!m_mediaTickets) return {};
+    return m_mediaTickets->urlFor(mxcUri);
+}
+
+void MessageModel::onMediaTicketReady(const QString& mxcUri, const QString& url)
+{
+    for (int row = 0; row < m_messages.size(); ++row) {
+        if (m_messages[row].mediaMxc != mxcUri) continue;
+        if (m_messages[row].mediaUrl == url) continue;
+        m_messages[row].mediaUrl = url;
+        const auto idx = index(row, 0);
+        emit dataChanged(idx, idx, {MediaUrlRole});
+    }
 }
 
 MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& event, const QString& ownUserId) const
@@ -422,6 +449,11 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
     if (entry.msgtype == "m.image" || entry.msgtype == "m.file" ||
         entry.msgtype == "m.audio" || entry.msgtype == "m.video") {
         QString mxcUrl = QString::fromStdString(event.content.data.value("url", ""));
+        // Kept alongside the resolved URL: a ticket is short-lived, so the row
+        // has to know which object it is showing in order to be re-resolved when
+        // one arrives (or is refreshed). Also what the external-open path uses,
+        // so that path never touches a URL with a credential in it.
+        entry.mediaMxc = mxcUrl;
         entry.mediaUrl = resolveMediaUrl(mxcUrl);
         entry.mediaFileName = entry.body; // body is the filename in media messages
 

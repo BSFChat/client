@@ -517,6 +517,12 @@ ApplicationWindow {
         function onMediaSendFailed(error) {
             toastError("Upload failed: " + error);
         }
+        // "Open this attachment" now downloads the bytes and hands the local
+        // file to the desktop, so it can fail where opening a URL in a browser
+        // could not. Silence would read as "the click did nothing".
+        function onMediaOpenFailed(error) {
+            toastError("Couldn't open that file: " + error);
+        }
         function onMediaSendCompleted() {
             toastSuccess("Upload complete");
         }

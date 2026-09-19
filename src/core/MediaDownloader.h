@@ -13,6 +13,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QObject>
+#include <QSet>
 #include <QString>
 
 class MediaDownloader : public QObject {
@@ -24,6 +25,27 @@ public:
     // cached, emits `completed` synchronously (next event loop tick)
     // with the existing path.
     Q_INVOKABLE void request(const QString& remoteUrl);
+
+    // Bearer token for media fetches, or empty for none.
+    //
+    // Sent as an Authorization header. C++ can do what QML's Image.source
+    // cannot, which is why the external-open path (openDownloaded below) needs
+    // neither a ticket nor a credential in the URL. Only ever attached to an
+    // http(s) URL — a file:// or qrc: source gets nothing.
+    void setAuthToken(const QString& token) { m_authToken = token; }
+
+    // Download (or reuse the cached copy) and hand THE LOCAL FILE to the
+    // desktop with QDesktopServices::openUrl(QUrl::fromLocalFile(...)).
+    //
+    // This exists so that "open this attachment" never involves a browser.
+    // Qt.openUrlExternally on a media URL put that URL — and, before signed
+    // tickets, the viewer's 90-day session token inside it — into the system
+    // browser's address bar, its history, and the clipboard, and that click is
+    // what completed the account-takeover chain in audit finding A1. Passing a
+    // remote URL to the OS is now not something any media call site can do.
+    //
+    // Emits `openFailed` when the download fails or the OS refuses the file.
+    Q_INVOKABLE void openDownloaded(const QString& remoteUrl);
 
     // 0..1 for in-flight; sticks at 1.0 once complete.
     Q_INVOKABLE double progress(const QString& remoteUrl) const;
@@ -44,9 +66,16 @@ signals:
     void completed(QString remoteUrl, QString localFileUrl);
     void failed(QString remoteUrl, QString error);
     void progressChanged(QString remoteUrl, double progress);
+    // openDownloaded() could not put a local file in front of the user.
+    void openFailed(QString remoteUrl, QString error);
 
 private:
     QNetworkAccessManager m_nam;
+    QString m_authToken;
+    // Remote URLs whose completion should be handed to the desktop. A set, not
+    // a flag on the entry: a video already being streamed by the player can be
+    // asked to open while its download is in flight.
+    QSet<QString> m_pendingOpens;
 
     struct Entry {
         QString path;         // local file path
@@ -62,5 +91,9 @@ private:
     // Sweep: tally every file in the cache dir, if total > limit
     // delete oldest-modified until under. Cheap — bounded by the
     // number of cached files, which is capped by the size limit.
+    // Opens `localPath` with the desktop if `remoteUrl` was requested through
+    // openDownloaded(). No-op otherwise, so an ordinary request() never pops a
+    // window open.
+    void handOffToDesktop(const QString& remoteUrl, const QString& localPath);
     void enforceCacheBudget();
 };

@@ -106,6 +106,7 @@ qt_add_executable(bsfchat-app
     src/identity/IdentityClient.cpp
     src/identity/IdentityApiClient.cpp
     src/net/MatrixClient.cpp
+    src/net/MediaTicketCache.cpp
     src/net/SyncBackoff.cpp
     src/net/AuthError.cpp
     src/net/SyncLoop.cpp

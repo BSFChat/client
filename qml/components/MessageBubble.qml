@@ -22,6 +22,11 @@ Item {
     property real timestamp
     property string msgtype: "m.text"
     property string mediaUrl: ""
+    // The mxc:// URI behind mediaUrl. Media URLs now carry a short-lived signed
+    // ticket rather than the session token, so the URL is not a stable handle —
+    // it expires, and it is not what the "open this file" path should be given.
+    // Everything that leaves the app works from the mxc instead.
+    property string mediaMxc: ""
     property string mediaFileName: ""
     property real mediaFileSize: 0
     // Intrinsic media dimensions from the m.image / m.video event's
@@ -80,7 +85,7 @@ Item {
     // Left-click on an inline image asks MessageView to open the
     // in-app ImageViewer (zoomable / pannable lightbox). Middle-click
     // bypasses this and opens in the OS browser instead.
-    signal imageOpenRequested(string url, string filename, real size)
+    signal imageOpenRequested(string url, string mxc, string filename, real size)
     // Right-click context-menu action: redact (delete) the message.
     // Allowed for the sender or anyone with MANAGE_MESSAGES.
     signal deleteRequested(string eventId)
@@ -903,6 +908,7 @@ Item {
                 active: bubble.msgtype === "m.video" && bubble.mediaUrl !== ""
                 sourceComponent: VideoPlayerCard {
                     source: bubble.mediaUrl
+                    sourceMxc: bubble.mediaMxc
                     fileName: bubble.mediaFileName
                     fileSize: bubble.mediaFileSize
                     mediaWidth: bubble.mediaWidth
@@ -1041,7 +1047,7 @@ Item {
                                     }
                                     Text {
                                         Layout.alignment: Qt.AlignHCenter
-                                        text: "Middle-click to try in your browser"
+                                        text: "Middle-click to open it"
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.xs
                                         color: Theme.fg3
@@ -1058,10 +1064,19 @@ Item {
                                     // (zoom + pan). Middle-click is the
                                     // escape hatch to the OS browser.
                                     if (mouse.button === Qt.MiddleButton) {
-                                        Qt.openUrlExternally(bubble.mediaUrl);
+                                        // Downloads with an Authorization
+                                        // header and opens the LOCAL file. It
+                                        // used to hand this URL to the system
+                                        // browser, which is the click that
+                                        // completed the takeover chain.
+                                        if (serverManager.activeServer) {
+                                            serverManager.activeServer
+                                                .openMediaExternally(bubble.mediaMxc);
+                                        }
                                     } else {
                                         bubble.imageOpenRequested(
                                             bubble.mediaUrl,
+                                            bubble.mediaMxc,
                                             bubble.mediaFileName,
                                             bubble.mediaFileSize);
                                     }
@@ -1097,7 +1112,13 @@ Item {
             Loader {
                 Layout.fillWidth: true
                 Layout.preferredHeight: item ? item.implicitHeight : 0
-                active: bubble.msgtype === "m.file" && bubble.mediaUrl !== ""
+                // Keyed on the mxc, not on mediaUrl. The card is a filename and
+                // a size with a click target; it needs no download URL, and its
+                // click works from the mxc. Gating it on mediaUrl would make it
+                // appear one ticket round-trip late for no reason — and pop the
+                // row's height at that moment. Images and video still wait for a
+                // URL, because Image.source and MediaPlayer.source need one.
+                active: bubble.msgtype === "m.file" && bubble.mediaMxc !== ""
                 sourceComponent: Component {
                     Rectangle {
                         id: fileCard
@@ -1171,7 +1192,18 @@ Item {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: Qt.openUrlExternally(bubble.mediaUrl)
+                            // The file card's single left-click. This was
+                            // Qt.openUrlExternally(bubble.mediaUrl) — one click,
+                            // no confirmation, the viewer's 90-day token into
+                            // the system browser's address bar. It now fetches
+                            // the bytes with an Authorization header and asks
+                            // the desktop to open the local copy.
+                            onClicked: {
+                                if (serverManager.activeServer) {
+                                    serverManager.activeServer
+                                        .openMediaExternally(bubble.mediaMxc);
+                                }
+                            }
                         }
                     }
                 }
