@@ -20,7 +20,13 @@ using json = nlohmann::json;
 
 MatrixClient::MatrixClient(QObject* parent)
     : QObject(parent)
+    , m_mediaTickets(this)
 {
+    // The cache decides WHEN a ticket is needed; this class knows HOW to ask.
+    // The signal is emitted from the event loop, never from inside the
+    // urlFor() that decided — see MediaTicketCache::scheduleMint.
+    connect(&m_mediaTickets, &bsfchat::client::MediaTicketCache::mintRequested,
+            this, &MatrixClient::requestMediaTicket);
 }
 
 void MatrixClient::setHomeserver(const QString& url)
@@ -29,11 +35,63 @@ void MatrixClient::setHomeserver(const QString& url)
     // Strip trailing slash
     while (m_homeserver.endsWith('/'))
         m_homeserver.chop(1);
+    m_mediaTickets.setHomeserver(m_homeserver);
 }
 
 void MatrixClient::setAccessToken(const QString& token)
 {
+    const bool changed = (m_accessToken != token);
     m_accessToken = token;
+    // A ticket names the user it was minted for. A new token means a new
+    // session — possibly a different account — so every cached ticket is at
+    // best useless and at worst a stale URL we would keep handing to an Image
+    // until it expired. Includes logout, where the token goes empty.
+    if (changed) m_mediaTickets.clear();
+}
+
+void MatrixClient::requestMediaTicket(const QString& mxcUri)
+{
+    if (m_accessToken.isEmpty() || m_homeserver.isEmpty()) {
+        m_mediaTickets.mintFailed(mxcUri, QStringLiteral("not signed in"));
+        return;
+    }
+
+    QJsonObject body;
+    body["mxc_uri"] = mxcUri;
+    auto* reply = makeRequest("POST",
+                              QString::fromUtf8(bsfchat::client::kMediaTicketPath),
+                              QJsonDocument(body).toJson(QJsonDocument::Compact));
+    if (!reply) {
+        m_mediaTickets.mintFailed(mxcUri, QStringLiteral("request not sent"));
+        return;
+    }
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, mxcUri]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            // A 404 here is the ordinary answer for "you may not have this
+            // object" — the mint endpoint deliberately gives the same reply for
+            // that as for "no such object". MediaTicketCache backs off on it, so
+            // an image in a channel the user cannot see does not become a
+            // request per repaint.
+            m_mediaTickets.mintFailed(mxcUri, reply->errorString());
+            return;
+        }
+        const auto doc = QJsonDocument::fromJson(reply->readAll());
+        if (!doc.isObject()) {
+            m_mediaTickets.mintFailed(mxcUri, QStringLiteral("malformed ticket response"));
+            return;
+        }
+        const auto obj = doc.object();
+        const QString mt = obj.value("mt").toString();
+        const qint64 exp = static_cast<qint64>(obj.value("exp").toDouble());
+        const qint64 ttlMs = static_cast<qint64>(obj.value("ttl_ms").toDouble());
+        if (mt.isEmpty() || ttlMs <= 0) {
+            m_mediaTickets.mintFailed(mxcUri, QStringLiteral("incomplete ticket response"));
+            return;
+        }
+        m_mediaTickets.storeTicket(mxcUri, mt, exp, ttlMs);
+    });
 }
 
 QUrl MatrixClient::buildUrl(const QString& path) const
@@ -854,8 +912,9 @@ void MatrixClient::uploadMedia(const QString& uploadId, const QByteArray& data,
 
 QString MatrixClient::mediaDownloadUrl(const QString& mxcUri) const
 {
-    // mxc://server/mediaId -> http(s)://homeserver/_matrix/media/v3/download/server/mediaId?access_token=...
-    return bsfchat::client::buildMediaDownloadUrl(m_homeserver, m_accessToken, mxcUri);
+    // mxc://server/mediaId -> https://homeserver/_matrix/media/v3/download/server/mediaId?mt=…&exp=…
+    // Empty until a ticket exists; the caller repaints on ticketReady.
+    return m_mediaTickets.urlFor(mxcUri);
 }
 
 void MatrixClient::getProfile(const QString& userId)

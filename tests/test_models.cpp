@@ -8,6 +8,7 @@
 #include <QSignalSpy>
 
 #include "model/MessageModel.h"
+#include "net/MediaTicketCache.h"
 #include "model/ThreadFilterModel.h"
 #include "model/RoomListModel.h"
 #include "model/MemberListModel.h"
@@ -736,69 +737,170 @@ private slots:
     }
 
     // --- media download URLs -------------------------------------------
-    // The server can require auth on downloads ([media] require_auth, on by
-    // default). QML Image.source can't send an Authorization header, so the
-    // token has to be in the query string or every image 401s.
+    //
+    // These four used to assert the OPPOSITE: that the URL ended in
+    // "?access_token=<the viewer's 90-day session token>". That was the
+    // exfiltration channel of the one-click account takeover (audit A1) and it
+    // wrote every user's live token into nginx's access log on every fetch.
+    //
+    // The token is gone. buildMediaDownloadUrl now returns the bare object URL
+    // and nothing else; a URL that actually fetches is composed by
+    // MediaTicketCache from a short-lived server-signed ticket.
 
-    void testMediaUrlCarriesAccessToken()
+    void testMediaUrlCarriesNoCredential()
     {
         const QString url = bsfchat::client::buildMediaDownloadUrl(
-            "https://bsfchat.example", "tok_abc123", "mxc://bsfchat.example/AbCdEf");
+            "https://bsfchat.example", "mxc://bsfchat.example/AbCdEf");
         QCOMPARE(url, QStringLiteral("https://bsfchat.example")
                       + QString::fromUtf8(bsfchat::api_path::kMediaDownload)
-                      + QStringLiteral("bsfchat.example/AbCdEf?access_token=tok_abc123"));
-    }
-
-    void testMediaUrlPercentEncodesToken()
-    {
-        // Tokens are server-generated, but nothing guarantees they stay
-        // query-safe; an unescaped '&' or '+' would truncate or corrupt the
-        // credential and read as a 401 rather than a client bug.
-        const QString url = bsfchat::client::buildMediaDownloadUrl(
-            "https://h", "a+b&c=d/e", "mxc://h/id");
-        QVERIFY(url.endsWith(QStringLiteral("?access_token=a%2Bb%26c%3Dd%2Fe")));
-        QCOMPARE(url.count(QLatin1Char('&')), 0);
+                      + QStringLiteral("bsfchat.example/AbCdEf"));
+        QVERIFY(!url.contains("access_token"));
+        QVERIFY(!url.contains(QLatin1Char('?')));
     }
 
     void testMediaUrlRejectsNonMxcAndEmptyHomeserver()
     {
-        QVERIFY(bsfchat::client::buildMediaDownloadUrl("https://h", "t", "http://evil/x").isEmpty());
-        QVERIFY(bsfchat::client::buildMediaDownloadUrl("", "t", "mxc://h/id").isEmpty());
+        QVERIFY(bsfchat::client::buildMediaDownloadUrl("https://h", "http://evil/x").isEmpty());
+        QVERIFY(bsfchat::client::buildMediaDownloadUrl("", "mxc://h/id").isEmpty());
     }
 
-    void testMediaUrlWithoutTokenHasNoQuery()
+    void testTicketUrlCarriesTheTicketAndTheSignedExpiry()
     {
-        // Pre-login / no-credential case must stay a bare URL rather than
-        // emitting "?access_token=".
-        const QString url = bsfchat::client::buildMediaDownloadUrl("https://h", "", "mxc://h/id");
-        QVERIFY(!url.isEmpty());
-        QVERIFY(!url.contains(QLatin1Char('?')));
+        // `exp` goes out verbatim because it is inside the signature; the
+        // ticket is percent-encoded because nothing guarantees a base64url
+        // payload stays query-safe if the format ever changes.
+        const QString url = bsfchat::client::MediaTicketCache::composeUrl(
+            "https://h", "mxc://h/id", "QGE6aA.sig+/=", 1700000000);
+        QVERIFY(url.startsWith("https://h"));
+        QVERIFY(url.contains("/id?mt="));
+        QVERIFY(url.endsWith("&exp=1700000000"));
+        QVERIFY(!url.contains("access_token"));
+        QVERIFY(url.contains("%2B")); // the '+' survived as an escape
     }
 
-    void testMessageModelResolvesMediaWithToken()
+    void testTicketCacheMintsOnceThenServesFromCache()
     {
-        // MessageModel reads the token through a pointer to its owner's copy,
-        // so a token set after construction (every login path) still lands in
-        // URLs built later.
+        bsfchat::client::MediaTicketCache cache;
+        cache.setHomeserver("https://h");
+        QSignalSpy mints(&cache, &bsfchat::client::MediaTicketCache::mintRequested);
+
+        // No ticket yet: "" now, and exactly one mint scheduled however many
+        // times a binding asks.
+        QVERIFY(cache.urlFor("mxc://h/id").isEmpty());
+        QVERIFY(cache.urlFor("mxc://h/id").isEmpty());
+        QVERIFY(mints.wait(500));
+        QCOMPARE(mints.count(), 1);
+
+        cache.storeTicket("mxc://h/id", "tkt", 1700000000, 300000);
+        QVERIFY(cache.urlFor("mxc://h/id").contains("mt=tkt"));
+        QCOMPARE(mints.count(), 1); // served from cache, no second mint
+    }
+
+    void testTicketCacheAnnouncesLateArrivals()
+    {
+        bsfchat::client::MediaTicketCache cache;
+        cache.setHomeserver("https://h");
+        QSignalSpy ready(&cache, &bsfchat::client::MediaTicketCache::ticketReady);
+
+        cache.storeTicket("mxc://h/id", "tkt", 1700000000, 300000);
+        QCOMPARE(ready.count(), 1);
+        QCOMPARE(ready.at(0).at(0).toString(), QStringLiteral("mxc://h/id"));
+        QVERIFY(ready.at(0).at(1).toString().contains("mt=tkt"));
+    }
+
+    void testTicketCacheRefreshesBeforeExpiryWithoutBlanking()
+    {
+        // The property that keeps a long-lived Image from blinking: inside the
+        // refresh margin the cache keeps serving the still-valid URL AND mints
+        // a replacement, rather than going empty and waiting.
+        qint64 now = 1000000;
+        bsfchat::client::MediaTicketCache cache(nullptr, [&now] { return now; });
+        cache.setHomeserver("https://h");
+        QSignalSpy mints(&cache, &bsfchat::client::MediaTicketCache::mintRequested);
+
+        cache.storeTicket("mxc://h/id", "tkt", 1700000000, 300000);
+        QVERIFY(!cache.urlFor("mxc://h/id").isEmpty());
+        QCOMPARE(mints.count(), 0);
+
+        // Past the margin, still live.
+        now += 300000 - bsfchat::client::MediaTicketCache::kRefreshMarginMs + 1;
+        QVERIFY(!cache.urlFor("mxc://h/id").isEmpty());
+        QVERIFY(mints.wait(500));
+        QCOMPARE(mints.count(), 1);
+
+        // Past the deadline: nothing to serve.
+        now += bsfchat::client::MediaTicketCache::kRefreshMarginMs + 1;
+        QVERIFY(cache.urlFor("mxc://h/id").isEmpty());
+    }
+
+    void testTicketCacheBacksOffOnRefusal()
+    {
+        // An object in a channel the user cannot see answers 404 forever. Without
+        // a backoff that is one HTTP request per binding evaluation, per repaint.
+        qint64 now = 1000000;
+        bsfchat::client::MediaTicketCache cache(nullptr, [&now] { return now; });
+        cache.setHomeserver("https://h");
+        QSignalSpy mints(&cache, &bsfchat::client::MediaTicketCache::mintRequested);
+
+        QVERIFY(cache.urlFor("mxc://h/nope").isEmpty());
+        QVERIFY(mints.wait(500));
+        QCOMPARE(mints.count(), 1);
+        cache.mintFailed("mxc://h/nope", "404");
+
+        for (int i = 0; i < 20; ++i) QVERIFY(cache.urlFor("mxc://h/nope").isEmpty());
+        QTest::qWait(50);
+        QCOMPARE(mints.count(), 1);
+
+        now += bsfchat::client::MediaTicketCache::kFirstBackoffMs + 1;
+        QVERIFY(cache.urlFor("mxc://h/nope").isEmpty());
+        QVERIFY(mints.wait(500));
+        QCOMPARE(mints.count(), 2);
+    }
+
+    void testTicketCacheIsClearedWhenTheSessionChanges()
+    {
+        // A ticket names the user it was minted for, so another session's are
+        // worthless — and a stale one would be handed to an Image until it aged
+        // out.
+        bsfchat::client::MediaTicketCache cache;
+        cache.setHomeserver("https://h");
+        cache.storeTicket("mxc://h/id", "tkt", 1700000000, 300000);
+        QVERIFY(cache.hasLiveTicket("mxc://h/id"));
+
+        cache.clear();
+        QVERIFY(!cache.hasLiveTicket("mxc://h/id"));
+        QVERIFY(cache.urlFor("mxc://h/id").isEmpty());
+    }
+
+    void testMessageModelResolvesMediaThroughTheTicketCache()
+    {
         MessageModel model;
         model.setHomeserver("https://bsfchat.example");
-        QString token;
-        model.setAccessTokenSource(&token);
 
-        QVERIFY(!model.resolveMediaUrl("mxc://bsfchat.example/id").contains("access_token"));
-        token = "later_token";
-        QVERIFY(model.resolveMediaUrl("mxc://bsfchat.example/id")
-                    .endsWith("?access_token=later_token"));
+        // With no cache there is deliberately no URL at all. The only other
+        // thing it could return is one with a credential in it.
+        QVERIFY(model.resolveMediaUrl("mxc://bsfchat.example/id").isEmpty());
+
+        bsfchat::client::MediaTicketCache cache;
+        cache.setHomeserver("https://bsfchat.example");
+        model.setMediaTicketCache(&cache);
+
+        QVERIFY(model.resolveMediaUrl("mxc://bsfchat.example/id").isEmpty());
+        cache.storeTicket("mxc://bsfchat.example/id", "tkt", 1700000000, 300000);
+        const QString url = model.resolveMediaUrl("mxc://bsfchat.example/id");
+        QVERIFY(url.contains("mt=tkt"));
+        QVERIFY(!url.contains("access_token"));
     }
 
-    void testMessageModelMediaUrlOnEventMatchesMatrixClient()
+    void testMessageModelRepaintsTheRowWhenATicketArrives()
     {
-        // The inline-image path (baked into the row at insert time) must
-        // produce the same shape as the avatar path (built on demand in QML).
+        // The whole reason resolveMediaUrl is allowed to answer "": the row's
+        // mediaUrl has to become real on its own once the ticket lands.
         MessageModel model;
         model.setHomeserver("https://bsfchat.example");
-        const QString token = QStringLiteral("tok");
-        model.setAccessTokenSource(&token);
+        bsfchat::client::MediaTicketCache cache;
+        cache.setHomeserver("https://bsfchat.example");
+        model.setMediaTicketCache(&cache);
 
         bsfchat::RoomEvent event = makeMessageEvent("$img", "@a:h", "pic.png");
         event.content.data["msgtype"] = "m.image";
@@ -806,10 +908,20 @@ private slots:
         model.appendEvent(event, "@me:h");
 
         QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.data(model.index(0, 0), MessageModel::MediaMxcRole).toString(),
+                 QStringLiteral("mxc://bsfchat.example/PicId"));
+        QVERIFY(model.data(model.index(0, 0),
+                           MessageModel::MediaUrlRole).toString().isEmpty());
+
+        QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+        cache.storeTicket("mxc://bsfchat.example/PicId", "tkt", 1700000000, 300000);
+
+        QCOMPARE(changed.count(), 1);
         const QString baked = model.data(model.index(0, 0),
                                          MessageModel::MediaUrlRole).toString();
+        QVERIFY(baked.contains("mt=tkt"));
+        QVERIFY(!baked.contains("access_token"));
         QCOMPARE(baked, model.resolveMediaUrl("mxc://bsfchat.example/PicId"));
-        QVERIFY(baked.endsWith("?access_token=tok"));
     }
 
     // --- event-id indexing / targeted repaints ---------------------------

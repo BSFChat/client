@@ -3,6 +3,7 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDebug>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -31,14 +32,16 @@ QString MediaDownloader::cacheKeyForUrl(const QString& url)
 {
     // The query string is not part of the object's identity.
     //
-    // Media URLs carry ?access_token=… (MediaUrl.h explains why it cannot be
-    // a header), so hashing the WHOLE url keyed every cached file to the
-    // session token. Every re-login changed the token, every previously
-    // downloaded image and video therefore missed, and the whole cache was
-    // re-fetched over the network while the old copies sat there consuming
-    // the 200 MB budget until eviction happened to reach them. With tokens
-    // now expiring after 90 days and re-login being a normal event rather
-    // than a rare one, that is a full media re-download on a schedule.
+    // This started as a bug fix: media URLs used to carry ?access_token=, so
+    // hashing the WHOLE url keyed every cached file to the session token. Every
+    // re-login changed the token, every previously downloaded image and video
+    // therefore missed, and the whole cache was re-fetched while the old copies
+    // sat there consuming the 200 MB budget until eviction reached them.
+    //
+    // The token is gone — the query now carries a signed media ticket
+    // (util/MediaUrl.h) — and the rule matters more than it did, not less. A
+    // ticket is replaced every few minutes, so a key that included it would
+    // miss on essentially every fetch and the cache would never hit at all.
     const int q = url.indexOf(QLatin1Char('?'));
     return q < 0 ? url : url.left(q);
 }
@@ -76,9 +79,11 @@ void MediaDownloader::request(const QString& remoteUrl)
     QString localPath = cachePathFor(remoteUrl);
     if (it != m_entries.constEnd() && it->done
         && QFileInfo::exists(it->path)) {
-        QString url = QUrl::fromLocalFile(it->path).toString();
-        QTimer::singleShot(0, this, [this, remoteUrl, url]() {
+        QString path = it->path;
+        QString url = QUrl::fromLocalFile(path).toString();
+        QTimer::singleShot(0, this, [this, remoteUrl, url, path]() {
             emit completed(remoteUrl, url);
+            handOffToDesktop(remoteUrl, path);
         });
         return;
     }
@@ -89,8 +94,9 @@ void MediaDownloader::request(const QString& remoteUrl)
         e.progress = 1.0;
         m_entries.insert(remoteUrl, e);
         QString url = QUrl::fromLocalFile(localPath).toString();
-        QTimer::singleShot(0, this, [this, remoteUrl, url]() {
+        QTimer::singleShot(0, this, [this, remoteUrl, url, localPath]() {
             emit completed(remoteUrl, url);
+            handOffToDesktop(remoteUrl, localPath);
         });
         return;
     }
@@ -100,9 +106,17 @@ void MediaDownloader::request(const QString& remoteUrl)
         return;
     }
 
-    QNetworkRequest req((QUrl(remoteUrl)));
+    const QUrl url(remoteUrl);
+    QNetworkRequest req(url);
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                      QNetworkRequest::NoLessSafeRedirectPolicy);
+    // The credential goes in a header, never in the URL. Scheme-gated so a
+    // redirect target or a local path can never be handed the token, and so the
+    // cache key (which is the URL minus its query) stays free of it.
+    if (!m_authToken.isEmpty()
+        && (url.scheme() == QLatin1String("https") || url.scheme() == QLatin1String("http"))) {
+        req.setRawHeader("Authorization", ("Bearer " + m_authToken).toUtf8());
+    }
     QNetworkReply* reply = m_nam.get(req);
 
     Entry e;
@@ -130,6 +144,7 @@ void MediaDownloader::request(const QString& remoteUrl)
                 if (reply->error() != QNetworkReply::NoError) {
                     QString msg = reply->errorString();
                     m_entries.remove(remoteUrl);
+                    if (m_pendingOpens.remove(remoteUrl)) emit openFailed(remoteUrl, msg);
                     emit failed(remoteUrl, msg);
                     return;
                 }
@@ -138,6 +153,7 @@ void MediaDownloader::request(const QString& remoteUrl)
                 if (!f.open(QIODevice::WriteOnly)) {
                     QString msg = f.errorString();
                     m_entries.remove(remoteUrl);
+                    if (m_pendingOpens.remove(remoteUrl)) emit openFailed(remoteUrl, msg);
                     emit failed(remoteUrl, msg);
                     return;
                 }
@@ -146,8 +162,10 @@ void MediaDownloader::request(const QString& remoteUrl)
 
                 jt->done = true;
                 jt->progress = 1.0;
+                const QString localPath = jt->path;
                 emit completed(remoteUrl,
-                               QUrl::fromLocalFile(jt->path).toString());
+                               QUrl::fromLocalFile(localPath).toString());
+                handOffToDesktop(remoteUrl, localPath);
 
                 // After every successful write, check whether the
                 // cache is over budget and evict oldest-touched
@@ -156,6 +174,38 @@ void MediaDownloader::request(const QString& remoteUrl)
                 // a user who never downloads new media pays nothing.
                 enforceCacheBudget();
             });
+}
+
+void MediaDownloader::openDownloaded(const QString& remoteUrl)
+{
+    if (remoteUrl.isEmpty()) {
+        emit openFailed(remoteUrl, QStringLiteral("empty URL"));
+        return;
+    }
+    // Already local (a file the player downloaded earlier, say) — nothing to
+    // fetch, just show it.
+    const QUrl url(remoteUrl);
+    if (url.isLocalFile()) {
+        if (!QDesktopServices::openUrl(url)) {
+            emit openFailed(remoteUrl, QStringLiteral("the system could not open this file"));
+        }
+        return;
+    }
+    m_pendingOpens.insert(remoteUrl);
+    request(remoteUrl);
+}
+
+void MediaDownloader::handOffToDesktop(const QString& remoteUrl, const QString& localPath)
+{
+    if (!m_pendingOpens.remove(remoteUrl)) return;
+
+    // fromLocalFile, not fromUserInput or a re-parse of a string: the URL the
+    // OS is handed is constructed from a path this process wrote into its own
+    // cache directory, so there is no way for a remote URL to reach the
+    // browser through here.
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(localPath))) {
+        emit openFailed(remoteUrl, QStringLiteral("the system could not open this file"));
+    }
 }
 
 void MediaDownloader::enforceCacheBudget()

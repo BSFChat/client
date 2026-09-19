@@ -1918,7 +1918,12 @@ Rectangle {
                                 Image {
                                     anchors.fill: parent
                                     source: {
-                                        if (serverManager.activeServer && serverManager.activeServer.avatarUrl !== "") {
+                                        if (!serverManager.activeServer) return "";
+                                        // Read and compared — see UserSettings.qml
+                                        // for why the epoch has to be in the
+                                        // binding at all.
+                                        if (serverManager.activeServer.mediaTicketEpoch < 0) return "";
+                                        if (serverManager.activeServer.avatarUrl !== "") {
                                             return serverManager.activeServer.resolveMediaUrl(serverManager.activeServer.avatarUrl);
                                         }
                                         return "";

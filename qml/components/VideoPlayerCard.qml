@@ -29,6 +29,9 @@ ColumnLayout {
     property url source
     property string fileName: ""
     property real fileSize: 0
+    // The mxc:// URI behind `source` — see MessageBubble.mediaMxc. `source`
+    // carries a ticket that expires; anything leaving the app uses this.
+    property string sourceMxc: ""
 
     // Effective URL fed to MediaPlayer. On desktop this is identical to
     // `source`. On Android we download first (see below) and swap in a
@@ -634,8 +637,8 @@ ColumnLayout {
 
         // Whole-card click target — below the transport bar in z so
         // clicks on the play button / slider still reach those. Left-
-        // click toggles play/pause; middle-click opens in browser
-        // (same escape hatch as inline images).
+        // click toggles play/pause; middle-click downloads and opens the
+        // local file (same escape hatch as inline images).
         MouseArea {
             id: cardMouse
             anchors.fill: parent
@@ -649,7 +652,14 @@ ColumnLayout {
             // the explicit expand button in the transport bar instead.
             onClicked: (m) => {
                 if (m.button === Qt.MiddleButton) {
-                    Qt.openUrlExternally(root.source);
+                    // Was Qt.openUrlExternally(root.source) — the media URL,
+                    // with the session token in it, into the system browser.
+                    // Now: fetch with an Authorization header, open the local
+                    // file.
+                    if (serverManager.activeServer) {
+                        serverManager.activeServer
+                            .openMediaExternally(root.sourceMxc);
+                    }
                 } else {
                     root.togglePlay();
                 }

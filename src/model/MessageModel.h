@@ -12,6 +12,8 @@
 
 #include <bsfchat/MatrixTypes.h>
 
+#include "net/MediaTicketCache.h"
+
 class ThreadFilterModel;
 
 class MessageModel : public QAbstractListModel {
@@ -38,7 +40,8 @@ public:
         IsOwnMessageRole,
         ShowSenderRole,     // Whether to show sender info (for grouping)
         ShowDateSeparator,  // Whether to show a date separator above this message
-        MediaUrlRole,       // Resolved HTTP URL for media messages
+        MediaUrlRole,       // Resolved HTTP URL for media messages (may arrive late)
+        MediaMxcRole,       // The mxc:// URI the row's media came from
         MediaFileNameRole,  // Filename from media content
         MediaFileSizeRole,  // File size from media content info
         MediaWidthRole,     // Intrinsic width  in px from m.image/m.video info.w
@@ -239,6 +242,17 @@ public:
     // them can forget to push an update here.
     void setAccessTokenSource(const QString* token) { m_accessToken = token; }
 
+    // The shared ticket cache (MatrixClient's), not owned.
+    //
+    // Media URLs used to be built here from the homeserver and the token. They
+    // are now built from a short-lived server-signed ticket, which has to be
+    // fetched — so resolveMediaUrl() can answer "" for a row that will get a URL
+    // a moment later, and this model listens for that and repaints the row.
+    // Without a cache set, resolveMediaUrl() returns "" and no media resolves:
+    // that is deliberate, because the only other thing it could do is put the
+    // session token back in the URL.
+    void setMediaTicketCache(bsfchat::client::MediaTicketCache* cache);
+
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
     QHash<int, QByteArray> roleNames() const override;
@@ -310,7 +324,8 @@ private:
         qint64 timestamp = 0;
         QString msgtype;
         bool isOwnMessage = false;
-        QString mediaUrl;       // Resolved HTTP URL for m.image/m.file
+        QString mediaUrl;       // Resolved HTTP URL for m.image/m.file ("" until ticketed)
+        QString mediaMxc;       // The mxc:// URI mediaUrl was resolved from
         QString mediaFileName;  // Filename from content
         qint64 mediaFileSize = 0; // Size in bytes
         int    mediaWidth  = 0;   // intrinsic px from info.w (0 = unknown)
@@ -397,6 +412,14 @@ private:
     const QMap<QString, QString>* m_dnCache = nullptr;
     const QSet<QString>* m_botUsers = nullptr;
     const QString* m_accessToken = nullptr;
+    bsfchat::client::MediaTicketCache* m_mediaTickets = nullptr;
+
+    // A ticket landed for `mxcUri`: re-resolve every row that names it and
+    // repaint just those. One mxc can legitimately appear in several rows (a
+    // repost, a thumbnail reused as the full image), so this is a scan rather
+    // than a single lookup — bounded by the loaded timeline, and it only runs
+    // once per object per five-minute ticket.
+    void onMediaTicketReady(const QString& mxcUri, const QString& url);
 
     MessageEntry eventToEntry(const bsfchat::RoomEvent& event, const QString& ownUserId) const;
     // True when `event` is an edit *sibling* — content.m.relates_to with

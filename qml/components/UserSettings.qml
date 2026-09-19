@@ -81,7 +81,16 @@ Popup {
                 Image {
                     anchors.fill: parent
                     source: {
-                        if (serverManager.activeServer && serverManager.activeServer.avatarUrl !== "") {
+                        if (!serverManager.activeServer) return "";
+                        // Read AND COMPARED so the binding depends on it: a
+                        // media URL now carries a ticket that has to be
+                        // fetched, so resolveMediaUrl answers "" first and
+                        // something real once the ticket lands. A bare
+                        // property read is dead-code-eliminated on QML's
+                        // AOT-compiled path and the binding would never
+                        // re-run — same trap as UserProfileCard's _permGen.
+                        if (serverManager.activeServer.mediaTicketEpoch < 0) return "";
+                        if (serverManager.activeServer.avatarUrl !== "") {
                             return serverManager.activeServer.resolveMediaUrl(serverManager.activeServer.avatarUrl);
                         }
                         return "";

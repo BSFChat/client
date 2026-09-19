@@ -1405,6 +1405,7 @@ Rectangle {
                         timestamp: model.timestamp
                         msgtype: model.msgtype
                         mediaUrl: model.mediaUrl || ""
+                        mediaMxc: model.mediaMxc || ""
                         mediaFileName: model.mediaFileName || ""
                         mediaFileSize: model.mediaFileSize || 0
                         mediaWidth: model.mediaWidth || 0
@@ -1482,9 +1483,9 @@ Rectangle {
                         }
                         // Inline image left-click — route to the shared
                         // lightbox. Middle-click bypasses this entirely and
-                        // goes straight to the browser (handled in the bubble).
-                        onImageOpenRequested: (url, filename, size) => {
-                            imageViewer.openFor(url, filename, size);
+                        // downloads-then-opens the local file (in the bubble).
+                        onImageOpenRequested: (url, mxc, filename, size) => {
+                            imageViewer.openFor(url, mxc, filename, size);
                         }
                         // Context-menu delete → confirm, then redact. The
                         // server enforces MANAGE_MESSAGES / sender-ownership

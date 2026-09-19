@@ -10,6 +10,7 @@
 
 #include <bsfchat/MatrixTypes.h>
 
+#include "net/MediaTicketCache.h"
 #include "util/SearchParser.h"
 
 class MatrixClient : public QObject {
@@ -142,7 +143,23 @@ public:
     // net/TokenedReply.h.
     void uploadMedia(const QString& uploadId, const QByteArray& data,
                      const QString& contentType, const QString& filename);
+
+    // The URL to hand an Image/MediaPlayer for an mxc URI, or "" when there is
+    // not yet a ticket for it.
+    //
+    // It used to return a URL with the session token in the query string; it
+    // now returns one with a short-lived signed ticket, or nothing at all while
+    // one is being fetched. Callers must treat "" as "not yet" and repaint when
+    // MediaTicketCache::ticketReady fires — every existing one already did,
+    // because this could always return "" before login. See util/MediaUrl.h.
     QString mediaDownloadUrl(const QString& mxcUri) const;
+
+    // The mint-and-cache layer behind mediaDownloadUrl(). Exposed so the pieces
+    // that resolve media without going through this class — MessageModel, which
+    // bakes a URL into each row — share one cache and one set of tickets rather
+    // than minting their own.
+    bsfchat::client::MediaTicketCache* mediaTickets() { return &m_mediaTickets; }
+    const bsfchat::client::MediaTicketCache* mediaTickets() const { return &m_mediaTickets; }
 
     // GET /account/whoami — the server's canonical identity for our
     // access token. Used to reconcile a persisted (possibly stale or
@@ -483,7 +500,12 @@ private:
     static void applyMentions(nlohmann::json& content,
                                const QStringList& mentionedUserIds);
 
+    // POST /_matrix/media/v3/ticket for one object, feeding the reply back
+    // into m_mediaTickets. Driven by MediaTicketCache::mintRequested.
+    void requestMediaTicket(const QString& mxcUri);
+
     QNetworkAccessManager m_nam;
+    bsfchat::client::MediaTicketCache m_mediaTickets;
     QString m_homeserver;
     QString m_accessToken;
 };

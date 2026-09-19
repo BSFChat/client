@@ -4,7 +4,7 @@ import QtQuick.Layouts
 import BSFChat
 
 // Full-window image lightbox. A single instance lives in MessageView and
-// is invoked via openFor(url, filename, size) when a MessageBubble emits
+// is invoked via openFor(url, mxc, filename, size) when a MessageBubble emits
 // imageOpenRequested.
 //
 // Controls:
@@ -15,7 +15,8 @@ import BSFChat
 //   • Click outside the image    → close
 //   • Esc                        → close
 //   • Middle-click on the inline
-//     image (not in here)        → opens in browser instead of launching
+//     image (not in here)        → downloads and opens the local file with
+//                                  the system viewer instead of launching
 //
 // Pan/zoom are tracked as plain `zoom`, `panX`, `panY` reals on the
 // viewer root — no Flickable. A Flickable would eat wheel events before
@@ -25,6 +26,10 @@ Popup {
     id: viewer
 
     property string imageUrl: ""
+    // The mxc:// URI behind imageUrl — see MessageBubble.mediaMxc. The URL
+    // carries an expiring ticket; the mxc is the stable handle, and the only
+    // thing the "open it" button is allowed to work from.
+    property string imageMxc: ""
     property string filename: ""
     property real   fileSize: 0
 
@@ -34,8 +39,9 @@ Popup {
     property real panX: 0
     property real panY: 0
 
-    function openFor(url, name, size) {
+    function openFor(url, mxc, name, size) {
         imageUrl = url;
+        imageMxc = mxc || "";
         filename = name || "";
         fileSize = size || 0;
         zoom = 1.0;
@@ -323,8 +329,16 @@ Popup {
 
             GlassBtn {
                 icon: "link"
-                tooltip: "Open in browser"
-                onClicked: Qt.openUrlExternally(viewer.imageUrl)
+                tooltip: "Open with your system viewer"
+                // Not the browser, and not this URL. Downloads the object with
+                // an Authorization header and opens the local copy — see
+                // ServerConnection::openMediaExternally.
+                onClicked: {
+                    if (serverManager.activeServer) {
+                        serverManager.activeServer
+                            .openMediaExternally(viewer.imageMxc);
+                    }
+                }
             }
             GlassBtn {
                 icon: "x"
