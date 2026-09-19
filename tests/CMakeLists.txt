@@ -711,6 +711,22 @@ target_include_directories(test_media_cache_key PRIVATE ${CMAKE_SOURCE_DIR}/src)
 # media URL in front of the system browser.
 target_link_libraries(test_media_cache_key PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::Test)
 add_test(NAME test_media_cache_key COMMAND test_media_cache_key)
+# This target links Qt6::Gui, so QTEST_MAIN expands to QGuiApplication, which
+# initialises a platform plugin before a single case runs. On a headless Linux
+# runner that aborts: "could not connect to display". Most tests here link only
+# Qt6::Core and get a QCoreApplication, which is why they need nothing.
+#
+# macOS hides the difference — Cocoa initialises without a display — so this
+# passed locally and on the macOS job and failed only on Linux. If you add a
+# QTEST_MAIN test that links Qt6::Gui or Qt6::Widgets, it needs this line too.
+#
+# The other way out is QTEST_GUILESS_MAIN, which test_url_handler uses for the
+# same reason — it links Qt6::Gui but needs no display, so it just declines the
+# GUI app. That is the better fix where the test genuinely does not touch Gui;
+# offscreen is used here because it is correct either way and this change is
+# unblocking a release.
+set_tests_properties(test_media_cache_key PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # Deleting a message must be able to fail. redactEvent reported nothing at
 # all, so a refused delete looked exactly like an accepted one.
