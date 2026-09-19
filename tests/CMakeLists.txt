@@ -600,6 +600,47 @@ target_link_libraries(test_error_surface_guards PRIVATE
 )
 add_test(NAME test_error_surface_guards COMMAND test_error_surface_guards)
 
+# WHEN the upload failure signals fire, rather than what they say. Same
+# sources as test_error_surface_guards above (it is the same ServerConnection
+# and the same counter), kept as its own target because it pins a different
+# invariant: a pre-flight failure must not be reported before sendMediaMessage
+# has returned to the caller that is about to count the upload. Read the
+# header of the .cpp for the composer lockout it exists to prevent.
+qt_add_executable(test_composer_upload_lock
+    test_composer_upload_lock.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
+    ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AudioDeviceStatus.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/voice/VoiceTransportSelector.cpp
+    ${CMAKE_SOURCE_DIR}/src/store/LocalCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/FileLogger.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MarkdownParser.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MentionRenderer.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/PermissionMath.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
+)
+target_include_directories(test_composer_upload_lock PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_composer_upload_lock PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Network Qt6::Sql Qt6::Test
+    nlohmann_json::nlohmann_json
+)
+add_test(NAME test_composer_upload_lock COMMAND test_composer_upload_lock)
+
 # Publish gate for the QML snapshot lists (DMs, server members, bans): a
 # changed list must announce itself, an identical rebuild must stay silent
 # (U-H2). Header-only (src/net/SnapshotGate.h), so no ServerConnection needed.

@@ -244,13 +244,18 @@ private slots:
 
     // ── notifyLevelFailed ─────────────────────────────────────────────────
     //
-    // DELIBERATELY NOT GUARDED. Nothing consumes the signal — no QML handler,
-    // no C++ slot — and the user-visible half of the failure is the rollback,
-    // which has already happened by the time it fires. This case exists to
-    // record that as a decision and to fail if somebody guards it without
-    // giving it a receiver, or breaks the rollback while guarding it.
+    // GUARDED, since it acquired a receiver. It had none when the other four
+    // were decided — no QML handler, no C++ slot, no test — so the server's
+    // text reached no screen and substituting it would have guarded nothing.
+    // main.qml now toasts it, because the rollback it accompanies corrects a
+    // context menu that has already closed and so tells the user nothing.
+    // A toast is the same kind of hole sendFeedback lands in, so it gets the
+    // banner's sentence verbatim rather than the search pane's wording.
+    //
+    // The rollback is still the half that matters, and both halves are
+    // asserted here: a guard must not cost the user the restored setting.
 
-    void expiredNotifyLevelWriteRollsBackAndReportsUnchanged()
+    void expiredNotifyLevelWriteRollsBackAndSaysTheSessionExpired()
     {
         auto conn = deadSession();
         QSignalSpy changed(conn.get(), &ServerConnection::notifyLevelChanged);
@@ -267,11 +272,30 @@ private slots:
         QCOMPARE(changed.count(), 2);
         QCOMPARE(changed.at(1).at(1).toString(), QStringLiteral("none"));
 
-        // And the report itself is untouched. If you are here because you
-        // gave this signal a receiver, guard it now — replace the text, keep
-        // the signal — and change this expectation with it.
+        // And the report fires with the session sentence rather than the
+        // raw Matrix object main.qml would otherwise put in a toast next to
+        // a banner already saying the same thing in English.
         QCOMPARE(failed.count(), 1);
-        QCOMPARE(failed.first().at(1).toString(), kRawToken);
+        QCOMPARE(failed.first().at(0).toString(), kRoom);
+        QCOMPARE(failed.first().at(1).toString(), kSignIn);
+    }
+
+    void healthyNotifyLevelFailureKeepsTheServersOwnReason()
+    {
+        // The guard must not eat an ordinary refusal — a 403 on a channel a
+        // moderator has locked down is the only thing explaining why the
+        // choice bounced.
+        auto conn = liveSession();
+        QSignalSpy changed(conn.get(), &ServerConnection::notifyLevelChanged);
+        QSignalSpy failed(conn.get(), &ServerConnection::notifyLevelFailed);
+
+        const auto reason = QStringLiteral("You don't have permission to do that");
+        conn->setRoomNotifyLevel(kRoom, QStringLiteral("none"));
+        emit conn->client()->roomNotifyLevelError(kRoom, reason);
+
+        QCOMPARE(changed.count(), 2);  // optimistic write, then the rollback
+        QCOMPARE(failed.count(), 1);
+        QCOMPARE(failed.first().at(1).toString(), reason);
     }
 
     // ── mediaSendFailed ───────────────────────────────────────────────────
@@ -313,6 +337,11 @@ private slots:
 
         conn->sendMediaMessage(QStringLiteral("file:///tmp/whatever.png"));
 
+        // Deferred to the next turn of the event loop, and the spin is not
+        // incidental: emitting a pre-flight failure inside the call locked
+        // the composer out. tests/test_composer_upload_lock.cpp owns that
+        // invariant; here it only has to be waited for.
+        QVERIFY(spy.wait(2000));
         QCOMPARE(spy.count(), 1);
         QCOMPARE(spy.first().at(0).toString(), QStringLiteral("No active room"));
     }
@@ -328,6 +357,7 @@ private slots:
         const QString missing = dir.filePath(QStringLiteral("gone.png"));
         conn->sendMediaMessage(QUrl::fromLocalFile(missing).toString());
 
+        QVERIFY(spy.wait(2000));  // deferred; see the case above
         QCOMPARE(spy.count(), 1);
         const auto msg = spy.first().at(0).toString();
         QVERIFY2(msg.contains(QStringLiteral("gone.png")),

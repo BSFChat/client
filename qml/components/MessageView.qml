@@ -74,7 +74,12 @@ Rectangle {
                 }
             }
             // One per file, so the composer stays locked until the LAST
-            // of a multi-file drop lands (U-H6).
+            // of a multi-file drop lands (U-H6). Counting after the sends
+            // rather than alongside them is safe because sendMediaMessage
+            // never reports a failure before it returns — the invariant is
+            // held in ServerConnection::emitPreflightMediaFailure, and a
+            // synchronous pre-flight failure here would have locked the
+            // composer for the channel.
             for (var j = 0; j < uploaded; ++j) messageInput.noteUploadStarted();
             drop.accepted = uploaded > 0;
         }
