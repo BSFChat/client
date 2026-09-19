@@ -760,6 +760,10 @@ signals:
     void registerSucceeded();
     void registerFailed(const QString& error);
     void mediaSendCompleted();
+    // An upload (attachment, avatar, server icon) failed. MessageInput's
+    // in-flight count is decremented on this and on mediaSendCompleted only,
+    // so it must fire even when the text is worthless. Emit request failures
+    // through emitMediaSendFailed.
     void mediaSendFailed(const QString& error);
     void activeVoiceRoomIdChanged();
     // The server retired our voice row and the V-H2 re-join was
@@ -808,6 +812,9 @@ signals:
     // layer shows a toast and the optimistic local update is rolled back
     // before this signal fires. `kind` is a short tag ("role-assign",
     // "server-name", …) so the UI can tailor the message.
+    //
+    // On a dead session `kind` and `status` are still the real ones and only
+    // `error` is replaced with the sign-in sentence — the emit site says why.
     void stateWriteFailed(const QString& kind, int status, const QString& error);
     // Emitted when something outside MessageView (e.g. a message-link click
     // from another server, or a cross-room jump) has asked the chat pane to
@@ -822,7 +829,9 @@ signals:
     void searchResultsReady(const QVariantList& results, int total,
                             const QStringList& highlights,
                             const QString& nextBatch, bool appended);
-    // A search could not be completed. `message` is already user-facing.
+    // A search could not be completed. `message` is already user-facing, and
+    // on a dead session it is replaced wholesale — emit it through
+    // emitSearchError, never directly.
     void searchErrored(const QString& message);
     // The effective notify level for `roomId` changed (either because the user
     // set it, or because the server's answer disagreed with the local cache).
@@ -830,6 +839,11 @@ signals:
     void notifyLevelChanged(const QString& roomId, const QString& level);
     // Server refused a notify-level write; the local value has already been
     // rolled back to what it was.
+    //
+    // Currently has no receiver anywhere — the rollback is what the user
+    // sees — which is why this one carries the server's text unguarded on a
+    // dead session. Wire up a handler and you inherit the guard: see the emit
+    // site in the ctor.
     void notifyLevelFailed(const QString& roomId, const QString& error);
     // Fired after a /messages response is absorbed into the MessageModel.
     // MessageView listens to drive the "paginate-until-found" loop for
@@ -1094,6 +1108,21 @@ public:
     // a rule the next caller will not, so it is enforced here instead, the way
     // setVoiceError above already does it for the voice surface.
     void emitFeedback(const QString& text, const QString& kind);
+
+    // The ONLY place `searchErrored` is emitted from. Do not emit it directly.
+    //
+    // Same guard, a different sentence: this text lands inline where the
+    // results go, not in a toast, so it says why the list is empty rather
+    // than repeating the banner above it verbatim. The .cpp has the reasoning
+    // and the reason the signal must still fire (the popup's spinner is
+    // cleared by this handler and nothing else).
+    void emitSearchError(const QString& message);
+
+    // The ONLY place `mediaSendFailed` is emitted from for a failed REQUEST.
+    // The two pre-flight checks in sendMediaMessage — no active room, file
+    // won't open — emit it directly on purpose, because their text is about
+    // something signing in again will not fix.
+    void emitMediaSendFailed(const QString& error);
 public:
     // Called once at startup by ServerManager so the mic gate can
     // consult voiceMode / PTT prefs without a global singleton.
