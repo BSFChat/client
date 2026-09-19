@@ -20,6 +20,10 @@
 #include <QtTest/QtTest>
 #include <QStandardPaths>
 
+#include "model/BotAdminModel.h"  // ServerConnection exposes a BotAdminModel*
+                                   // Q_PROPERTY; moc needs the complete type,
+                                   // and a forward declaration is not enough
+                                   // once this TU instantiates the meta-type.
 #include "net/ServerConnection.h"
 
 namespace {

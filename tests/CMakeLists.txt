@@ -513,6 +513,10 @@ add_test(NAME test_server_roster COMMAND test_server_roster)
 qt_add_executable(test_identity_provider_url
     test_identity_provider_url.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
+    # ServerConnection gained a BotAdminModel* Q_PROPERTY when feat/bots merged.
+    # AUTOMOC instantiates the pointer meta-type, which needs the complete type,
+    # so this target has to carry the model even though the test never uses it.
+    ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
