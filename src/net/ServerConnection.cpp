@@ -444,24 +444,25 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             const QString restored = *it;
             m_pendingNotifyLevelRollback.erase(it);
             emit notifyLevelChanged(roomId, restored);
-            // DELIBERATELY NOT GUARDED, unlike the surfaces above. Two
-            // reasons, and the second is the one that decides it:
+            // The rollback above is half the message and it used to be all of
+            // it: this signal had no receiver anywhere — no QML handler, no
+            // C++ slot, no test — so the `error` string reached no screen on
+            // any code path, which is why it was left unguarded.
             //
-            //   * the user-visible part of this failure is the rollback, and
-            //     it has already happened — notifyLevelChanged went out on
-            //     the line above and the context-menu checkmark has moved
-            //     back. Nothing here holds in-flight state that only this
-            //     signal clears (m_pendingNotifyLevelRollback is erased
-            //     above, unconditionally);
-            //   * nothing consumes notifyLevelFailed. No QML handler, no C++
-            //     slot, no test — checked across qml/, src/ and tests/. The
-            //     `error` string is not on screen on any code path, so
-            //     substituting it would guard nothing and would add a fourth
-            //     copy of the expired sentence to keep in step.
+            // It has one now, in main.qml, because the rollback on its own is
+            // not a message the user can read. The level is picked from a
+            // context menu that closes on the click, so the checkmark the
+            // rollback corrects is inside a menu nobody is looking at; what
+            // is left on screen is the channel row's mute indicator silently
+            // returning to where it was, if the user happens to be watching
+            // that row. Nothing says the server refused, and the obvious
+            // reading — the click missed — is wrong. Every other write in
+            // main.qml's Connections block toasts when the server refuses it;
+            // this was the one that did so silently.
             //
-            // If a handler is ever added, guard it then: replace the text,
-            // keep the signal. The rule is in the block below emitFeedback.
-            emit notifyLevelFailed(roomId, error);
+            // With a receiver comes the guard, as promised here: the text now
+            // lands in a toast, so it is guarded like the other toasts.
+            emitNotifyLevelFailed(roomId, error);
             return;
         }
         // A failed GET is not worth a user-facing error — the local cache stays
@@ -1413,7 +1414,10 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         // request goes out, so it is never a 401 wearing a local error's
         // clothes, and "your session has expired" would be a wrong answer to
         // "which room were you going to put this in?".
-        emit mediaSendFailed("No active room");
+        //
+        // Deferred, though, like the other pre-flight check below: see
+        // emitPreflightMediaFailure.
+        emitPreflightMediaFailure(QStringLiteral("No active room"));
         return;
     }
 
@@ -1450,9 +1454,11 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         // /data/… or content://com.android.providers… into the UI.
         QString friendly = displayName.isEmpty() ? "file" : displayName;
         // Also raw, and for the same reason: a file we cannot open is a local
-        // fact that stays true after the user signs back in.
-        emit mediaSendFailed("Couldn't read the selected " + friendly
-                             + " — " + file.errorString());
+        // fact that stays true after the user signs back in. Also deferred,
+        // for emitPreflightMediaFailure's reason.
+        emitPreflightMediaFailure(QStringLiteral("Couldn't read the selected ")
+                                  + friendly + QStringLiteral(" — ")
+                                  + file.errorString());
         return;
     }
 
@@ -2524,6 +2530,73 @@ void ServerConnection::emitMediaSendFailed(const QString& error)
     emit mediaSendFailed(error);
 }
 
+// The notification-level surface. A toast, like sendFeedback's, and the
+// shortest of these four because the decisions are all made elsewhere: the
+// rollback at the emit site is what actually restores the UI, so nothing here
+// holds in-flight state and the signal could in principle be dropped on a
+// dead session — but every guarded surface substitutes rather than drops, and
+// a toast that says why the mute did not take is worth having even when the
+// reason is the session. The banner's sentence verbatim: this lands in the
+// same kind of hole the composer's feedback does, not in an inline pane.
+void ServerConnection::emitNotifyLevelFailed(const QString& roomId,
+                                             const QString& error)
+{
+    if (m_auth.shouldSuppressSubsystemError()) {
+        emit notifyLevelFailed(roomId,
+                               tr("Your session has expired. Sign in again to "
+                                  "reconnect."));
+        return;
+    }
+    emit notifyLevelFailed(roomId, error);
+}
+
+// The other half of the upload surface: not WHAT the two pre-flight checks
+// say, but WHEN they say it.
+//
+// Both of them decide before a byte goes on the wire, so left alone they
+// report synchronously, inside sendMediaMessage, while the caller is still on
+// the line that called it. Every other failure on this surface arrives in a
+// reply handler, some round trip later. That difference is invisible from
+// QML and it broke the composer.
+//
+// MessageInput.qml starts an upload as
+//
+//     serverManager.activeServer.sendMediaMessage(url);
+//     inputRoot.noteUploadStarted();
+//
+// which is the obvious order — you do not count an upload you have not
+// started — and it is what all three call sites do (the attach dialog, paste,
+// and MessageView's drop area, which is worse still: it sends every file in
+// the drop and only then increments once per file). A synchronous failure
+// lands BETWEEN those two lines, on a count of zero. `_noteUploadFinished`
+// clamps at zero, so the decrement is dropped; the increment on the next line
+// then sticks forever. The composer is left disabled, reading "Uploading…",
+// with nothing in flight, until a room change calls `_resetUploads`. Choosing
+// an unreadable file out of the attach dialog was enough to lock a channel's
+// message box for as long as the user stayed in it.
+//
+// Fixed here rather than by having the three call sites increment first, for
+// the reason the emitFeedback block gives: a rule every caller must remember
+// is a rule the next caller will not. Reordering the QML fixes today's three
+// sites and leaves the trap armed for the fourth, and for whoever adds a
+// third pre-flight check (a size cap, a MIME blocklist) to this function. The
+// invariant is cheaper to hold in one place:
+//
+//     sendMediaMessage NEVER emits mediaSendFailed before it returns.
+//
+// A zero-delay singleShot bound to `this` is all that takes: it lands in this
+// object's event loop the moment the caller unwinds — before any user input,
+// so no room change can slip in between — and it disconnects itself if the
+// connection dies first. tests/test_composer_upload_lock.cpp holds the
+// invariant and the composer behaviour that depends on it.
+//
+// Not routed through emitMediaSendFailed, deliberately: these two keep their
+// own words on a dead session (see above), and only the timing is shared.
+void ServerConnection::emitPreflightMediaFailure(const QString& error)
+{
+    QTimer::singleShot(0, this, [this, error] { emit mediaSendFailed(error); });
+}
+
 // WHAT IS AND IS NOT GUARDED, now that the four above have been decided.
 //
 // Guarded, each by replacing text and never by dropping a signal:
@@ -2537,22 +2610,27 @@ void ServerConnection::emitMediaSendFailed(const QString& error)
 //   * searchErrored, via emitSearchError, with a sentence written for an
 //     inline pane rather than a toast.
 //   * mediaSendFailed, via emitMediaSendFailed, on the three call sites that
-//     report a failed request; the two pre-flight ones stay verbatim.
+//     report a failed request; the two pre-flight ones stay verbatim, and go
+//     out deferred — see emitPreflightMediaFailure, where the timing turned
+//     out to be part of this surface's contract too.
+//   * notifyLevelFailed, via emitNotifyLevelFailed. It lands in a toast, so
+//     it gets the banner's sentence verbatim, like sendFeedback does.
 //
 // Not guarded, on purpose:
 //
 //   * loginError / registerError — the recovery path. Suppressing the reason
 //     a sign-in failed is what makes the expired state unclearable, which is
 //     defect 2 in net/SessionAuth.h. Their call sites carry the same note.
-//   * notifyLevelFailed — nothing consumes it and the rollback it accompanies
-//     is the user-visible message. The reasoning is at the emit site.
 //
 // The rule, for the next surface somebody adds: ask whether the caller holds
 // in-flight state that only its failure path clears. If it does — and the DM
 // create guard in startDirectMessage is the worked example, where swallowing
 // a failure locks that peer out until restart — replace the text and never
 // drop the signal. Ask second where the text lands: a toast, an inline pane
-// and a settings dialog do not want the same sentence.
+// and a settings dialog do not want the same sentence. Ask third, if the
+// caller does hold such state, WHEN the signal fires relative to the call
+// that started it: the composer lockout emitPreflightMediaFailure fixes is
+// the case where the text and the surface were both already right.
 
 void ServerConnection::clearVoiceError()
 {

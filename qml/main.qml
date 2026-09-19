@@ -526,6 +526,15 @@ ApplicationWindow {
         function onMediaSendCompleted() {
             toastSuccess("Upload complete");
         }
+        // The server refused a notification-level change and ServerConnection
+        // has already put the local value back. The rollback is not visible
+        // to the user who caused it: the context menu it corrects closed on
+        // the click that started this. Without a line here the refusal looks
+        // like a click that did nothing, and the user walks away believing
+        // the channel is muted.
+        function onNotifyLevelFailed(roomId, error) {
+            toastError("Couldn't change notification settings: " + error);
+        }
         function onVoiceErrorChanged() {
             // Fires on set AND on the 8s auto-clear — only toast the
             // non-empty transitions.

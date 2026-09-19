@@ -35,12 +35,35 @@ Rectangle {
     property int _inFlightUploads: 0
     readonly property bool uploading: _inFlightUploads > 0
     // Called by every site that kicks off an upload — the attach button,
-    // MessageView's drop area, and paste.
+    // MessageView's drop area, and paste. All three call it AFTER
+    // sendMediaMessage, which is only safe because that function never
+    // reports a failure before it returns; the invariant is stated and held
+    // in ServerConnection::emitPreflightMediaFailure. A pre-flight failure
+    // that arrived synchronously used to decrement this count before it had
+    // been incremented, and the clamp below then made the loss silent: the
+    // composer sat disabled reading "Uploading…" with nothing in flight,
+    // recoverable only by leaving the channel and coming back.
     function noteUploadStarted() { inputRoot._inFlightUploads++; }
+    // Decrements we know are coming and must ignore: uploads that were in
+    // flight when _resetUploads ran. Their completion still arrives (the
+    // connection is unchanged on a room switch) with nothing left to cancel.
+    // That is the ONE legitimate unmatched decrement, so it is counted out
+    // explicitly and everything else is allowed to complain.
+    property int _orphanedUploads: 0
     function _noteUploadFinished() {
-        if (inputRoot._inFlightUploads > 0) inputRoot._inFlightUploads--;
+        if (inputRoot._inFlightUploads > 0) { inputRoot._inFlightUploads--; return; }
+        if (inputRoot._orphanedUploads > 0) { inputRoot._orphanedUploads--; return; }
+        // Still clamped — there is no count to take one from, and a negative
+        // one would disable the composer by arithmetic later. But say so.
+        // A clamp that absorbs an unmatched decrement without a word is why
+        // the pre-flight ordering bug above presented as a stuck message box
+        // rather than as something anybody could see going wrong.
+        console.warn("MessageInput: upload finished with none in flight —"
+                     + " an upload was counted late, or a signal arrived for"
+                     + " an upload this composer never started");
     }
     function _resetUploads() {
+        inputRoot._orphanedUploads += inputRoot._inFlightUploads;
         inputRoot._inFlightUploads = 0;
         inputRoot._uploads = ({});
         uploadSweepTimer.stop();

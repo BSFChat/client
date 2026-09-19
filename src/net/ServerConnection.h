@@ -417,7 +417,8 @@ public:
     // it becomes a cache of the server's value rather than the source of truth.
     // `setRoomNotifyLevel` writes locally first (so the UI is instant) and then
     // PUTs; a rejected PUT rolls the local value back and reports via
-    // notifyLevelFailed.
+    // notifyLevelFailed, which main.qml turns into a toast — the rollback
+    // alone is silent, because the menu it corrects has already closed.
     Q_INVOKABLE void setRoomNotifyLevel(const QString& roomId, const QString& level);
     // Pull the server's value for one room. Fires notifyLevelChanged once the
     // answer lands (and only if it actually differs from the local cache).
@@ -795,8 +796,12 @@ signals:
     void mediaSendCompleted();
     // An upload (attachment, avatar, server icon) failed. MessageInput's
     // in-flight count is decremented on this and on mediaSendCompleted only,
-    // so it must fire even when the text is worthless. Emit request failures
-    // through emitMediaSendFailed.
+    // so it must fire even when the text is worthless — and it must not fire
+    // too EARLY either: a caller counts the upload on the line after
+    // sendMediaMessage returns, so an emit from inside that call is a
+    // decrement nobody is there to receive and a composer that never unlocks.
+    // Emit request failures through emitMediaSendFailed and pre-flight ones
+    // through emitPreflightMediaFailure; never emit this directly.
     void mediaSendFailed(const QString& error);
     void activeVoiceRoomIdChanged();
     // The server retired our voice row and the V-H2 re-join was
@@ -873,10 +878,10 @@ signals:
     // Server refused a notify-level write; the local value has already been
     // rolled back to what it was.
     //
-    // Currently has no receiver anywhere — the rollback is what the user
-    // sees — which is why this one carries the server's text unguarded on a
-    // dead session. Wire up a handler and you inherit the guard: see the emit
-    // site in the ctor.
+    // main.qml toasts this: the rollback moves a checkmark inside a context
+    // menu that has already closed, so without it the refusal is invisible
+    // and the user is left believing the channel is muted. Emit it through
+    // emitNotifyLevelFailed, never directly.
     void notifyLevelFailed(const QString& roomId, const QString& error);
     // Fired after a /messages response is absorbed into the MessageModel.
     // MessageView listens to drive the "paginate-until-found" loop for
@@ -1157,11 +1162,25 @@ public:
     // cleared by this handler and nothing else).
     void emitSearchError(const QString& message);
 
+    // The ONLY place `notifyLevelFailed` is emitted from. Guarded like the
+    // rest since it acquired a receiver (main.qml's toast); the emit site
+    // carries the reason it has one.
+    void emitNotifyLevelFailed(const QString& roomId, const QString& error);
+
     // The ONLY place `mediaSendFailed` is emitted from for a failed REQUEST.
     // The two pre-flight checks in sendMediaMessage — no active room, file
-    // won't open — emit it directly on purpose, because their text is about
-    // something signing in again will not fix.
+    // won't open — do not come through here on purpose, because their text is
+    // about something signing in again will not fix.
     void emitMediaSendFailed(const QString& error);
+
+    // The ONLY place `mediaSendFailed` is emitted from for a failed PRE-FLIGHT
+    // check: it keeps the caller's text and defers the emit to the next turn
+    // of the event loop. That deferral is load-bearing — a pre-flight failure
+    // reported synchronously arrives before the caller has counted the upload
+    // it just started, and the composer never unlocks. The .cpp has the whole
+    // account; the short version is that sendMediaMessage must never emit
+    // mediaSendFailed before it returns.
+    void emitPreflightMediaFailure(const QString& error);
 public:
     // Called once at startup by ServerManager so the mic gate can
     // consult voiceMode / PTT prefs without a global singleton.
