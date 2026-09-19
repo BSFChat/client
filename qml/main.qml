@@ -517,6 +517,14 @@ ApplicationWindow {
         function onMediaSendFailed(error) {
             toastError("Upload failed: " + error);
         }
+        // Avatar and server-icon uploads reported their failures on
+        // mediaSendFailed until they got a signal of their own, purely to
+        // reach this toast. The toast is unchanged; what changed is that
+        // MessageInput no longer hears them and no longer decrements its
+        // in-flight count for an upload the composer never started.
+        function onAvatarUploadFailed(error) {
+            toastError("Upload failed: " + error);
+        }
         // "Open this attachment" now downloads the bytes and hands the local
         // file to the desktop, so it can fail where opening a URL in a browser
         // could not. Silence would read as "the click did nothing".

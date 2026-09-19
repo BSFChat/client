@@ -2504,16 +2504,28 @@ void ServerConnection::emitSearchError(const QString& message)
     emit searchErrored(message);
 }
 
-// The upload surface. Guarded here rather than at the signal, because the
-// four call sites are not the same kind of failure.
+// The upload surface. Guarded here rather than at the signal, because the five
+// call sites that can report a failed upload — two pre-flight checks in
+// sendMediaMessage, its reply handler, and the avatar and server-icon reply
+// handlers — are not the same kind of failure, and as of this split are not
+// even all on the same signal.
 //
-// The three that route through this helper are the reply handlers for an
-// upload that was actually attempted: the composer's attachment, the server
-// icon, and the avatar. Those are the ones that carry a 401 body. The other
-// two emit mediaSendFailed directly and deliberately (see sendMediaMessage) —
-// they fire before any request leaves the process, so their text describes a
-// local fact that a fresh sign-in would not change, and overwriting it with
-// the session sentence would be a confidently wrong diagnosis.
+// The one that routes through THIS helper is the reply handler for a composer
+// attachment that was actually attempted — the one that can carry a 401 body.
+// The other two in sendMediaMessage keep their own words and go through
+// emitPreflightMediaFailure instead: they decide before any request leaves the
+// process, so their text describes a local fact that a fresh sign-in would not
+// change, and overwriting it with the session sentence would be a confidently
+// wrong diagnosis. What they need from a chokepoint is the TIMING, not the
+// wording — see that helper below.
+//
+// The avatar and server-icon reply handlers do want this helper's exact 401
+// guard, and used to get it by calling it. They no longer do, and the reason
+// is not the wording either: see emitAvatarUploadFailed, two helpers down.
+// Between them, those two are the whole reason this surface has three
+// chokepoints for what looks like one kind of failure. The text is the thing
+// they agree on; whose upload it is and when it is allowed to arrive are the
+// things they do not.
 //
 // Not dropped, for the emitFeedback reason exactly: MessageInput decrements
 // _inFlightUploads on mediaSendCompleted or mediaSendFailed and on nothing
@@ -2531,7 +2543,7 @@ void ServerConnection::emitMediaSendFailed(const QString& error)
 }
 
 // The notification-level surface. A toast, like sendFeedback's, and the
-// shortest of these four because the decisions are all made elsewhere: the
+// shortest of these helpers because the decisions are all made elsewhere: the
 // rollback at the emit site is what actually restores the UI, so nothing here
 // holds in-flight state and the signal could in principle be dropped on a
 // dead session — but every guarded surface substitutes rather than drops, and
@@ -2597,7 +2609,43 @@ void ServerConnection::emitPreflightMediaFailure(const QString& error)
     QTimer::singleShot(0, this, [this, error] { emit mediaSendFailed(error); });
 }
 
-// WHAT IS AND IS NOT GUARDED, now that the four above have been decided.
+// The same guard as emitMediaSendFailed, on a signal the composer does not
+// listen to.
+//
+// mediaSendFailed is a bare signal: it says an upload failed and nothing about
+// WHICH one. MessageInput's Connections block therefore decrements
+// _inFlightUploads on every one it sees, because it has no way to tell a
+// stranger's failure from its own. While the avatar and server-icon handlers
+// shared that signal, failing to set an avatar during an attachment upload
+// decremented a count those uploads had never incremented — the composer
+// unlocked and stopped reading "Uploading…" with the attachment still on the
+// wire. That is U-H6's symptom reached from the other end, and it was
+// invisible because the QML clamped the count at zero without a word.
+//
+// Note which direction bled and which did not. Neither avatar path emits
+// mediaSendCompleted — success continues into setRoomState / updateAvatarUrl
+// — so the borrowing was one-way, and a shared signal that only ever fires
+// half a lifecycle cannot be one the other half is counted from.
+//
+// Separate signals rather than an upload id threaded through mediaSendFailed:
+// the id would have to come back out of sendMediaMessage (it is minted inside,
+// see the token comment there) and every receiver would then have to hold a
+// set of ids to filter against, to express something the type system can say
+// for free. The toast in main.qml is all these two surfaces ever wanted from
+// mediaSendFailed, and it now has a handler of its own.
+void ServerConnection::emitAvatarUploadFailed(const QString& error)
+{
+    if (m_auth.shouldSuppressSubsystemError()) {
+        emit avatarUploadFailed(tr("Your session has expired. Sign in again to "
+                                   "reconnect."));
+        return;
+    }
+    emit avatarUploadFailed(error);
+}
+
+// WHAT IS AND IS NOT GUARDED, now that the chokepoints above have been
+// decided. (This header used to carry a count of them. It was wrong twice
+// over before either upload fix landed, so it no longer carries one.)
 //
 // Guarded, each by replacing text and never by dropping a signal:
 //
@@ -2609,10 +2657,18 @@ void ServerConnection::emitPreflightMediaFailure(const QString& error)
 //     string, the part that is a raw Matrix object on a 401, is replaced.
 //   * searchErrored, via emitSearchError, with a sentence written for an
 //     inline pane rather than a toast.
-//   * mediaSendFailed, via emitMediaSendFailed, on the three call sites that
-//     report a failed request; the two pre-flight ones stay verbatim, and go
-//     out deferred — see emitPreflightMediaFailure, where the timing turned
-//     out to be part of this surface's contract too.
+//   * mediaSendFailed, via emitMediaSendFailed, on the ONE call site that
+//     reports a failed composer-attachment REQUEST. The two pre-flight checks
+//     in sendMediaMessage keep their text verbatim and go out deferred, via
+//     emitPreflightMediaFailure — the timing turned out to be part of this
+//     surface's contract too.
+//   * avatarUploadFailed, via emitAvatarUploadFailed, on the avatar and
+//     server-icon reply handlers. Same sentence mediaSendFailed gets, and that
+//     is the point: this one is not about the text either. It is about who is
+//     allowed to COUNT the signal — MessageInput decrements its in-flight
+//     count on mediaSendFailed and cannot tell whose upload a bare signal
+//     describes, so an upload the composer did not start must not arrive on
+//     it at all. The reasoning is at emitAvatarUploadFailed.
 //   * notifyLevelFailed, via emitNotifyLevelFailed. It lands in a toast, so
 //     it gets the banner's sentence verbatim, like sendFeedback does.
 //
@@ -2627,10 +2683,27 @@ void ServerConnection::emitPreflightMediaFailure(const QString& error)
 // create guard in startDirectMessage is the worked example, where swallowing
 // a failure locks that peer out until restart — replace the text and never
 // drop the signal. Ask second where the text lands: a toast, an inline pane
-// and a settings dialog do not want the same sentence. Ask third, if the
-// caller does hold such state, WHEN the signal fires relative to the call
-// that started it: the composer lockout emitPreflightMediaFailure fixes is
-// the case where the text and the surface were both already right.
+// and a settings dialog do not want the same sentence.
+//
+// Ask third — and this is the question both upload bugs were hiding behind —
+// whether any receiver COUNTS the signal rather than just reading it. A
+// receiver keeping a tally is not merely displaying your text, it is balancing
+// your signal against its own bookkeeping, and two more things have to be true
+// that no amount of reviewing the sentence will tell you:
+//
+//   * WHOSE operation the signal describes. A bare QString cannot say, so a
+//     counting receiver credits every one it sees to itself. That is the
+//     avatar split, above: two surfaces that merely want the same toast can
+//     share a signal forever, but the moment one of them is also a lifecycle
+//     event somebody is balancing, it needs its own.
+//   * WHEN it fires, relative to the call that started the operation. A
+//     caller that counts on the line after the call has not counted yet while
+//     that call is still on the stack. That is emitPreflightMediaFailure.
+//
+// Both of those shipped on this one surface, and from the user's chair they
+// were the same defect: a composer that stopped saying "Uploading…" when it
+// should not have. The text and the surface were already right in both cases,
+// which is exactly why neither was caught by reading the error strings.
 
 void ServerConnection::clearVoiceError()
 {
@@ -3102,7 +3175,10 @@ void ServerConnection::uploadServerAvatar(const QString& fileUrl)
             m_client->setRoomState(targetRoom,
                 QString::fromUtf8(bsfchat::event_type::kServerInfo), QString(), body);
         },
-        [this](const QString& error) { emitMediaSendFailed(error); });
+        // NOT emitMediaSendFailed: this upload is not the composer's, and the
+        // composer decrements its in-flight count on every mediaSendFailed it
+        // sees. See emitAvatarUploadFailed.
+        [this](const QString& error) { emitAvatarUploadFailed(error); });
 
     m_client->uploadMedia(uploadId, fileData, mimeType, fileInfo.fileName());
 }
@@ -3151,7 +3227,8 @@ void ServerConnection::uploadAvatar(const QString& fileUrl)
         m_client, this, uploadId,
         &MatrixClient::mediaUploaded, &MatrixClient::mediaUploadError,
         [this](const QString& contentUri) { updateAvatarUrl(contentUri); },
-        [this](const QString& error) { emitMediaSendFailed(error); });
+        // Same reason as uploadServerAvatar above.
+        [this](const QString& error) { emitAvatarUploadFailed(error); });
 
     m_client->uploadMedia(uploadId, fileData, mimeType, fileInfo.fileName());
 }
