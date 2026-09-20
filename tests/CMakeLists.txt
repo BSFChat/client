@@ -202,7 +202,15 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
             ${libaom_SOURCE_DIR} ${libaom_BINARY_DIR})
     endif()
     add_test(NAME test_video_pipeline COMMAND test_video_pipeline)
-    # Encodes real frames against QTRY deadlines; flaky under parallel ctest.
+    # Encodes real frames against QTRY deadlines. RUN_SERIAL was the first
+    # answer to that and it is not a sufficient one: ctest serialises this
+    # against OTHER CTEST TESTS only, so a concurrent `cmake --build`, another
+    # checkout's test sweep, or anything else on the machine still competes
+    # for the same cores. The durable fix is in the test itself — every
+    # QTRY_*_WITH_TIMEOUT there is a liveness wait with a deadline sized so
+    # that only a broken pipeline can miss it (see kLivenessMs / kEncodeMs in
+    # test_video_pipeline.cpp). RUN_SERIAL stays because there is nothing to
+    # gain from encoding real video in parallel with itself.
     set_tests_properties(test_video_pipeline PROPERTIES RUN_SERIAL TRUE)
     # Headless: no window, no capture device, no audio.
     set_tests_properties(test_video_pipeline PROPERTIES
@@ -407,6 +415,16 @@ if(BSFCHAT_ENABLE_VOICE)
         # Real sockets, real DTLS handshakes and wall-clock deadlines: under
         # `ctest -j4` on a loaded CI runner this timed out twice in one day
         # (rc.11). Serial, so it never competes with the video pipeline test.
+        #
+        # RUN_SERIAL was never going to be enough on its own, and is worth
+        # even less here than elsewhere: ctest only holds off other CTEST
+        # jobs, and this test is EXCLUDED from CI entirely (`-E
+        # test_media_loopback` in .github/workflows/ci.yml, both the Release
+        # and the asan job, for the hosted-runner ICE stall). So the only
+        # place it ever runs is a developer machine, which is exactly the
+        # environment RUN_SERIAL cannot speak for — a concurrent build or a
+        # second agent's sweep is invisible to it. The waits inside the test
+        # are what had to change; see kSetupWait there.
         set_tests_properties(test_media_loopback PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
     endif()
 endif()
