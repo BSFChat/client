@@ -68,6 +68,35 @@ constexpr Flags kEveryoneDefault =
     kViewChannel | kSendMessages | kAttachFiles | kEmbedLinks | kChangeNickname |
     kAddReactions;
 
+// The flags that open at least one PAGE in the Server Settings modal, and so
+// the set that decides whether the gear in the channel-list header is a live
+// control or a locked one.
+//
+// It exists because the gear's gate and the modal's nav list are one fact
+// expressed twice, and they had drifted: the gear asked for MANAGE_ROLES,
+// MANAGE_CHANNELS, KICK or BAN, while the modal also carries an Overview page
+// gated on MANAGE_SERVER and a Bots page gated on MANAGE_BOTS. A member holding
+// only one of those two had no way in at all — including, absurdly, to the
+// "you need the Manage bots permission" state BotManagerPane renders for
+// exactly that member.
+//
+// Keep this in step with the nav Repeater's model in
+// qml/components/ServerSettings.qml. tests/test_bots.cpp checks that every
+// entry here is a flag protocol knows about, and that the two lists are the
+// same length.
+constexpr Flags kServerSettingsPages =
+    kManageServer | kManageRoles | kManageChannels | kKickMembers |
+    kBanMembers | kManageBots | kAdministrator;
+
+// Whether `mask` (an already-resolved SERVER-SCOPE permission set) opens the
+// Server Settings modal onto anything at all. Server scope is not a detail:
+// every page in that modal is server-wide, and asking with a channel's
+// overrides folded in would open a dialog whose every write the server refuses.
+constexpr bool opensServerSettings(Flags mask)
+{
+    return (mask & kServerSettingsPages) != 0;
+}
+
 constexpr Flags kAllFlags =
     kViewChannel | kSendMessages | kAttachFiles | kEmbedLinks | kManageMessages |
     kManageChannels | kManageRoles | kKickMembers | kBanMembers |

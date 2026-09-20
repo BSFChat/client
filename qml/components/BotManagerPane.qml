@@ -54,6 +54,12 @@ Item {
     // that can only ever 403.
     onVisibleChanged: {
         if (visible && _mayManage && _model) _model.refresh();
+        // And put the create field back to the prefix. The field's `text`
+        // starts as a binding on it, but the first keystroke replaces that
+        // binding with a plain value — so without this, the pane reopens
+        // holding whatever half-typed name was abandoned last time, which is
+        // the one state where the prefix can be missing and nothing says so.
+        if (visible) localpartField.resetToPrefix();
     }
 
     ColumnLayout {
@@ -339,7 +345,23 @@ Item {
                 BotField {
                     id: localpartField
                     Layout.preferredWidth: 180
-                    placeholderText: "username"
+                    // Prefilled, not merely hinted. `bot_` is mandatory
+                    // server-side (protocol bot::kLocalpartPrefix) and it is
+                    // the one rule an operator has no way to guess: in the
+                    // 2026-09-20 incident a server owner typed a bare name,
+                    // got a 400 about a prefix nothing had mentioned, and had
+                    // no idea the field wanted something different from every
+                    // other username field he had ever filled in. Starting
+                    // the field at the prefix makes the rule a thing you can
+                    // SEE rather than a thing you can be told off about.
+                    //
+                    // The value comes from the model, which reads the
+                    // protocol header — not a "bot_" literal here, which is
+                    // how a client ends up prefilling a prefix the server
+                    // stopped requiring.
+                    text: botPane._model ? botPane._model.localpartPrefix : ""
+                    placeholderText: botPane._model
+                        ? botPane._model.localpartPrefix + "deploy" : "username"
                     // The server owns the real rule; this is the same check
                     // BotAdminModel.localpartError applies, asked here on
                     // every keystroke so Create can be disabled rather than
@@ -347,6 +369,28 @@ Item {
                     readonly property string problem:
                         text.length === 0 ? ""
                         : (botPane._model ? botPane._model.validateLocalpart(text) : "")
+
+                    // Put the caret after the prefix on first focus rather
+                    // than selecting the whole field, so typing does not wipe
+                    // the thing we just prefilled. Only when the field still
+                    // holds exactly the prefix — someone coming back to edit
+                    // a longer name they already typed keeps their caret.
+                    onActiveFocusChanged: {
+                        if (activeFocus && botPane._model
+                                && text === botPane._model.localpartPrefix) {
+                            deselect();
+                            cursorPosition = text.length;
+                        }
+                    }
+
+                    // Reset to the prefix, not to empty: the field's job
+                    // after a create is to be ready for the next bot, and an
+                    // empty box would put the operator back in front of the
+                    // same unguessable rule.
+                    function resetToPrefix() {
+                        text = botPane._model ? botPane._model.localpartPrefix : "";
+                        cursorPosition = text.length;
+                    }
                 }
                 BotField {
                     id: botNameField
@@ -362,8 +406,11 @@ Item {
                 Button {
                     id: createBotBtn
                     implicitHeight: Theme.controlHeight.md
+                    // `problem` carries the whole rule now, including "the
+                    // prefix on its own is not a name" — which the old
+                    // `text.length > 0` test could not express once the field
+                    // starts out non-empty.
                     enabled: !!botPane._model && !botPane._model.busy
-                             && localpartField.text.length > 0
                              && localpartField.problem.length === 0
                     contentItem: RowLayout {
                         spacing: Theme.sp.s2
@@ -396,7 +443,7 @@ Item {
                         // the error line above, and re-typing a rejected
                         // username is cheaper than an admin wondering whether
                         // the second click created a second bot.
-                        localpartField.clear();
+                        localpartField.resetToPrefix();
                         botNameField.clear();
                         botDescField.clear();
                     }
@@ -415,7 +462,16 @@ Item {
             Text {
                 Layout.fillWidth: true
                 visible: localpartField.problem.length === 0
-                text: "The bot gets its own account and an access token you'll see once."
+                // Says the rule out loud even when nothing is wrong. The
+                // prefill shows the prefix; this says why it is there and what
+                // else the server will insist on, so the grammar is readable
+                // before a rejection rather than only after one.
+                text: botPane._model
+                    ? ("The bot gets its own account and an access token you'll see once. "
+                       + "Its username keeps the \"" + botPane._model.localpartPrefix
+                       + "\" prefix, is at most " + botPane._model.maxLocalpartLength
+                       + " characters, and uses lowercase letters, digits, . _ - only.")
+                    : "The bot gets its own account and an access token you'll see once."
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.xs
                 color: Theme.fg3

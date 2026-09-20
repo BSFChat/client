@@ -723,30 +723,71 @@ Rectangle {
                     elide: Text.ElideRight
                 }
 
-                // Settings gear icon — visible whenever the user has any
-                // admin-level permission (ADMINISTRATOR short-circuits to all
-                // flags, so admins always see it).
+                // Settings gear.
+                //
+                // Shown to every member of a server, not only to members who
+                // may change something — and that is a deliberate reversal.
+                //
+                // It used to be gated on canManageRoles || canManageChannel ||
+                // canKick || canBan, and vanished silently for everyone else.
+                // On 2026-09-20 that cost a support call and an SSH session
+                // into the production database: a server's own owner could not
+                // find Server Settings, because he was signed in as an OIDC
+                // account holding only @everyone while a DIFFERENT account of
+                // his held the admin role. A missing gear says "this product
+                // has no server settings". It cannot say "you, this account,
+                // may not use them" — and those are the two things the person
+                // in front of it needs to tell apart.
+                //
+                // So the gear stays, muted, and the modal behind it explains.
+                // That is the same shape BotManagerPane already uses for its
+                // own permission (the Bots nav row is present for everybody and
+                // the PAGE explains), and the same reason: hiding the entry
+                // point makes the feature undiscoverable to the owner who has
+                // not yet granted it to the account they are actually using.
+                //
+                // "Clean" is preserved by what is behind it: a locked gear
+                // opens onto one sentence and the signed-in identity, never
+                // onto a modal full of controls that do nothing.
                 Icon {
+                    id: settingsGear
                     name: "settings"
                     size: 18
-                    color: settingsGearMouse.containsMouse ? Theme.fg0 : Theme.fg2
-                    visible: {
+                    // permissionsGeneration is a real int dependency the
+                    // AOT compiler won't eliminate; bumped by every
+                    // apply*Event handler in ServerConnection.
+                    readonly property bool unlocked: {
                         if (!serverManager.activeServer) return false;
                         var sc = serverManager.activeServer;
-                        // permissionsGeneration is a real int dependency the
-                        // AOT compiler won't eliminate; bumped by every
-                        // apply*Event handler in ServerConnection.
                         if (sc.permissionsGeneration < 0) return false;
-                        var rid = sc.activeRoomId || "";
-                        return sc.canManageRoles(rid) || sc.canManageChannel(rid) || sc.canKick(rid) || sc.canBan(rid);
+                        return sc.canOpenServerSettings();
                     }
+                    color: settingsGear.unlocked
+                         ? (settingsGearMouse.containsMouse ? Theme.fg0 : Theme.fg2)
+                         : (settingsGearMouse.containsMouse ? Theme.fg2 : Theme.fg3)
+                    visible: !!serverManager.activeServer
                     Layout.alignment: Qt.AlignVCenter
+
+                    ToolTip.visible: settingsGearMouse.containsMouse
+                    ToolTip.delay: 400
+                    // Names the account in the tooltip as well as in the modal.
+                    // Hovering the thing that is not working is the cheapest
+                    // possible step, and "which account am I?" is the question
+                    // the incident turned on.
+                    ToolTip.text: settingsGear.unlocked
+                        ? "Server Settings"
+                        : ("Server Settings — not available to "
+                           + (serverManager.activeServer
+                              ? serverManager.activeServer.userId : ""))
 
                     MouseArea {
                         id: settingsGearMouse
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
+                        // Opened in both cases. The popup decides what to show;
+                        // a click that does nothing would be a third state, and
+                        // indistinguishable from a broken button.
                         onClicked: serverSettings.open()
                     }
                 }
@@ -1998,6 +2039,16 @@ Rectangle {
                         }
                     }
 
+                    // Hovering the block gives the un-elided id without
+                    // opening anything. The menu below is the one-click answer;
+                    // this is the zero-click one, and it costs nothing.
+                    ToolTip.visible: userInfoMouse.containsMouse
+                    ToolTip.delay: 600
+                    ToolTip.text: serverManager.activeServer
+                        ? (serverManager.activeServer.displayName + "\n"
+                           + serverManager.activeServer.userId)
+                        : ""
+
                     MouseArea {
                         id: userInfoMouse
                         anchors.fill: parent
@@ -2090,6 +2141,76 @@ Rectangle {
                     }
                 }
 
+                // ── Who you are ─────────────────────────────────────
+                //
+                // The full mxid, unelided, one click from anywhere — clicking
+                // your own name is where a person looks when they are asking
+                // "who am I signed in as", and it was the one place that did
+                // not say.
+                //
+                // The footer two lines below this menu already renders the
+                // mxid, but it elides: the sidebar is 240px and the mute /
+                // deafen / settings trio eats most of it, so
+                // "@josh.oidc:bsfchat.com" arrives as "@josh.oid…". That is
+                // worse than useless for the case this exists for — on
+                // 2026-09-20 a server owner had TWO accounts on one homeserver
+                // with near-identical display names, one of them an OIDC
+                // account holding only @everyone, and diagnosing which one he
+                // was using took an SSH session and a database query. Two
+                // accounts that differ after the tenth character look
+                // identical once elided; they do not look identical here.
+                //
+                // Not a MenuItem: there is nothing to trigger, and a row that
+                // highlights on hover promises an action it does not have.
+                Rectangle {
+                    implicitHeight: identityColumn.implicitHeight + Theme.sp.s3 * 2
+                    color: "transparent"
+                    ColumnLayout {
+                        id: identityColumn
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: Theme.sp.s3
+                        anchors.rightMargin: Theme.sp.s3
+                        spacing: 1
+
+                        Text {
+                            text: "SIGNED IN AS"
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.xs
+                            font.weight: Theme.fontWeight.semibold
+                            font.letterSpacing: Theme.trackWidest.xs
+                            color: Theme.fg3
+                            Layout.fillWidth: true
+                        }
+                        Text {
+                            text: serverManager.activeServer
+                                  ? serverManager.activeServer.displayName : ""
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.md
+                            font.weight: Theme.fontWeight.semibold
+                            color: Theme.fg0
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+                        // Wrapped, never elided. The whole point of this line
+                        // is the characters an elide would eat; a menu that
+                        // grows a row taller is a far cheaper price than an
+                        // id that cannot be read.
+                        Text {
+                            text: serverManager.activeServer
+                                  ? serverManager.activeServer.userId : ""
+                            font.family: Theme.fontMono
+                            font.pixelSize: Theme.fontSize.xs
+                            color: Theme.fg2
+                            wrapMode: Text.WrapAnywhere
+                            Layout.fillWidth: true
+                        }
+                    }
+                }
+
+                MenuSeparator { }
+
                 // Quick access to the presence + custom status
                 // picker. Users open this most often, hence top
                 // of menu. Renders a tiny presence dot in the
@@ -2136,11 +2257,13 @@ Rectangle {
                     onTriggered: Window.window.openUserSettings()
                 }
                 // Sits next to the profile entry, not behind the settings
-                // gear above: that gear is only rendered for a member holding
-                // MANAGE_ROLES / MANAGE_CHANNELS / KICK / BAN, and opt-in
-                // roles exist for everybody else. Hidden when the server
-                // publishes none, so it is not a dead entry on the servers
-                // that do not use them.
+                // gear above: everything behind that gear is administration
+                // and opt-in roles are for the members who administer
+                // nothing. (The gear itself is no longer permission-gated —
+                // see its comment in the header — but what it opens still
+                // is, so this entry would be no more reachable there.) Hidden
+                // when the server publishes none, so it is not a dead entry
+                // on the servers that do not use them.
                 ThemedUserItem {
                     text: "Your Roles"
                     iconName: "gift"

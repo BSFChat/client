@@ -4312,6 +4312,16 @@ bool ServerConnection::canManageNicknames() const {
 bool ServerConnection::canManageBots() const {
     return (myPermissions(QString()) & permmath::kManageBots) != 0;
 }
+bool ServerConnection::canManageServer() const {
+    return (myPermissions(QString()) & permmath::kManageServer) != 0;
+}
+// Server scope, deliberately: every page in that modal is server-wide, so
+// asking with a channel's overrides folded in would open a dialog whose every
+// write the server then refuses — the same trap the bot and nickname
+// accessors above are commented for.
+bool ServerConnection::canOpenServerSettings() const {
+    return permmath::opensServerSettings(myPermissions(QString()));
+}
 
 // ── Bot identity ──────────────────────────────────────────────────────────
 

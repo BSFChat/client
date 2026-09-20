@@ -1,5 +1,7 @@
 #include "model/BotAdminModel.h"
 
+#include <bsfchat/Constants.h>
+
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QRegularExpression>
@@ -24,8 +26,21 @@ void BotAdminModel::setErrorText(const QString& text)
     emit errorTextChanged();
 }
 
+QString BotAdminModel::localpartPrefix()
+{
+    return QString::fromUtf8(bsfchat::bot::kLocalpartPrefix.data(),
+                             qsizetype(bsfchat::bot::kLocalpartPrefix.size()));
+}
+
+int BotAdminModel::maxLocalpartLength()
+{
+    return int(bsfchat::limits::kMaxUsernameLength);
+}
+
 QString BotAdminModel::localpartError(const QString& localpart)
 {
+    const QString prefix = localpartPrefix();
+
     if (localpart.isEmpty())
         return QStringLiteral("Pick a username for the bot.");
 
@@ -37,11 +52,33 @@ QString BotAdminModel::localpartError(const QString& localpart)
     if (localpart.contains(':'))
         return QStringLiteral("No colons — the server part is added for you.");
 
+    // The prefix, first and by name. It is the rule an operator is least
+    // likely to guess and the one the server states first, so saying it
+    // before anything about characters or length matches the order the
+    // server's own sentence puts them in.
+    if (!localpart.startsWith(prefix)) {
+        return QStringLiteral("Bot usernames must start with \"%1\" — "
+                              "that prefix is what marks the account as a bot, "
+                              "and no person can be given it.")
+            .arg(prefix);
+    }
+    if (localpart.size() <= prefix.size()) {
+        return QStringLiteral("Add something after \"%1\" — the prefix on "
+                              "its own is not a name.").arg(prefix);
+    }
+    if (localpart.size() > maxLocalpartLength()) {
+        return QStringLiteral("At most %1 characters, including the \"%2\" "
+                              "prefix.").arg(maxLocalpartLength()).arg(prefix);
+    }
+
+    // BotHandler::valid_bot_localpart's character set, exactly. NOT a wider
+    // one: a set this end accepts and the server refuses is a Create button
+    // that lights up for a name that cannot be created.
     static const QRegularExpression allowed(
-        QStringLiteral("^[a-z0-9._=\\-/+]+$"));
+        QStringLiteral("^[a-z0-9._\\-]+$"));
     if (!allowed.match(localpart).hasMatch()) {
         return QStringLiteral(
-            "Use lowercase letters, numbers, and . _ = - / + only.");
+            "Use lowercase letters, digits, and . _ - only.");
     }
     return QString();
 }
