@@ -808,6 +808,72 @@ private slots:
                             + offenders.join(QStringLiteral(", "))));
     }
 
+    // Starting a composer upload without telling the composer.
+    //
+    // MessageInput.qml derives its disabled "Uploading…" state from a count of
+    // the uploads it started, and decrements that count on the connection's
+    // mediaSendCompleted / mediaSendFailed. Those are bare signals — they say
+    // an upload ended and nothing about which one — so ANY call to
+    // sendMediaMessage on the active connection hands the composer a
+    // decrement, whether or not that caller ever handed it an increment.
+    //
+    // Three bugs on this counter have shipped. Two were fixed in
+    // ServerConnection (the pre-flight emits are deferred; the avatar uploads
+    // got a signal of their own). The third is the one this scan is for:
+    // MobileMain.qml's Android share-intent handler called sendMediaMessage
+    // and simply did not count it. Sharing a file into BSFChat while an
+    // attachment was uploading unlocked the composer with the attachment still
+    // on the wire; sharing with nothing in flight was an unmatched decrement
+    // that the clamp in _noteUploadFinished absorbed without a word. The
+    // ServerConnection comment predicting exactly this ("reordering the QML
+    // fixes today's three sites and leaves the trap armed for the fourth") was
+    // written while the fourth site was already in the tree.
+    //
+    // A convention did not hold for three call sites and will not hold for the
+    // fifth, so it is a scan. Deliberately coarse: it pairs the two calls
+    // per FILE and by count, not by control flow. It cannot tell a loop that
+    // sends N and counts N from one that sends N and counts one — the C++
+    // cases in test_composer_upload_lock.cpp are where multi-file balance is
+    // pinned. What it does catch, and what nothing else catches headlessly, is
+    // a call site that does not participate in the bookkeeping at all.
+    void everyQmlUploadIsCounted()
+    {
+        // Calls, not declarations: `function noteUploadStarted()` is the
+        // definition in MessageInput.qml and the forwarder in MessageView.qml,
+        // and neither is a site that starts anything.
+        static const QRegularExpression sends(QStringLiteral(R"(\bsendMediaMessage\s*\()"));
+        static const QRegularExpression counts(
+            QStringLiteral(R"((?<!function\s)\bnoteUploadStarted\s*\()"));
+
+        QStringList offenders;
+        int sitesChecked = 0;
+        for (const QString& path : filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
+                                              QStringLiteral("*.qml"))) {
+            const QString src = withoutComments(readAll(path));
+            int nSends = 0;
+            for (auto it = sends.globalMatch(src); it.hasNext(); it.next()) ++nSends;
+            if (nSends == 0) continue;
+            sitesChecked += nSends;
+
+            int nCounts = 0;
+            for (auto it = counts.globalMatch(src); it.hasNext(); it.next()) ++nCounts;
+            if (nCounts < nSends) {
+                offenders << QStringLiteral("%1 (%2 sendMediaMessage, %3 noteUploadStarted)")
+                                 .arg(QFileInfo(path).fileName())
+                                 .arg(nSends).arg(nCounts);
+            }
+        }
+        QVERIFY2(sitesChecked > 0,
+                 "no QML calls sendMediaMessage — has the upload path moved? "
+                 "This guard is only meaningful while call sites exist.");
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "QML starts a composer upload without calling "
+                     "noteUploadStarted, so the composer will be handed a "
+                     "decrement it never matched: ")
+                     + offenders.join(QStringLiteral(", "))));
+    }
+
 private:
     // The text between the braces of the first block whose opening matches
     // `opener` (which must end at that block's `{`). Null when there is none.

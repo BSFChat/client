@@ -624,7 +624,17 @@ ApplicationWindow {
                 return;
             }
             if (isFile) {
+                // Same two lines, in the same order, as every other site that
+                // starts a composer upload — see MessageInput.noteUploadStarted.
+                // This one used to send without counting, which is the
+                // ownership half of U-H6 reached from the producing side: the
+                // upload's mediaSendCompleted / mediaSendFailed arrives at the
+                // composer's Connections block regardless, so a share while an
+                // attachment was uploading unlocked the composer with the
+                // attachment still on the wire, and a share with nothing in
+                // flight was an unmatched decrement the clamp ate in silence.
                 s.sendMediaMessage(payload);
+                chatView.noteUploadStarted();
                 toast("Uploading shared file…", "info");
             } else {
                 s.sendMessage(payload);

@@ -20,9 +20,10 @@
 //
 //   2. The SIGNAL still fires. Every one of these surfaces is the only thing
 //      that clears some in-flight state: the settings pane's pending save,
-//      SearchPopup's `searching` flag, MessageInput's `_inFlightUploads`
-//      count — which, while it is above zero, disables the composer and shows
-//      "Uploading…". A guard that returned early instead of substituting
+//      SearchPopup's `searching` flag, MessageInput's in-flight upload tally
+//      (qml/js/UploadTally.js) — which, while it is above zero, disables the
+//      composer and shows "Uploading…". A guard that returned early
+//      instead of substituting
 //      would turn a cosmetic problem into one the user cannot type their way
 //      out of. Each case below therefore asserts the emission count as well
 //      as the text.
