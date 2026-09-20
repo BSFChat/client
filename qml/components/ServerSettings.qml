@@ -1330,7 +1330,19 @@ Popup {
                                                             position: serverSettingsPopup.roleScratchPos,
                                                             permissions: "0x" + permsVal.toString(16),
                                                             mentionable: r.mentionable || false,
-                                                            hoist: r.hoist || false
+                                                            hoist: r.hoist || false,
+                                                            // Carried through, not edited here.
+                                                            // This save rebuilds the role object
+                                                            // field by field and PUTs the WHOLE
+                                                            // role list, so any field this literal
+                                                            // forgets is silently cleared on every
+                                                            // role edit — for self_assignable that
+                                                            // would quietly un-publish the server's
+                                                            // opt-in roles the first time an admin
+                                                            // renamed one. There is no checkbox for
+                                                            // it yet; it is set through
+                                                            // PATCH /_matrix/client/v3/bsfchat/roles/{id}.
+                                                            self_assignable: r.self_assignable || false
                                                         });
                                                     } else {
                                                         out.push(r);

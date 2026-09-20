@@ -4000,6 +4000,7 @@ void ServerConnection::applyServerRolesEvent(const QJsonObject& content, qint64 
         r.permissions = parseFlagsValue(o.value("permissions"));
         r.mentionable = o.value("mentionable").toBool(false);
         r.hoist = o.value("hoist").toBool(false);
+        r.selfAssignable = o.value("self_assignable").toBool(false);
         if (r.permissions != 0) any_perms = true;
         if (o.contains("id")) any_id = true;
         parsed.append(r);
