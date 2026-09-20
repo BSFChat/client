@@ -170,10 +170,22 @@ jobs:
 
       # CMake 4.0 (currently on windows-latest runners as of mid-2026)
       # dropped compatibility with `cmake_minimum_required(VERSION
-      # <3.5)`. libdatachannel's vendored plog/usrsctp/libjuice/libsrtp
-      # CMakeLists.txt files predate that floor and won't configure
-      # without -DCMAKE_POLICY_VERSION_MINIMUM=3.5 (CMake's own escape
-      # hatch — variable introduced in 3.31, no-op on older CMake).
+      # <3.5)`. Several dependencies predate that floor and won't
+      # configure without -DCMAKE_POLICY_VERSION_MINIMUM=3.5 (CMake's
+      # own escape hatch — variable introduced in 3.31, no-op on older
+      # CMake): libdatachannel's vendored plog/usrsctp/libjuice/libsrtp,
+      # AND libyuv's own top-level CMakeLists.txt (VERSION 2.8), plus
+      # jwt-cpp's HunterGate.cmake.
+      #
+      # That spread is why this stays a global flag rather than a
+      # PATCH_COMMAND rewriting the offending files: a patch script can
+      # only reach one FetchContent project's tree at a time, so it
+      # would cover libdatachannel and still leave libyuv failing. We
+      # had such a script (cmake/patch-plog.cmake, globbing
+      # libdatachannel's deps/*/CMakeLists.txt); it was unwired the same
+      # day it landed in favour of this flag and deleted in 2026-09.
+      # Don't bring it back — widen the flag's reach instead.
+      #
       # macOS/Linux pin CMake to 3.30.5 via pip and don't need this
       # today, but the flag is harmless there and lets us drop those
       # pins later without resurrecting this bug.
