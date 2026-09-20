@@ -161,6 +161,13 @@ Popup {
     // of who holds it — so it gets its own scratch value rather than a seat in
     // roleScratchPerms.
     property bool roleScratchMentionable: false
+    // Nor is `self_assignable` a permission bit — it says who may PUT this
+    // role on themselves, not what holding it lets them do — so it gets its
+    // own scratch value too. It had no control at all until now: the save
+    // below carried the flag through untouched (which is why the bot's roles
+    // survived an admin renaming one) but nothing in the client could set it,
+    // so the only way to publish an opt-in role was PATCH by hand.
+    property bool roleScratchSelfAssignable: false
 
     property string memberScratchId: ""
     // Set of assigned role ids: { roleId: true }. Written by replacement
@@ -191,6 +198,7 @@ Popup {
         roleScratchPos = (role && role.position !== undefined) ? role.position : 0;
         roleScratchPerms = _permsToNumber(role && role.permissions);
         roleScratchMentionable = !!(role && role.mentionable);
+        roleScratchSelfAssignable = !!(role && role.self_assignable);
     }
 
     function endRoleEdit() {
@@ -199,6 +207,7 @@ Popup {
         // Cleared with the rest of the scratch state, so opening a second role
         // does not inherit the first one's checkbox before beginRoleEdit runs.
         roleScratchMentionable = false;
+        roleScratchSelfAssignable = false;
     }
 
     function toggleRoleScratchPerm(flag) {
@@ -1274,6 +1283,45 @@ Popup {
                                         font.pixelSize: Theme.fontSize.xs
                                     }
 
+                                    // Sits beside `mentionable` for the same
+                                    // reason: a property of the role, not of
+                                    // its holder. The pairing is not
+                                    // decorative — a boss-notification role is
+                                    // both, and the two together are the whole
+                                    // mechanism: members opt in by taking the
+                                    // role, the bot notifies by mentioning it,
+                                    // and there is no subscriber table
+                                    // anywhere.
+                                    Row {
+                                        Layout.topMargin: Theme.sp.s3
+                                        spacing: 6
+                                        ThemedCheckBox {
+                                            id: selfAssignableBox
+                                            checked: serverSettingsPopup.roleScratchSelfAssignable
+                                            onToggled: serverSettingsPopup.roleScratchSelfAssignable
+                                                = !serverSettingsPopup.roleScratchSelfAssignable
+                                        }
+                                        Text {
+                                            text: "Let members add and remove this role themselves"
+                                            color: Theme.fg0
+                                            font.family: Theme.fontSans
+                                            font.pixelSize: Theme.fontSize.sm
+                                            anchors.verticalCenter: selfAssignableBox.verticalCenter
+                                        }
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.WordWrap
+                                        text: "It appears in every member\u2019s Your Roles "
+                                              + "picker. The server refuses this unless the "
+                                              + "role\u2019s permissions are already covered by "
+                                              + "@everyone \u2014 and refuses to hand it out "
+                                              + "later if that stops being true."
+                                        color: Theme.fg3
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.xs
+                                    }
+
                                     Text {
                                         Layout.topMargin: Theme.sp.s3
                                         text: "PERMISSIONS"
@@ -1373,18 +1421,17 @@ Popup {
                                                             permissions: "0x" + permsVal.toString(16),
                                                             mentionable: serverSettingsPopup.roleScratchMentionable,
                                                             hoist: r.hoist || false,
-                                                            // Carried through, not edited here.
-                                                            // This save rebuilds the role object
-                                                            // field by field and PUTs the WHOLE
-                                                            // role list, so any field this literal
-                                                            // forgets is silently cleared on every
-                                                            // role edit — for self_assignable that
-                                                            // would quietly un-publish the server's
-                                                            // opt-in roles the first time an admin
-                                                            // renamed one. There is no checkbox for
-                                                            // it yet; it is set through
-                                                            // PATCH /_matrix/client/v3/bsfchat/roles/{id}.
-                                                            self_assignable: r.self_assignable || false
+                                                            // Edited here now, and still written
+                                                            // unconditionally: this save rebuilds
+                                                            // the role object field by field and
+                                                            // PUTs the WHOLE role list, so any
+                                                            // field the literal forgets is silently
+                                                            // cleared on every role edit. The
+                                                            // scratch is seeded from the role on
+                                                            // open, so an admin who never touches
+                                                            // the checkbox still writes back what
+                                                            // was there.
+                                                            self_assignable: serverSettingsPopup.roleScratchSelfAssignable
                                                         });
                                                     } else {
                                                         out.push(r);
@@ -1502,6 +1549,14 @@ Popup {
                                 // react, which nobody creating a role means.
                                 permissions: "0x480f",
                                 mentionable: false,
+                                // A new role is never opt-in. Making it so is
+                                // a deliberate act with a containment rule
+                                // attached (the server refuses a
+                                // self-assignable role that grants more than
+                                // @everyone), and defaulting it on would mean
+                                // every role an admin created was one every
+                                // member could silently take.
+                                self_assignable: false,
                                 hoist: false
                             });
                             serverManager.activeServer.updateServerRoles(out);

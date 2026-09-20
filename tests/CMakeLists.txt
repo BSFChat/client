@@ -536,6 +536,7 @@ qt_add_executable(test_identity_provider_url
     # AUTOMOC instantiates the pointer meta-type, which needs the complete type,
     # so this target has to carry the model even though the test never uses it.
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/SelfRoleModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
@@ -589,6 +590,7 @@ qt_add_executable(test_error_surface_guards
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/SelfRoleModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
@@ -632,6 +634,7 @@ qt_add_executable(test_composer_upload_lock
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/SelfRoleModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
@@ -886,3 +889,19 @@ target_link_libraries(test_message_render PRIVATE
 add_test(NAME test_message_render COMMAND test_message_render)
 set_tests_properties(test_message_render PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# The member-facing self-assignable role picker: SelfRoleModel driven through
+# its std::function hooks (no network, no event loop, no GUI — the seam
+# BotAdminModel and VoiceSession use), plus source-text scans that the picker
+# is reachable without a permission and does not re-implement the model's
+# filtering in QML where nothing headless can see it.
+qt_add_executable(test_self_roles
+    test_self_roles.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/SelfRoleModel.cpp
+)
+target_include_directories(test_self_roles PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_self_roles PRIVATE
+    BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml"
+    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_self_roles PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_self_roles COMMAND test_self_roles)

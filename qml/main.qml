@@ -412,6 +412,15 @@ ApplicationWindow {
         parent: Overlay.overlay
     }
 
+    // Member-facing self-assignable role picker. Global for the same reason
+    // the others are — it is reached from the channel-list user menu, which
+    // cannot see ids across file boundaries — and, unlike ServerSettings,
+    // reachable with no permission at all.
+    SelfRolePicker {
+        id: selfRolePickerGlobal
+        parent: Overlay.overlay
+    }
+
     // Direct-messages surface now lives inline in ChannelList
     // (overlayed when `serverManager.viewingDms`); no separate
     // popup. openDirectMessages() just flips the view flag.
@@ -454,6 +463,7 @@ ApplicationWindow {
     function checkForUpdates() {
         if (typeof updater !== "undefined") updater.checkNow();
     }
+    function openSelfRoles() { selfRolePickerGlobal.openPicker(); }
     function openClientSettings() { clientSettingsGlobal.open(); }
     function openShortcutsDialog() { shortcutsDialogGlobal.open(); }
     function openSearch() { searchPopupGlobal.open(); }

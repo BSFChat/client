@@ -121,6 +121,7 @@ qt_add_executable(bsfchat-app
     src/model/ThreadFilterModel.cpp
     src/model/MemberListModel.cpp
     src/model/BotAdminModel.cpp
+    src/model/SelfRoleModel.cpp
     src/store/LocalCache.cpp
     src/util/FileLogger.cpp
     src/util/MarkdownParser.cpp
@@ -447,6 +448,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/StatusPicker.qml
         qml/components/ThreadPanel.qml
         qml/components/RoleAssignPopup.qml
+        qml/components/SelfRolePicker.qml
         qml/components/ToastHost.qml
         qml/components/VideoPlayerCard.qml
         qml/components/LinkPreview.qml

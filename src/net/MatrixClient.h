@@ -194,6 +194,20 @@ public:
     // deactivated bot succeeds, so a double-click cannot produce an error the
     // operator has to interpret.
     void deactivateBot(const QString& userId);
+
+    // The member-facing half of self-assignable roles. Deliberately NOT a
+    // member.roles state write: that path is MANAGE_ROLES plus rank and would
+    // 403 for the ordinary member this exists for. These two go to
+    // PUT/DELETE /_matrix/client/v3/bsfchat/self_roles/{roleId}, which asks
+    // only that the role be flagged `self_assignable` and still inside
+    // @everyone's permissions.
+    //
+    // Both are idempotent server-side — taking a role you hold, or dropping
+    // one you do not, is a 200 that writes nothing — so a double click costs
+    // a round trip and nothing else.
+    void addSelfRole(const QString& roleId);
+    void removeSelfRole(const QString& roleId);
+
     void setDisplayName(const QString& userId, const QString& displayName);
     void setAvatarUrl(const QString& userId, const QString& avatarUrl);
 
@@ -436,6 +450,17 @@ signals:
     // transport failure) and `error` the server's decoded message.
     void botRequestFailed(const QString& operation, int status,
                           const QString& error);
+
+    // A self-role PUT/DELETE succeeded. `roleIds` is the server's own
+    // post-change bsfchat.member.roles list, not an echo of what we asked
+    // for — the picker adopts it verbatim so an idempotent no-op, or a change
+    // another client made in the same window, corrects the UI instead of
+    // being papered over by our optimism.
+    void selfRoleChanged(const QString& roleId, const QStringList& roleIds);
+    // A refusal. 403 is the ordinary one and means the containment re-check
+    // failed: the role is still flagged self-assignable but its permissions
+    // are no longer a subset of @everyone's.
+    void selfRoleFailed(const QString& roleId, int status, const QString& error);
 
     // Per-server nickname read-back. `nickname` is empty when the user has none —
     // the endpoint omits the key entirely rather than returning "", so empty here
