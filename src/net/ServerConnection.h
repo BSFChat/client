@@ -37,6 +37,7 @@ class RoomListModel;
 class MessageModel;
 class MemberListModel;
 class BotAdminModel;
+class ChannelInviteModel;
 class SelfRoleModel;
 #ifdef BSFCHAT_VOICE_ENABLED
 class VoiceEngine;
@@ -96,6 +97,13 @@ class ServerConnection : public QObject {
     // member can open it. It reports an empty list on a server that publishes
     // no opt-in roles, which is the only "nothing to see" this surface has.
     Q_PROPERTY(SelfRoleModel* selfRoleModel READ selfRoleModel CONSTANT)
+    // View-model behind "add a member to this channel". Always present and
+    // bound unconditionally, for the reason botAdminModel gives — and here the
+    // dialog is deliberately reachable WITHOUT the permission as well (see
+    // AddMemberDialog.qml), so a permission-gated model would defeat the
+    // point: the locked state is the thing a member without MANAGE_CHANNELS
+    // most needs to be able to reach.
+    Q_PROPERTY(ChannelInviteModel* channelInviteModel READ channelInviteModel CONSTANT)
     // Bumped whenever the set of known bot user ids changes, so QML that
     // asks isBot(userId) directly (the profile card, which has a user id and
     // no model row) re-evaluates. The member list and the message list do not
@@ -340,6 +348,7 @@ public:
     MemberListModel* memberListModel() const { return m_memberListModel; }
     BotAdminModel* botAdminModel() const { return m_botAdminModel; }
     SelfRoleModel* selfRoleModel() const { return m_selfRoleModel; }
+    ChannelInviteModel* channelInviteModel() const { return m_channelInviteModel; }
     MatrixClient* client() const { return m_client; }
 
     // Set credentials (for restoring from settings)
@@ -1025,6 +1034,18 @@ private:
     // bsfchat::client::moderationRooms(); split out so the three moderation
     // entry points cannot drift on how "latest" is computed.
     QMap<QString, QString> membershipByRoom(const QString& userId) const;
+    // `userId`'s latest membership in ONE room ("join"/"invite"/"leave"/"ban",
+    // or empty when no member event for them has ever been seen there).
+    //
+    // membershipByRoom() above answers the same question for every room at
+    // once because the server-scope moderation helpers genuinely need all of
+    // them. The invite dialog needs exactly one, on every keystroke, so it
+    // gets its own lookup rather than building and throwing away a map of the
+    // whole server each time.
+    QString membershipInRoom(const QString& roomId, const QString& userId) const;
+    // The channel's display name, for copy. Empty for a room this client has
+    // not synced, which every message that uses it is written to survive.
+    QString roomNameFor(const QString& roomId) const;
 
     MatrixClient* m_client;
     SyncLoop* m_syncLoop;
@@ -1159,6 +1180,7 @@ public:
     QSet<QString> m_botUserIds;
     BotAdminModel* m_botAdminModel = nullptr;
     SelfRoleModel* m_selfRoleModel = nullptr;
+    ChannelInviteModel* m_channelInviteModel = nullptr;
     // Push the current role document and OUR OWN member.roles into the self-role
     // picker. Hung off this class's own serverRolesChanged() rather than called
     // from each write path, because all four of them (a server.roles event, a

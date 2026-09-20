@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import BSFChat
+import "../js/ComboBoxText.js" as ComboBoxText
 
 // Themed dropdown. Surface matches the composer's TextField vocabulary:
 // `bg0` body, `line` unfocused / `accent` focused border, `r2` radius,
@@ -23,12 +24,19 @@ ComboBox {
         readonly property bool selected: index === cb.currentIndex
         contentItem: Text {
             // ComboBox.textAt(index) resolves through textRole against
-            // whatever model shape is in play — QVariantList-as-array,
-            // QAbstractListModel with roles, plain JS array. The
-            // previous Array.isArray + model[textRole] path produced
-            // empty strings on QVariantList models, which rendered as
-            // invisible rows (hence the "black on black" dropdown).
-            text: cb.textAt(itemDelegate.index) || ""
+            // most model shapes — QVariantList-as-array,
+            // QAbstractListModel with roles, plain JS array — but NOT
+            // against a QJsonArray handed over from C++, where it
+            // returns "" for every row while the count comes through
+            // (six correctly-sized blank rows in Role overrides). The
+            // even older Array.isArray + model[textRole] path had the
+            // mirror-image hole on QVariantList models, which is the
+            // first "black on black" dropdown; reverting to it just
+            // swaps which combos are blank. ComboBoxText.js tries both
+            // and carries the full story.
+            text: ComboBoxText.resolve(cb.textAt(itemDelegate.index),
+                                       cb.model, itemDelegate.index,
+                                       cb.textRole)
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.md
             font.weight: itemDelegate.selected
@@ -63,7 +71,11 @@ ComboBox {
         // Offset left to leave room for the chevron indicator.
         leftPadding: Theme.sp.s4
         rightPadding: cb.indicator.width + Theme.sp.s5
-        text: cb.displayText
+        // The closed field has the same root cause as the rows above:
+        // displayText goes through the same textRole lookup, so it is
+        // blank on a QJsonArray model too. Same resolver, same reasons.
+        text: ComboBoxText.resolve(cb.displayText, cb.model,
+                                   cb.currentIndex, cb.textRole)
         font.family: Theme.fontSans
         font.pixelSize: Theme.fontSize.md
         color: Theme.fg0
