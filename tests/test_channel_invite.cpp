@@ -4,9 +4,9 @@
 //
 //   1. ChannelInviteModel driven headlessly. It reaches the network through
 //      std::function hooks, so every decision the dialog makes — what it
-//      refuses before spending a request, what it says about each of the six
-//      different situations the server answers with an identical 403, and
-//      what it claims happened on success — is exercised with a recording
+//      refuses before spending a request, what it says about each of the
+//      seven different situations the server answers with an identical 403,
+//      and what it claims happened on success — is exercised with a recording
 //      fake and no event loop, no network and no GUI.
 //
 //   2. Source scans for what no headless test can reach: that the affordance
@@ -22,9 +22,16 @@
 //         perms.can(*user_id, room_id, permission::kManageChannels)
 //     under the comment "Inviting piggybacks on MANAGE_CHANNELS for now — we
 //     don't have a separate flag."
-//   * Six distinct refusals, all 403 M_FORBIDDEN, distinguishable only by
+//   * Seven distinct refusals, all 403 M_FORBIDDEN, distinguishable only by
 //     their `error` text. The literals below are copied from that file and
 //     are the reason explainFailure matches on substrings.
+//   * The target must be a REAL ACCOUNT — user_exists(), added 2026-09-20 in
+//     server b8e26ac. Ordered after MANAGE_CHANNELS and after both ban
+//     checks, deliberately, so an ordinary member's refusal is byte-identical
+//     for a real id and a fictional one and a pre-ban on an unregistered id
+//     still reads "banned from this server". That ordering is why a caller
+//     who lacks the permission never sees the new message, and it is pinned
+//     server-side rather than guessed at here.
 //   * A BOT target joins immediately: membership 'join', a real join event so
 //     other members see it arrive, and an audit record naming the INVITER. A
 //     repeat invite for a bot already in the room is a writeless 200.
@@ -33,11 +40,18 @@
 //     — "cannot rejoin unless you are invited back". This endpoint is the
 //     only thing that clears it.
 //
-// And two things it does NOT do, which is why the model refuses them itself:
-//   * it never calls user_exists(), so an invite for a typo'd id is a 200 and
-//     a membership row for an account that is not there;
+// And one thing it still does NOT do, which is why the model refuses it
+// itself:
 //   * it does not refuse a human who is already joined — it rewrites their
 //     membership back to 'invite', demoting a member who was already in.
+//
+// A SECOND gap closed on 2026-09-20 and this file moved with it. handle_invite
+// used to skip user_exists() entirely, so an invite for a typo'd id was a 200
+// and a membership row for nobody. The client could not see that, so it
+// guessed at the commonest shape of the mistake — a warning when the typed
+// id's homeserver was not ours. The server refuses the whole class now, so
+// that guess is gone and theForeignHomeserverGuessIsGoneBecauseTheServer-
+// AnswersItNow records why, including what the guess could never catch.
 //
 // ───────────── the drift hazard this deliberately avoids ─────────────
 //
@@ -95,6 +109,11 @@ constexpr const char* kIsADirect      = "Cannot invite someone into a direct mes
 constexpr const char* kBannedRoom     = "User is banned from this room";
 constexpr const char* kBannedServer   = "User is banned from this server";
 constexpr const char* kBotDeactivated = "That bot is deactivated and cannot be added to a channel";
+// Added 2026-09-20 with server b8e26ac. Pinned server-side too, by
+// tests/e2e/mutate_phantom_membership.py, which mutates this exact literal and
+// expects the mutation to be caught — so a reword upstream breaks a server test
+// before it reaches this one.
+constexpr const char* kNoSuchAccount   = "There is no account on this server with that id";
 } // namespace server_says
 
 // A recording fake for the model's network seam, plus a scriptable roster.
@@ -103,7 +122,6 @@ struct Fake {
     QStringList sentUsers;
     QMap<QString, QString> membership;   // "<room>|<user>" -> membership
     QStringList bots;
-    QString self = QStringLiteral("@owner:bsfchat.com");
     QMap<QString, QString> displayNames;
 
     void install(ChannelInviteModel& m)
@@ -116,7 +134,6 @@ struct Fake {
             return membership.value(room + QStringLiteral("|") + user);
         };
         m.hooks.isKnownBot = [this](const QString& user) { return bots.contains(user); };
-        m.hooks.selfUserId = [this]() { return self; };
         m.hooks.displayNameOf = [this](const QString& user) {
             return displayNames.value(user);
         };
@@ -130,8 +147,12 @@ class TestChannelInvite : public QObject {
 
 private slots:
 
-    // ── validation, which is the client's only defence against a server that
-    //    never checks the target exists ─────────────────────────────────────
+    // ── validation: structure only, checked before the request is spent ───
+    //
+    // This used to be described as the client's only defence against a server
+    // that never checked the target exists. The server checks now; what is
+    // left here is the part that never needed asking — see userIdError.
+    // ──────────────────────────────────────────────────────────────────────
 
     void aMalformedIdIsRefusedWithoutSpendingARequest()
     {
@@ -166,33 +187,56 @@ private slots:
         QVERIFY(ChannelInviteModel::userIdError(QString()).isEmpty());
     }
 
-    void aForeignHomeserverIsWarnedAboutButNotBlocked()
+    void theForeignHomeserverGuessIsGoneBecauseTheServerAnswersItNow()
     {
+        // WHAT THIS REPLACED, because the deletion is the point.
+        //
+        // Until server b8e26ac, handle_invite never called user_exists() and
+        // answered 200 for an id nobody held. The client could not be told
+        // "no such account", so it guessed the commonest shape of that
+        // mistake — homeserverWarning(), which cautioned when the typed id's
+        // domain was not the one we are signed in to, on the reasoning that
+        // this deployment does not federate. A guess: it could not see a
+        // typo'd LOCALPART at all, and it fired on a perfectly good id the
+        // moment federation arrived.
+        //
+        // The server now refuses every one of those cases with one 403, so
+        // the guess is dead code and its whole job belongs to the branch
+        // below. A foreign id is not special any more — it is simply an id
+        // with no account here, which is what the server says about it.
         ChannelInviteModel m;
         Fake fake;
         fake.install(m);
 
         const QString foreign = QStringLiteral("@alice:example.org");
-        const QString warning = m.warnAboutHomeserver(foreign);
-        QVERIFY(!warning.isEmpty());
-        // Names both servers — the whole value of the warning is that the
-        // reader can see which character they got wrong.
-        QVERIFY(warning.contains(QStringLiteral("example.org")));
-        QVERIFY(warning.contains(QStringLiteral("bsfchat.com")));
 
-        // A warning, not a refusal: it still goes.
+        // Still not blocked client-side, for the same reason the warning
+        // never blocked: refusing here would be the client deciding what
+        // exists, and only the server knows. It goes, and the server answers.
         m.invite(QStringLiteral("!r:bsfchat.com"), foreign, QStringLiteral("general"));
         QCOMPARE(fake.sentUsers.size(), 1);
         QCOMPARE(fake.sentUsers.first(), foreign);
 
-        // Same server, no warning — including across case, because a
-        // hostname is not case-sensitive and a warning about nothing trains
-        // people to ignore the warning about something.
-        QVERIFY(m.warnAboutHomeserver(QStringLiteral("@bob:bsfchat.com")).isEmpty());
-        QVERIFY(m.warnAboutHomeserver(QStringLiteral("@bob:BSFChat.com")).isEmpty());
-        // And nothing to say when the id is not usable yet, so the caution
-        // does not fight the error line for the same space.
-        QVERIFY(m.warnAboutHomeserver(QStringLiteral("@bob")).isEmpty());
+        // And THAT is the answer it gets — the same one a typo'd localpart
+        // gets, which the guess could never have produced.
+        m.onFailed(foreign, QStringLiteral("general"), 403,
+                   QString::fromUtf8(server_says::kNoSuchAccount));
+        QVERIFY(m.errorText().contains(QStringLiteral("no account")));
+        QVERIFY(m.errorText().contains(foreign));
+
+        // The dialog no longer carries the guess either. A binding left
+        // calling a function nobody kept would not compile, but a binding
+        // left rendering a stale warn-coloured line under the error line
+        // would — so the QML is scanned, in the idiom the rest of this file
+        // uses for what a headless test cannot reach.
+        const QString dialog = withoutComments(
+            readAll(QStringLiteral(BSFCHAT_QML_DIR "/components/AddMemberDialog.qml")));
+        QVERIFY2(!dialog.isEmpty(), "AddMemberDialog.qml not readable");
+        for (const char* gone : {"warnAboutHomeserver", "homeserverNote"}) {
+            QVERIFY2(!dialog.contains(QLatin1String(gone)),
+                     qPrintable(QStringLiteral("AddMemberDialog.qml still has ")
+                                + QLatin1String(gone)));
+        }
     }
 
     void someoneAlreadyInTheChannelIsRefusedHereBecauseTheServerWillNot()
@@ -339,7 +383,7 @@ private slots:
         QCOMPARE(added.size(), 1);
     }
 
-    // ── six identical 403s, six different things to do about them ─────────
+    // ── seven identical 403s, seven different things to do about them ─────
 
     void eachForbiddenReasonGetsItsOwnAdvice()
     {
@@ -382,10 +426,74 @@ private slots:
         QVERIFY(dead.contains(QStringLiteral("deactivated")));
         QVERIFY(dead.contains(QStringLiteral("permanent")));
 
-        // All six say something different. A mapping that collapsed two of
+        // No such account — the one the server could not say until b8e26ac,
+        // and the one that used to arrive as a cheerful success. The advice
+        // is "you typed it wrong", because after the ban and permission
+        // checks above it there is nothing else it can be.
+        const QString absent = explain(server_says::kNoSuchAccount);
+        QVERIFY(absent.contains(QStringLiteral("no account")));
+        QVERIFY(absent.contains(who));
+        QVERIFY(absent.contains(QStringLiteral("spelling")));
+        // Not blamed on the channel. This refusal is about the id and would
+        // be identical in every channel on the server, so naming one would
+        // suggest a different channel might have worked — the same reasoning
+        // the 400 branch is built on.
+        QVERIFY(!absent.contains(QStringLiteral("#general")));
+        // And it still parses when the id is missing. This is the one branch
+        // whose sentence puts the id in a slot where explainFailure's "that
+        // member" fallback would be ungrammatical, so it has its own wording
+        // for that case rather than a noun phrase in a verb's place.
+        const QString anon = ChannelInviteModel::explainFailure(
+            QString(), room, 403, QString::fromUtf8(server_says::kNoSuchAccount));
+        QVERIFY(anon.contains(QStringLiteral("with that id")));
+        QVERIFY(!anon.contains(QStringLiteral("account that member")));
+
+        // All seven say something different. A mapping that collapsed two of
         // them would be worse than no mapping, because it would look right.
-        const QStringList all{perm, notIn, dm, roomBan, serverBan, dead};
+        const QStringList all{perm, notIn, dm, roomBan, serverBan, dead, absent};
         QCOMPARE(QSet<QString>(all.begin(), all.end()).size(), all.size());
+    }
+
+    void noRefusalIsCapturedByAnotherRefusalsSubstring()
+    {
+        // explainFailure tells seven identical-looking 403s apart by matching
+        // SUBSTRINGS of the server's `error` text, first match wins. That is
+        // a mapping which can silently go wrong in exactly one way: a new
+        // fragment matching an older message, or an older fragment matching a
+        // newer message, so one refusal is answered with another's advice.
+        // The reader would see a confident, wrong sentence.
+        //
+        // Checked BEHAVIOURALLY rather than by re-listing the fragments here.
+        // Restating them would be the everyEnforcedPermissionHasASwitchInThe-
+        // RoleEditor mistake in miniature: both sides of the comparison drawn
+        // from the client, so a fragment that stopped matching would still
+        // "agree" with its copy. Feeding the SERVER's strings in and looking
+        // at what comes out tests the mapping itself.
+        const QString who  = QStringLiteral("@bob:bsfchat.com");
+        const QString room = QStringLiteral("general");
+        const QList<const char*> refusals{
+            server_says::kNoPermission,   server_says::kNotAMember,
+            server_says::kIsADirect,      server_says::kBannedRoom,
+            server_says::kBannedServer,   server_says::kBotDeactivated,
+            server_says::kNoSuchAccount,
+        };
+
+        QStringList advice;
+        for (const char* raw : refusals) {
+            const QString text = QString::fromUtf8(raw);
+            const QString msg  = ChannelInviteModel::explainFailure(who, room, 403, text);
+            // RECOGNISED. The fallback branch appends the server's sentence
+            // verbatim, so echoing it back is exactly the signature of a
+            // refusal that matched nothing — which is how this test sees a
+            // fragment that has drifted out of agreement with the server.
+            QVERIFY2(!msg.contains(text),
+                     qPrintable(QStringLiteral("fell through to the server's words: ") + text));
+            advice << msg;
+        }
+        // DISTINCT. `who` and `room` are held constant, so two refusals
+        // landing in the same branch produce byte-identical advice — which
+        // covers both collision directions at once.
+        QCOMPARE(QSet<QString>(advice.begin(), advice.end()).size(), refusals.size());
     }
 
     void aTransportFailureDoesNotBlameTheId()
@@ -411,6 +519,16 @@ private slots:
             QStringLiteral("@bob:bsfchat.com"), QStringLiteral("general"), 403,
             QStringLiteral("Some future refusal nobody has written yet"));
         QVERIFY(odd.contains(QStringLiteral("Some future refusal nobody has written yet")));
+
+        // A NEAR MISS to the newest fragment, which is the loosest of the
+        // seven: "no account" is two common words, so a 403 that merely talks
+        // about accounts must not be mis-attributed to it. This one shares
+        // "account" and "server" with kNoSuchAccount and matches neither.
+        const QString near = ChannelInviteModel::explainFailure(
+            QStringLiteral("@bob:bsfchat.com"), QStringLiteral("general"), 403,
+            QStringLiteral("That account is administered by another server"));
+        QVERIFY(near.contains(QStringLiteral("administered by another server")));
+        QVERIFY(!near.contains(QStringLiteral("spelling")));
 
         // 400 and 404 have their own shapes and neither is a 403.
         const QString bad = ChannelInviteModel::explainFailure(
