@@ -587,6 +587,14 @@ public:
     // not seen resolves as @everyone only, so the answer errs towards "not
     // permitted" and the mention renders as plain text rather than as a pill
     // for a ping that may not have happened.
+    //
+    // For a BOT sender it errs further in that same safe direction: a bot does
+    // not inherit the implicit @everyone role at all
+    // (permmath::inheritsEveryoneRole, mirroring the server's
+    // permission::inherits_everyone_role), so an unseen assignment resolves to
+    // nothing rather than to the server's defaults. That is what stops this
+    // client rendering a bot's literal "@everyone" as a live room ping the
+    // server had already refused to deliver as one.
     quint64 permissionsFor(const QString& userId, const QString& roomId) const;
 
     // Resolve the role ids an event named into the role mentions that actually
