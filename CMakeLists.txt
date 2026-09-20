@@ -121,6 +121,7 @@ qt_add_executable(bsfchat-app
     src/model/ThreadFilterModel.cpp
     src/model/MemberListModel.cpp
     src/model/BotAdminModel.cpp
+    src/model/ChannelInviteModel.cpp
     src/model/SelfRoleModel.cpp
     src/store/LocalCache.cpp
     src/util/FileLogger.cpp
@@ -455,6 +456,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/ScreenPickerDialog.qml
         qml/components/BotBadge.qml
         qml/components/BotManagerPane.qml
+        qml/components/AddMemberDialog.qml
         qml/theme/Theme.qml
     RESOURCES
         qml/data/EmojiData.js

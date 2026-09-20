@@ -270,6 +270,15 @@ public:
     // Pass an empty id for a fire-and-forget redaction (reaction toggles).
     void redactEvent(const QString& requestId, const QString& roomId,
                      const QString& eventId, const QString& reason = {});
+    // Add `userId` to `roomId` — POST /rooms/{roomId}/invite.
+    //
+    // Unlike kick/ban/unban below, which are fire-and-forget, this one reports
+    // back: it is a construction, not a moderation act, and the person who
+    // asked for it is sitting in front of a dialog waiting to find out whether
+    // it worked. The reply comes back as inviteSucceeded / inviteFailed, both
+    // of which echo the user id so a reply that lands after the field was
+    // retyped is still attributed to the right target.
+    void inviteUser(const QString& roomId, const QString& userId);
     void kickUser(const QString& roomId, const QString& userId, const QString& reason = {});
     void banUser(const QString& roomId, const QString& userId, const QString& reason = {});
     // Reverses a ban on `userId` in `roomId`. The user goes back to "leave"
@@ -450,6 +459,21 @@ signals:
     // transport failure) and `error` the server's decoded message.
     void botRequestFailed(const QString& operation, int status,
                           const QString& error);
+
+    // ── Channel invite replies ────────────────────────────────────────────
+    //
+    // The server answers `{}` for both halves of the success case — a human
+    // left at membership 'invite' and a bot joined outright — and there is no
+    // field that says which it did. So there is one signal, and the copy that
+    // has to distinguish them does it from what the client already knows (see
+    // ChannelInviteModel::noticeFor).
+    void inviteSucceeded(const QString& roomId, const QString& userId);
+    // `status` is the HTTP status (0 for a transport failure) and `error` the
+    // server's decoded message. Both are needed: handle_invite answers six
+    // different situations with 403 M_FORBIDDEN and the text is what tells
+    // them apart.
+    void inviteFailed(const QString& roomId, const QString& userId,
+                      int status, const QString& error);
 
     // A self-role PUT/DELETE succeeded. `roleIds` is the server's own
     // post-change bsfchat.member.roles list, not an echo of what we asked

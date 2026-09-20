@@ -9,6 +9,7 @@
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
 #include "model/BotAdminModel.h"
+#include "model/ChannelInviteModel.h"
 #include "model/SelfRoleModel.h"
 #include "util/MediaUrl.h"
 #include "util/MemberCache.h"
@@ -276,6 +277,66 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     // Every path that changes the role document or an assignment emits this.
     connect(this, &ServerConnection::serverRolesChanged, this,
             &ServerConnection::refreshSelfRoles);
+
+    // ── adding a member to a channel ──────────────────────────────────────
+    m_channelInviteModel = new ChannelInviteModel(this);
+    m_channelInviteModel->hooks.invite = [this](const QString& roomId,
+                                                const QString& userId) {
+        m_client->inviteUser(roomId, userId);
+    };
+    m_channelInviteModel->hooks.membershipOf = [this](const QString& roomId,
+                                                      const QString& userId) {
+        return membershipInRoom(roomId, userId);
+    };
+    m_channelInviteModel->hooks.isKnownBot = [this](const QString& userId) {
+        return isBot(userId);
+    };
+    m_channelInviteModel->hooks.selfUserId = [this]() { return m_userId; };
+    m_channelInviteModel->hooks.displayNameOf = [this](const QString& userId) {
+        // displayNameForSender falls back to the user id; the model wants an
+        // empty string for "no name known" so it can make that choice itself.
+        const QString dn = m_userDisplayNames.value(userId);
+        return dn == userId ? QString() : dn;
+    };
+
+    connect(m_client, &MatrixClient::inviteSucceeded, this,
+            [this](const QString& roomId, const QString& userId) {
+        m_channelInviteModel->onInvited(userId, roomNameFor(roomId));
+    });
+    connect(m_client, &MatrixClient::inviteFailed, this,
+            [this](const QString& roomId, const QString& userId, int status,
+                   const QString& error) {
+        // The same suppression the bot pane and the self-role picker honour
+        // (defect 3 in net/SessionAuth.h): once the session is known dead,
+        // this subsystem's own 401 is noise about a cause already named on
+        // screen, and "you need Manage Channels" would be an outright wrong
+        // diagnosis of an expired token.
+        if (m_auth.shouldSuppressSubsystemError()) {
+            m_channelInviteModel->onFailed(
+                userId, roomNameFor(roomId), status,
+                tr("Your session has expired. Sign in again to reconnect."));
+            return;
+        }
+        m_channelInviteModel->onFailed(userId, roomNameFor(roomId), status, error);
+    });
+    // A bot invited into a channel has JOINED it, and the server emits a real
+    // join event for it — so the roster corrects itself on the next sync tick
+    // without anything here. What does not arrive on its own is the bot FLAG
+    // for a bot this client has never seen in any channel: the badge is read
+    // off member events, and until one lands the new arrival renders as a
+    // person. Folding the id in on success is the same trick the bot admin
+    // pane already plays for a freshly created bot, and for the same reason.
+    connect(m_channelInviteModel, &ChannelInviteModel::memberAdded, this,
+            [this](const QString& roomId, const QString& userId) {
+        Q_UNUSED(roomId);
+        if (m_botAdminModel->listedBotUserIds().contains(userId)
+            && !m_botUserIds.contains(userId)) {
+            m_botUserIds.insert(userId);
+            m_messageModel->refreshBotFlags();
+            ++m_botFlagsGeneration;
+            emit botFlagsChanged();
+        }
+    });
 
     // Connect sync signals
     connect(m_syncLoop, &SyncLoop::syncCompleted, this, &ServerConnection::processSyncResponse);
@@ -4844,6 +4905,28 @@ QMap<QString, QString> ServerConnection::membershipByRoom(const QString& userId)
         out.insert(it.key(), latest);
     }
     return out;
+}
+
+QString ServerConnection::membershipInRoom(const QString& roomId,
+                                           const QString& userId) const {
+    const auto it = m_roomMembers.constFind(roomId);
+    if (it == m_roomMembers.constEnd()) return {};
+    // Last write wins, matching membershipByRoom: the bucket is append-ordered
+    // and upsertMemberEvent keeps it that way, so the latest event for a user
+    // is the one furthest along.
+    QString latest;
+    for (const auto& ev : it.value()) {
+        if (ev.state_key.has_value()
+            && QString::fromStdString(*ev.state_key) == userId) {
+            latest = QString::fromStdString(ev.content.data.value("membership", ""));
+        }
+    }
+    return latest;
+}
+
+QString ServerConnection::roomNameFor(const QString& roomId) const {
+    if (roomId.isEmpty() || !m_roomListModel) return {};
+    return m_roomListModel->roomDisplayName(roomId);
 }
 
 void ServerConnection::kickFromServer(const QString& userId, const QString& reason) {

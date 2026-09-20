@@ -1917,6 +1917,29 @@ void MatrixClient::redactReaction(const QString& roomId, const QString& reaction
     redactEvent(QString(), roomId, reactionEventId, QString());
 }
 
+void MatrixClient::inviteUser(const QString& roomId, const QString& userId)
+{
+    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
+                   + QUrl::toPercentEncoding(roomId) + "/invite";
+    QJsonObject body{{"user_id", userId}};
+    QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    auto* reply = makeRequest("POST", path, payload);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId, userId]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            int status = 0;
+            QString msg;
+            decodeMatrixError(reply, &status, &msg);
+            emit inviteFailed(roomId, userId, status, msg);
+            return;
+        }
+        // The body is `{}` in every success case and carries nothing worth
+        // reading — see inviteSucceeded for why there is no bot/human flag
+        // in it to look for.
+        emit inviteSucceeded(roomId, userId);
+    });
+}
+
 void MatrixClient::kickUser(const QString& roomId, const QString& userId, const QString& reason)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
