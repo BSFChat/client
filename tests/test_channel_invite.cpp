@@ -36,14 +36,18 @@
 //     other members see it arrive, and an audit record naming the INVITER. A
 //     repeat invite for a bot already in the room is a writeless 200.
 //   * A HUMAN target is left at membership 'invite'.
+//   * A target who is ALREADY JOINED is a writeless 200 whether they are a
+//     human or a bot. Until server a19fd10 (fix/invite-no-demote) that was
+//     true only of a bot: for a human it rewrote membership back to 'invite'
+//     and demoted a member who was already in. The model used to refuse that
+//     case locally off its cached roster, and
+//     someoneAlreadyInTheChannelIsSentToTheServerWhichIsIdempotent below is
+//     the test that used to assert the refusal and now asserts its absence.
+//     The generic PUT .../state/m.room.member/{userId} route was fixed with
+//     it, so there is no second way in.
 //   * /join refuses anyone was_removed_by_moderator() recognises, and says so
 //     — "cannot rejoin unless you are invited back". This endpoint is the
 //     only thing that clears it.
-//
-// And one thing it still does NOT do, which is why the model refuses it
-// itself:
-//   * it does not refuse a human who is already joined — it rewrites their
-//     membership back to 'invite', demoting a member who was already in.
 //
 // A SECOND gap closed on 2026-09-20 and this file moved with it. handle_invite
 // used to skip user_exists() entirely, so an invite for a typo'd id was a 200
@@ -239,8 +243,28 @@ private slots:
         }
     }
 
-    void someoneAlreadyInTheChannelIsRefusedHereBecauseTheServerWillNot()
+    void someoneAlreadyInTheChannelIsSentToTheServerWhichIsIdempotent()
     {
+        // This test used to assert the opposite, under the name
+        // someoneAlreadyInTheChannelIsRefusedHereBecauseTheServerWillNot: the
+        // model read the cached roster and refused a target it had seen as
+        // 'join', because handle_invite would otherwise rewrite that 'join'
+        // back to 'invite' — demoting a member and taking them out of
+        // everyone else's roster until they joined again.
+        //
+        // Server a19fd10 (fix/invite-no-demote) makes an already-joined
+        // target a writeless 200 for a human, the same answer the bot path
+        // always gave, and does the same for the generic
+        // PUT .../state/m.room.member/{userId} route. So the refusal went,
+        // and the property is now the reverse: the request always goes to the
+        // server.
+        //
+        // Do not bring the refusal back. It was never a real guard — the
+        // roster is a cache, a miss fell straight through to the bug it was
+        // protecting against — so all it decided was whether the same click
+        // said "already in" or reported success, depending on what the client
+        // had happened to see. Deleting it is safe because noticeFor()'s
+        // non-bot copy names no outcome, so it reads true for a no-op too.
         ChannelInviteModel m;
         Fake fake;
         const QString room = QStringLiteral("!general:bsfchat.com");
@@ -251,18 +275,26 @@ private slots:
 
         m.invite(room, bob, QStringLiteral("general"));
 
-        // Not sent. handle_invite would have rewritten Bob's membership from
-        // 'join' back to 'invite' and taken him out of everyone else's
-        // roster until he joined again.
-        QCOMPARE(fake.sentUsers.size(), 0);
-        QVERIFY(m.errorText().contains(QStringLiteral("already in")));
-        QVERIFY(m.errorText().contains(QStringLiteral("Bob")));
-
-        // A membership the client has NOT seen falls through to the server.
-        // Refusing on a cache miss would make the dialog useless on a fresh
-        // connection, which is exactly when someone is setting a server up.
-        m.invite(room, QStringLiteral("@carol:bsfchat.com"), QStringLiteral("general"));
         QCOMPARE(fake.sentUsers.size(), 1);
+        QCOMPARE(fake.sentUsers.first(), bob);
+        QCOMPARE(fake.sentRooms.first(), room);
+        QVERIFY(m.errorText().isEmpty());
+        QVERIFY(m.busy());
+
+        // And the success it reports afterwards claims nothing that a no-op
+        // would make untrue — no "they will see the invite" for someone who
+        // is standing in the channel already.
+        m.onInvited(bob, QStringLiteral("general"));
+        QVERIFY(m.errorText().isEmpty());
+        QVERIFY(m.noticeText().contains(QStringLiteral("Bob")));
+        QVERIFY2(!m.noticeText().contains(QStringLiteral("sees the invite")),
+                 qPrintable(m.noticeText()));
+
+        // A membership the client has NOT seen behaves identically; there is
+        // no longer any path where the cache changes what happens.
+        m.invite(room, QStringLiteral("@carol:bsfchat.com"), QStringLiteral("general"));
+        QCOMPARE(fake.sentUsers.size(), 2);
+        QVERIFY(m.errorText().isEmpty());
     }
 
     // ── the readmit case: the one that looks like an error and is the
@@ -336,13 +368,19 @@ private slots:
         QVERIFY(m.noticeText().contains(QStringLiteral("no invite to accept")));
     }
 
-    void anUnknownTargetSuccessCoversBothOutcomesRatherThanGuessing()
+    void anUnknownTargetSuccessNamesNoOutcomeBecauseThreeArePossible()
     {
         // The client learns bot-ness from member events and from the bot
         // admin list. That list is gated on MANAGE_BOTS while this dialog is
         // gated on MANAGE_CHANNELS, and neither implies the other — so an
         // operator can legitimately add a bot the client has never heard of.
         // The server replies `{}` either way and cannot be asked which it did.
+        //
+        // This used to name both outcomes ("a person sees the invite next
+        // time they connect; a bot is already in the channel"). There are
+        // three now: since the local already-joined refusal went, a target
+        // who is already a member reaches here too and the server writes
+        // nothing for them. So the copy names none of them.
         ChannelInviteModel m;
         Fake fake;
         fake.install(m);
@@ -351,12 +389,15 @@ private slots:
         m.invite(QStringLiteral("!general:bsfchat.com"), who, QStringLiteral("general"));
         m.onInvited(who, QStringLiteral("general"));
 
-        // Both outcomes named, neither asserted. The failure this guards
-        // against is announcing "they'll see the invite" to someone watching
-        // a bot appear instantly.
-        QVERIFY(m.noticeText().contains(QStringLiteral("person")));
-        QVERIFY(m.noticeText().contains(QStringLiteral("bot")));
         QVERIFY(m.noticeText().contains(who));
+        QVERIFY(m.noticeText().contains(QStringLiteral("#general")));
+        // Nothing about what happens next, because whatever it said would be
+        // false for one of the three.
+        for (const char* claim : {"sees the invite", "next time they connect",
+                                  "already in the channel"}) {
+            QVERIFY2(!m.noticeText().contains(QLatin1String(claim)),
+                     qPrintable(m.noticeText()));
+        }
     }
 
     void aSuccessAnnouncesTheMemberSoTheRosterCanCatchUp()
