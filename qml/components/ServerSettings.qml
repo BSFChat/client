@@ -157,6 +157,10 @@ Popup {
     property string roleScratchColor: ""
     property int roleScratchPos: 0
     property double roleScratchPerms: 0
+    // `mentionable` is not a permission bit — it is a property of the ROLE, not
+    // of who holds it — so it gets its own scratch value rather than a seat in
+    // roleScratchPerms.
+    property bool roleScratchMentionable: false
 
     property string memberScratchId: ""
     // Set of assigned role ids: { roleId: true }. Written by replacement
@@ -186,11 +190,15 @@ Popup {
         roleScratchColor = (role && role.color) || defaultRoleColor;
         roleScratchPos = (role && role.position !== undefined) ? role.position : 0;
         roleScratchPerms = _permsToNumber(role && role.permissions);
+        roleScratchMentionable = !!(role && role.mentionable);
     }
 
     function endRoleEdit() {
         editingRoleId = "";
         roleScratchId = "";
+        // Cleared with the rest of the scratch state, so opening a second role
+        // does not inherit the first one's checkbox before beginRoleEdit runs.
+        roleScratchMentionable = false;
     }
 
     function toggleRoleScratchPerm(flag) {
@@ -1232,6 +1240,40 @@ Popup {
                                         }
                                     }
 
+                                    // `mentionable` sits ABOVE the permissions grid and
+                                    // outside it on purpose. It is not a permission: a
+                                    // permission says what the HOLDER of this role may do,
+                                    // and this says what everybody else may do TO the role.
+                                    // Putting it in the grid would file it under "things
+                                    // this role can do", which is how it gets read as
+                                    // harmless and left off checks like same_role().
+                                    Row {
+                                        Layout.topMargin: Theme.sp.s3
+                                        spacing: 6
+                                        ThemedCheckBox {
+                                            id: mentionableBox
+                                            checked: serverSettingsPopup.roleScratchMentionable
+                                            onToggled: serverSettingsPopup.roleScratchMentionable
+                                                = !serverSettingsPopup.roleScratchMentionable
+                                        }
+                                        Text {
+                                            text: "Allow anyone to @mention this role"
+                                            color: Theme.fg0
+                                            font.family: Theme.fontSans
+                                            font.pixelSize: Theme.fontSize.sm
+                                            anchors.verticalCenter: mentionableBox.verticalCenter
+                                        }
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.WordWrap
+                                        text: "Members with \u201cMention Everyone\u201d can "
+                                              + "ping this role either way."
+                                        color: Theme.fg3
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontSize.xs
+                                    }
+
                                     Text {
                                         Layout.topMargin: Theme.sp.s3
                                         text: "PERMISSIONS"
@@ -1329,7 +1371,7 @@ Popup {
                                                             color: serverSettingsPopup.roleScratchColor || r.color,
                                                             position: serverSettingsPopup.roleScratchPos,
                                                             permissions: "0x" + permsVal.toString(16),
-                                                            mentionable: r.mentionable || false,
+                                                            mentionable: serverSettingsPopup.roleScratchMentionable,
                                                             hoist: r.hoist || false,
                                                             // Carried through, not edited here.
                                                             // This save rebuilds the role object

@@ -1835,6 +1835,102 @@ private slots:
         QCOMPARE(both.count("<a "), 1);
     }
 
+    void testRoleMentionRendersAsAPillAndSelfStyleWhenHeld()
+    {
+        QVector<bsfchat::client::MentionTarget> none;
+        QVector<bsfchat::client::RoleMentionTarget> roles{
+            {"mod", "Moderator", "#ff0000", /*includesMe=*/false}
+        };
+        const QString out =
+            bsfchat::client::renderMentions("hey @Moderator", none, false, roles);
+        // A span, not an anchor — a role has no profile to open.
+        QVERIFY(out.contains("<span"));
+        QCOMPARE(out.count("<a "), 0);
+        QVERIFY(out.contains(">@Moderator</span>"));
+        QVERIFY(out.contains("color:#ff0000"));
+
+        // A role the reader holds takes the self-mention treatment, because
+        // they were notified.
+        roles[0].includesMe = true;
+        const QString mine =
+            bsfchat::client::renderMentions("hey @Moderator", none, false, roles);
+        QVERIFY(mine.contains("#ffd166"));   // kSelfMentionStyle foreground
+        QVERIFY(!mine.contains("color:#ff0000"));
+    }
+
+    void testANonMentionableRoleIsLeftAsPlainText()
+    {
+        // The resolver drops roles that did not notify, so the renderer simply
+        // never hears about them. The token must SURVIVE as text — not be
+        // stripped, not become an empty span. The sender typed those
+        // characters; what they must not get is a pill implying a ping.
+        QVector<bsfchat::client::MentionTarget> none;
+        const QString body = "hey @Moderator";
+        QCOMPARE(bsfchat::client::renderMentions(body, none, false, {}), body);
+    }
+
+    void testRoleNameAndColourCannotInjectMarkupOrCss()
+    {
+        // A role name takes MANAGE_ROLES to set, but that is a delegated
+        // permission, not a trusted one — it gets the same treatment a display
+        // name gets.
+        QVector<bsfchat::client::MentionTarget> none;
+        QVector<bsfchat::client::RoleMentionTarget> hostile{
+            {"x", "<img src=x onerror=alert(1)>", "red; background:url(//evil)", false}
+        };
+        const QString out = bsfchat::client::renderMentions(
+            QStringLiteral("@<img src=x onerror=alert(1)>").toHtmlEscaped(),
+            none, false, hostile);
+
+        // The payload is present as escaped TEXT — that is the point, it is
+        // what the sender wrote — so asserting on the substring "onerror"
+        // proves nothing. The property is that nothing became MARKUP: strip the
+        // tags this renderer is allowed to emit and no '<' may remain. Same
+        // shape of assertion as the display-name test above, and it catches
+        // payloads this test never thought of.
+        QVERIFY(out.contains("&lt;img"));
+        QString residue = out;
+        residue.remove(QRegularExpression("<span style=\"[^\"]*\">"));
+        residue.remove("</span>");
+        QVERIFY2(!residue.contains(QLatin1Char('<')),
+                 qPrintable("unexpected markup survived: " + residue));
+
+        // The colour is not a #RRGGBB literal, so it is discarded outright
+        // rather than escaped into a style attribute — no CSS a role owner
+        // chose reaches the document at all.
+        QVERIFY(!out.contains("evil"));
+        QVERIFY(!out.contains("background:url"));
+    }
+
+    void testARoleWinsATokenCollisionAgainstASelfChosenDisplayName()
+    {
+        // A user can rename themselves "Moderator"; naming a role takes
+        // MANAGE_ROLES. If both are named in one message the token must resolve
+        // to the role, or anyone can shadow a role pill by renaming themselves.
+        QVector<bsfchat::client::MentionTarget> users{
+            {"@mallory:server", "Moderator", false}
+        };
+        QVector<bsfchat::client::RoleMentionTarget> roles{
+            {"mod", "Moderator", "", false}
+        };
+        const QString out =
+            bsfchat::client::renderMentions("@Moderator", users, false, roles);
+        QCOMPARE(out.count("<a "), 0);
+        QVERIFY(out.contains("<span"));
+    }
+
+    void testRoleMentionsAreSkippedInsideCodeSpans()
+    {
+        QVector<bsfchat::client::MentionTarget> none;
+        QVector<bsfchat::client::RoleMentionTarget> roles{
+            {"mod", "Moderator", "", false}
+        };
+        const QString out = bsfchat::client::renderMentions(
+            "<code>@Moderator</code> and @Moderator", none, false, roles);
+        QCOMPARE(out.count("<span"), 1);
+        QVERIFY(out.contains("<code>@Moderator</code>"));
+    }
+
     void testMentionMarkupSurvivesAnEditWithoutWideningRepaint()
     {
         // Editing a message rebuilds its body, which throws away the baked
