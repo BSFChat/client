@@ -563,6 +563,54 @@ private slots:
         QVERIFY2(avatarSpy.count() == 0,
                  "an attachment must not report itself on the avatar signal");
     }
+
+    // ── The composer's length cap ────────────────────────────────────────
+    //
+    // The composer had no cap and the server had no limit, so a pasted logfile
+    // went into everyone's timeline. The server now refuses an oversize body
+    // with 413 M_TOO_LARGE; MessageInput.qml refuses it before the send, using
+    // the two members below. The QML itself cannot be instantiated from a test
+    // binary (the module is compiled into the app — see test_qml_hygiene.cpp),
+    // so what is pinned here is the arithmetic it depends on.
+
+    void theByteLengthIsUtf8AndNotUtf16Units()
+    {
+        ServerConnection conn(kServer);
+
+        // The whole reason this is a C++ helper. QML's `text.length` is UTF-16
+        // code units, so it would read these as 5, 5 and 2 — and the server is
+        // counting 5, 15 and 8. A composer that counted units would promise a
+        // Japanese speaker three times the room they actually have.
+        QCOMPARE(conn.messageByteLength(QStringLiteral("hello")), 5);
+        QCOMPARE(conn.messageByteLength(QString::fromUtf8("日本語のテスト")), 21);
+        QCOMPARE(conn.messageByteLength(QString::fromUtf8("\U0001F600\U0001F600")), 8);
+        QCOMPARE(conn.messageByteLength(QString()), 0);
+    }
+
+    void theCapMatchesTheProtocolCeiling()
+    {
+        ServerConnection conn(kServer);
+        // Never higher than what the stock server enforces: a composer that
+        // lets through what the server refuses is the state this replaced.
+        QCOMPARE(conn.maxMessageBytes(),
+                 static_cast<int>(bsfchat::limits::kMaxMessageBodyBytes));
+    }
+
+    void aFiftyNameRosterIsNowhereNearTheCap()
+    {
+        ServerConnection conn(kServer);
+        QString body;
+        for (int i = 0; i < 50; ++i) {
+            body += QStringLiteral("Knight Of The Long Name %1 — level 3%2 Elite Knight\n")
+                        .arg(i).arg(i);
+        }
+        // The bot case the cap must not break. A quarter of the budget would
+        // already be too close; it uses well under a sixth.
+        QVERIFY2(conn.messageByteLength(body) * 4 < conn.maxMessageBytes(),
+                 qPrintable(QStringLiteral("roster is %1 bytes of %2")
+                                .arg(conn.messageByteLength(body))
+                                .arg(conn.maxMessageBytes())));
+    }
 };
 
 // No QGuiApplication: a window system on a dev Mac means permission dialogs,
