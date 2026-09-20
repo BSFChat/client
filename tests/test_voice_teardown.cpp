@@ -158,6 +158,17 @@ Peers bringUpPair(int round)
     // and the handshake waited out its full timeout — on Linux and macOS,
     // on changes unrelated to this test. Locally it always passed.
     cfg.bindAddress = "127.0.0.1";
+    // If a bring-up here ever dies with a DTLS *certificate* rejection
+    // ("certificate verify failed" / "tlsv1 alert unknown ca") rather
+    // than a timeout, suspect the ordering race inside libdatachannel's
+    // PeerConnection::setRemoteDescription, not this test: it gives ICE
+    // the remote credentials before it stores the remote description, so
+    // on loopback the peer's certificate can arrive while there is no
+    // fingerprint to check it against. Sanitizers plus `ctest -j4` on a
+    // 3-core runner were enough to lose that thread for the ~2 ms it
+    // takes (CI run 35523785278). We patch it at configure time — see
+    // cmake/patch-libdatachannel.cmake, which fails the build if the pin
+    // ever moves out from under the fix.
     Peers p;
     p.offerer = new PeerConnectionManager(
         QStringLiteral("@b:test"), QStringLiteral("call-%1").arg(round), cfg);
@@ -181,8 +192,16 @@ Peers bringUpPair(int round)
     p.offerer->createOffer();
     if (!pumpUntil([&] { return p.offerer->isChannelOpen()
                              && p.answerer->isChannelOpen(); }, 15000)) {
-        std::fprintf(stderr, "FAIL: data channels never opened (round %d)\n",
-                     round);
+        // Say WHICH way it broke. A bring-up that times out with both
+        // peers Failed is a handshake that was rejected (look for the
+        // DTLS lines above it); one that times out with neither Failed
+        // is ICE still trying.
+        std::fprintf(stderr, "FAIL: data channels never opened (round %d) "
+                             "— offerer=%s answerer=%s, failed=%s\n",
+                     round,
+                     p.offerer->isChannelOpen() ? "open" : "closed",
+                     p.answerer->isChannelOpen() ? "open" : "closed",
+                     *failed ? "yes" : "no");
         return {};
     }
     if (*failed) {
@@ -203,6 +222,16 @@ Peers bringUpPair(int round)
 bool stressVideo()
 {
     return qEnvironmentVariable("BSFCHAT_TEARDOWN_STRESS_VIDEO") == "1";
+}
+
+// How many times to walk the four destruction shapes. One pass is what
+// ctest runs; BSFCHAT_TEARDOWN_PASSES=N is for hunting a bring-up race,
+// where the only lever that matters is the number of fresh handshakes.
+int passes()
+{
+    bool ok = false;
+    const int n = qEnvironmentVariableIntValue("BSFCHAT_TEARDOWN_PASSES", &ok);
+    return (ok && n > 0) ? n : 1;
 }
 
 // Everything the old destructor could be racing: audio frames, JPEG
@@ -239,14 +268,15 @@ int main(int argc, char** argv)
     // destroying a peer from inside the delivery of one of its own
     // frames, which is when libdatachannel's thread is demonstrably in
     // the middle of calling into this object.
-    for (int round = 0; round < 4; ++round) {
+    const int rounds = 4 * passes();
+    for (int round = 0; round < rounds; ++round) {
         Peers p = bringUpPair(round);
         if (!p.offerer) return 2;
 
         blast(p.offerer, 40);
         blast(p.answerer, 20);
 
-        switch (round) {
+        switch (round % 4) {
         case 0:
             // Receiver dies while frames are in flight toward it. This is
             // the leave / dead-peer-cleanup shape.

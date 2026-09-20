@@ -37,6 +37,15 @@ if(BSFCHAT_ENABLE_VOICE)
         # bundled-libjuice STUN HMAC-key crash (>64B key).
         GIT_TAG        v0.24.5
         GIT_SHALLOW    TRUE
+        # setRemoteDescription() hands ICE the remote credentials before it
+        # stores the remote description, so on loopback the peer's DTLS
+        # certificate can arrive while there is nothing to check its
+        # fingerprint against — the handshake is then rejected outright
+        # ("certificate verify failed" / "unknown ca"). Still unfixed on
+        # upstream master. The script is idempotent and fails the configure
+        # if its anchor ever stops matching, so moving the pin cannot
+        # silently drop the fix. Full incident in the script's header.
+        PATCH_COMMAND  ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_LIST_DIR}/patch-libdatachannel.cmake"
     )
     # Media transport ON: rtc::Track + RTP packetizers + DTLS-SRTP for
     # the real-video path (H.264 over RTP). SRTP comes from the libsrtp
