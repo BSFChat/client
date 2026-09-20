@@ -112,6 +112,73 @@ Rectangle {
                     visible: headerItem.memberCount > 0
                 }
                 Item { Layout.fillWidth: true }
+
+                // Add a member to this channel.
+                //
+                // Here because this panel is the answer to "who is in this
+                // channel", and "and one more" is the same question. The
+                // channel's right-click menu carries the same action for
+                // people who look where Discord puts "Invite People"; both
+                // open AddMemberDialog.
+                //
+                // PRESENT WITHOUT THE PERMISSION, muted rather than gone, and
+                // it opens the dialog either way — the precedent
+                // BotManagerPane.qml set and that
+                // fix/identity-permission-discoverability applied to the
+                // Server Settings gear. The reasoning is in
+                // AddMemberDialog.qml's header; the short version is that a
+                // control which vanishes says "this product cannot do that"
+                // when the truth is "this account may not", and telling those
+                // apart is the whole job. A click that did nothing would be a
+                // third state and indistinguishable from a broken button.
+                Icon {
+                    id: addMemberIcon
+                    name: "plus"
+                    size: 14
+                    // MANAGE_CHANNELS in THIS room — what handle_invite
+                    // checks. _gen above re-evaluates it on every permission
+                    // tick, so a role edit unlocks it without a reconnect.
+                    readonly property bool unlocked: {
+                        memberListRoot._gen;
+                        var s = serverManager.activeServer;
+                        if (!s) return false;
+                        if (s.permissionsGeneration < 0) return false;
+                        return s.canManageChannel(s.activeRoomId || "");
+                    }
+                    color: addMemberIcon.unlocked
+                         ? (addMemberMouse.containsMouse ? Theme.fg0 : Theme.fg2)
+                         : (addMemberMouse.containsMouse ? Theme.fg2 : Theme.fg3)
+                    visible: !!serverManager.activeServer
+                             && (serverManager.activeServer.activeRoomId || "") !== ""
+                    Layout.alignment: Qt.AlignVCenter
+
+                    ToolTip.visible: addMemberMouse.containsMouse
+                    ToolTip.delay: 400
+                    // Names the account in the locked case, for the same
+                    // reason the gear's tooltip does: hovering the thing that
+                    // is not working is the cheapest possible step, and
+                    // "which account am I?" is the question the 2026-09-20
+                    // incident turned on.
+                    ToolTip.text: addMemberIcon.unlocked
+                        ? "Add a member to this channel"
+                        : ("Add a member — not available to "
+                           + (serverManager.activeServer
+                              ? serverManager.activeServer.userId : ""))
+
+                    MouseArea {
+                        id: addMemberMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            var s = serverManager.activeServer;
+                            if (!s) return;
+                            addMemberDialog.roomId = s.activeRoomId || "";
+                            addMemberDialog.roomName = s.activeRoomName || "";
+                            addMemberDialog.open();
+                        }
+                    }
+                }
             }
 
             Rectangle {
@@ -337,6 +404,17 @@ Rectangle {
     // Profile card for clicking on member names
     UserProfileCard {
         id: memberProfileCard
+        parent: Overlay.overlay
+    }
+
+    // "Add someone to this channel", opened by the + in the header above.
+    // Declared here AND in ChannelList.qml, the same way RoleAssignPopup is
+    // declared here and in main.qml: one user-facing behaviour, instantiated
+    // where each entry point can reach it. It holds no state between opens —
+    // the caller sets roomId/roomName and onOpened resets the rest — so two
+    // instances cannot disagree about anything.
+    AddMemberDialog {
+        id: addMemberDialog
         parent: Overlay.overlay
     }
 

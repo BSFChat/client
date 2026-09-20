@@ -559,11 +559,17 @@ add_test(NAME test_server_roster COMMAND test_server_roster)
 qt_add_executable(test_identity_provider_url
     test_identity_provider_url.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
-    # ServerConnection gained a BotAdminModel* Q_PROPERTY when feat/bots merged.
-    # AUTOMOC instantiates the pointer meta-type, which needs the complete type,
-    # so this target has to carry the model even though the test never uses it.
+    # ServerConnection gained a BotAdminModel* Q_PROPERTY when feat/bots merged,
+    # a SelfRoleModel* with the self-role picker, and a ChannelInviteModel* with
+    # "add a member to a channel". AUTOMOC instantiates each pointer meta-type,
+    # which needs the complete type, so every target that compiles
+    # ServerConnection.cpp has to carry all three even though these tests use
+    # none of them. Expect to add a line here whenever a view-model is hung off
+    # ServerConnection — the failure is a static_assert about is_complete<> in
+    # qmetatype.h and names the model, which is the only clue it gives.
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/SelfRoleModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/ChannelInviteModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
@@ -618,6 +624,7 @@ qt_add_executable(test_error_surface_guards
     ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/SelfRoleModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/ChannelInviteModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
@@ -662,6 +669,7 @@ qt_add_executable(test_composer_upload_lock
     ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/SelfRoleModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/ChannelInviteModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
@@ -932,3 +940,28 @@ target_compile_definitions(test_self_roles PRIVATE
     BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test_self_roles PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_self_roles COMMAND test_self_roles)
+
+# Adding a member — person or bot — to a channel: POST /rooms/{id}/invite,
+# which the server has always had and the client never called.
+#
+# ChannelInviteModel driven through its std::function hooks (no network, no
+# event loop, no GUI — the seam BotAdminModel and VoiceSession use), plus
+# source scans for what a headless test cannot reach: that the affordance
+# exists, that its gate is the flag PROTOCOL defines rather than a number
+# typed into a QML binding, and that the gate mutes the control instead of
+# deleting it. bsfchat_protocol is linked for that first anchor, which is the
+# whole point — see the header of test_channel_invite.cpp.
+qt_add_executable(test_channel_invite
+    test_channel_invite.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/ChannelInviteModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/PermissionMath.cpp
+)
+target_include_directories(test_channel_invite PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_channel_invite PRIVATE
+    BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml"
+    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_channel_invite PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Test
+)
+add_test(NAME test_channel_invite COMMAND test_channel_invite)

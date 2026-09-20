@@ -2423,6 +2423,35 @@ Rectangle {
             onTriggered: roomContextMenu._setNotifyLevel("none")
         }
 
+        // Where Discord puts "Invite People", so it is where people look.
+        //
+        // The member-list header carries the same action for the channel you
+        // are currently IN; this one works on whichever channel was
+        // right-clicked, which is why it passes roomContextMenu.roomId rather
+        // than reading activeRoomId.
+        //
+        // Enabled-gated rather than hidden, matching the two entries below —
+        // and see AddMemberDialog.qml's header for why the dialog itself
+        // still opens for a member without the permission from the member
+        // list. A greyed menu row and a muted icon say the same thing in the
+        // two vocabularies those surfaces already use.
+        ThemedRoomItem {
+            text: "Add member…"
+            iconName: "users"
+            enabled: {
+                if (!serverManager.activeServer) return false;
+                if (serverManager.activeServer.permissionsGeneration < 0) return false;
+                // MANAGE_CHANNELS in this room — the flag handle_invite
+                // checks, resolved through the shared mirror.
+                return serverManager.activeServer.canManageChannel(roomContextMenu.roomId);
+            }
+            onTriggered: {
+                addMemberFromMenu.roomId = roomContextMenu.roomId;
+                addMemberFromMenu.roomName = roomContextMenu.roomName;
+                addMemberFromMenu.open();
+            }
+        }
+
         ThemedRoomItem {
             text: "Channel Settings…"
             iconName: "settings"
@@ -2453,6 +2482,14 @@ Rectangle {
                 deleteChannelConfirm.open();
             }
         }
+    }
+
+    // "Add member…" from the channel context menu. A second instance of the
+    // dialog the member list also declares — see the note beside that one:
+    // it carries no state across opens, so two instances cannot disagree.
+    AddMemberDialog {
+        id: addMemberFromMenu
+        parent: Overlay.overlay
     }
 
     // Confirmation popup for channel deletion. Keeps us from nuking a
