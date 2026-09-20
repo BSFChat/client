@@ -2135,6 +2135,22 @@ Rectangle {
                     iconName: "edit"
                     onTriggered: Window.window.openUserSettings()
                 }
+                // Sits next to the profile entry, not behind the settings
+                // gear above: that gear is only rendered for a member holding
+                // MANAGE_ROLES / MANAGE_CHANNELS / KICK / BAN, and opt-in
+                // roles exist for everybody else. Hidden when the server
+                // publishes none, so it is not a dead entry on the servers
+                // that do not use them.
+                ThemedUserItem {
+                    text: "Your Roles"
+                    iconName: "gift"
+                    visible: {
+                        var s = serverManager.activeServer;
+                        if (!s || !s.selfRoleModel) return false;
+                        return s.selfRoleModel.roles.length > 0;
+                    }
+                    onTriggered: Window.window.openSelfRoles()
+                }
                 ThemedUserItem {
                     text: "Client Settings"
                     iconName: "settings"

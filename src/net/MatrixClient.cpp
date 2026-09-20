@@ -1114,6 +1114,65 @@ void MatrixClient::deactivateBot(const QString& userId)
     });
 }
 
+namespace {
+
+// Shared body of the two self-role calls: same path, same reply shape, same
+// failure signal — only the verb differs. Kept as one function so the reply
+// handling cannot drift between add and remove, which is precisely where a
+// "the tick came back but the role did not" bug would live.
+QString selfRolePath(const QString& roleId)
+{
+    return QString::fromUtf8(bsfchat::api_path::kSelfRoles) + "/"
+           + QString::fromUtf8(QUrl::toPercentEncoding(roleId));
+}
+
+} // namespace
+
+void MatrixClient::addSelfRole(const QString& roleId)
+{
+    // An empty JSON object rather than no body: the role id is in the path and
+    // the server wants nothing else, but a PUT with no Content-Length is
+    // handled inconsistently by proxies (see rotateBotToken).
+    auto* reply = makeRequest("PUT", selfRolePath(roleId), QByteArrayLiteral("{}"));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roleId]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            int status = 0;
+            QString msg;
+            decodeMatrixError(reply, &status, &msg);
+            emit selfRoleFailed(roleId, status, msg);
+            return;
+        }
+        const auto o = QJsonDocument::fromJson(reply->readAll()).object();
+        QStringList ids;
+        for (const auto& v : o.value(QStringLiteral("role_ids")).toArray()) {
+            ids.append(v.toString());
+        }
+        emit selfRoleChanged(roleId, ids);
+    });
+}
+
+void MatrixClient::removeSelfRole(const QString& roleId)
+{
+    auto* reply = makeRequest("DELETE", selfRolePath(roleId));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roleId]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            int status = 0;
+            QString msg;
+            decodeMatrixError(reply, &status, &msg);
+            emit selfRoleFailed(roleId, status, msg);
+            return;
+        }
+        const auto o = QJsonDocument::fromJson(reply->readAll()).object();
+        QStringList ids;
+        for (const auto& v : o.value(QStringLiteral("role_ids")).toArray()) {
+            ids.append(v.toString());
+        }
+        emit selfRoleChanged(roleId, ids);
+    });
+}
+
 void MatrixClient::setDisplayName(const QString& userId, const QString& displayName)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kProfile)

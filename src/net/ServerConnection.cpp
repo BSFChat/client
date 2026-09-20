@@ -9,6 +9,7 @@
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
 #include "model/BotAdminModel.h"
+#include "model/SelfRoleModel.h"
 #include "util/MediaUrl.h"
 #include "util/MemberCache.h"
 #include "util/MentionBadge.h"
@@ -231,6 +232,50 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             emit botFlagsChanged();
         }
     });
+
+    // ── the self-assignable role picker ───────────────────────────────────
+    m_selfRoleModel = new SelfRoleModel(this);
+    m_selfRoleModel->hooks.addSelfRole = [this](const QString& roleId) {
+        m_client->addSelfRole(roleId);
+    };
+    m_selfRoleModel->hooks.removeSelfRole = [this](const QString& roleId) {
+        m_client->removeSelfRole(roleId);
+    };
+    connect(m_client, &MatrixClient::selfRoleChanged, this,
+            [this](const QString& roleId, const QStringList& roleIds) {
+        // The endpoint's reply is authoritative for our own assignment, and it
+        // arrives before the sync echo does. Writing it into m_memberRoles
+        // here — not just into the picker — is what keeps the rest of the UI
+        // (role chips, the permission maths, hoisting) in step during the gap;
+        // otherwise a member who ticked a role would hold it in the picker and
+        // nowhere else until the next sync came round.
+        if (!m_userId.isEmpty()) {
+            m_memberRoles[m_userId] = roleIds;
+            ++m_permissionsGeneration;
+            emit permissionsChanged();
+        }
+        m_selfRoleModel->onSelfRoleResult(roleId, roleIds);
+        emit serverRolesChanged();
+    });
+    connect(m_client, &MatrixClient::selfRoleFailed, this,
+            [this](const QString& roleId, int status, const QString& error) {
+        // Routed to the picker's inline error line rather than through
+        // stateWriteFailed: this is not a state-event write, there is no
+        // m_pendingStateUndo entry to pop, and the refusal belongs next to the
+        // checkbox that sprang back rather than in a toast that outlives the
+        // popup. A dead session is still worth saying plainly, though — the
+        // same suppression every other subsystem honours.
+        if (m_auth.shouldSuppressSubsystemError()) {
+            m_selfRoleModel->onSelfRoleFailed(
+                roleId, status,
+                tr("Your session has expired. Sign in again to reconnect."));
+            return;
+        }
+        m_selfRoleModel->onSelfRoleFailed(roleId, status, error);
+    });
+    // Every path that changes the role document or an assignment emits this.
+    connect(this, &ServerConnection::serverRolesChanged, this,
+            &ServerConnection::refreshSelfRoles);
 
     // Connect sync signals
     connect(m_syncLoop, &SyncLoop::syncCompleted, this, &ServerConnection::processSyncResponse);
@@ -1060,6 +1105,7 @@ void ServerConnection::disconnectFromServer()
     // message model's stamped copies need re-resolving.
     m_botUserIds.clear();
     m_botAdminModel->reset();
+    m_selfRoleModel->reset();
     m_messageModel->refreshBotFlags();
 
     m_connected = false;
@@ -4342,6 +4388,16 @@ void ServerConnection::setMemberRoles(const QString& userId, const QStringList& 
 
 QStringList ServerConnection::memberRoles(const QString& userId) const {
     return m_memberRoles.value(userId);
+}
+
+void ServerConnection::refreshSelfRoles() {
+    if (!m_selfRoleModel) return;
+    // m_serverRoles is the raw role document as it came off the wire, which is
+    // what the picker wants: it needs `self_assignable` and the permission
+    // bitfield, and RoleInfo drops neither but is not exposed to QML. The held
+    // list is our own and only our own — there is no "view somebody else's
+    // opt-ins" here, by design.
+    m_selfRoleModel->setServerState(m_serverRoles, m_memberRoles.value(m_userId));
 }
 
 QVariantList ServerConnection::channelOverrides(const QString& roomId) const {

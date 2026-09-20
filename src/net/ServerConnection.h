@@ -37,6 +37,7 @@ class RoomListModel;
 class MessageModel;
 class MemberListModel;
 class BotAdminModel;
+class SelfRoleModel;
 #ifdef BSFCHAT_VOICE_ENABLED
 class VoiceEngine;
 class NotificationSounds;
@@ -89,6 +90,12 @@ class ServerConnection : public QObject {
     // itself gated on canManageBots(), so a null here would only move the
     // permission check into every binding inside it.
     Q_PROPERTY(BotAdminModel* botAdminModel READ botAdminModel CONSTANT)
+    // View-model behind the member-facing self-assignable role picker. Always
+    // present and deliberately ungated: unlike botAdminModel, whose dialog is
+    // behind canManageBots(), the whole point of this one is that an ORDINARY
+    // member can open it. It reports an empty list on a server that publishes
+    // no opt-in roles, which is the only "nothing to see" this surface has.
+    Q_PROPERTY(SelfRoleModel* selfRoleModel READ selfRoleModel CONSTANT)
     // Bumped whenever the set of known bot user ids changes, so QML that
     // asks isBot(userId) directly (the profile card, which has a user id and
     // no model row) re-evaluates. The member list and the message list do not
@@ -332,6 +339,7 @@ public:
     MessageModel* messageModel() const { return m_messageModel; }
     MemberListModel* memberListModel() const { return m_memberListModel; }
     BotAdminModel* botAdminModel() const { return m_botAdminModel; }
+    SelfRoleModel* selfRoleModel() const { return m_selfRoleModel; }
     MatrixClient* client() const { return m_client; }
 
     // Set credentials (for restoring from settings)
@@ -1134,6 +1142,14 @@ public:
     // state, nothing to probe for, and nothing that arrives late.
     QSet<QString> m_botUserIds;
     BotAdminModel* m_botAdminModel = nullptr;
+    SelfRoleModel* m_selfRoleModel = nullptr;
+    // Push the current role document and OUR OWN member.roles into the self-role
+    // picker. Hung off this class's own serverRolesChanged() rather than called
+    // from each write path, because all four of them (a server.roles event, a
+    // member.roles event, an optimistic setMemberRoles, its rollback) already
+    // emit it — and the one that gets forgotten later is the one that would
+    // leave the picker showing a role that no longer exists.
+    void refreshSelfRoles();
     int m_botFlagsGeneration = 0;
     // Fold one answer into the set and repaint if it moved. Takes the flag as
     // read off a member event, a profile reply or /whoami — all three carry
