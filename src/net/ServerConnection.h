@@ -14,6 +14,7 @@
 #include <QVector>
 #include <functional>
 
+#include <bsfchat/Constants.h>
 #include <bsfchat/MatrixTypes.h>
 // Header-only dependency (QString + QJsonObject), safe in non-voice
 // builds. The .cpp side of it is voice-gated, so every CALL into
@@ -67,6 +68,19 @@ class ServerConnection : public QObject {
     // UserProfileCard's _permGen).
     Q_PROPERTY(int mediaTicketEpoch READ mediaTicketEpoch NOTIFY mediaTicketEpochChanged)
     Q_PROPERTY(QString userId READ userId NOTIFY userIdChanged)
+    // The composer's character... BYTE budget. See messageByteLength() below
+    // for why the composer has to count in bytes, and Constants.h for why the
+    // server does.
+    //
+    // CONSTANT, and the protocol default rather than anything the server told
+    // us: there is no endpoint that publishes an operator's configured
+    // `[limits] max_message_bytes`, so this is the figure the stock server
+    // enforces. On a deployment that has lowered it, the composer lets a
+    // message through that the server then refuses with 413 M_TOO_LARGE —
+    // which is the pre-existing behaviour for every message, so the cap is
+    // strictly an improvement rather than a new failure mode. It must never be
+    // set HIGHER than the protocol default for the same reason.
+    Q_PROPERTY(int maxMessageBytes READ maxMessageBytes CONSTANT)
     Q_PROPERTY(RoomListModel* roomListModel READ roomListModel CONSTANT)
     Q_PROPERTY(MessageModel* messageModel READ messageModel CONSTANT)
     Q_PROPERTY(MemberListModel* memberListModel READ memberListModel CONSTANT)
@@ -184,6 +198,29 @@ public:
     QString serverName() const;
     QString serverAvatarUrl() const { return m_serverAvatarUrl; }
     QString userId() const { return m_userId; }
+
+    int maxMessageBytes() const {
+        return static_cast<int>(bsfchat::limits::kMaxMessageBodyBytes);
+    }
+
+    // UTF-8 bytes in `text`, which is what the server counts and what QML
+    // cannot work out for itself.
+    //
+    // QML has no byte length. `text.length` is UTF-16 code UNITS: one for most
+    // characters, two for anything outside the BMP, and in neither case the
+    // number the server is comparing against. Counting units would have the
+    // composer tell a Japanese speaker they have 16,000 characters left when
+    // the server will take about 5,400, and tell an emoji-heavy user 16,000
+    // when the real answer is ~4,000 — the composer's whole purpose is to say
+    // no BEFORE the send, so a cap that disagrees with the server is worse
+    // than none.
+    //
+    // Cheap enough to call on every keystroke: QString::toUtf8 on a composer's
+    // worth of text is a single pass over a few kilobytes.
+    Q_INVOKABLE int messageByteLength(const QString& text) const {
+        return static_cast<int>(text.toUtf8().size());
+    }
+
     QString accessToken() const { return m_accessToken; }
     QString deviceId() const { return m_deviceId; }
     bool isConnected() const { return m_connected; }

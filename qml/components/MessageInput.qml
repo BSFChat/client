@@ -13,17 +13,63 @@ import "../js/UploadTally.js" as UploadTally
 Rectangle {
     id: inputRoot
     color: Theme.bg1
-    border.color: inputArea.activeFocus ? Theme.accent : Theme.line
+    border.color: inputRoot.overLimit
+        ? Theme.danger
+        : (inputArea.activeFocus ? Theme.accent : Theme.line)
     border.width: 1
     radius: Theme.r3
-    implicitHeight: (editingHeader.visible || replyHeader.visible)
-        ? (editingHeader.visible ? editingHeader.height : replyHeader.height)
-          + inputCore.implicitHeight + 8
+    // Every banner currently taking a slice off the top of the composer.
+    // Editing and replying are mutually exclusive; the size warning stacks
+    // under whichever of them is up, because you can be editing a message
+    // into being too long.
+    readonly property real _bannerHeight:
+        (editingHeader.visible ? editingHeader.height
+                               : (replyHeader.visible ? replyHeader.height : 0))
+        + sizeHeader.height
+    implicitHeight: inputRoot._bannerHeight > 0
+        ? inputRoot._bannerHeight + inputCore.implicitHeight + 8
         : inputCore.implicitHeight
     height: implicitHeight
 
     property string roomName: ""
     property string activeRoomId: serverManager.activeServer ? serverManager.activeServer.activeRoomId : ""
+
+    // ── How long a message may be ────────────────────────────────────
+    //
+    // There was no cap here at all, and none on the server either, so the
+    // composer would cheerfully accept a pasted logfile, send it, and have it
+    // land in everyone's timeline. The server now refuses an oversize body
+    // with 413 M_TOO_LARGE — this is the half that tells the user BEFORE they
+    // press Enter, which is the only point at which the information is any use
+    // to them.
+    //
+    // Nothing is ever truncated. A composer that silently drops the tail of a
+    // paste is worse than one that refuses it: the user sends what looks like
+    // a complete message and only finds out later, if ever. The send is
+    // blocked, the border goes red, and the banner says by how much.
+    //
+    // BYTES, not `text.length`. QML's length is UTF-16 code units, which is
+    // neither what the user sees nor what the server counts; see
+    // ServerConnection::messageByteLength. preeditText is included because an
+    // IME's uncommitted composition is about to become text — the same reason
+    // the send button's `armed` reads it.
+    readonly property int maxBodyBytes: serverManager.activeServer
+        ? serverManager.activeServer.maxMessageBytes : 0
+    readonly property int bodyBytes: {
+        var s = serverManager.activeServer;
+        if (!s) return 0;
+        return s.messageByteLength(
+            (inputArea.text + inputArea.preeditText).trim());
+    }
+    readonly property bool overLimit:
+        inputRoot.maxBodyBytes > 0 && inputRoot.bodyBytes > inputRoot.maxBodyBytes
+    // The counter appears only in the last tenth of the budget. Shown always,
+    // it is noise on every message anyone actually sends; shown only once the
+    // limit is already breached, the user has no warning that they are getting
+    // close to it mid-paste.
+    readonly property bool nearLimit:
+        inputRoot.maxBodyBytes > 0
+        && inputRoot.bodyBytes > inputRoot.maxBodyBytes * 0.9
 
     // U-H6. `uploading` used to be a plain bool: set true when an upload
     // started, set false by the FIRST mediaSendCompleted. With N files in
@@ -586,15 +632,73 @@ Rectangle {
         }
     }
 
-    RowLayout {
-        id: inputCore
+    // Over-length warning. Stacks under the editing / reply banner rather than
+    // replacing it: "you are editing a message and it is now too long" is a
+    // real state and the user needs both halves of it.
+    //
+    // A banner and not a toast, because the condition persists — it is true
+    // for as long as the text is, and it goes away by itself when the user
+    // deletes enough. A toast would fire once, be missed, and leave a composer
+    // that refuses to send for no visible reason.
+    Rectangle {
+        id: sizeHeader
         anchors.top: editingHeader.visible
                      ? editingHeader.bottom
-                     : (replyHeader.visible ? replyHeader.bottom : parent.top)
+                     : (replyHeader.visible
+                        ? replyHeader.bottom
+                        : (uploadBanner.visible ? uploadBanner.bottom : parent.top))
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: visible ? 32 : 0
+        color: Theme.bg0
+        radius: Theme.r2
+        visible: inputRoot.overLimit
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Theme.sp.s4
+            anchors.rightMargin: Theme.sp.s4
+            spacing: Theme.sp.s3
+
+            // No icon: qml/icons has no warning glyph, and the two banners
+            // above use theirs to say WHICH mode the composer is in, not to
+            // raise an alarm. Colour and wording carry this one.
+            Text {
+                text: "Message is too long"
+                color: Theme.danger
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                font.weight: Theme.fontWeight.semibold
+            }
+            Text {
+                // The numbers, because "too long" on its own gives the user no
+                // idea whether to delete a word or a page. Bytes rather than
+                // characters is what the server counts, and saying so is more
+                // honest than quoting a character figure that is wrong for
+                // anything outside ASCII.
+                text: "— " + (inputRoot.bodyBytes - inputRoot.maxBodyBytes)
+                      + " bytes over the " + inputRoot.maxBodyBytes
+                      + "-byte limit. Shorten it, or attach it as a file."
+                color: Theme.fg2
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+            }
+        }
+    }
+
+    RowLayout {
+        id: inputCore
+        anchors.top: sizeHeader.visible
+                     ? sizeHeader.bottom
+                     : (editingHeader.visible
+                        ? editingHeader.bottom
+                        : (replyHeader.visible ? replyHeader.bottom : parent.top))
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        anchors.topMargin: (editingHeader.visible || replyHeader.visible) ? 4 : 0
+        anchors.topMargin: inputRoot._bannerHeight > 0 ? 4 : 0
         anchors.leftMargin: Theme.sp.s3
         anchors.rightMargin: Theme.sp.s3
         spacing: Theme.sp.s1
@@ -853,6 +957,24 @@ Rectangle {
             }
         }
 
+        // Bytes remaining, in the last tenth of the budget only. The banner
+        // above says what has gone wrong once the limit is passed; this is the
+        // thing that lets a user see it coming while they are still typing,
+        // which is the difference between "shorten this" and "start again".
+        Text {
+            Layout.alignment: Qt.AlignVCenter
+            visible: inputRoot.nearLimit
+            text: (inputRoot.maxBodyBytes - inputRoot.bodyBytes).toString()
+            color: inputRoot.overLimit ? Theme.danger : Theme.fg3
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.xs
+            // Bare digits next to a composer read as a countdown; a screen
+            // reader gets no such context from them.
+            Accessible.role: Accessible.StaticText
+            Accessible.name: (inputRoot.maxBodyBytes - inputRoot.bodyBytes)
+                             + " bytes remaining"
+        }
+
         // Send button — accent-filled once the composer has something to
         // send. SPEC §3.6 calls for it to show only when input is
         // non-empty. We fade+scale the button in instead of toggling a
@@ -871,9 +993,17 @@ Rectangle {
             // visual disabled state already covers empty composers.
             Accessible.role: Accessible.Button
             Accessible.name: "Send message"
+            // The over-length case gets its own sentence: a screen reader
+            // user has no red border and no banner colour to go on, and
+            // "nothing to send yet" in front of a composer full of text is
+            // actively misleading.
             Accessible.description: sendBtn.armed
                 ? "Send the typed message"
-                : "Nothing to send yet"
+                : (inputRoot.overLimit
+                   ? "Message is " + (inputRoot.bodyBytes - inputRoot.maxBodyBytes)
+                     + " bytes over the " + inputRoot.maxBodyBytes
+                     + "-byte limit and cannot be sent"
+                   : "Nothing to send yet")
             Accessible.onPressAction: if (sendBtn.armed) sendCurrentMessage()
             // `armed` must include preeditText so Android IMEs (which
             // keep keystrokes in preedit until a commit char like space
@@ -883,6 +1013,7 @@ Rectangle {
                 (inputArea.text.trim().length > 0
                  || inputArea.preeditText.length > 0)
                 && !inputRoot.uploading
+                && !inputRoot.overLimit
             color: sendMouse.containsMouse && armed
                 ? Theme.accentDim : Theme.accent
             Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
@@ -1438,6 +1569,19 @@ Rectangle {
         var text = inputArea.text.trim();
         if (text.length === 0) return;
         if (!serverManager.activeServer) return;
+
+        // Checked here and not only on the send button, because Enter and the
+        // Accessible press action both reach this function directly. The
+        // banner is already up by the time anyone can get here — overLimit is
+        // a binding on the same text — so this is the refusal, not the
+        // notification. Nothing is trimmed, split or sent in part: the
+        // message stays in the composer exactly as typed, which is the only
+        // state from which the user can fix it.
+        //
+        // Slash commands are below this line on purpose. "/me <a novel>"
+        // becomes an m.emote with the same oversize body and the server
+        // refuses it identically.
+        if (inputRoot.overLimit) return;
 
         // Slash-command intercept — takes priority over replies/edits
         // since "/me fixed typo" inside a reply context would be a
