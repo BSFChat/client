@@ -149,6 +149,50 @@ QString withoutComments(QString src)
     return src.remove(block).remove(line);
 }
 
+// The shape of a "SIGNED IN AS" block, in whichever file it appears: a name
+// line bound to the name property, ABOVE the line bound to the id. Returns
+// the block so the caller can go on asserting about it.
+//
+// Worth saying why this is asserted at all, since the two tests that used
+// this block only checked that the mxid was in it and passed for a week
+// while the block was visibly wrong. Both surfaces rendered the MXID on the
+// name line — elided to "@oidc_a5cdbefe-9003-4f0…" in the user menu,
+// duplicated verbatim in the locked panel — so the most prominent line of a
+// block that exists to end an ambiguity reproduced it. The assertions
+// covered the half that was easy to write against the source (the id is
+// present, the id is not elided) and never asked what the line above it
+// said, which is the half that was wrong.
+//
+// This still cannot prove the binding RESOLVES to a name, because the source
+// said `.displayName` the whole time and the defect was in what that
+// property answered. That is pinned where it can be —
+// tests/test_identity_provider_url.cpp, which drives the real
+// ServerConnection — and this checks the shape those tests cannot see.
+QString identityBlockAt(const QString& src, int from, const char* what)
+{
+    const int label = src.indexOf(QStringLiteral("\"SIGNED IN AS\""), from);
+    if (label < 0) {
+        QTest::qFail(qPrintable(QStringLiteral("%1 has no identity block")
+                                    .arg(QString::fromUtf8(what))),
+                     __FILE__, __LINE__);
+        return {};
+    }
+    // Generous: comment stripping leaves the indentation behind, so a block
+    // of four Texts measures a good deal wider than it reads.
+    const QString block = src.mid(label, 2500);
+    const int nameAt = block.indexOf(QStringLiteral(".displayName"));
+    const int idAt = block.indexOf(QStringLiteral(".userId"));
+    if (nameAt < 0 || idAt < 0 || nameAt > idAt) {
+        QTest::qFail(qPrintable(
+                         QStringLiteral("%1 does not put a name line above the id — "
+                                        "a block that prints the mxid twice, or prints "
+                                        "it where the name belongs, answers nothing")
+                             .arg(QString::fromUtf8(what))),
+                     __FILE__, __LINE__);
+    }
+    return block;
+}
+
 QStringList filesUnder(const QString& root, const QString& glob)
 {
     QStringList out;
@@ -706,7 +750,12 @@ private slots:
         // was, so the mxid is not decoration here.
         const int locked = src.indexOf(QStringLiteral("visible: !serverSettingsPopup._mayOpen"));
         QVERIFY2(locked > 0, "the locked panel is missing or was renamed");
-        const QString panel = src.mid(locked, 3000);
+        // And the NAME above it, from the name property — not a second copy
+        // of the id. Signed in as an account with no display name at all,
+        // this panel rendered "@viewer:lockdemo.test" on both lines, which
+        // manages to take two rows to say one thing.
+        const QString panel = identityBlockAt(src, locked,
+                                              "the locked Server Settings panel");
         QVERIFY2(panel.contains(QStringLiteral(".userId")),
                  "the locked panel does not say which account is signed in");
     }
@@ -719,18 +768,20 @@ private slots:
 
         const int menu = src.indexOf(QStringLiteral("id: userMenu"));
         QVERIFY2(menu > 0, "the user menu is missing or was renamed");
-        const QString block = src.mid(menu, 4000);
+        const QString block = identityBlockAt(src, menu, "the user menu");
         QVERIFY2(block.contains(QStringLiteral(".userId")),
                  "the user menu does not show the signed-in mxid");
-        // Un-elided, and that is the point rather than a style note: the
-        // sidebar footer already renders the id and elides it to "@josh.oid…"
-        // in a 240px column, which is exactly no help when the two accounts
-        // you are choosing between differ after the tenth character.
-        const int idLine = block.indexOf(QStringLiteral(".userId"));
-        const QString around = block.mid(idLine, 400);
-        QVERIFY2(!around.contains(QStringLiteral("Text.Elide")),
-                 "the menu elides the mxid, which is the one thing it exists "
-                 "to show in full");
+        // NOTHING in this block elides, and that is the point rather than a
+        // style note. The id is the obvious case — it is what the sidebar
+        // footer already gets wrong, arriving as "@josh.oid…" in a 240px
+        // column. But the name line above it is the same case whenever there
+        // is no display name to show, because then it is carrying the
+        // localpart and is itself the identifier. As shipped it DID elide,
+        // and rendered "@oidc_a5cdbefe-9003-4f0…" — one line of ambiguity
+        // sitting directly above the line that exists to resolve it.
+        QVERIFY2(!block.contains(QStringLiteral("Text.Elide")),
+                 "the identity block elides, which is the one thing it exists "
+                 "not to do");
     }
 
     void aCreatedTokenIsPresentedOnceAndSurvivesTheRefreshUnderneathIt()

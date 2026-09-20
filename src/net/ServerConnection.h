@@ -207,7 +207,10 @@ public:
     ~ServerConnection() override;
 
     // Properties
-    QString displayName() const { return m_displayName; }
+    // This account's name as every "who am I signed in as" surface prints
+    // it. Never the bare mxid — see the definition for why that is the
+    // accessor's job and not each caller's.
+    QString displayName() const;
     QString avatarUrl() const { return m_avatarUrl; }
     QString serverUrl() const { return m_serverUrl; }
     QString serverName() const;

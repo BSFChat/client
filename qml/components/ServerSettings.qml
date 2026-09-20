@@ -518,6 +518,10 @@ Popup {
                 font.letterSpacing: Theme.trackWidest.xs
                 color: Theme.fg3
             }
+            // The name, and never a second copy of the id underneath: an
+            // account with no display name at all renders its localpart here
+            // (ServerConnection::displayName), which is also what the member
+            // list prints for it. Two identical lines say nothing twice.
             Text {
                 Layout.fillWidth: true
                 text: serverManager.activeServer

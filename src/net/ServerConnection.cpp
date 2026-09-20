@@ -56,6 +56,17 @@
 #include <QPermissions>
 #endif
 
+// @localpart:host → localpart. Anything that is not an mxid comes back
+// unchanged, so this is safe on a string that is already a name.
+static QString localpartOf(const QString& mxid)
+{
+    if (mxid.startsWith('@')) {
+        const int colon = mxid.indexOf(':');
+        if (colon > 1) return mxid.mid(1, colon - 1);
+    }
+    return mxid;
+}
+
 ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     : QObject(parent)
     , m_client(new MatrixClient(this))
@@ -849,7 +860,14 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
             qWarning() << "stored user id" << m_userId
                        << "differs from server canonical" << canonicalId
                        << "— correcting";
-            const bool displayNameWasId = (m_displayName == m_userId);
+            // "Never told a name", in both spellings it reaches us in: the
+            // sentinel applyLoginResponse writes, and the localpart that
+            // displayName() answers with — which is what ServerManager
+            // persisted, so it is what a restored entry hands back. Either
+            // way it was derived from the id we are about to replace, so it
+            // has to be re-derived rather than left describing the old one.
+            const bool displayNameWasId = (m_displayName == m_userId
+                                           || m_displayName == localpartOf(m_userId));
             m_userId = canonicalId;
             if (displayNameWasId) {
                 m_displayName = canonicalId;
@@ -1814,12 +1832,9 @@ QString ServerConnection::displayNameForSender(const QString& userId) const
 {
     auto it = m_userDisplayNames.find(userId);
     if (it != m_userDisplayNames.end() && !it->isEmpty()) return *it;
-    // Fall back to the localpart rather than showing a raw mxid.
-    if (userId.startsWith('@')) {
-        const int colon = userId.indexOf(':');
-        if (colon > 1) return userId.mid(1, colon - 1);
-    }
-    return userId;
+    // Fall back to the localpart rather than showing a raw mxid — the same
+    // rule displayName() applies to our own account.
+    return localpartOf(userId);
 }
 
 void ServerConnection::searchMessages(const QString& searchTerm, int limit,
@@ -3163,6 +3178,27 @@ void ServerConnection::fetchNickname(const QString& userId)
     m_client->getNickname(userId);
 }
 
+QString ServerConnection::displayName() const
+{
+    // m_displayName is seeded with the mxid itself when nothing has told us a
+    // name yet (applyLoginResponse), and that sentinel must not reach a view.
+    // Every surface that prints this prints it SHORT — the sidebar footer
+    // elides it in a 240px column, the "signed in as" block sets it beside
+    // the full id — and a truncated mxid is precisely the string that cannot
+    // answer "which of my two accounts is this?", which is the only question
+    // those surfaces exist to answer. @oidc_a5cdbefe-… and @oidc_76ea6af7-…
+    // are one character apart at the width a name line gets.
+    //
+    // The localpart is not a name either, but it is the identifying half of
+    // the id rather than the shared "@" and homeserver, so it says something
+    // at any width. Resolved here rather than at each call site because there
+    // are five of them (the menu block, the footer line, its tooltip, the
+    // avatar initial, and ServerManager's persisted entry) and the one that
+    // forgot is how this shipped.
+    if (!m_displayName.isEmpty() && m_displayName != m_userId) return m_displayName;
+    return localpartOf(m_userId);
+}
+
 QString ServerConnection::serverName() const {
     if (!m_serverName.isEmpty()) return m_serverName;
     // Fall back to the server's hostname so the UI has something to show
@@ -3524,6 +3560,29 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     // including a LEAVE, which is what keeps a departed bot's
                     // messages badged.
                     recordBotFlag(uid, event.content.data.value("bsfchat.bot", false));
+                    // Our OWN name is learned here, like everybody else's.
+                    //
+                    // It used to be learned only from a /profile reply, and
+                    // nothing asks /profile for our own account at startup —
+                    // the two getProfile(m_userId) calls above it are both
+                    // reactions to US changing the name in this process. So a
+                    // launch left m_displayName on whatever the stored entry
+                    // held (the mxid, for any account that had never edited
+                    // its profile in this client) while this map — which the
+                    // member list, the message authors and the voice panel all
+                    // resolve through — held the real name from the very first
+                    // sync. The roster said "josh" and the identity block said
+                    // "@oidc_a5cdbefe-9003-4f0…", from the same event, in the
+                    // same window. Same fold, one answer.
+                    //
+                    // Outside the cache guard below on purpose: the map can
+                    // already hold the name (a nickname push, a profile reply
+                    // for a bot probe) while m_displayName is still the
+                    // sentinel, and that is exactly the case that must heal.
+                    if (uid == m_userId && !dn.isEmpty() && dn != m_displayName) {
+                        m_displayName = dn;
+                        emit displayNameChanged();
+                    }
                     if (!dn.isEmpty() && m_userDisplayNames.value(uid) != dn) {
                         m_userDisplayNames[uid] = dn;
                         // Push the new name into any views that have

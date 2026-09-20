@@ -2183,6 +2183,16 @@ Rectangle {
                             color: Theme.fg3
                             Layout.fillWidth: true
                         }
+                        // The NAME — what the member list prints for this same
+                        // account, from the same fold (see the self branch in
+                        // ServerConnection's m.room.member handler), and the
+                        // localpart when there is genuinely no name to print.
+                        //
+                        // Wrapped rather than elided, like the id below it and
+                        // for the same reason: in the no-name case this line
+                        // IS an identifier, and an identifier cut off at the
+                        // 20th character is the ambiguity this whole block was
+                        // added to end. A popup menu can afford a second row.
                         Text {
                             text: serverManager.activeServer
                                   ? serverManager.activeServer.displayName : ""
@@ -2190,7 +2200,7 @@ Rectangle {
                             font.pixelSize: Theme.fontSize.md
                             font.weight: Theme.fontWeight.semibold
                             color: Theme.fg0
-                            elide: Text.ElideRight
+                            wrapMode: Text.Wrap
                             Layout.fillWidth: true
                         }
                         // Wrapped, never elided. The whole point of this line
