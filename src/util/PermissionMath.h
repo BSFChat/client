@@ -16,6 +16,10 @@
 // tests on, and ServerConnection cannot be instantiated in a unit test.
 //
 // Authority is server/src/auth/Permissions.cpp. Keep the two in step.
+//
+// That mirroring now covers one RULE as well as the bit values: whether the
+// implicit @everyone role applies to an account at all. See
+// inheritsEveryoneRole below.
 namespace bsfchat::permmath {
 
 using Flags = std::uint64_t;
@@ -105,6 +109,40 @@ constexpr Flags kAllFlags =
 
 inline const char* kEveryoneRoleId = "everyone";
 
+// The reserved localpart prefix that marks a bot account.
+//
+// This mirror's own copy of protocol's `bot::kLocalpartPrefix`
+// (protocol/include/bsfchat/Constants.h), carried here for the same reason as
+// every bit value above: so the permission maths link without the protocol
+// library. tests/test_models.cpp pins it against protocol's, exactly as
+// tests/test_bots.cpp pins kManageBots, so a change to the namespace cannot
+// land quietly on this side.
+inline const char* kBotLocalpartPrefix = "bot_";
+
+// Does the implicit @everyone role apply to this account? False for a bot.
+//
+// The authority is `permission::inherits_everyone_role`
+// (protocol/include/bsfchat/Permissions.h); read it for the whole argument.
+// The short version: @everyone is the default role FOR PEOPLE WHO JOIN the
+// server, and a bot is not somebody who joined — it is an account an
+// administrator minted for one job, already excluded from the other two things
+// joining confers (it cannot log in with a password, and it is excluded from
+// channel auto-join). This is the third exclusion and the one with
+// consequences, because a role only ever ADDS bits: while a bot held the
+// default, "this bot may see these three channels and nothing else" was not a
+// sentence the permission model could say.
+//
+// Withholding the implicit grant makes @everyone ORDINARY for a bot — still a
+// role, still assignable by id — so "let this bot do what a member can" stays
+// available and merely has to be said on purpose.
+//
+// Judged from the user id alone, which is sound because the `bot_` namespace is
+// closed on every account-creation path: registration refuses the prefix, the
+// OIDC auto-create path mints `oidc_` localparts, and bot creation refuses a
+// localpart outside it. Takes a full user id ("@bot_deploy:example.com"), not a
+// localpart.
+bool inheritsEveryoneRole(const QString& userId);
+
 struct Role {
     QString id;
     int position = 0;
@@ -125,6 +163,13 @@ struct Override {
 // in one channel lets them rename that channel; it must not make the client
 // offer them a "create channel" affordance the server will refuse, and on the
 // server side that same conflation was a privilege-escalation hole.
+//
+// `userId` does two jobs, and the second is newer than most call sites: besides
+// keying the `user:<id>` channel override, it decides whether the implicit
+// @everyone role applies at all (inheritsEveryoneRole — it does not, for a
+// bot). So a placeholder id is no longer safe to pass when the caller only
+// cares about roles: an id that is not the account being evaluated can now
+// change the BASE permissions and not just the overrides.
 Flags effectivePermissions(const QVector<Role>& allRoles,
                            const QStringList& myRoleIds,
                            const QString& userId,

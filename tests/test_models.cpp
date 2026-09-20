@@ -28,6 +28,9 @@
 
 #include <bsfchat/MatrixTypes.h>
 #include <bsfchat/Constants.h>
+#include <bsfchat/Permissions.h>
+
+#include <string_view>
 
 class TestModels : public QObject {
     Q_OBJECT
@@ -2744,6 +2747,169 @@ private slots:
             roles, {QStringLiteral("builder")}, QStringLiteral("@bob:t"), nullptr);
         QVERIFY((p & kManageChannels) != 0);
         QVERIFY((p & kSendMessages) != 0);
+    }
+
+    // ── The implicit @everyone role, and the account that does not get it ───
+    //
+    // A bot does NOT inherit @everyone. The rule is the server's
+    // (permission::inherits_everyone_role in protocol/include/bsfchat/
+    // Permissions.h, consumed by PermissionsEngine::compute and
+    // resolve_user_roles); permmath::inheritsEveryoneRole is this mirror's copy
+    // of it, and server/docs/bot-scoping.md §6.7 is the argument for fixing the
+    // mirror.
+    //
+    // Every test below asserts BOTH directions against the SAME role table and
+    // the SAME assignment, differing only in the shape of the user id. The
+    // ordinary-member half is not padding: without it each bot assertion would
+    // pass just as well on a mirror that had stopped applying @everyone to
+    // ANYBODY — which is the same drift pointed the other way, and the more
+    // visible bug of the two, since it greys out a member's composer and tells
+    // them they may not speak in a channel the server would let them post in.
+
+    void testPermissionsBotDoesNotInheritEveryoneButAMemberDoes()
+    {
+        using namespace bsfchat::permmath;
+        QVector<Role> roles{
+            {QStringLiteral("everyone"), 0, kEveryoneDefault},
+            {QStringLiteral("builder"),  5, kManageChannels},
+        };
+        // One assignment, used for both accounts, naming only "builder".
+        const QStringList mine{QStringLiteral("builder")};
+
+        // The bot gets what it was assigned and nothing more.
+        const Flags bot = effectivePermissions(
+            roles, mine, QStringLiteral("@bot_deploy:t"), nullptr);
+        QCOMPARE(bot, kManageChannels);
+        QVERIFY((bot & kEveryoneDefault) == 0);
+        QVERIFY((bot & kViewChannel) == 0);
+        QVERIFY((bot & kSendMessages) == 0);
+
+        // THE CONTROL. A member whose assignment is equally silent about
+        // @everyone still receives it, implicitly, exactly as before.
+        const Flags human = effectivePermissions(
+            roles, mine, QStringLiteral("@bob:t"), nullptr);
+        QCOMPARE(human, Flags(kEveryoneDefault | kManageChannels));
+        QVERIFY((human & kSendMessages) != 0);
+    }
+
+    // The symptom §6.7 names, in the terms the client actually fails in: a
+    // server whose operator put MENTION_EVERYONE on the @everyone role, which is
+    // an ordinary arrangement on a small server. This is the question
+    // ServerConnection::resolveRoleMentions asks about a SENDER before it draws
+    // a pill, so the mirror answering "yes" for a bot is what rendered a bot's
+    // literal "@everyone" as a live room ping the server had already refused to
+    // deliver as one.
+    void testPermissionsBotDoesNotPickUpMentionEveryoneFromTheDefaultRole()
+    {
+        using namespace bsfchat::permmath;
+        QVector<Role> roles{
+            {QStringLiteral("everyone"), 0, kEveryoneDefault | kMentionEveryone},
+        };
+        const QVector<Override> overrides; // channel scope; none configured
+
+        const Flags bot = effectivePermissions(
+            roles, {}, QStringLiteral("@bot_deploy:t"), &overrides);
+        QVERIFY((bot & kMentionEveryone) == 0);
+
+        // THE CONTROL: same roles, same empty assignment, a person.
+        const Flags human = effectivePermissions(
+            roles, {}, QStringLiteral("@bob:t"), &overrides);
+        QVERIFY((human & kMentionEveryone) != 0);
+    }
+
+    // The un-bootstrapped fallback, which is the rule's most dangerous corner
+    // rather than an exception to it: it hands out kEveryoneDefault with no
+    // roles document to read it out of, and that is precisely the grant a scoped
+    // bot was not given.
+    void testPermissionsUnsyncedBotGetsNothingWhereAMemberGetsTheDefaults()
+    {
+        using namespace bsfchat::permmath;
+        const Flags bot =
+            effectivePermissions({}, {}, QStringLiteral("@bot_deploy:t"), nullptr);
+        QCOMPARE(bot, Flags(0));
+
+        // THE CONTROL, and the reason this cannot simply be folded into
+        // testPermissionsUnsyncedClientFallsBackToEveryoneDefaults above: the
+        // contrast is the assertion, so both halves belong in one test where
+        // neither can be deleted without the other failing.
+        const Flags human =
+            effectivePermissions({}, {}, QStringLiteral("@bob:t"), nullptr);
+        QCOMPARE(human, kEveryoneDefault);
+    }
+
+    // Withholding the implicit grant makes @everyone ORDINARY for a bot, not
+    // forbidden. That is what makes the upgrade invisible for the bots already
+    // on a running server: bootstrap_roles wrote them an assignment naming
+    // @everyone at creation, so they resolve it through the ordinary loop and
+    // come out identical to a member.
+    void testPermissionsBotAssignedEveryoneExplicitlyResolvesItLikeAnyRole()
+    {
+        using namespace bsfchat::permmath;
+        QVector<Role> roles{{QStringLiteral("everyone"), 0, kEveryoneDefault}};
+        const Flags bot = effectivePermissions(
+            roles, {QStringLiteral("everyone")}, QStringLiteral("@bot_deploy:t"),
+            nullptr);
+        QCOMPARE(bot, kEveryoneDefault);
+    }
+
+    // The @everyone channel OVERRIDE is a statement about the CHANNEL — "this
+    // one is open to everybody" — not about who holds which role, so withholding
+    // the implicit ROLE must not withhold it. compute() applies it
+    // unconditionally and inherits_everyone_role calls the distinction out by
+    // name; a mirror that gated it here would hide a channel from a bot that the
+    // server lets it see.
+    void testPermissionsEveryoneChannelOverrideStillAppliesToABot()
+    {
+        using namespace bsfchat::permmath;
+        QVector<Role> roles{{QStringLiteral("everyone"), 0, kEveryoneDefault}};
+        const QVector<Override> overrides{
+            {QStringLiteral("role:everyone"), kViewChannel, 0}
+        };
+        const Flags bot = effectivePermissions(
+            roles, {}, QStringLiteral("@bot_deploy:t"), &overrides);
+        QVERIFY((bot & kViewChannel) != 0);   // from the override
+        QVERIFY((bot & kSendMessages) == 0);  // and still nothing from the role
+    }
+
+    // The mirror's rule IS protocol's rule, pinned against it rather than
+    // restated — the same arrangement tests/test_bots.cpp uses for the bit
+    // values, and for the same reason. A test that wrote "bot_" down itself
+    // would agree with the client on any prefix, including one the server has
+    // never heard of, and would therefore prove nothing about the two being in
+    // step. The ids below are the edges where a hand-rolled prefix check and
+    // protocol's disagree.
+    void testTheBotRuleIsProtocolsRuleOverEveryShapeOfId()
+    {
+        using namespace bsfchat::permmath;
+
+        // The mirrored constant against its authority.
+        QCOMPARE(QString::fromLatin1(kBotLocalpartPrefix),
+                 QString::fromUtf8(bsfchat::bot::kLocalpartPrefix.data(),
+                                   qsizetype(bsfchat::bot::kLocalpartPrefix.size())));
+
+        const QStringList ids{
+            QStringLiteral("@bot_deploy:example.com"), // a bot
+            QStringLiteral("@bot_:example.com"),       // the prefix and nothing else
+            QStringLiteral("@bob:example.com"),        // a person
+            QStringLiteral("@robot_arm:example.com"),  // the prefix, but not at the start
+            QStringLiteral("@Bot_deploy:example.com"), // wrong case: not the namespace
+            QStringLiteral("bot_deploy:example.com"),  // a localpart, not a user id
+            QStringLiteral("@oidc_jo:example.com"),    // the other reserved namespace
+            QStringLiteral("@bot:example.com"),        // "bot" without the underscore
+            QStringLiteral("@server:example.com"),     // the synthetic server actor
+            QStringLiteral("@bot_"),                   // no domain at all
+            QStringLiteral("@"),
+            QString(),
+        };
+
+        for (const QString& id : ids) {
+            const QByteArray utf8 = id.toUtf8();
+            const bool authority = bsfchat::permission::inherits_everyone_role(
+                std::string_view(utf8.constData(), std::size_t(utf8.size())));
+            QVERIFY2(inheritsEveryoneRole(id) == authority,
+                     qPrintable(QStringLiteral("mirror disagrees with protocol for \"%1\"")
+                                    .arg(id)));
+        }
     }
 
     // ---- Moderation scope (ban/unban vs kick) ---------------------------
