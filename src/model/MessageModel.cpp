@@ -9,6 +9,40 @@
 #include "util/MentionRenderer.h"
 #include "util/ScrollAnchor.h"
 
+namespace {
+
+// Media rows render a filename card, not prose — no body HTML is built for
+// them, and MessageBubble never shows their TextEdit.
+bool isMediaMsgtype(const QString& msgtype)
+{
+    return msgtype == QLatin1String("m.image") || msgtype == QLatin1String("m.file")
+        || msgtype == QLatin1String("m.audio") || msgtype == QLatin1String("m.video");
+}
+
+// The one place a body with no sender-supplied formatted_body becomes the HTML
+// the timeline renders.
+//
+// Two promotions, and they used to disagree about newlines. m.text goes
+// through markdown, which ends by turning "\n" into <br>. Everything else
+// must NOT go through markdown — an m.notice from a bot, or an /me, has to
+// keep its literal asterisks and underscores literal — so it is escaped only,
+// and the escape-only path dropped the line breaks. HTML folds a newline into
+// a space, so the moment anything promoted such a body (the "(edited)" badge,
+// the m.emote prefix, a mention anchor) a three-line message rendered as one.
+//
+// Returning markup for every prose msgtype, not just m.text, is what lets the
+// view concatenate and never escape: the rule about which bodies markdown may
+// touch lives here, next to the rule about line breaks, instead of being
+// half-remembered in QML.
+QString renderBodyHtml(const QString& body, const QString& msgtype)
+{
+    if (body.isEmpty() || isMediaMsgtype(msgtype)) return {};
+    return msgtype == QLatin1String("m.text") ? MarkdownParser::toHtml(body)
+                                              : MarkdownParser::plainToHtml(body);
+}
+
+} // namespace
+
 MessageModel::MessageModel(QObject* parent)
     : QAbstractListModel(parent)
 {
@@ -565,9 +599,11 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
         }
     }
 
-    // If no formatted_body from server, apply local markdown rendering
-    if (entry.formattedBody.isEmpty() && !entry.body.isEmpty() && entry.msgtype == "m.text") {
-        entry.formattedBody = MarkdownParser::toHtml(entry.body);
+    // If no formatted_body from server, render the body ourselves — markdown
+    // for m.text, escape-only for the rest. Either way the result is the
+    // display markup the bubble shows verbatim.
+    if (entry.formattedBody.isEmpty()) {
+        entry.formattedBody = renderBodyHtml(entry.body, entry.msgtype);
     }
     applyMentionMarkup(entry);
 
@@ -625,8 +661,7 @@ void MessageModel::applyMentionMarkup(MessageEntry& entry) const
         && !entry.mentionsRoom) return;
     // Media rows render a filename, not prose; there is nothing to highlight
     // and formattedBody is not shown for them.
-    if (entry.msgtype == "m.image" || entry.msgtype == "m.file"
-        || entry.msgtype == "m.audio" || entry.msgtype == "m.video") return;
+    if (isMediaMsgtype(entry.msgtype)) return;
 
     QVector<bsfchat::client::MentionTarget> targets;
     targets.reserve(entry.mentionedUserIds.size());
@@ -637,11 +672,13 @@ void MessageModel::applyMentionMarkup(MessageEntry& entry) const
 
     // renderMentions requires already-escaped markup. When the sender supplied
     // no formatted_body and markdown rendering didn't kick in (e.g. m.notice),
-    // escape the plain body ourselves rather than handing it raw text — the
+    // promote the plain body ourselves rather than handing it raw text — the
     // renderer would otherwise match tokens against unescaped input and the
-    // result would be interpreted as RichText.
-    QString base = entry.formattedBody.isEmpty() ? entry.body.toHtmlEscaped()
-                                                 : entry.formattedBody;
+    // result would be interpreted as RichText. plainToHtml, not
+    // toHtmlEscaped: this IS that promotion to rich text, so the body's line
+    // breaks have to survive it.
+    QString base = entry.formattedBody.isEmpty()
+        ? MarkdownParser::plainToHtml(entry.body) : entry.formattedBody;
     entry.formattedBody = bsfchat::client::renderMentions(
         base, targets, entry.mentionsRoom, entry.roleMentions);
 }
@@ -770,9 +807,12 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
             if (raw.startsWith("* ")) raw = raw.mid(2);
             newBody = raw;
         }
-        if (newFormatted.isEmpty() && !newBody.isEmpty()
-            && m_messages[i].msgtype == "m.text") {
-            newFormatted = MarkdownParser::toHtml(newBody);
+        // Same promotion as a freshly-arrived event: an edit must not be the
+        // thing that changes how a body is rendered. It was — the badge
+        // promoted the row to rich text while the body stayed plain, and the
+        // edit ate the message's line breaks.
+        if (newFormatted.isEmpty()) {
+            newFormatted = renderBodyHtml(newBody, m_messages[i].msgtype);
         }
         // Stash the previous body into history so "Show edit
         // history" can recover it. We push EITHER the pristine
