@@ -14,14 +14,6 @@ QString channelPhrase(const QString& roomName)
                               : QStringLiteral("#") + roomName;
 }
 
-// The homeserver half of an mxid, or empty if it does not have one.
-QString domainOf(const QString& userId)
-{
-    const int colon = userId.indexOf(':');
-    if (colon < 0) return {};
-    return userId.mid(colon + 1);
-}
-
 } // namespace
 
 ChannelInviteModel::ChannelInviteModel(QObject* parent)
@@ -84,29 +76,32 @@ QString ChannelInviteModel::userIdError(const QString& userId)
     return {};
 }
 
-QString ChannelInviteModel::homeserverWarning(const QString& userId,
-                                              const QString& selfUserId)
-{
-    if (!userIdError(userId).isEmpty()) return {};
-    const QString theirs = domainOf(userId);
-    const QString ours   = domainOf(selfUserId);
-    if (theirs.isEmpty() || ours.isEmpty()) return {};
-    // Case-insensitively: a homeserver name is a hostname, and "BSFChat.com"
-    // and "bsfchat.com" are the same server. Warning about that difference
-    // would be warning about nothing.
-    if (theirs.compare(ours, Qt::CaseInsensitive) == 0) return {};
-
-    return QStringLiteral("That id is on \"") + theirs
-         + QStringLiteral("\", not \"") + ours
-         + QStringLiteral("\". Members of this server end in \"") + ours
-         + QStringLiteral("\" — check for a typo. The server accepts this "
-                          "either way and the member simply never appears.");
-}
-
-QString ChannelInviteModel::warnAboutHomeserver(const QString& userId) const
-{
-    return homeserverWarning(userId, hooks.selfUserId ? hooks.selfUserId() : QString());
-}
+// THERE WAS A homeserverWarning() HERE, AND ITS ABSENCE IS DELIBERATE.
+//
+// It cautioned — in warn colour, under the field — when the typed id's
+// homeserver was not the one we are signed in to, and it existed because of a
+// server bug rather than because the domain mattered. Until server b8e26ac,
+// handle_invite never called user_exists() and there is no foreign key on the
+// membership table, so inviting an id nobody held returned 200 and wrote a
+// membership row for nobody. The dialog announced a success, the person never
+// turned up, and nothing in the product ever surfaced the row.
+//
+// The client could not detect that, so it guessed at the commonest shape of
+// the mistake: this deployment does not federate, so every real member id
+// ends in our homeserver, so a different domain is probably a typo. A guess,
+// with the two failings a guess has — it was blind to a typo'd LOCALPART,
+// which is the more common slip, and it would have started crying wolf on
+// every genuinely remote id the day federation arrived.
+//
+// The server now refuses the whole class with one 403 (kNoSuchAccount in
+// RoomHandler.cpp — a typo, a remote id and a malformed string all get it),
+// so the guess is dead code and its job has moved into explainFailure below.
+// userIdError() above stays: that is structure, checkable without asking, and
+// it saves a round trip rather than predicting an answer.
+//
+// If federation ever lands, do not restore this. "Not a local account" stops
+// being the same statement as "does not exist" on the SERVER first, and the
+// server's wording is what changes.
 
 QString ChannelInviteModel::readmitHint(const QString& roomId, const QString& userId,
                                         const QString& roomName) const
@@ -242,16 +237,22 @@ QString ChannelInviteModel::explainFailure(const QString& userId,
 
     // MATCHED ON THE SERVER'S TEXT, and that needs defending.
     //
-    // handle_invite answers six genuinely different situations with the same
+    // handle_invite answers seven genuinely different situations with the same
     // 403 and the same errcode M_FORBIDDEN — caller not in the room, room is a
     // DM, caller lacks MANAGE_CHANNELS, target banned here, target banned
-    // server-wide, target is a deactivated bot. The `error` string is the only
-    // thing that tells them apart, so it is what we match on. A distinct
-    // errcode per case would be better and belongs on the server side; until
-    // it exists, this is the whole of the available signal.
+    // server-wide, target has no account at all, target is a deactivated bot.
+    // The `error` string is the only thing that tells them apart, so it is
+    // what we match on. A distinct errcode per case would be better and
+    // belongs on the server side; until it exists, this is the whole of the
+    // available signal.
     //
     // Every branch is therefore a SUBSTRING match on the distinctive words
-    // rather than on the whole sentence, and the default hands back the
+    // rather than on the whole sentence, and NO TWO OF THOSE FRAGMENTS MAY
+    // MATCH EACH OTHER'S SENTENCE — a collision would answer one refusal with
+    // another's advice, confidently and wrongly. That is checked behaviourally
+    // by noRefusalIsCapturedByAnotherRefusalsSubstring, which feeds the
+    // server's seven strings in and requires seven distinct answers; add an
+    // eighth branch and add its string there. The default hands back the
     // server's own text. Reword a message upstream and this degrades to
     // showing what the server said — worse copy, never a wrong claim and never
     // a swallowed error. tests/test_channel_invite.cpp pins the strings
@@ -285,6 +286,35 @@ QString ChannelInviteModel::explainFailure(const QString& userId,
             return who + QStringLiteral(" is banned from ") + where
                  + QStringLiteral(". Lift the ban under Server Settings → "
                                   "Bans before adding them back.");
+        }
+        // No such account. Placed here, after both bans and before the bot
+        // branch, because that is where the server evaluates it — a pre-ban
+        // on an id nobody has registered yet still answers "banned from this
+        // server", which is both true and the more actionable of the two.
+        //
+        // The message does not name the channel. This refusal is about the id
+        // alone and would be identical in every channel on the server, so
+        // naming one would imply a different channel might have worked — the
+        // same reasoning the 400 branch is built on.
+        //
+        // One sentence covers a typo'd localpart, a typo'd domain and an id
+        // from another server, because the server answers all three with this
+        // and cannot be asked which it meant. It is also the sentence that
+        // replaced homeserverWarning() — see the note above readmitHint for
+        // why the client used to guess at the third case and no longer does.
+        //
+        // Built around `userId` rather than `who`, because `who`'s "that
+        // member" fallback would read "There's no account that member on this
+        // server." Every other branch puts `who` in a slot where the fallback
+        // still parses; this one does not, so it says "with that id" instead.
+        if (says("no account")) {
+            const QString lead =
+                userId.isEmpty()
+                    ? QStringLiteral("There's no account with that id on this server.")
+                    : QStringLiteral("There's no account ") + userId
+                          + QStringLiteral(" on this server.");
+            return lead + QStringLiteral(" Check the spelling — ids from "
+                                         "another server can't be added here.");
         }
         if (says("deactivated")) {
             return who + QStringLiteral(" is a deactivated bot and can't be "

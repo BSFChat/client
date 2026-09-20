@@ -197,12 +197,6 @@ Popup {
                     text.length === 0 ? ""
                     : (addMemberDialog._model
                        ? addMemberDialog._model.validateUserId(text.trim()) : "")
-                // A caution, not a refusal — see ChannelInviteModel's header
-                // for why this does not block.
-                readonly property string homeserverNote:
-                    text.length === 0 ? ""
-                    : (addMemberDialog._model
-                       ? addMemberDialog._model.warnAboutHomeserver(text.trim()) : "")
                 // "They are not in this channel, and adding them is how they
                 // get back in" — the readmit case, which is the one thing on
                 // this path that reads like a failure and is not.
@@ -239,8 +233,19 @@ Popup {
 
             // Four mutually-exclusive lines under the field, in the order a
             // reader needs them: what is wrong with what you typed, what went
-            // wrong when we sent it, what probably went wrong that we cannot
-            // prove, and what happened when it worked.
+            // wrong when we sent it, what adding this person will do, and
+            // what happened when it worked.
+            //
+            // There was a FIFTH — "what probably went wrong that we cannot
+            // prove", a warn-coloured caution that the typed id's homeserver
+            // was not ours. It existed because the server used to accept an
+            // invite for an account that did not exist and answer 200, so a
+            // typo produced a success message and a member who never
+            // appeared; guessing at the domain was the closest the client
+            // could get to saying so. Server b8e26ac refuses that outright,
+            // the refusal arrives as an ordinary 403, and it renders on the
+            // error line below like every other one. Nothing here is allowed
+            // to speculate about what the server would have said.
             Text {
                 Layout.fillWidth: true
                 visible: text.length > 0
@@ -257,15 +262,6 @@ Popup {
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
                 color: Theme.danger
-                wrapMode: Text.WordWrap
-            }
-            Text {
-                Layout.fillWidth: true
-                visible: text.length > 0 && memberIdField.problem.length === 0
-                text: memberIdField.homeserverNote
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontSize.sm
-                color: Theme.warn
                 wrapMode: Text.WordWrap
             }
             Text {

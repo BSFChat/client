@@ -291,7 +291,6 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     m_channelInviteModel->hooks.isKnownBot = [this](const QString& userId) {
         return isBot(userId);
     };
-    m_channelInviteModel->hooks.selfUserId = [this]() { return m_userId; };
     m_channelInviteModel->hooks.displayNameOf = [this](const QString& userId) {
         // displayNameForSender falls back to the user id; the model wants an
         // empty string for "no name known" so it can make that choice itself.

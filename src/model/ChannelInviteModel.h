@@ -41,6 +41,7 @@
 //   * the room must not be a DM                               403
 //   * the caller must hold MANAGE_CHANNELS **in that room**   403
 //   * the target must not be banned in the room or server-wide 403
+//   * the target must be an account that EXISTS            403
 //   * a BOT target joins immediately — membership 'join', a real join event,
 //     and an audit record naming the INVITER — because a bot has no human to
 //     accept an invite and cannot even see one (SyncResponse has no `invite`
@@ -49,25 +50,32 @@
 //   * a deactivated bot is refused                            403
 //   * a HUMAN target gets membership 'invite' and can then join.
 //
-// Two things the server does NOT do, both of which land on this class:
+// One thing the server does NOT do, which lands on this class:
 //
-//   1. IT NEVER CHECKS THAT THE TARGET EXISTS. SqliteStore has user_exists(),
-//      and handle_invite does not call it; there is no foreign key on the
-//      membership table either. Inviting @tpyo:bsfchat.com returns 200 and
-//      writes a membership row for an account that does not exist. Nothing in
-//      the product ever shows it, so the operator's only evidence is that the
-//      person they meant never turns up. The client cannot fix that — but it
-//      can catch the shape of a typo before spending the request, which is
-//      what userIdError() and homeserverWarning() are for.
+//   IT DOES NOT REPORT "ALREADY A MEMBER" FOR A HUMAN. For a bot that case is
+//   a deliberate, documented no-op 200. For a human it rewrites membership
+//   from 'join' back to 'invite', which is a downgrade nobody asked for. So
+//   the only place that case can be caught is here, from the roster the
+//   client already has — see the `membershipOf` hook. Recorded rather than
+//   worked around silently, because the next person to read this will
+//   otherwise assume the check is upstream.
 //
-//   2. IT DOES NOT REPORT "ALREADY A MEMBER" FOR A HUMAN. For a bot that case
-//      is a deliberate, documented no-op 200. For a human it rewrites
-//      membership from 'join' back to 'invite', which is a downgrade nobody
-//      asked for. So the only place that case can be caught is here, from the
-//      roster the client already has — see the `membershipOf` hook.
+// ─────────────── a second gap, closed on the server 2026-09-20 ────────────
 //
-// Both gaps are recorded rather than worked around silently, because the next
-// person to read this will otherwise assume the checks are upstream.
+// handle_invite USED TO ACCEPT AN INVITE FOR AN ACCOUNT THAT DID NOT EXIST.
+// It never called user_exists(), and room_members.user_id has no foreign key,
+// so inviting @tpyo:bsfchat.com returned 200 and left a membership row behind
+// for nobody — visible in the roster with no name, and announced to the
+// channel as an arrival. The operator's only evidence was that the person
+// they meant never turned up.
+//
+// The client could not detect it, so it did the best it could: userIdError()
+// for structure, and a homeserverWarning() that guessed a domain mismatch was
+// probably a typo. Server b8e26ac closed the gap with a 403 that says so, so
+// the guess is gone and explainFailure answers it from the server's own
+// refusal. userIdError() stays — it is structure, not a prediction, and it
+// still saves the round trip. This paragraph is here so that nobody has to
+// wonder later why a domain check appeared and then vanished.
 class ChannelInviteModel : public QObject {
     Q_OBJECT
 
@@ -104,11 +112,13 @@ public:
         // it knows; "false" means "not known to be one", never "is a human".
         // See noticeFor() for why the copy is built to survive that.
         std::function<bool(const QString& userId)> isKnownBot;
-        // The signed-in account's own mxid, for the homeserver check and for
-        // naming the account in the permission message. The 2026-09-20
-        // incident turned on exactly that question ("which account am I?"),
-        // which is why it is in the copy rather than left to be guessed.
-        std::function<QString()> selfUserId;
+        // There was a selfUserId hook here, read only by the homeserver
+        // guess. Nothing in this model needs to know which account we are
+        // any more, so it went with the guess rather than sitting wired up
+        // and unread. The locked-state copy that names the signed-in account
+        // is in AddMemberDialog.qml and reads ServerConnection::userId
+        // directly; it never came through here.
+
         // Display name for `userId` if the client has one, else empty.
         std::function<QString(const QString& userId)> displayNameOf;
     };
@@ -150,23 +160,12 @@ public:
         return userIdError(userId);
     }
 
-    // A caution, not an error: `userId`'s homeserver is not the one we are
-    // signed in to. Empty when it matches, when either id is unusable, or when
-    // the self id is unknown.
-    //
-    // This is the closest the client can get to "no such user", and it is
-    // worth having because of gap 1 in the header: the server accepts an
-    // invite for an account that does not exist and returns 200, so a typo'd
-    // domain produces a success message and a member who never appears. This
-    // deployment does not federate — every real member id ends in the
-    // homeserver we are connected to — so a mismatch is nearly always a typo.
-    //
-    // NEARLY. It does not block, and must not start blocking without
-    // federation being genuinely impossible rather than merely unimplemented:
-    // a warning that is wrong costs a sentence, a block that is wrong costs
-    // the feature.
-    static QString homeserverWarning(const QString& userId, const QString& selfUserId);
-    Q_INVOKABLE QString warnAboutHomeserver(const QString& userId) const;
+    // There is no homeserverWarning()/warnAboutHomeserver() pair here any
+    // more. It warned when the typed id's domain was not ours, as the closest
+    // the client could get to "no such user" while the server was still
+    // accepting invites for accounts that did not exist. The server answers
+    // that case itself now — see the note in the .cpp, above readmitHint, for
+    // the full reasoning and for why it should not come back.
 
     // A note, shown while typing, for someone whose last membership in this
     // channel was a departure — "not an error, and here is what adding them
