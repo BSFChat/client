@@ -1222,36 +1222,41 @@ Item {
                           && bubble.msgtype !== "m.video"
                           && bubble.msgtype !== "m.audio"
                           && bubble.msgtype !== "m.file")
+                // Concatenation only. Every byte of body markup here comes
+                // from MessageModel, which escapes a plain body AND keeps its
+                // line breaks (MarkdownParser::plainToHtml). This used to
+                // escape the body itself and stop there, and since HTML folds
+                // a newline into a space, editing a three-line message —
+                // which is what first promotes a plain body to RichText for
+                // the badge — re-rendered it as one line. Building body HTML
+                // in here is untestable without a GUI; test_message_render
+                // fails if it comes back.
                 text: {
                     var base = bubble.formattedBody !== "" ? bubble.formattedBody : bubble.body;
+                    var suffix = '<span style="color:#8e9297;font-size:small"> (edited)</span>';
                     // m.emote ("/me foo") renders as "<sender> foo" in italics
                     // and with accent colour, same convention Element / Fluffy
                     // use. Italics + sender prefix means we always promote to
                     // RichText for emotes.
                     if (bubble.msgtype === "m.emote") {
+                        // The display name is the one string the model does
+                        // not render for us. It is a single line, so escaping
+                        // is all it needs.
                         var senderEsc = bubble.senderDisplayName
-                            .replace(/&/g, "&amp;").replace(/</g, "&lt;")
-                            .replace(/>/g, "&gt;");
-                        var bodyEsc = bubble.body
                             .replace(/&/g, "&amp;").replace(/</g, "&lt;")
                             .replace(/>/g, "&gt;");
                         var out = '<span style="color:' + Theme.accent
                             + ';font-weight:600">* ' + senderEsc
-                            + '</span> <i>' + bodyEsc + '</i>';
-                        if (bubble.edited)
-                            out += '<span style="color:#8e9297;font-size:small">'
-                                 + ' (edited)</span>';
+                            + '</span> <i>' + bubble.formattedBody + '</i>';
+                        if (bubble.edited) out += suffix;
                         return out;
                     }
                     if (!bubble.edited) return base;
                     // RichText mode lets us style the badge; PlainText mode
-                    // appends raw text. Promote to RichText when editing.
-                    var suffix = '<span style="color:#8e9297;font-size:small"> (edited)</span>';
-                    if (bubble.formattedBody !== "") return base + suffix;
-                    // Escape plain body minimally so angle brackets don't
-                    // get interpreted by RichText.
-                    var escaped = base.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-                    return escaped + suffix;
+                    // appends raw text. Promote to RichText when editing —
+                    // `base` is already markup, because the model renders
+                    // every prose body it holds.
+                    return base + suffix;
                 }
                 textFormat: (bubble.msgtype === "m.emote"
                              || bubble.formattedBody !== ""

@@ -862,3 +862,27 @@ target_link_libraries(test_bots PRIVATE
     Qt6::Core Qt6::Test
 )
 add_test(NAME test_bots COMMAND test_bots)
+
+# Line breaks in a plain body that gets promoted to HTML — the "(edited)"
+# badge, the m.emote prefix, the mention renderer. QTextDocument is the
+# importer behind TextEdit.RichText, so laying the markup out and counting
+# lines is what the user sees; Qt6::Gui is here for that and nothing else, and
+# offscreen keeps it off a display (and off macOS's permission dialogs).
+qt_add_executable(test_message_render
+    test_message_render.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MarkdownParser.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MentionRenderer.cpp
+)
+target_include_directories(test_message_render PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_message_render PRIVATE
+    BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml")
+target_link_libraries(test_message_render PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Gui Qt6::Test
+)
+add_test(NAME test_message_render COMMAND test_message_render)
+set_tests_properties(test_message_render PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

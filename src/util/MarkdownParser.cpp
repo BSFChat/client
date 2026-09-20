@@ -18,6 +18,13 @@ QString MarkdownParser::toHtml(const QString& markdown)
     return result;
 }
 
+QString MarkdownParser::plainToHtml(const QString& text)
+{
+    QString result = text.toHtmlEscaped();
+    result.replace('\n', "<br>");
+    return result;
+}
+
 QString MarkdownParser::processCodeBlocks(const QString& text)
 {
     static QRegularExpression re("```(?:[a-zA-Z]*\\n)?([\\s\\S]*?)```",
