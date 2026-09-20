@@ -1294,6 +1294,13 @@ private:
         quint64 permissions = 0;
         bool mentionable = false;
         bool hoist = false;
+        // "Any member may add this role to themselves, and remove it again."
+        // Mirrored here so the UI can tell an opt-in role apart from one an
+        // admin grants; the server is the authority on whether a claim is
+        // allowed (PUT/DELETE /bsfchat/self_roles/{id}), and a client must not
+        // treat this bit as proof the role is harmless — see
+        // protocol ServerRole for the containment rule that actually makes it so.
+        bool selfAssignable = false;
     };
     struct Override {
         QString targetKey; // "role:..." or "user:..."
