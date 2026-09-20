@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Qt.labs.platform as Platform
 import BSFChat
+import "../js/UploadTally.js" as UploadTally
 
 // MessageInput is an implicitHeight-driven Rectangle so it can grow the
 // vertical banner strip (when editing) without forcing the parent to
@@ -32,39 +33,61 @@ Rectangle {
     // the rest of the session. It is now derived from the count of
     // uploads this composer has actually started and not yet seen finish,
     // and that count is reset outright on a room / server change.
-    property int _inFlightUploads: 0
-    readonly property bool uploading: _inFlightUploads > 0
+    //
+    // The arithmetic itself lives in js/UploadTally.js so it can be tested
+    // without instantiating this component (which imports BSFChat and so
+    // cannot be loaded from a test binary) — read that file's header for the
+    // two invariants a bare-signal tally depends on and the three times they
+    // have been broken. Everything below is the wiring.
+    property var _tally: UploadTally.empty()
+    readonly property bool uploading: inputRoot._tally.inFlight > 0
+    // Diagnostic, not UI: how many terminal signals arrived that this composer
+    // could account for neither as its own upload nor as an orphan it had
+    // already written off. Above zero means somebody's wiring is wrong.
+    readonly property int unmatchedUploadReports: inputRoot._tally.unmatched
+
     // Called by every site that kicks off an upload — the attach button,
-    // MessageView's drop area, and paste. All three call it AFTER
-    // sendMediaMessage, which is only safe because that function never
-    // reports a failure before it returns; the invariant is stated and held
-    // in ServerConnection::emitPreflightMediaFailure. A pre-flight failure
-    // that arrived synchronously used to decrement this count before it had
-    // been incremented, and the clamp below then made the loss silent: the
-    // composer sat disabled reading "Uploading…" with nothing in flight,
-    // recoverable only by leaving the channel and coming back.
-    function noteUploadStarted() { inputRoot._inFlightUploads++; }
-    // Decrements we know are coming and must ignore: uploads that were in
-    // flight when _resetUploads ran. Their completion still arrives (the
-    // connection is unchanged on a room switch) with nothing left to cancel.
-    // That is the ONE legitimate unmatched decrement, so it is counted out
-    // explicitly and everything else is allowed to complain.
-    property int _orphanedUploads: 0
-    function _noteUploadFinished() {
-        if (inputRoot._inFlightUploads > 0) { inputRoot._inFlightUploads--; return; }
-        if (inputRoot._orphanedUploads > 0) { inputRoot._orphanedUploads--; return; }
-        // Still clamped — there is no count to take one from, and a negative
-        // one would disable the composer by arithmetic later. But say so.
-        // A clamp that absorbs an unmatched decrement without a word is why
-        // the pre-flight ordering bug above presented as a stuck message box
-        // rather than as something anybody could see going wrong.
-        console.warn("MessageInput: upload finished with none in flight —"
-                     + " an upload was counted late, or a signal arrived for"
-                     + " an upload this composer never started");
+    // paste, MessageView's drop area, and the mobile shell's Android
+    // share-intent handler. All of them call it AFTER sendMediaMessage, which
+    // is only safe because that function never reports a failure before it
+    // returns; the invariant is stated and held in
+    // ServerConnection::emitPreflightMediaFailure. A pre-flight failure that
+    // arrived synchronously used to decrement this count before it had been
+    // incremented, and the clamp then made the loss silent: the composer sat
+    // disabled reading "Uploading…" with nothing in flight, recoverable only
+    // by leaving the channel and coming back.
+    //
+    // tests/test_qml_hygiene.cpp pins the pairing: a QML file that calls
+    // sendMediaMessage and does not call this is the shape of the fourth bug
+    // on this counter, and it is a source scan rather than a convention
+    // because the first three were all "somebody did not know the rule".
+    function noteUploadStarted() {
+        inputRoot._tally = UploadTally.started(inputRoot._tally);
     }
-    function _resetUploads() {
-        inputRoot._orphanedUploads += inputRoot._inFlightUploads;
-        inputRoot._inFlightUploads = 0;
+    function _noteUploadFinished() {
+        var next = UploadTally.finished(inputRoot._tally);
+        if (UploadTally.wasUnmatched(inputRoot._tally, next)) {
+            // Still clamped — a negative count would disable the composer by
+            // arithmetic later, which is a worse failure than the one being
+            // reported. But say so. A clamp that absorbs an unmatched
+            // decrement without a word is why the pre-flight ordering bug
+            // presented as a stuck message box rather than as something
+            // anybody could see going wrong.
+            console.warn("MessageInput: upload finished with none in flight —"
+                         + " an upload was counted late, or a signal arrived"
+                         + " for an upload this composer never started"
+                         + " (unmatched so far: " + next.unmatched + ")");
+        }
+        inputRoot._tally = next;
+    }
+    // `connectionChanged` decides whether the uploads being written off here
+    // can still be expected to report back. See UploadTally.contextChanged:
+    // on a room switch they can and are credited, on a server switch their
+    // signals go to a connection this composer is no longer listening to and
+    // the credit would only serve to silence a later, real bug.
+    function _resetUploads(connectionChanged) {
+        inputRoot._tally = UploadTally.contextChanged(inputRoot._tally,
+                                                      connectionChanged);
         inputRoot._uploads = ({});
         uploadSweepTimer.stop();
     }
@@ -91,12 +114,33 @@ Rectangle {
     property var _drafts: ({})
     property string _lastRoomKey: ""
 
+    // The connection itself, not its URL. roomKey embeds the URL and would
+    // catch a server switch in every case anyone can currently produce, but
+    // what the upload tally actually needs to know is whether the OBJECT the
+    // Connections blocks below are attached to has been swapped — that is what
+    // decides whether an in-flight upload can still report back. Two live
+    // connections to the same URL in the same room would give the same
+    // roomKey, and relying on that not happening is the kind of implicit
+    // coupling this counter has already been bitten by twice.
+    readonly property var uploadConnection: serverManager.activeServer
+    property var _lastConnection: null
+
     onRoomKeyChanged: inputRoot._swapRoomState()
-    Component.onCompleted: inputRoot._lastRoomKey = inputRoot.roomKey
+    onUploadConnectionChanged: inputRoot._swapRoomState()
+    Component.onCompleted: {
+        inputRoot._lastRoomKey = inputRoot.roomKey;
+        inputRoot._lastConnection = inputRoot.uploadConnection;
+    }
 
     function _swapRoomState() {
+        // Both handlers above fire on a server switch, in an order QML does
+        // not define. Whichever runs first does the swap; the second finds
+        // nothing left to do and returns.
+        var connChanged = (inputRoot.uploadConnection !== inputRoot._lastConnection);
+        inputRoot._lastConnection = inputRoot.uploadConnection;
+
         var prev = inputRoot._lastRoomKey;
-        if (prev === inputRoot.roomKey) return;
+        if (prev === inputRoot.roomKey && !connChanged) return;
 
         // Stash the outgoing room's draft. An in-progress EDIT is not a
         // draft — its text belongs to a message that already exists —
@@ -125,9 +169,11 @@ Rectangle {
         // Slowmode is per-channel; carrying the send timestamp over locks
         // the composer in a channel the user has not posted in.
         inputRoot.lastSentAt = 0;
-        // In-flight uploads were started against the room we just left,
-        // and their completion signals are no longer routed here.
-        inputRoot._resetUploads();
+        // In-flight uploads were started against the room we just left, so
+        // they must not keep the composer locked here. Whether their terminal
+        // signal can still reach this composer depends on whether the
+        // connection changed too — see _resetUploads.
+        inputRoot._resetUploads(connChanged);
 
         var next = inputRoot._drafts[inputRoot.roomKey];
         inputArea.text = (next && next.text) ? next.text : "";

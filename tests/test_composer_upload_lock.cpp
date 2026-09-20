@@ -280,6 +280,58 @@ private slots:
         QCOMPARE(composer.unmatchedDecrements, 0);
     }
 
+    void aMixedDropCountsTheFilesItSendsRatherThanTheOnesThatWork()
+    {
+        // The drop area's worst case, and the one that says whether it is
+        // genuinely covered or merely lucky. It increments once per file it
+        // SENT, not per file that will succeed, so a drop mixing a readable
+        // and an unreadable file produces two increments and two terminal
+        // signals of different kinds arriving at different times — one
+        // deferred pre-flight failure and one real request against a dead
+        // port. Both must land after both increments, and the pair must
+        // balance exactly.
+        //
+        // The all-unreadable case above passes even if the deferral only
+        // happens to hold, because nothing else is in flight to be corrupted.
+        // Here the pre-flight failure lands with a real upload's count beside
+        // it, so a regression would show up as the composer unlocking while
+        // the readable file is still going.
+        ServerConnection conn(kServer);
+        signIn(&conn);
+        conn.setActiveRoom(kRoom);
+        ComposerBookkeeping composer;
+        attachComposer(&composer, &conn);
+
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString readable = writeImage(dir, QStringLiteral("holiday.png"));
+        QVERIFY(!readable.isEmpty());
+        const QString unreadable = dir.filePath(QStringLiteral("gone.png"));
+
+        // MessageView.qml's onDropped, verbatim in shape: every send first,
+        // then one increment per send.
+        conn.sendMediaMessage(QUrl::fromLocalFile(unreadable).toString());
+        conn.sendMediaMessage(QUrl::fromLocalFile(readable).toString());
+        composer.noteUploadStarted();
+        composer.noteUploadStarted();
+
+        QCOMPARE(composer.inFlight, 2);
+        QVERIFY2(!composer.composerEnabled(),
+                 "nothing may have been reported while the handler was running");
+
+        // The pre-flight failure arrives first, on a count of 2. If the
+        // composer unlocks here the readable file is still on the wire.
+        QTRY_VERIFY_WITH_TIMEOUT(composer.inFlight < 2, 2000);
+        QVERIFY2(!composer.composerEnabled(),
+                 "one file failing pre-flight must not unlock the composer "
+                 "while the other is still uploading");
+        QCOMPARE(composer.unmatchedDecrements, 0);
+
+        QTRY_VERIFY_WITH_TIMEOUT(composer.composerEnabled(), 8000);
+        QCOMPARE(composer.inFlight, 0);
+        QCOMPARE(composer.unmatchedDecrements, 0);
+    }
+
     void aSucceedingSendStillLocksTheComposerWhileItRuns()
     {
         // The guard against "fix the lockout by never locking". A send that

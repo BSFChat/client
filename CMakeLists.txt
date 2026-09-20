@@ -499,6 +499,11 @@ qt_add_qml_module(bsfchat-app
         # connection and the displayed view disagree. Shared by
         # ChannelList.qml and tests/qml/tst_channelselection.qml.
         qml/js/ChannelSelection.js
+        # The composer's in-flight upload bookkeeping — the counter U-H6 and
+        # both of the fix/composer-upload-* defects were about. Out of
+        # MessageInput.qml so tests/qml/tst_uploadtally.qml can pin the rules
+        # instead of a C++ transcription of them.
+        qml/js/UploadTally.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt

@@ -21,6 +21,24 @@ Rectangle {
             messageInput.inputArea.forceActiveFocus();
     }
 
+    // Tell the composer an upload it will hear the end of has begun.
+    //
+    // Exposed for the mobile shell: MobileMain.qml's Android share-intent
+    // handler calls sendMediaMessage on the active connection, which posts
+    // into the composer's own room and reports on the composer's own
+    // mediaSendCompleted / mediaSendFailed — so the composer WILL be handed
+    // the decrement whether or not anybody told it about the increment. It
+    // was not being told, which made every shared file an unmatched decrement
+    // and, if the user had an attachment uploading at the time, unlocked the
+    // composer with their file still on the wire.
+    //
+    // A forwarder rather than a property alias so the mobile shell never
+    // reaches into this component's children; there is exactly one thing it
+    // needs from the composer here and this is it.
+    function noteUploadStarted() {
+        if (messageInput) messageInput.noteUploadStarted();
+    }
+
     // Thread-panel state exposed so the mobile shell's hardware-back
     // handler can close the panel before popping any other UI.
     function threadPanelOpen() {
@@ -80,6 +98,18 @@ Rectangle {
             // held in ServerConnection::emitPreflightMediaFailure, and a
             // synchronous pre-flight failure here would have locked the
             // composer for the channel.
+            //
+            // Genuinely safe, not accidentally so, and this site is the one
+            // that needs the invariant most: it is not "one send, one count
+            // on the next line" but N sends and only then N counts, so a
+            // synchronous failure on file 1 would land with the count still
+            // at zero and N-1 further sends still to go. The deferral is what
+            // covers it — every terminal signal for this drop is queued behind
+            // the return of this handler, so all N increments are in place
+            // before the first one is delivered. Note also that `uploaded`
+            // counts sends ATTEMPTED, not files that will succeed: a drop
+            // mixing a readable and an unreadable file counts both, and both
+            // report back. tests/test_composer_upload_lock.cpp holds this.
             for (var j = 0; j < uploaded; ++j) messageInput.noteUploadStarted();
             drop.accepted = uploaded > 0;
         }
