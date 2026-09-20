@@ -515,6 +515,33 @@ if(Qt6QuickTest_FOUND AND NOT ANDROID AND NOT IOS)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
+# ThemedComboBox label resolution against C++-backed models
+# (tests/qml_models/tst_comboboxmodel.qml over qml/js/ComboBoxText.js).
+#
+# Its own runner rather than another file under tests/qml/, because it
+# needs a C++ probe object registered on the engine and the runner above
+# is deliberately engine-only. The probe declares its models with the
+# same metatypes the app uses — QJsonArray for ServerConnection's
+# serverRoles, QVariantList for Settings' audio device lists — which is
+# the entire value of the target: the Role-overrides dropdown shipped
+# blank because ComboBox's textRole lookup returns "" for every row of a
+# QJsonArray, and a test written against a QML array literal (the shape
+# the slowmode combo in the same dialog uses) passes on the broken code.
+# Same failure mode as comparing the client's permission mask against
+# the client's own kAllFlags: green, and blind.
+if(Qt6QuickTest_FOUND AND NOT ANDROID AND NOT IOS)
+    qt_add_executable(test_combobox_model combobox_model_test_main.cpp)
+    target_compile_definitions(test_combobox_model PRIVATE
+        QUICK_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/qml_models")
+    target_link_libraries(test_combobox_model PRIVATE
+        Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::QuickTest)
+    add_test(NAME test_combobox_model COMMAND test_combobox_model)
+    # Headless, same reason as above: it asserts on text, not pixels, and
+    # must not steal focus from whoever is at the keyboard during ctest.
+    set_tests_properties(test_combobox_model PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
+
 # ServerManager's connection-list lifecycle (U-C1). Header-only logic
 # (src/net/ServerRoster.h) lifted out of ServerManager precisely so this
 # needs no Settings, no ServerConnection, no event loop and no network.
