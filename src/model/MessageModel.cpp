@@ -492,6 +492,29 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
         }
         if (mentions.contains("room") && mentions["room"].is_boolean())
             entry.mentionsRoom = mentions["room"].get<bool>();
+
+        // Role mentions (bsfchat.role_ids, inside the same block — see
+        // protocol Constants.h for why it lives there and not beside it).
+        // Read through the SAME notifiedMentions() object as everything above,
+        // so the "an edit's mentions notified nobody" rule covers roles for
+        // free rather than needing a second copy of it.
+        const std::string kRoleKey(bsfchat::mention::kRoleIdsKey);
+        if (m_roleResolver && mentions.contains(kRoleKey)
+            && mentions[kRoleKey].is_array()) {
+            QStringList roleIds;
+            for (const auto& r : mentions[kRoleKey]) {
+                if (!r.is_string()) continue;
+                const QString id = QString::fromStdString(r.get<std::string>());
+                if (!id.isEmpty() && !roleIds.contains(id)) roleIds.append(id);
+            }
+            if (!roleIds.isEmpty()) {
+                entry.roleMentions = m_roleResolver(
+                    roleIds, entry.sender, QString::fromStdString(event.room_id));
+                for (const auto& role : entry.roleMentions) {
+                    if (role.includesMe) { entry.mentionsMe = true; break; }
+                }
+            }
+        }
     }
 
     // --- server-reconciled edits ---------------------------------------
@@ -598,7 +621,8 @@ bool MessageModel::isReplacementEvent(const bsfchat::RoomEvent& event)
 
 void MessageModel::applyMentionMarkup(MessageEntry& entry) const
 {
-    if (entry.mentionedUserIds.isEmpty() && !entry.mentionsRoom) return;
+    if (entry.mentionedUserIds.isEmpty() && entry.roleMentions.isEmpty()
+        && !entry.mentionsRoom) return;
     // Media rows render a filename, not prose; there is nothing to highlight
     // and formattedBody is not shown for them.
     if (entry.msgtype == "m.image" || entry.msgtype == "m.file"
@@ -619,7 +643,7 @@ void MessageModel::applyMentionMarkup(MessageEntry& entry) const
     QString base = entry.formattedBody.isEmpty() ? entry.body.toHtmlEscaped()
                                                  : entry.formattedBody;
     entry.formattedBody = bsfchat::client::renderMentions(
-        base, targets, entry.mentionsRoom);
+        base, targets, entry.mentionsRoom, entry.roleMentions);
 }
 
 void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& ownUserId)

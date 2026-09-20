@@ -9,6 +9,7 @@
 #include <QString>
 #include <QTimer>
 
+#include "util/MentionRenderer.h"
 #include "net/SessionAuth.h"
 #include <QVector>
 #include <functional>
@@ -522,6 +523,21 @@ public:
     // client-side using the same algorithm the server uses. For gating UI
     // decisions; the server still enforces on every request.
     Q_INVOKABLE quint64 myPermissions(const QString& roomId) const;
+    // The same computation for SOMEBODY ELSE. Needed by the role-mention
+    // resolver, which has to answer "did the sender hold MENTION_EVERYONE?" to
+    // know whether a non-mentionable role in their message actually pinged
+    // anyone. Degrades safely: a user whose bsfchat.member.roles this client has
+    // not seen resolves as @everyone only, so the answer errs towards "not
+    // permitted" and the mention renders as plain text rather than as a pill
+    // for a ping that may not have happened.
+    quint64 permissionsFor(const QString& userId, const QString& roomId) const;
+
+    // Resolve the role ids an event named into the role mentions that actually
+    // notified somebody. Mirrors the server's rule; see the resolver's
+    // definition in the .cpp for the rule and why the client re-derives it.
+    QVector<bsfchat::client::RoleMentionTarget> resolveRoleMentions(
+        const QStringList& roleIds, const QString& sender, const QString& roomId) const;
+
     Q_INVOKABLE bool canSend(const QString& roomId) const;
     Q_INVOKABLE bool canAttach(const QString& roomId) const;
     Q_INVOKABLE bool canEmbed(const QString& roomId) const;

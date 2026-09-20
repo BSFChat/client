@@ -22,6 +22,33 @@ struct MentionTarget {
     bool isSelf = false;
 };
 
+// One resolved ROLE mention.
+//
+// Only roles that ACTUALLY NOTIFIED are ever put in this list. The caller
+// (MessageModel, via ServerConnection's resolver) applies the same rule the
+// server applies — the role exists, and either it is `mentionable` or the
+// sender holds MENTION_EVERYONE — and drops the rest before calling here.
+//
+// That is the answer to "what happens to the rendering when a non-mentionable
+// role is named": nothing at all. The token is not in this list, so no needle
+// matches it, so it survives as the ordinary escaped text it already was. It
+// reads as "@Moderator", in the body colour, exactly as typed. It is NOT
+// stripped and NOT quietly turned into an empty span, because the sender did
+// write those characters and a reader comparing the message to what they meant
+// to send should see them. What they should not see is a pill implying somebody
+// was pinged when nobody was.
+//
+// `name` and `color` are attacker-controlled in the same way a display name is
+// — a role name is set by whoever has MANAGE_ROLES — and get the same
+// treatment: the name is emitted only as HTML-escaped element text, and the
+// colour is used only after being validated as a #RRGGBB literal.
+struct RoleMentionTarget {
+    QString roleId;
+    QString name;
+    QString color;      // "#RRGGBB", or empty for the default mention colour
+    bool includesMe = false;
+};
+
 // The composer writes a mention as '@' + the display name with all whitespace
 // removed (see MessageInput.qml's _stripToToken), so that the token survives
 // copy/paste and re-editing as a single word. Both sides have to agree on the
@@ -48,8 +75,15 @@ QString mentionToken(const QString& displayName);
 //
 // `roomMention` reflects m.mentions.room: when true, a literal `@room` token
 // is highlighted too.
+//
+// `roleTargets` are the role mentions that took effect. A role token is matched
+// against '@' + the role's name with whitespace stripped, the same transform
+// user mentions use (mentionToken), so "@Server Staff" in the composer and
+// "@ServerStaff" in the body are the same token. A role the reader holds is
+// styled like a self-mention, because it is one: they were notified.
 QString renderMentions(const QString& html,
                        const QVector<MentionTarget>& targets,
-                       bool roomMention);
+                       bool roomMention,
+                       const QVector<RoleMentionTarget>& roleTargets = {});
 
 } // namespace bsfchat::client

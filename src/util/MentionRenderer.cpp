@@ -4,6 +4,8 @@
 #include <QStringView>
 #include <QUrl>
 
+#include <cctype>
+
 #include <algorithm>
 
 namespace bsfchat::client {
@@ -23,6 +25,12 @@ constexpr auto kSelfMentionStyle =
     "text-decoration:none; font-weight:700;";
 constexpr auto kRoomMentionStyle =
     "color:#ff9f6e; background-color:#40291d; font-weight:700;";
+// A role mention the reader is NOT part of: the neutral "somebody else was
+// pinged" treatment, so triage stays a three-way read rather than a four-way
+// one. A role the reader IS part of borrows kSelfMentionStyle, because the
+// distinction that matters is "was I notified", and they were.
+constexpr auto kRoleMentionStyle =
+    "color:#7aa2ff; background-color:#232a3d; font-weight:700;";
 
 // Token characters for the boundary test. A mention must not be recognised
 // inside a longer word, or "@Bob" lights up in the middle of "@Bobby" and the
@@ -56,6 +64,42 @@ QString roomSpan()
            + QStringLiteral("\">@room</span>");
 }
 
+// A role colour is chosen by whoever holds MANAGE_ROLES and goes straight into
+// a style attribute, so it is validated as a literal #RRGGBB and nothing else.
+// Anything otherwise shaped — "red", "#fff", "x; background:url(...)" — is
+// discarded rather than escaped, because there is no legitimate value this
+// rejects and a CSS injection here would be styling chosen by a third party
+// inside a message body.
+bool isHexColor(const QString& c)
+{
+    if (c.size() != 7 || c[0] != QLatin1Char('#')) return false;
+    for (int i = 1; i < 7; ++i) {
+        if (!isxdigit(c[i].toLatin1())) return false;
+    }
+    return true;
+}
+
+// `label` MUST already be HTML-escaped: it is emitted as element text.
+//
+// A span, not an anchor. A user mention links to a profile; a role has no page
+// to open, and emitting a dead <a> would invite a click that does nothing and
+// would nest inside the inert-depth tracking below. @room is a span for the
+// same reason.
+QString roleSpan(const RoleMentionTarget& role, const QString& label)
+{
+    QString style = role.includesMe ? QLatin1String(kSelfMentionStyle)
+                                    : QLatin1String(kRoleMentionStyle);
+    // The role's own colour overrides only the foreground, so the background
+    // still carries the "this is a mention" signal even for a role coloured
+    // close to the page background.
+    if (!role.includesMe && isHexColor(role.color)) {
+        style = QStringLiteral("color:") + role.color
+                + QStringLiteral("; background-color:#232a3d; font-weight:700;");
+    }
+    return QStringLiteral("<span style=\"") + style + QStringLiteral("\">")
+           + label + QStringLiteral("</span>");
+}
+
 // Canonical rendered label for a target: '@' + the locally-resolved display
 // name, escaped. Deliberately NOT the label the sender chose — a sender can
 // write anything between their anchor tags, including a different person's
@@ -78,15 +122,18 @@ QString tagName(QStringView tag)
 }
 
 struct Needle {
+    enum class Kind { User, Room, Role };
     QString text; // escaped, '@'-prefixed
-    int target;   // index into `targets`, or -1 for @room
+    Kind kind = Kind::User;
+    int index = -1; // into `targets` (User) or `roleTargets` (Role)
 };
 
 QVector<Needle> buildNeedles(const QVector<MentionTarget>& targets,
-                             bool roomMention)
+                             bool roomMention,
+                             const QVector<RoleMentionTarget>& roleTargets)
 {
     QVector<Needle> needles;
-    auto add = [&needles](const QString& raw, int target) {
+    auto add = [&needles](const QString& raw, Needle::Kind kind, int index) {
         if (raw.isEmpty()) return;
         // A user id already carries its own '@'; a display name does not.
         QString token = raw.startsWith(QLatin1Char('@')) ? raw
@@ -95,21 +142,34 @@ QVector<Needle> buildNeedles(const QVector<MentionTarget>& targets,
         for (const auto& n : needles) {
             if (n.text.compare(escaped, Qt::CaseInsensitive) == 0) return;
         }
-        needles.append({escaped, target});
+        needles.append({escaped, kind, index});
     };
 
     // @room first so it wins a length tie against a user literally named
     // "room" (stable_sort below preserves this).
-    if (roomMention) needles.append({QStringLiteral("@room"), -1});
+    if (roomMention) needles.append({QStringLiteral("@room"), Needle::Kind::Room, -1});
+
+    // Roles before users, and the ordering is load-bearing: `add` keeps the
+    // FIRST needle for a given token, so whichever goes in first wins a
+    // collision. A display name is chosen by its owner and can be set to
+    // "Moderator"; a role name is chosen by someone holding MANAGE_ROLES. If a
+    // message names both, resolving the token to the user would let anyone
+    // shadow a role pill by renaming themselves after it. The reverse — an
+    // admin naming a role after a member — is not a capability anyone lacks
+    // already.
+    for (int i = 0; i < roleTargets.size(); ++i) {
+        add(mentionToken(roleTargets[i].name).mid(1), Needle::Kind::Role, i);
+        add(roleTargets[i].name, Needle::Kind::Role, i);
+    }
 
     for (int i = 0; i < targets.size(); ++i) {
         const auto& t = targets[i];
         // The composer's whitespace-stripped form is the one actually written
         // into bodies; the others are fallbacks for mentions typed or built by
         // other clients.
-        add(mentionToken(t.displayName).mid(1), i);
-        add(t.displayName, i);
-        add(t.userId, i);
+        add(mentionToken(t.displayName).mid(1), Needle::Kind::User, i);
+        add(t.displayName, Needle::Kind::User, i);
+        add(t.userId, Needle::Kind::User, i);
     }
 
     // Longest first: with both "Bob" and "Bob Smith" in the room, matching the
@@ -123,7 +183,8 @@ QVector<Needle> buildNeedles(const QVector<MentionTarget>& targets,
 
 // Rewrite one text node. `segment` is escaped HTML with no tags in it.
 QString rewriteSegment(const QString& segment, const QVector<Needle>& needles,
-                       const QVector<MentionTarget>& targets)
+                       const QVector<MentionTarget>& targets,
+                       const QVector<RoleMentionTarget>& roleTargets)
 {
     if (!segment.contains(QLatin1Char('@'))) return segment;
 
@@ -145,9 +206,21 @@ QString rewriteSegment(const QString& segment, const QVector<Needle>& needles,
             if (!rest.startsWith(n.text, Qt::CaseInsensitive)) continue;
             const int end = i + n.text.size();
             if (end < segment.size() && isTokenChar(segment[end])) continue;
-            out += (n.target < 0) ? roomSpan()
-                                  : anchorFor(targets[n.target],
-                                              labelFor(targets[n.target]));
+            switch (n.kind) {
+            case Needle::Kind::Room:
+                out += roomSpan();
+                break;
+            case Needle::Kind::Role:
+                // Canonical label from the locally-known role, never the text
+                // the sender wrote — the same rule as a user mention, for the
+                // same reason: a sender must not choose what a pill says.
+                out += roleSpan(roleTargets[n.index],
+                                mentionToken(roleTargets[n.index].name).toHtmlEscaped());
+                break;
+            case Needle::Kind::User:
+                out += anchorFor(targets[n.index], labelFor(targets[n.index]));
+                break;
+            }
             i = end;
             matched = true;
             break;
@@ -214,13 +287,14 @@ QString mentionToken(const QString& displayName)
 
 QString renderMentions(const QString& html,
                        const QVector<MentionTarget>& targets,
-                       bool roomMention)
+                       bool roomMention,
+                       const QVector<RoleMentionTarget>& roleTargets)
 {
     if (html.isEmpty()) return html;
-    if (targets.isEmpty() && !roomMention) return html;
+    if (targets.isEmpty() && roleTargets.isEmpty() && !roomMention) return html;
 
     const QString normalised = canonicaliseUserAnchors(html, targets);
-    const QVector<Needle> needles = buildNeedles(targets, roomMention);
+    const QVector<Needle> needles = buildNeedles(targets, roomMention, roleTargets);
     if (needles.isEmpty()) return normalised;
 
     QString out;
@@ -259,7 +333,7 @@ QString renderMentions(const QString& html,
         if (next < 0) next = normalised.size();
         const QString segment = normalised.mid(i, next - i);
         out += (inertDepth > 0) ? segment
-                                : rewriteSegment(segment, needles, targets);
+                                : rewriteSegment(segment, needles, targets, roleTargets);
         i = next;
     }
     return out;
