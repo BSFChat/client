@@ -93,6 +93,31 @@ Item {
                 opacity: 0
                 scale: 0.95
 
+                // Set by clicking the message when it did not fit. An
+                // expanded toast also stops counting down: the reason to open
+                // it is to read it, and six seconds is not enough for the kind
+                // of message that needed opening.
+                property bool expanded: false
+
+                // Four lines is what fits beside the icon and the X without
+                // the card dominating the corner. The open cap is high enough
+                // that no real server message reaches it and low enough that a
+                // proxy's HTML error page cannot paint over the whole window.
+                readonly property int collapsedLines: 4
+                readonly property int expandedLines: 200
+
+                // One place, because the timer rule is the easy half to forget:
+                // opening pauses the countdown, closing starts it over. Kept
+                // imperative rather than bound to `expanded`, because the
+                // hover handler below already stops the timer by hand and a
+                // property that is both bound and assigned is one whose
+                // binding silently stops applying after the first hover.
+                function toggleExpanded() {
+                    expanded = !expanded;
+                    if (expanded) dismissTimer.stop();
+                    else          dismissTimer.restart();
+                }
+
                 readonly property color tintColor: {
                     switch (card.toastKind) {
                         case "error":   return Theme.danger;
@@ -145,15 +170,73 @@ Item {
                         Layout.alignment: Qt.AlignTop
                         Layout.topMargin: 2
                     }
-                    Text {
+                    // The message.
+                    //
+                    // `maximumLineCount` + `elide` is a SILENT cut: the tail of
+                    // a server's sentence is replaced by one ellipsis and there
+                    // is no way, anywhere in the app, to get it back. The toast
+                    // cannot be selected, it is gone in six seconds, and the
+                    // part that gets eaten is the end — which for a validation
+                    // error is precisely the part that says what to type
+                    // instead. A server owner spent a support call on a 400
+                    // whose tail he never saw.
+                    //
+                    // The cap itself stays, because a misbehaving server (or a
+                    // proxy's HTML error page) must not be able to paint a
+                    // 4000-line card over the window. What changes is that
+                    // hitting it is now visible and reversible: the card says
+                    // it has more and opens to the whole thing on a click.
+                    // Truncation you can undo is a layout decision; truncation
+                    // you cannot is data loss.
+                    ColumnLayout {
                         Layout.fillWidth: true
-                        text: card.toastText
-                        color: Theme.fg0
-                        font.family: Theme.fontSans
-                        font.pixelSize: Theme.fontSize.sm
-                        wrapMode: Text.WordWrap
-                        maximumLineCount: 4
-                        elide: Text.ElideRight
+                        spacing: 2
+
+                        Text {
+                            id: messageText
+                            Layout.fillWidth: true
+                            text: card.toastText
+                            color: Theme.fg0
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.sm
+                            wrapMode: Text.WordWrap
+                            maximumLineCount: card.expanded
+                                ? card.expandedLines : card.collapsedLines
+                            elide: card.expanded ? Text.ElideNone : Text.ElideRight
+
+                            // On the Text rather than on the card's hover area:
+                            // that one is `acceptedButtons: Qt.NoButton` on
+                            // purpose (D-H1), because anything up here that
+                            // swallows clicks takes the dismiss button's with
+                            // them.
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: messageText.truncated || card.expanded
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: card.toggleExpanded()
+                            }
+                        }
+
+                        // Only when there is something behind the ellipsis.
+                        // An affordance that appears on every toast would be
+                        // noise on the ninety-nine that fit; one that never
+                        // appears is the bug this whole block is about.
+                        Text {
+                            Layout.fillWidth: true
+                            visible: messageText.truncated || card.expanded
+                            text: card.expanded
+                                ? "Show less"
+                                : "Show the rest of this message"
+                            color: card.tintColor
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.xs
+                            font.weight: Theme.fontWeight.semibold
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: card.toggleExpanded()
+                            }
+                        }
                     }
 
                     // Dismiss button.
@@ -189,7 +272,10 @@ Item {
                     hoverEnabled: true
                     acceptedButtons: Qt.NoButton
                     onEntered: dismissTimer.stop()
-                    onExited:  dismissTimer.restart()
+                    // Not restarted while expanded — the user opened this one
+                    // deliberately and the only thing that should close it is
+                    // the X, or collapsing it again.
+                    onExited:  if (!card.expanded) dismissTimer.restart()
                 }
 
                 Timer {

@@ -207,7 +207,10 @@ public:
     ~ServerConnection() override;
 
     // Properties
-    QString displayName() const { return m_displayName; }
+    // This account's name as every "who am I signed in as" surface prints
+    // it. Never the bare mxid — see the definition for why that is the
+    // accessor's job and not each caller's.
+    QString displayName() const;
     QString avatarUrl() const { return m_avatarUrl; }
     QString serverUrl() const { return m_serverUrl; }
     QString serverName() const;
@@ -620,6 +623,22 @@ public:
     // flag with no room. Passing a room id here would let a per-channel
     // override open a dialog whose every request the server then refuses.
     Q_INVOKABLE bool canManageBots() const;
+    // MANAGE_SERVER — the server name/icon and the audit log, which is the
+    // Overview page of Server Settings. Server scope, like the three above.
+    Q_INVOKABLE bool canManageServer() const;
+    // "Does Server Settings open onto anything you may use?" — the roll-up
+    // behind the header gear.
+    //
+    // One question rather than the four the gear used to ask inline, because
+    // the gear's gate and the modal's page list are the same fact and they had
+    // already drifted apart: MANAGE_SERVER and MANAGE_BOTS each open a page
+    // that no combination of the old four could reach. The set lives in
+    // permmath::kServerSettingsPages so it is checkable without a live
+    // connection.
+    //
+    // A `false` here does NOT mean "hide the gear" — see ChannelList.qml. It
+    // means the modal opens on its locked state.
+    Q_INVOKABLE bool canOpenServerSettings() const;
 
     // ── Bot identity ──────────────────────────────────────────────────────
 

@@ -152,6 +152,67 @@ private slots:
                      + offenders.join(QStringLiteral(", "))));
     }
 
+    // A surface that carries a SERVER's error text may not cut it silently.
+    //
+    // ToastHost is where almost every server error in this client lands:
+    // login and registration failures, upload failures, a refused
+    // notification-level change, every state write ServerSettings makes, and
+    // voice. Its message Text carried `maximumLineCount: 4` with
+    // `elide: Text.ElideRight` and no way out — the card is not selectable,
+    // it is gone in six seconds, and the part an ellipsis eats is the END of
+    // the sentence, which for a validation error is precisely the half that
+    // says what to type instead.
+    //
+    // That is how the 2026-09-20 support call went: a server owner read a 400
+    // about bot usernames as far as "…and", and the list of characters he was
+    // allowed to use was never on his screen at all. It is a shared surface,
+    // so it was never going to stay a one-off.
+    //
+    // The cap itself is fine and stays — a proxy's HTML error page must not
+    // be able to paint a four-thousand-line card over the window. What is not
+    // fine is a cap you cannot get past. So: if a toast clamps its message, it
+    // must clamp it CONDITIONALLY, on some state the user can change.
+    //
+    // Source-scanned rather than exercised, for the usual reason: ToastHost
+    // imports the BSFChat module, which only the app binary has.
+    void aToastCannotSilentlyEatTheEndOfAServerError()
+    {
+        const QString src = withoutComments(readAll(
+            QStringLiteral(BSFCHAT_QML_DIR "/components/ToastHost.qml")));
+        QVERIFY2(!src.isEmpty(), "ToastHost.qml not found");
+
+        // Both properties, wherever they appear in this file. A second Text
+        // that clamps unconditionally is the same bug in a new place.
+        static const QRegularExpression clamps(
+            QStringLiteral(R"((maximumLineCount|elide)\s*:\s*([^\n]*))"));
+        QStringList offenders;
+        int checked = 0;
+        for (auto it = clamps.globalMatch(src); it.hasNext();) {
+            const auto m = it.next();
+            ++checked;
+            // `expanded` is the escape hatch the card offers. Any other
+            // state would do — what may not appear is a constant.
+            if (m.captured(2).contains(QStringLiteral("expanded"))) continue;
+            if (m.captured(2).contains(QStringLiteral("Text.ElideNone"))) continue;
+            offenders << m.captured(0).trimmed();
+        }
+        QVERIFY2(checked > 0,
+                 "ToastHost no longer clamps its message at all — if that is "
+                 "deliberate, delete this guard rather than leaving it green "
+                 "on a file it stopped describing.");
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "a toast clamps a server's error text with no way to read "
+                     "the rest of it: ")
+                     + offenders.join(QStringLiteral("; "))));
+
+        // And the way out has to be findable. An expandable card that looks
+        // identical to one that fits is a feature nobody discovers.
+        QVERIFY2(src.contains(QStringLiteral("truncated")),
+                 "nothing in ToastHost notices that it truncated, so it cannot "
+                 "offer to show the rest");
+    }
+
     // A settings pane may not lay content out underneath its scrollbar.
     //
     // The owner's report, verbatim: "Right now, I can't fully read the

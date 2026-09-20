@@ -42,6 +42,7 @@
 #include "model/MessageModel.h"
 #include "util/PermissionMath.h"
 
+#include <bsfchat/Constants.h>
 #include <bsfchat/Permissions.h>
 
 namespace permmath = bsfchat::permmath;
@@ -146,6 +147,50 @@ QString withoutComments(QString src)
                                           QRegularExpression::DotMatchesEverythingOption);
     static const QRegularExpression line(QStringLiteral("//[^\n]*"));
     return src.remove(block).remove(line);
+}
+
+// The shape of a "SIGNED IN AS" block, in whichever file it appears: a name
+// line bound to the name property, ABOVE the line bound to the id. Returns
+// the block so the caller can go on asserting about it.
+//
+// Worth saying why this is asserted at all, since the two tests that used
+// this block only checked that the mxid was in it and passed for a week
+// while the block was visibly wrong. Both surfaces rendered the MXID on the
+// name line — elided to "@oidc_a5cdbefe-9003-4f0…" in the user menu,
+// duplicated verbatim in the locked panel — so the most prominent line of a
+// block that exists to end an ambiguity reproduced it. The assertions
+// covered the half that was easy to write against the source (the id is
+// present, the id is not elided) and never asked what the line above it
+// said, which is the half that was wrong.
+//
+// This still cannot prove the binding RESOLVES to a name, because the source
+// said `.displayName` the whole time and the defect was in what that
+// property answered. That is pinned where it can be —
+// tests/test_identity_provider_url.cpp, which drives the real
+// ServerConnection — and this checks the shape those tests cannot see.
+QString identityBlockAt(const QString& src, int from, const char* what)
+{
+    const int label = src.indexOf(QStringLiteral("\"SIGNED IN AS\""), from);
+    if (label < 0) {
+        QTest::qFail(qPrintable(QStringLiteral("%1 has no identity block")
+                                    .arg(QString::fromUtf8(what))),
+                     __FILE__, __LINE__);
+        return {};
+    }
+    // Generous: comment stripping leaves the indentation behind, so a block
+    // of four Texts measures a good deal wider than it reads.
+    const QString block = src.mid(label, 2500);
+    const int nameAt = block.indexOf(QStringLiteral(".displayName"));
+    const int idAt = block.indexOf(QStringLiteral(".userId"));
+    if (nameAt < 0 || idAt < 0 || nameAt > idAt) {
+        QTest::qFail(qPrintable(
+                         QStringLiteral("%1 does not put a name line above the id — "
+                                        "a block that prints the mxid twice, or prints "
+                                        "it where the name belongs, answers nothing")
+                             .arg(QString::fromUtf8(what))),
+                     __FILE__, __LINE__);
+    }
+    return block;
 }
 
 QStringList filesUnder(const QString& root, const QString& glob)
@@ -505,8 +550,19 @@ private slots:
         RecordingHooks hooks;
         hooks.installOn(model);
 
-        QVERIFY(BotAdminModel::localpartError(QStringLiteral("build-bot")).isEmpty());
-        QVERIFY(BotAdminModel::localpartError(QStringLiteral("bot.1_2=3/4+5")).isEmpty());
+        // These two used to read `build-bot` and `bot.1_2=3/4+5` and expect
+        // BOTH to be accepted. Neither can be created on any server: the
+        // first has no `bot_` prefix and the second uses `=`, `/` and `+`,
+        // none of which BotHandler::valid_bot_localpart allows. The old
+        // expectations were not describing the server, they were describing
+        // this function — which is how a validator drifts a whole character
+        // set away from the thing it validates for and stays green.
+        QVERIFY(BotAdminModel::localpartError(QStringLiteral("bot_build")).isEmpty());
+        QVERIFY(BotAdminModel::localpartError(QStringLiteral("bot_1.2_3-4")).isEmpty());
+        QVERIFY(!BotAdminModel::localpartError(QStringLiteral("build-bot")).isEmpty());
+        QVERIFY(!BotAdminModel::localpartError(QStringLiteral("bot_1=2")).isEmpty());
+        QVERIFY(!BotAdminModel::localpartError(QStringLiteral("bot_1/2")).isEmpty());
+        QVERIFY(!BotAdminModel::localpartError(QStringLiteral("bot_1+2")).isEmpty());
         QVERIFY(!BotAdminModel::localpartError(QString()).isEmpty());
         QVERIFY(!BotAdminModel::localpartError(QStringLiteral("Build Bot")).isEmpty());
         QVERIFY(!BotAdminModel::localpartError(QStringLiteral("BuildBot")).isEmpty());
@@ -521,15 +577,211 @@ private slots:
         QVERIFY(!model.errorText().isEmpty());
         QVERIFY(!model.busy());
 
-        model.createBot(QStringLiteral("build"), QStringLiteral("Build Bot"),
+        model.createBot(QStringLiteral("bot_build"), QStringLiteral("Build Bot"),
                         QStringLiteral("CI"));
         QCOMPARE(hooks.calls, QStringList{QStringLiteral("create")});
-        QCOMPARE(hooks.lastLocalpart, QStringLiteral("build"));
+        QCOMPARE(hooks.lastLocalpart, QStringLiteral("bot_build"));
         QCOMPARE(hooks.lastDisplayName, QStringLiteral("Build Bot"));
         QCOMPARE(hooks.lastDescription, QStringLiteral("CI"));
         // The stale validation message must be gone once a valid attempt
         // starts, or the pane shows an error next to a request in flight.
         QVERIFY(model.errorText().isEmpty());
+    }
+
+    // ── The 2026-09-20 discoverability incident ───────────────────────────
+    //
+    // One support call, one SSH session and one database query, for two
+    // questions the client could have answered on screen: "which account am I
+    // signed in as", and "why is there no Server Settings gear". Three of the
+    // four surfaces it touched are QML and are guarded by source scans below,
+    // in the spirit of test_qml_hygiene.cpp; the rule the fourth one broke is
+    // ordinary C++ and is checked directly.
+
+    void theLocalpartRuleIsTheServersRuleAndNotAWiderOne()
+    {
+        // The prefix and the length come from PROTOCOL, not from a literal
+        // here and not from BotAdminModel's own copy of either — the same
+        // reasoning as thePermissionMirrorHasNotDriftedFromProtocol above. A
+        // test that asked the client what its prefix was and then checked the
+        // client enforced it would pass on any prefix, including one the
+        // server has never heard of.
+        const QString prefix = QString::fromUtf8(
+            bsfchat::bot::kLocalpartPrefix.data(),
+            qsizetype(bsfchat::bot::kLocalpartPrefix.size()));
+        QCOMPARE(BotAdminModel::localpartPrefix(), prefix);
+        QCOMPARE(BotAdminModel::maxLocalpartLength(),
+                 int(bsfchat::limits::kMaxUsernameLength));
+
+        // Missing prefix: refused, and the refusal must SAY the prefix. The
+        // operator in the incident was told "invalid username" by nothing at
+        // all — the field let him through and the server's 400 was the first
+        // mention the prefix ever got.
+        const QString missing = BotAdminModel::localpartError(
+            QStringLiteral("tibiaguru"));
+        QVERIFY(!missing.isEmpty());
+        QVERIFY2(missing.contains(prefix),
+                 qPrintable(QStringLiteral("prefix not named in: ") + missing));
+
+        // The prefix alone is not a name — the server refuses it
+        // (`localpart.size() <= kLocalpartPrefix.size()`), so the button must
+        // not light up for it.
+        QVERIFY(!BotAdminModel::localpartError(prefix).isEmpty());
+        QVERIFY(BotAdminModel::localpartError(prefix + QStringLiteral("a")).isEmpty());
+
+        // Length, at the boundary the server uses: total, prefix included.
+        const int max = int(bsfchat::limits::kMaxUsernameLength);
+        const QString tail(max - prefix.size(), QLatin1Char('a'));
+        QVERIFY(BotAdminModel::localpartError(prefix + tail).isEmpty());
+        QVERIFY(!BotAdminModel::localpartError(prefix + tail + QStringLiteral("a"))
+                     .isEmpty());
+
+        // The character set, exactly BotHandler::valid_bot_localpart's:
+        // lowercase a–z, digits, and . _ - — nothing else. `=`, `/` and `+`
+        // are the three this end used to wave through, and the three the
+        // field's own error message used to advertise.
+        for (QChar c : {QLatin1Char('.'), QLatin1Char('_'), QLatin1Char('-')}) {
+            QVERIFY2(BotAdminModel::localpartError(prefix + QStringLiteral("a") + c
+                                                   + QStringLiteral("b")).isEmpty(),
+                     qPrintable(QStringLiteral("rejected a legal character: ") + c));
+        }
+        for (QChar c : {QLatin1Char('='), QLatin1Char('/'), QLatin1Char('+'),
+                        QLatin1Char('@'), QLatin1Char(' '), QLatin1Char('A')}) {
+            QVERIFY2(!BotAdminModel::localpartError(prefix + QStringLiteral("a") + c
+                                                    + QStringLiteral("b")).isEmpty(),
+                     qPrintable(QStringLiteral("accepted an illegal character: ") + c));
+        }
+    }
+
+    void theCreateFieldPrefillsThePrefixRatherThanWaitingForA400()
+    {
+        const QString src = withoutComments(readAll(
+            QStringLiteral(BSFCHAT_QML_DIR "/components/BotManagerPane.qml")));
+        QVERIFY2(!src.isEmpty(), "BotManagerPane.qml not found");
+
+        // The field must start at the prefix, and must get it from the model
+        // (which reads the protocol header) rather than from a "bot_" literal
+        // in QML — a literal is how a client keeps prefilling a prefix the
+        // server has stopped requiring.
+        QVERIFY2(src.contains(QStringLiteral("localpartPrefix")),
+                 "the create field does not prefill the bot prefix");
+        static const QRegularExpression literal(QStringLiteral("\"bot_\""));
+        QVERIFY2(!literal.match(src).hasMatch(),
+                 "BotManagerPane.qml hard-codes \"bot_\" instead of asking the "
+                 "model for protocol's bot::kLocalpartPrefix");
+    }
+
+    void serverSettingsOpensForEveryPermissionItHasAPageFor()
+    {
+        // The gear's gate and the modal's nav list are one fact. They had
+        // drifted: the gate asked for MANAGE_ROLES / MANAGE_CHANNELS / KICK /
+        // BAN, while the modal also carries an Overview page (MANAGE_SERVER)
+        // and a Bots page (MANAGE_BOTS). A member holding only one of those
+        // two could not reach the modal at all — including, absurdly, the
+        // "you need the Manage bots permission" state BotManagerPane renders
+        // for exactly that member.
+        for (permmath::Flags f : {permmath::kManageServer, permmath::kManageRoles,
+                                  permmath::kManageChannels, permmath::kKickMembers,
+                                  permmath::kBanMembers, permmath::kManageBots,
+                                  permmath::kAdministrator}) {
+            QVERIFY2(permmath::opensServerSettings(f),
+                     qPrintable(QStringLiteral("a page exists for 0x%1 but it does "
+                                               "not open the dialog").arg(f, 0, 16)));
+        }
+
+        // Every flag in the set is one protocol knows about. Checked against
+        // the authority rather than against permmath::kAllFlags, which is the
+        // client's own copy — comparing the set to a mirror of itself would
+        // pass for a bit protocol never assigned.
+        QCOMPARE(permmath::kServerSettingsPages
+                     & ~permmath::Flags(bsfchat::permission::kAllFlags),
+                 permmath::Flags(0));
+
+        // And the incident itself: an account holding nothing but @everyone.
+        // It opens the dialog onto the locked panel, so this is what decides
+        // whether the gear is live — never whether it exists.
+        QVERIFY(!permmath::opensServerSettings(permmath::kEveryoneDefault));
+        QVERIFY(!permmath::opensServerSettings(0));
+    }
+
+    void theSettingsGearSurvivesHavingNoPermissions()
+    {
+        const QString src = withoutComments(readAll(
+            QStringLiteral(BSFCHAT_QML_DIR "/components/ChannelList.qml")));
+        QVERIFY2(!src.isEmpty(), "ChannelList.qml not found");
+
+        // Anchored at end-of-identifier: a plain indexOf("id: settingsGear")
+        // also matches "id: settingsGearMouse", which is the gear's OWN
+        // MouseArea and sits where the Icon used to — so the guard passed
+        // happily against the very file it was written to reject.
+        static const QRegularExpression gearId(
+            QStringLiteral(R"(id:\s*settingsGear\s*$)"),
+            QRegularExpression::MultilineOption);
+        const int gear = int(gearId.match(src).capturedStart());
+        QVERIFY2(gear > 0, "the settings gear is missing or was renamed");
+        // From the id to the gear's own MouseArea: that span is the Icon's
+        // property block and nothing else, so the `visible` found in it is
+        // the gear's and not some later item's.
+        const int end = src.indexOf(QStringLiteral("MouseArea"), gear);
+        QVERIFY2(end > gear, "the gear has no MouseArea — did it stop being clickable?");
+        const QString block = src.mid(gear, end - gear);
+        static const QRegularExpression vis(QStringLiteral("visible:([^\n]*)"));
+        const auto m = vis.match(block);
+        QVERIFY2(m.hasMatch(), "the gear has no visible binding to check");
+        // It may depend on there BEING a server. It may not depend on what
+        // that server lets you do: a gear that vanishes cannot distinguish
+        // "no such feature" from "not for this account", and telling those
+        // two apart cost a database inspection over SSH.
+        QVERIFY2(!m.captured(1).contains(QStringLiteral("can")),
+                 qPrintable(QStringLiteral("the gear is permission-gated again: ")
+                            + m.captured(1)));
+    }
+
+    void theLockedServerSettingsPanelNamesTheAccount()
+    {
+        const QString src = withoutComments(readAll(
+            QStringLiteral(BSFCHAT_QML_DIR "/components/ServerSettings.qml")));
+        QVERIFY2(!src.isEmpty(), "ServerSettings.qml not found");
+
+        QVERIFY2(src.contains(QStringLiteral("canOpenServerSettings")),
+                 "ServerSettings.qml has no locked state");
+        // The whole incident was two accounts of one person on one homeserver
+        // with near-identical display names. A panel that named the missing
+        // permission but not the ACCOUNT would have left him exactly where he
+        // was, so the mxid is not decoration here.
+        const int locked = src.indexOf(QStringLiteral("visible: !serverSettingsPopup._mayOpen"));
+        QVERIFY2(locked > 0, "the locked panel is missing or was renamed");
+        // And the NAME above it, from the name property — not a second copy
+        // of the id. Signed in as an account with no display name at all,
+        // this panel rendered "@viewer:lockdemo.test" on both lines, which
+        // manages to take two rows to say one thing.
+        const QString panel = identityBlockAt(src, locked,
+                                              "the locked Server Settings panel");
+        QVERIFY2(panel.contains(QStringLiteral(".userId")),
+                 "the locked panel does not say which account is signed in");
+    }
+
+    void theUserMenuSaysWhichAccountYouAreSignedInAs()
+    {
+        const QString src = withoutComments(readAll(
+            QStringLiteral(BSFCHAT_QML_DIR "/components/ChannelList.qml")));
+        QVERIFY2(!src.isEmpty(), "ChannelList.qml not found");
+
+        const int menu = src.indexOf(QStringLiteral("id: userMenu"));
+        QVERIFY2(menu > 0, "the user menu is missing or was renamed");
+        const QString block = identityBlockAt(src, menu, "the user menu");
+        QVERIFY2(block.contains(QStringLiteral(".userId")),
+                 "the user menu does not show the signed-in mxid");
+        // NOTHING in this block elides, and that is the point rather than a
+        // style note. The id is the obvious case — it is what the sidebar
+        // footer already gets wrong, arriving as "@josh.oid…" in a 240px
+        // column. But the name line above it is the same case whenever there
+        // is no display name to show, because then it is carrying the
+        // localpart and is itself the identifier. As shipped it DID elide,
+        // and rendered "@oidc_a5cdbefe-9003-4f0…" — one line of ambiguity
+        // sitting directly above the line that exists to resolve it.
+        QVERIFY2(!block.contains(QStringLiteral("Text.Elide")),
+                 "the identity block elides, which is the one thing it exists "
+                 "not to do");
     }
 
     void aCreatedTokenIsPresentedOnceAndSurvivesTheRefreshUnderneathIt()
@@ -539,7 +791,7 @@ private slots:
         hooks.installOn(model);
         QSignalSpy issued(&model, &BotAdminModel::tokenIssued);
 
-        model.createBot(QStringLiteral("build"), QStringLiteral("Build Bot"), QString());
+        model.createBot(QStringLiteral("bot_build"), QStringLiteral("Build Bot"), QString());
         model.onBotCreated(QStringLiteral("@build:server"), QStringLiteral("Build Bot"),
                            QStringLiteral("syt_verysecret_token"));
 
@@ -584,7 +836,7 @@ private slots:
         RecordingHooks hooks;
         hooks.installOn(model);
 
-        model.createBot(QStringLiteral("build"), QStringLiteral("Build Bot"), QString());
+        model.createBot(QStringLiteral("bot_build"), QStringLiteral("Build Bot"), QString());
         model.onBotCreated(QStringLiteral("@build:server"), QStringLiteral("Build Bot"),
                            QStringLiteral("syt_verysecret_token"));
         QJsonArray bots;
@@ -711,7 +963,7 @@ private slots:
         // A pane opened against a disconnected server has no hooks installed.
         BotAdminModel model;
         model.refresh();
-        model.createBot(QStringLiteral("build"), QString(), QString());
+        model.createBot(QStringLiteral("bot_build"), QString(), QString());
         model.rotateToken(QStringLiteral("@build:server"));
         model.deactivateBot(QStringLiteral("@build:server"));
         // Nothing was attempted, so nothing is in flight.

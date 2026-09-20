@@ -458,20 +458,32 @@ private slots:
 
     void thePickerIsReachableWithoutAnyPermission()
     {
-        // The whole point. ServerSettings.qml is the wrong home precisely
-        // because its gear is rendered only for a member holding one of four
-        // admin permissions — pin that the picker's entry point is NOT behind
-        // that gate, and that the gate it replaced is still there (so this
-        // test keeps meaning something if the gear's condition moves).
+        // The whole point. ServerSettings.qml is the wrong home for an
+        // opt-in role picker: everything behind that gear is administration,
+        // and the picker is for members who administer nothing. Pin that the
+        // picker's entry point sits in the user menu rather than up in the
+        // header beside the gear.
+        //
+        // This used to ALSO assert that the gear itself was gated on
+        // `canManageRoles(...) || ...canManageChannel`, as an anchor that
+        // would notice if the gear moved. It is not gated any more, and the
+        // change was deliberate: after the 2026-09-20 incident the gear is
+        // rendered for every member and the MODAL explains itself, because a
+        // vanishing gear cannot tell "no such feature" apart from "not for
+        // this account". The anchor is now the gear's id, and the fact this
+        // one stopped asserting is asserted properly in tests/test_bots.cpp
+        // (theSettingsGearSurvivesHavingNoPermissions) rather than as a side
+        // effect here.
         const QString src = withoutComments(readAll(
             QStringLiteral(BSFCHAT_QML_DIR "/components/ChannelList.qml")));
         QVERIFY2(!src.isEmpty(), "ChannelList.qml not found");
 
         static const QRegularExpression gearGate(
-            QStringLiteral(R"(canManageRoles\([^)]*\)\s*\|\|\s*\w+\.canManageChannel)"));
+            QStringLiteral(R"(id:\s*settingsGear\s*$)"),
+            QRegularExpression::MultilineOption);
         QVERIFY2(gearGate.match(src).hasMatch(),
-                 "the Server Settings gear is no longer gated on admin "
-                 "permissions — this guard assumed it was");
+                 "the Server Settings gear is missing or was renamed — this "
+                 "guard uses it as the 'header, admin side' landmark");
 
         const qsizetype at = src.indexOf(QStringLiteral("openSelfRoles()"));
         QVERIFY2(at > 0, "nothing in ChannelList opens the self-role picker");

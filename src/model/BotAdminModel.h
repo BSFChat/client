@@ -81,6 +81,18 @@ class BotAdminModel : public QObject {
     Q_PROPERTY(bool issuedTokenIsRotation READ issuedTokenIsRotation NOTIFY issuedTokenChanged)
     Q_PROPERTY(bool hasIssuedToken READ hasIssuedToken NOTIFY issuedTokenChanged)
 
+    // The mandatory prefix every bot localpart starts with, straight from
+    // protocol/include/bsfchat/Constants.h. Exposed so the create field can
+    // PREFILL it instead of leaving the operator to discover it from a 400:
+    // a server owner hit exactly that in the 2026-09-20 support incident,
+    // typed a bare name, and got a rejection for a rule nothing on screen had
+    // mentioned. CONSTANT because it is a compile-time fact of the protocol,
+    // not server state — a binding on it can never need to re-evaluate.
+    Q_PROPERTY(QString localpartPrefix READ localpartPrefixProp CONSTANT)
+    // The server's cap, from the same header, so the hint line and the error
+    // cannot quote a number the server has moved on from.
+    Q_PROPERTY(int maxLocalpartLength READ maxLocalpartLengthProp CONSTANT)
+
 public:
     explicit BotAdminModel(QObject* parent = nullptr);
 
@@ -107,6 +119,19 @@ public:
     bool issuedTokenIsRotation() const { return m_issuedTokenIsRotation; }
     bool hasIssuedToken() const { return !m_issuedToken.isEmpty(); }
 
+    // Both read the protocol header. Defined in the .cpp so this header does
+    // not have to pull nlohmann/json in through Constants.h.
+    //
+    // Two spellings again, for the reason spelled out under localpartError()
+    // below: the rule is static so tests and the validator can reach it
+    // without an instance, and the META-OBJECT gets an ordinary const method,
+    // so nothing here depends on how a given Qt version handles a static
+    // through the property system.
+    static QString localpartPrefix();
+    static int maxLocalpartLength();
+    QString localpartPrefixProp() const { return localpartPrefix(); }
+    int maxLocalpartLengthProp() const { return maxLocalpartLength(); }
+
     // ── actions (called from QML) ──────────────────────────────────────────
 
     Q_INVOKABLE void refresh();
@@ -126,10 +151,22 @@ public:
     // show under the field. Called on every keystroke so Create can be
     // disabled rather than attempted.
     //
-    // The rule matches Matrix's own localpart grammar as the server applies
-    // it: lowercase a–z, digits, and `.`, `_`, `=`, `-`, `/`, `+`, at least
-    // one character. It is a courtesy check, not a security boundary — the
-    // server validates independently and its answer wins.
+    // The rule is BotHandler::valid_bot_localpart, restated: the
+    // `bot::kLocalpartPrefix` prefix, something after it, at most
+    // `limits::kMaxUsernameLength` characters in total, and only lowercase
+    // a–z, digits, `.`, `_` and `-`. It is a courtesy check, not a security
+    // boundary — the server validates independently and its answer wins.
+    //
+    // It used to claim a WIDER set than the server accepts (`=`, `/` and `+`
+    // as well) and to say nothing at all about the mandatory prefix, which
+    // made it worse than no check: a name this function approved could still
+    // be refused, and the field's own error described a grammar that does not
+    // exist on any server. That is half of the 2026-09-20 incident — the
+    // owner was told which characters were allowed, by us, wrongly, and the
+    // server's real sentence was the one they needed. The prefix and the
+    // length come from the protocol header now so the two cannot drift again;
+    // the character set is asserted against the server's own list in
+    // tests/test_bots.cpp, which is the only copy left to check against.
     //
     // Two spellings of one function: the static one is the rule, and the
     // invokable instance method is what QML calls. `Q_INVOKABLE static` does

@@ -7,13 +7,44 @@ import BSFChat
 Popup {
     id: serverSettingsPopup
     anchors.centerIn: Overlay.overlay
-    width: parent ? parent.width * 0.85 : 800
-    height: parent ? parent.height * 0.85 : 600
+    // Sized to what is actually in it. The locked panel is one banner and an
+    // account id; rendering it inside an 85%-of-the-window modal would read as
+    // a settings dialog that failed to load rather than as an answer.
+    width: {
+        var full = parent ? parent.width * 0.85 : 800;
+        return serverSettingsPopup._mayOpen ? full : Math.min(full, 520);
+    }
+    height: {
+        var full = parent ? parent.height * 0.85 : 600;
+        return serverSettingsPopup._mayOpen ? full : Math.min(full, 420);
+    }
     modal: true
     focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     property int selectedSection: 0
+
+    // Whether this account may use any page in here.
+    //
+    // False is not an error state and not a bug — it is the ordinary
+    // condition of every member of every server, and before 2026-09-20 it was
+    // expressed by the header gear simply not existing. That made "BSFChat has
+    // no server settings" and "THIS account may not use them" the same picture,
+    // which cost a support call and a database inspection over SSH: the owner
+    // was signed in as an OIDC account holding only @everyone while another
+    // account of his held the admin role, and nothing on screen could have told
+    // him so. The locked panel below is the sentence that was missing.
+    //
+    // Asked through ServerConnection so the flag set lives in one place
+    // (permmath::kServerSettingsPages) rather than being spelled out again in
+    // QML, where it had already drifted from the nav list below.
+    readonly property int _permGen:
+        serverManager.activeServer ? serverManager.activeServer.permissionsGeneration : 0
+    readonly property bool _mayOpen: {
+        _permGen;
+        var s = serverManager.activeServer;
+        return !!s && s.canOpenServerSettings();
+    }
 
     // Emitted when the user clicks a channel row in the Channels tab. The
     // host component is expected to open its ChannelSettings instance for
@@ -437,8 +468,104 @@ Popup {
     contentItem: RowLayout {
         spacing: 0
 
+        // ── Locked ──────────────────────────────────────────────────
+        //
+        // Replaces the nav AND the pages rather than sitting on top of them:
+        // an admin surface a member cannot use is clutter at best, and at worst
+        // it is a roster of roles and bans rendered for somebody the server
+        // would refuse. One sentence, the permissions by name, and — the part
+        // the incident turned on — which account is asking.
+        //
+        // Same shape as BotManagerPane's "You need the \"Manage bots\"
+        // permission…" state, which is the in-repo precedent for this: name
+        // the permission, say who can grant it, and do not pretend the feature
+        // is absent.
+        ColumnLayout {
+            visible: !serverSettingsPopup._mayOpen
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.margins: Theme.sp.s7 * 2
+            spacing: Theme.sp.s5
+
+            TabHeader { title: "Server Settings"; Layout.fillWidth: true }
+
+            InfoBanner {
+                icon: "lock"
+                tint: Theme.warn
+                // Names the permissions rather than saying "you don't have
+                // permission", for the reason BotManagerPane's banner gives:
+                // the name is the whole value — it is what the person asks an
+                // administrator for. No "see the Roles tab" here, though;
+                // whoever is reading this cannot open it.
+                text: "None of the pages in here are available to this account. "
+                    + "They need one of: Manage server, Manage roles, "
+                    + "Create & manage channels, Kick members, Ban members, or "
+                    + "Manage bots. Someone who already has Manage roles can put "
+                    + "one of them on a role this account holds."
+            }
+
+            // The identity block. Deliberately NOT just the display name: the
+            // 2026-09-20 incident was two accounts of the same person on the
+            // same homeserver, and display names are exactly the thing that
+            // cannot tell those apart. The mxid is the answer, so the mxid is
+            // what is shown, in full, selectable, and next to the sentence
+            // explaining why it matters.
+            Text {
+                text: "SIGNED IN AS"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                font.weight: Theme.fontWeight.semibold
+                font.letterSpacing: Theme.trackWidest.xs
+                color: Theme.fg3
+            }
+            // The name, and never a second copy of the id underneath: an
+            // account with no display name at all renders its localpart here
+            // (ServerConnection::displayName), which is also what the member
+            // list prints for it. Two identical lines say nothing twice.
+            Text {
+                Layout.fillWidth: true
+                text: serverManager.activeServer
+                      ? serverManager.activeServer.displayName : ""
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.lg
+                font.weight: Theme.fontWeight.semibold
+                color: Theme.fg0
+                elide: Text.ElideRight
+            }
+            // Read-only TextEdit rather than Text so the id can be selected and
+            // copied into a support message — which is what the person who hit
+            // this will be doing next. Same read-only-TextEdit idiom the bot
+            // token banner uses, and for the same reason: no editable buffer,
+            // but a value a human can get out of the window.
+            TextEdit {
+                Layout.fillWidth: true
+                text: serverManager.activeServer
+                      ? serverManager.activeServer.userId : ""
+                readOnly: true
+                selectByMouse: true
+                wrapMode: TextEdit.WrapAnywhere
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.fontSize.md
+                color: Theme.fg1
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "If you have more than one account on this server, the "
+                    + "permissions belong to the account above — not to you as "
+                    + "a person. Signing in as the other one is often the whole "
+                    + "answer."
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.fg2
+                wrapMode: Text.WordWrap
+            }
+
+            Item { Layout.fillHeight: true }
+        }
+
         // Left nav sidebar
         Rectangle {
+            visible: serverSettingsPopup._mayOpen
             Layout.fillHeight: true
             Layout.preferredWidth: 200
             color: Theme.bg0
@@ -519,6 +646,7 @@ Popup {
 
         // Content area
         StackLayout {
+            visible: serverSettingsPopup._mayOpen
             Layout.fillWidth: true
             Layout.fillHeight: true
             currentIndex: selectedSection
