@@ -13,6 +13,9 @@
 #include <bsfchat/MatrixTypes.h>
 
 #include "net/MediaTicketCache.h"
+#include "util/MentionRenderer.h"
+
+#include <functional>
 
 class ThreadFilterModel;
 
@@ -267,6 +270,27 @@ public:
     // member event for a room this model is not showing still tells us
     // something about a sender whose messages it is.
     void setBotUserCache(const QSet<QString>* cache) { m_botUsers = cache; }
+
+    // Resolves the role ids an event named into the role mentions that ACTUALLY
+    // NOTIFIED somebody, for rendering and for the highlight.
+    //
+    // A callback rather than a pointer to a cache, because the answer is not a
+    // lookup: it is the server's own rule — the role exists, and either it is
+    // `mentionable` or the SENDER holds MENTION_EVERYONE — plus "and do I hold
+    // it". That needs the role table, the sender's role assignment and the
+    // channel's permission overrides, all of which live in ServerConnection.
+    // Reproducing it here would be a second implementation of an authorisation
+    // rule, which is exactly how a client ends up drawing a pill for a ping
+    // that never happened (or, worse, suppressing one that did).
+    //
+    // Roles the rule rejects are simply absent from the result, which is how a
+    // non-mentionable role ends up rendered as plain text.
+    using RoleMentionResolver =
+        std::function<QVector<bsfchat::client::RoleMentionTarget>(
+            const QStringList& roleIds, const QString& sender, const QString& roomId)>;
+    void setRoleMentionResolver(RoleMentionResolver resolver) {
+        m_roleResolver = std::move(resolver);
+    }
     // Re-resolve every loaded row's flag from that cache, emitting only the
     // rows that actually moved — the same coalescing refreshDisplayNames
     // does, and for the same reason: this runs whenever a member event
@@ -355,6 +379,14 @@ private:
         bool mentionsMe = false;
         bool mentionsRoom = false;
         QStringList mentionedUserIds;
+        // Role mentions that took effect, resolved once at ingest through
+        // m_roleResolver. Only roles that actually notified are in here; a
+        // non-mentionable one is absent and so renders as plain text.
+        // `mentionsMe` is OR'd with "I hold one of these", because a role
+        // mention is a mention of every holder — the badge, the push and the
+        // highlight all have to agree on that or the three disagree about the
+        // same message.
+        QVector<bsfchat::client::RoleMentionTarget> roleMentions;
         // Reply metadata — populated when content.m.relates_to.m.in_reply_to
         // is present. replyToSender/replyPreview are best-effort snapshots
         // resolved from the local timeline when this message was ingested;
@@ -409,6 +441,7 @@ private:
     ThreadFilterModel* m_threadProxy = nullptr;
     QString m_prevBatchToken;
     bool m_loadingHistory = false;
+    RoleMentionResolver m_roleResolver;
     const QMap<QString, QString>* m_dnCache = nullptr;
     const QSet<QString>* m_botUsers = nullptr;
     const QString* m_accessToken = nullptr;

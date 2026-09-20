@@ -143,6 +143,12 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     m_memberListModel->setDisplayNameCache(&m_userDisplayNames);
     m_messageModel->setAccessTokenSource(&m_accessToken);
     m_messageModel->setBotUserCache(&m_botUserIds);
+    // `this` outlives the model (it owns it), so the capture is safe for the
+    // model's whole lifetime.
+    m_messageModel->setRoleMentionResolver(
+        [this](const QStringList& roleIds, const QString& sender, const QString& roomId) {
+            return resolveRoleMentions(roleIds, sender, roomId);
+        });
 
     // One ticket cache per connection, shared by the two things that resolve
     // media: the message model (which bakes a URL into each row) and QML's
@@ -3656,6 +3662,28 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                             && m["room"].get<bool>()) {
                             mentionsMe = true;
                         }
+                        // A role mention names every holder, so it is a mention
+                        // of us if we hold one of them. Same resolver the
+                        // timeline highlight uses, so the toast and the pill
+                        // can never disagree about the same message — and it
+                        // applies the mentionable / MENTION_EVERYONE rule, so a
+                        // locked role does not toast.
+                        const std::string kRoleKey(bsfchat::mention::kRoleIdsKey);
+                        if (!mentionsMe && m.contains(kRoleKey)
+                            && m[kRoleKey].is_array()) {
+                            QStringList roleIds;
+                            for (const auto& r : m[kRoleKey]) {
+                                if (r.is_string()) {
+                                    roleIds.append(
+                                        QString::fromStdString(r.get<std::string>()));
+                                }
+                            }
+                            const auto roomId = QString::fromStdString(event.room_id);
+                            for (const auto& role :
+                                 resolveRoleMentions(roleIds, sender, roomId)) {
+                                if (role.includesMe) { mentionsMe = true; break; }
+                            }
+                        }
                     }
                     // Suppress notifications for events the user has
                     // already read in this room. Without this guard,
@@ -4097,7 +4125,8 @@ void ServerConnection::applyChannelSettingsEvent(const QString& roomId, const QJ
 
 namespace permmath = bsfchat::permmath;
 
-quint64 ServerConnection::myPermissions(const QString& roomId) const
+quint64 ServerConnection::permissionsFor(const QString& userId,
+                                         const QString& roomId) const
 {
     // The algorithm itself lives in util/PermissionMath so it can be unit
     // tested; this function only adapts our stored shapes to it. See
@@ -4122,8 +4151,63 @@ quint64 ServerConnection::myPermissions(const QString& roomId) const
     const QVector<permmath::Override>* scope =
         roomId.isEmpty() ? nullptr : &overrides;
 
-    return permmath::effectivePermissions(roles, m_memberRoles.value(m_userId),
-                                          m_userId, scope);
+    return permmath::effectivePermissions(roles, m_memberRoles.value(userId),
+                                          userId, scope);
+}
+
+quint64 ServerConnection::myPermissions(const QString& roomId) const
+{
+    return permissionsFor(m_userId, roomId);
+}
+
+// Which of the roles an event named actually notified somebody.
+//
+// This re-derives the server's rule, which is normally the wrong thing for a
+// client to do. It is right here for one reason: the alternative is worse. The
+// server records role mentions as a single opaque sentinel row and does not
+// echo the decision back on the event, so the only ways for the client to know
+// are to re-derive it from state it already holds (this) or to have the server
+// annotate every timeline event with a per-event mention join (a query per
+// event on every sync, to change how a span is coloured). The inputs here —
+// the role table, the sender's assignment, the channel overrides — are the same
+// state events the server computed from, and every one of them is already
+// cached for the permission gating the UI does anyway.
+//
+// It is also safe to be wrong in one direction and only one. Getting this
+// wrong cannot notify anybody or fail to notify anybody: the badge, the unread
+// highlight and the push all come from the server. The blast radius is whether
+// a span is a pill or plain text. So where the client lacks state — most often
+// a sender whose bsfchat.member.roles has not arrived — it falls through to
+// "not permitted" and renders plain text, which understates rather than
+// inventing a ping.
+QVector<bsfchat::client::RoleMentionTarget> ServerConnection::resolveRoleMentions(
+    const QStringList& roleIds, const QString& sender, const QString& roomId) const
+{
+    QVector<bsfchat::client::RoleMentionTarget> out;
+    if (roleIds.isEmpty()) return out;
+
+    // The override half of the rule. Evaluated once, for the SENDER — not for
+    // the reader, who has no say in what the sender was allowed to do.
+    const bool senderMayMentionAny =
+        (permissionsFor(sender, roomId) & permmath::kMentionEveryone) != 0;
+
+    const QStringList myRoles = m_memberRoles.value(m_userId);
+
+    for (const QString& roleId : roleIds) {
+        // @everyone is never a role mention — the server refuses to record one,
+        // so rendering a pill for it would promise a ping that did not happen.
+        if (roleId == QLatin1String(permmath::kEveryoneRoleId)) continue;
+
+        const RoleInfo* def = nullptr;
+        for (const auto& r : m_roles) {
+            if (r.id == roleId) { def = &r; break; }
+        }
+        if (!def) continue;                                      // no such role
+        if (!def->mentionable && !senderMayMentionAny) continue; // the gate
+
+        out.append({def->id, def->name, def->color, myRoles.contains(roleId)});
+    }
+    return out;
 }
 
 // Whether this user may create channels and categories. The server evaluates
