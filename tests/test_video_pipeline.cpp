@@ -35,6 +35,28 @@
 
 namespace {
 
+// --- how long a QTRY_* is allowed to keep trying -----------------------------
+//
+// Every QTRY_*_WITH_TIMEOUT in this file is a LIVENESS wait: "the pipeline
+// eventually emits a frame", "the drop counter eventually reaches ten". Not
+// one of them defends a latency property — nothing here claims the encoder is
+// fast, only that it works — so the deadline's only job is to stop a
+// genuinely broken run from hanging forever.
+//
+// They were 2000 ms and 5000 ms. On a box that is also running a build, or
+// another agent's test sweep, real H.264 encodes and Qt event-loop turns
+// stretch past that, and the test failed for reasons that had nothing to do
+// with the code. RUN_SERIAL does not help: ctest only serialises a test
+// against OTHER CTEST JOBS, and the load that breaks these deadlines comes
+// from outside the ctest process entirely.
+//
+// A healthy run touches neither number — it satisfies the predicate in
+// milliseconds and QTRY returns immediately. All a larger deadline changes is
+// how long a broken run takes to report itself, and a broken pipeline emits
+// nothing at all rather than emitting slowly.
+constexpr int kLivenessMs = 20000;   // pure-logic paths (counters, signals)
+constexpr int kEncodeMs   = 30000;   // paths that encode or decode real frames
+
 PeerCaps capsWith(bool videoRtp, const QStringList& codecs) {
     PeerCaps c;
     c.videoRtp = videoRtp;
@@ -477,7 +499,7 @@ private slots:
             pipe.submitAccessUnit(annexB(/*nalType=*/1));
             QTest::qWait(12);
         }
-        QTRY_VERIFY_WITH_TIMEOUT(pipe.keyframeRequests() >= 3, 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(pipe.keyframeRequests() >= 3, kLivenessMs);
         QCOMPARE(pipe.decodedFrames(), quint64(0));
         QCOMPARE(pipe.droppedAus(), quint64(12));
         QVERIFY(spy.count() >= 3);
@@ -489,14 +511,18 @@ private slots:
     void keyframeRequestsAreThrottled() {
         VideoReceivePipeline pipe(QStringLiteral("@bob:example.org"),
                                   VideoStreamId::Screen, VideoCodecKind::H264);
-        pipe.setKeyframeRequestIntervalMs(5000);
+        // 60s, not 5s: long enough that a loaded box stretching the submit
+        // loop below cannot let the throttle expire and fire a second
+        // request. The property is that no request fires INSIDE the
+        // interval, so a wider interval tests it more strictly.
+        pipe.setKeyframeRequestIntervalMs(60000);
         // Below the decode backlog cap, so every drop here is the
         // keyframe gate rather than an overflow flush.
         for (int i = 0; i < 10; ++i) {
             pipe.submitAccessUnit(annexB(1));
             QTest::qWait(2);
         }
-        QTRY_COMPARE_WITH_TIMEOUT(pipe.droppedAus(), quint64(10), 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(pipe.droppedAus(), quint64(10), kLivenessMs);
         QCOMPARE(pipe.keyframeRequests(), quint64(1));
     }
 
@@ -517,7 +543,11 @@ private slots:
 
         VideoReceivePipeline pipe(kPeerA, VideoStreamId::Screen,
                                   VideoCodecKind::H265);
-        pipe.setKeyframeRequestIntervalMs(5000);
+        // 60s, not 5s: long enough that a loaded box stretching the submit
+        // loop below cannot let the throttle expire and fire a second
+        // request. The property is that no request fires INSIDE the
+        // interval, so a wider interval tests it more strictly.
+        pipe.setKeyframeRequestIntervalMs(60000);
         pipe.setDecoderRetryIntervalMs(5000);   // no retry within this test
         QSignalSpy spy(&pipe, &VideoReceivePipeline::decoderUnavailable);
 
@@ -527,7 +557,7 @@ private slots:
             pipe.submitAccessUnit(hevcIrap());
             QTest::qWait(2);
         }
-        QTRY_COMPARE_WITH_TIMEOUT(pipe.decoderFailures(), quint64(1), 2000);
+        QTRY_COMPARE_WITH_TIMEOUT(pipe.decoderFailures(), quint64(1), kLivenessMs);
         QCOMPARE(creates.load(), 1);        // not one per access unit
         QCOMPARE(spy.count(), 1);           // and ONE announcement
         QCOMPARE(pipe.decodedFrames(), quint64(0));
@@ -555,7 +585,11 @@ private slots:
 
         VideoReceivePipeline pipe(kPeerA, VideoStreamId::Screen,
                                   VideoCodecKind::H265);
-        pipe.setKeyframeRequestIntervalMs(5000);
+        // 60s, not 5s: long enough that a loaded box stretching the submit
+        // loop below cannot let the throttle expire and fire a second
+        // request. The property is that no request fires INSIDE the
+        // interval, so a wider interval tests it more strictly.
+        pipe.setKeyframeRequestIntervalMs(60000);
         pipe.setDecoderRetryIntervalMs(40);
         QSignalSpy spy(&pipe, &VideoReceivePipeline::decoderUnavailable);
 
@@ -565,7 +599,7 @@ private slots:
             pipe.submitAccessUnit(hevcIrap());
             QTest::qWait(5);
         }
-        QTRY_VERIFY_WITH_TIMEOUT(pipe.decoderFailures() >= 2, 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(pipe.decoderFailures() >= 2, kLivenessMs);
         // The bound is relative to wall time, not to the access-unit
         // count: a 40 ms floor permits at most one retry per 40 ms of
         // elapsed time (+1 for the initial attempt, +1 for the edge),
@@ -601,14 +635,14 @@ private slots:
         {
             VideoReceivePipeline hevc(kPeerA, VideoStreamId::Screen,
                                       VideoCodecKind::H265);
-            hevc.setKeyframeRequestIntervalMs(5000);
+            hevc.setKeyframeRequestIntervalMs(60000);  // see above: never expire mid-test
             hevc.setDecoderRetryIntervalMs(5000);
             QSignalSpy spy(&hevc, &VideoReceivePipeline::decoderUnavailable);
             for (int i = 0; i < 5; ++i) {
                 hevc.submitAccessUnit(hevcIrap());
                 QTest::qWait(2);
             }
-            QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 2000);
+            QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, kLivenessMs);
             QCOMPARE(hevc.decodedFrames(), quint64(0));
         }
 
@@ -624,7 +658,7 @@ private slots:
             h264.submitAccessUnit(annexB(i == 0 ? 5 : 1));
             QTest::qWait(2);
         }
-        QTRY_VERIFY_WITH_TIMEOUT(h264.decodedFrames() >= 4, 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(h264.decodedFrames() >= 4, kLivenessMs);
         QVERIFY(frames.count() >= 4);
         QCOMPARE(unavailable.count(), 0);
         QCOMPARE(h264.decoderFailures(), quint64(0));
@@ -1162,7 +1196,16 @@ private slots:
         pipe.configure(cfg);
 
         pipe.submitFrame(makeTestFrame(320, 240, 0), 0);
-        QTRY_VERIFY_WITH_TIMEOUT(spy.count() >= 1, 5000);
+        // Deliberately NOT QTRY_VERIFY. On a host with no usable H.264
+        // encoder this case must SKIP, but QVERIFY returns out of the slot
+        // the moment it fails, so the QSKIP below was unreachable and such a
+        // host got a hard failure instead. Spin manually and let both
+        // outcomes stay live.
+        {
+            QElapsedTimer waited; waited.start();
+            while (spy.isEmpty() && waited.elapsed() < kEncodeMs)
+                QTest::qWait(10);
+        }
         if (spy.isEmpty()) QSKIP("no usable H.264 encoder on this host");
         {
             const auto first = spy.at(0).at(1).value<EncodedFrame>();
@@ -1174,7 +1217,7 @@ private slots:
             pipe.submitFrame(makeTestFrame(320, 240, i), i * 66000);
             QTest::qWait(40);
         }
-        QTRY_VERIFY_WITH_TIMEOUT(spy.count() >= 3, 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(spy.count() >= 3, kEncodeMs);
         bool sawDelta = false;
         for (int i = 1; i < spy.count(); ++i)
             if (!spy.at(i).at(1).value<EncodedFrame>().keyframe) sawDelta = true;
@@ -1185,7 +1228,7 @@ private slots:
         const int beforeForce = spy.count();
         pipe.forceKeyframe();
         pipe.submitFrame(makeTestFrame(320, 240, 7), 500000);
-        QTRY_VERIFY_WITH_TIMEOUT(spy.count() > beforeForce, 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(spy.count() > beforeForce, kEncodeMs);
         QVERIFY2(spy.at(beforeForce).at(1).value<EncodedFrame>().keyframe,
                  "forceKeyframe() must produce an IDR on the next frame");
 
@@ -1196,7 +1239,7 @@ private slots:
         bigger.width = bigger.height = 480;
         pipe.configure(bigger);
         pipe.submitFrame(makeTestFrame(480, 360, 8), 600000);
-        QTRY_VERIFY_WITH_TIMEOUT(spy.count() > beforeResize, 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(spy.count() > beforeResize, kEncodeMs);
         const auto rebuilt = spy.at(beforeResize).at(1).value<EncodedFrame>();
         QVERIFY2(rebuilt.keyframe, "a rebuilt session must open on an IDR");
     }
@@ -1219,7 +1262,16 @@ private slots:
         pipe.configure(cfg);
 
         pipe.submitFrame(makeTestFrame(160, 120, 0), 0);
-        QTRY_VERIFY_WITH_TIMEOUT(spy.count() >= 1, 5000);
+        // Deliberately NOT QTRY_VERIFY. On a host with no usable H.264
+        // encoder this case must SKIP, but QVERIFY returns out of the slot
+        // the moment it fails, so the QSKIP below was unreachable and such a
+        // host got a hard failure instead. Spin manually and let both
+        // outcomes stay live.
+        {
+            QElapsedTimer waited; waited.start();
+            while (spy.isEmpty() && waited.elapsed() < kEncodeMs)
+                QTest::qWait(10);
+        }
         if (spy.isEmpty()) QSKIP("no usable H.264 encoder on this host");
 
         for (int round = 0; round < 20; ++round) {
@@ -1229,7 +1281,7 @@ private slots:
             for (int i = 0; i < 4; ++i)
                 pipe.submitFrame(makeTestFrame(160, 120, round * 4 + i),
                                  (round * 4 + i) * 33000);
-            QTRY_VERIFY_WITH_TIMEOUT(spy.count() > before, 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(spy.count() > before, kEncodeMs);
         }
     }
 };

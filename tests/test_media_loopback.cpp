@@ -69,15 +69,20 @@ std::shared_ptr<rtc::H264RtpPacketizer> buildChain(
 
 } // namespace
 
+// The canary case (initialOffer=false) is EXPECTED to time out, so it does
+// not get the full handshake allowance — every run would otherwise pay 45s
+// twice over for a failure we already know about. Nothing is at risk in
+// keeping it short: main() ignores this case's result, so a slow machine can
+// only cost us the NOTE we would print if upstream ever fixed the
+// limitation, never a red run.
+constexpr auto kCanaryWait = std::chrono::seconds(10);
+
 // initialOffer=true: track present from the first offer (simple case).
 // initialOffer=false: PRODUCTION SHAPE — connect with a data channel
 // only, then addTrack + renegotiate on the live connection, exactly
 // like PeerConnectionManager's "Adding video tracks + renegotiating".
 int runCase(bool initialOffer) {
-    // The renegotiated-track path is a CANARY that is expected to time out
-    // (see main); it keeps the short wait so every run does not pay the
-    // full handshake allowance for a failure we already expect.
-    const auto setupWait = initialOffer ? kSetupWait : std::chrono::seconds(10);
+    const auto setupWait = initialOffer ? kSetupWait : kCanaryWait;
     std::printf("--- case: track via %s\n",
                 initialOffer ? "initial offer" : "renegotiation");
     rtc::Configuration cfg; // no ICE servers — loopback host candidates
@@ -448,20 +453,46 @@ int runLateAdoptionCase() {
 
     // Give the receiving side's own openTracks() time to run — this is
     // the delay the queued adoption introduces in production.
+    //
+    // This was 100 iterations of 50ms: a hard five-second budget on a pure
+    // LIVENESS wait, and the one place in this file that could still fail
+    // because the machine was busy rather than because the code was wrong.
+    // Nothing here defends a latency property — the assertion is about
+    // whether onOpen replays, not about how quickly the track arrives — so
+    // the wait gets the same generous allowance as every other handshake in
+    // this test. A healthy run leaves it in milliseconds; all a longer
+    // allowance changes is how quickly a genuinely broken run gives up.
     std::shared_ptr<rtc::Track> recvTrack;
-    for (int i = 0; i < 100 && !recvTrack; ++i) {
-        {
-            std::lock_guard lock(handoffMutex);
-            recvTrack = handedOver;
+    {
+        const auto deadline = std::chrono::steady_clock::now() + kSetupWait;
+        while (std::chrono::steady_clock::now() < deadline) {
+            {
+                std::lock_guard lock(handoffMutex);
+                recvTrack = handedOver;
+            }
+            if (recvTrack) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        if (recvTrack) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     if (!recvTrack) {
         std::fprintf(stderr, "FAIL: onTrack never delivered a track\n");
         return 2;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // Wait for the track to actually open, rather than sleeping a flat 500ms
+    // and giving up. The old flat sleep made a LOADED box quietly skip the
+    // assertion below via the NOTE path — the test went green having checked
+    // nothing, which is a worse failure than a red one because nobody sees
+    // it. Polling to a deadline means load delays the check instead of
+    // cancelling it; the NOTE is then reserved for a run that genuinely never
+    // reached the racing state.
+    {
+        const auto deadline = std::chrono::steady_clock::now() + kSetupWait;
+        while (!recvTrack->isOpen()
+               && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
 
     if (!recvTrack->isOpen()) {
         std::printf("NOTE: receive track not open yet at late adoption — "
