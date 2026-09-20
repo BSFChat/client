@@ -874,6 +874,57 @@ private slots:
                      + offenders.join(QStringLiteral(", "))));
     }
 
+    // ThemedComboBox must not read a label straight off ComboBox.
+    //
+    // Channel settings > Role overrides shipped a dropdown of exactly the
+    // right height with six blank rows and a blank closed field. Its model is
+    // ServerConnection's `Q_PROPERTY(QJsonArray serverRoles ...)`, and
+    // ComboBox resolves both textAt() and displayText through a textRole
+    // lookup that reads a QVariantMap entry or a QAbstractListModel role and
+    // returns "" for every row of a QJsonArray. The count comes through,
+    // which is what makes it look like a colour bug.
+    //
+    // The trap worth spelling out: the code being guarded against here is not
+    // a careless shortcut, it is the FIX for the previous instance of the same
+    // symptom. ThemedComboBox once resolved labels with
+    // `Array.isArray(cb.model) ? cb.model[i][textRole] : ""`, which blanked
+    // the QVariantList-backed audio device combos in ClientSettings.qml
+    // because Array.isArray is false for those — and true for exactly the
+    // QJsonArray case textAt cannot read. Each single-source version blanks
+    // the combos the other one serves. qml/js/ComboBoxText.js tries both, and
+    // this guard is what stops a future edit from "simplifying" it back to
+    // either half.
+    //
+    // Source scan, same constraint as the rest of this file: ThemedComboBox
+    // imports the BSFChat module, so no test binary can instantiate it. The
+    // resolver's own behaviour is covered by test_combobox_model, which
+    // drives it against a real QJsonArray Q_PROPERTY.
+    void themedComboBoxResolvesLabelsThroughTheSharedHelper()
+    {
+        const QString src = withoutComments(
+            readQml(QStringLiteral("/components/ThemedComboBox.qml")));
+        QVERIFY2(!src.isEmpty(), "ThemedComboBox.qml not found");
+
+        QVERIFY2(src.contains(QStringLiteral("ComboBoxText.js")),
+                 "ThemedComboBox.qml no longer imports ComboBoxText.js — a "
+                 "bare textAt()/displayText goes blank on a QJsonArray model "
+                 "(Role overrides), and a bare Array.isArray path goes blank "
+                 "on a QVariantList one (audio devices)");
+
+        // Every use of the two ComboBox label accessors has to be an argument
+        // to the resolver, never the value of a binding on its own.
+        static const QRegularExpression bare(
+            QStringLiteral(R"RX((?<!ComboBoxText\.resolve\()(?:cb\.textAt\s*\(|cb\.displayText\b))RX"));
+        QStringList offenders;
+        for (auto it = bare.globalMatch(src); it.hasNext();)
+            offenders << it.next().captured(0).trimmed();
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "ThemedComboBox.qml reads a label straight off ComboBox "
+                     "instead of through ComboBoxText.resolve(): ")
+                     + offenders.join(QStringLiteral(", "))));
+    }
+
 private:
     // The text between the braces of the first block whose opening matches
     // `opener` (which must end at that block's `{`). Null when there is none.
