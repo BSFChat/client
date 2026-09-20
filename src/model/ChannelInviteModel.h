@@ -49,16 +49,15 @@
 //     writeless 200.
 //   * a deactivated bot is refused                            403
 //   * a HUMAN target gets membership 'invite' and can then join.
-//
-// One thing the server does NOT do, which lands on this class:
-//
-//   IT DOES NOT REPORT "ALREADY A MEMBER" FOR A HUMAN. For a bot that case is
-//   a deliberate, documented no-op 200. For a human it rewrites membership
-//   from 'join' back to 'invite', which is a downgrade nobody asked for. So
-//   the only place that case can be caught is here, from the roster the
-//   client already has — see the `membershipOf` hook. Recorded rather than
-//   worked around silently, because the next person to read this will
-//   otherwise assume the check is upstream.
+//   * a target who is ALREADY JOINED is a writeless 200, for a human exactly
+//     as for a bot. It used to rewrite their membership from 'join' back to
+//     'invite' — demoting a member nobody asked to demote and taking them out
+//     of everyone else's roster until they joined again — so this class
+//     refused that case locally off the cached roster. Server a19fd10
+//     (fix/invite-no-demote) closed it (handle_invite and the generic
+//     PUT .../state/m.room.member/{userId} route both), the local refusal is
+//     gone with it, and invite() now always reaches the server. See the note
+//     in invite() for why reinstating it would make things worse, not safer.
 //
 // ─────────────── a second gap, closed on the server 2026-09-20 ────────────
 //
@@ -107,6 +106,10 @@ public:
         // "leave", "ban", or empty when the client has never seen a member
         // event for them there. A cache, never an authority — the server
         // re-checks everything and its answer wins.
+        //
+        // Read by readmitHint() and nothing else: only the "leave" branch has
+        // a consumer now. It is not used to decide whether to send a request,
+        // and must not be — see invite().
         std::function<QString(const QString& roomId, const QString& userId)> membershipOf;
         // Whether the client already knows `userId` is a bot. True only when
         // it knows; "false" means "not known to be one", never "is a human".
@@ -130,10 +133,16 @@ public:
 
     // ── actions (called from QML) ──────────────────────────────────────────
 
-    // Send the invite for `userId` into `roomId`. Refuses locally, without a
-    // request, only for the cases the server cannot answer usefully: a
-    // malformed id, and a human who is already joined (see the header).
-    // `roomName` is copy only — it never reaches the wire.
+    // Send the invite for `userId` into `roomId`. The only thing refused
+    // locally, without spending a request, is a structurally malformed id —
+    // everything else is the server's answer to give. (An already-joined
+    // target used to be refused here too; see the header and invite().)
+    //
+    // `roomName` is copy only and is currently unread: it was the channel
+    // name in that refusal. Kept because the reply handlers onInvited/
+    // onFailed take it for the same reason and the dialog passes it to all
+    // three, so dropping it from one would make the surface asymmetric for
+    // no gain.
     Q_INVOKABLE void invite(const QString& roomId, const QString& userId,
                             const QString& roomName = {});
 

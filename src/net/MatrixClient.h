@@ -462,11 +462,12 @@ signals:
 
     // ── Channel invite replies ────────────────────────────────────────────
     //
-    // The server answers `{}` for both halves of the success case — a human
-    // left at membership 'invite' and a bot joined outright — and there is no
-    // field that says which it did. So there is one signal, and the copy that
-    // has to distinguish them does it from what the client already knows (see
-    // ChannelInviteModel::noticeFor).
+    // The server answers `{}` for every shape of the success case — a human
+    // left at membership 'invite', a bot joined outright, and (since server
+    // a19fd10) an already-joined target for whom nothing was written at all
+    // — and there is no field that says which it did. So there is one signal,
+    // and the copy claims only what is true of all three; see
+    // ChannelInviteModel::noticeFor.
     void inviteSucceeded(const QString& roomId, const QString& userId);
     // `status` is the HTTP status (0 for a transport failure) and `error` the
     // server's decoded message. Both are needed: handle_invite answers six

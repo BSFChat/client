@@ -154,18 +154,26 @@ QString ChannelInviteModel::noticeFor(const QString& userId,
     // gated on MANAGE_BOTS; this dialog is gated on MANAGE_CHANNELS, and
     // neither implies the other).
     //
-    // So there are two sentences, not three. When we know, we say what
-    // happened. When we do not, we say what happened for BOTH kinds rather
-    // than asserting the human case and being wrong in front of someone
-    // watching a bot appear instantly. The server returns `{}` for both and
-    // cannot be asked which it did.
+    // When we know it is a bot, we say what happened, because "it is already
+    // here, there is nothing to accept" is the surprising part for anyone
+    // arriving from Discord and it is true of every bot outcome.
+    //
+    // When we do NOT know, we say only that they were added, and nothing
+    // about what happens next. Three outcomes reach this line and the server
+    // answers `{}` for all of them and cannot be asked which it did: a person
+    // who now has an invite to accept, a bot that joined on the spot, and —
+    // since the server stopped demoting a joined member — someone who was
+    // already in the channel and for whom nothing at all was written. The old
+    // copy named the first two ("a person sees the invite next time they
+    // connect; a bot is already in the channel") and was a flat lie for the
+    // third. A sentence that covers all three says nothing useful, so this
+    // says the one thing that is true in every case and stops.
     if (hooks.isKnownBot && hooks.isKnownBot(userId)) {
         return who + QStringLiteral(" is a bot, so it has joined ") + were
              + QStringLiteral(" already — no invite to accept.");
     }
     return QStringLiteral("Added ") + who + QStringLiteral(" to ") + were
-         + QStringLiteral(". A person sees the invite next time they connect; "
-                          "a bot is already in the channel.");
+         + QStringLiteral(".");
 }
 
 void ChannelInviteModel::reset()
@@ -177,6 +185,7 @@ void ChannelInviteModel::reset()
 void ChannelInviteModel::invite(const QString& roomId, const QString& userId,
                                 const QString& roomName)
 {
+    Q_UNUSED(roomName)   // see the declaration: copy for a refusal that went
     setNoticeText({});
 
     if (roomId.isEmpty()) {
@@ -196,27 +205,20 @@ void ChannelInviteModel::invite(const QString& roomId, const QString& userId,
         return;
     }
 
-    // "Already here" is refused HERE and nowhere else, because the server does
-    // not refuse it. For a bot it is a documented writeless 200, which would
-    // leave the dialog announcing a join that did not happen. For a human it
-    // is worse than a no-op: handle_invite writes membership 'invite' over the
-    // existing 'join', which demotes a member who was already in the channel
-    // and, until they join again, takes them out of the roster everyone else
-    // sees. Nobody asking to add a member is asking for that.
+    // There was a local "already here" refusal here, reading the cached
+    // roster, because handle_invite used to write membership 'invite' over an
+    // existing 'join' — demoting a member who was already in the channel and
+    // taking them out of everyone else's roster until they joined again.
+    // Server a19fd10 (fix/invite-no-demote) makes that case a writeless 200,
+    // the same answer the bot path always gave, so there is nothing left to
+    // protect against and the request always goes to the server now.
     //
-    // The roster is a cache and it can be stale, so this only ever fires on a
-    // membership the client has actually seen. An unknown user falls through
-    // to the server, which is the right way round: refusing on a cache miss
-    // would make the dialog unusable on a fresh connection.
-    if (hooks.membershipOf) {
-        const QString membership = hooks.membershipOf(roomId, trimmed);
-        if (membership == QLatin1String("join")) {
-            setErrorText(nameFor(trimmed) + QStringLiteral(" is already in ")
-                         + channelPhrase(roomName) + QStringLiteral("."));
-            return;
-        }
-    }
-
+    // Do not reinstate it. It was never reliable: the roster is a cache, a
+    // miss fell straight through to the bug, so all it ever decided was
+    // whether the dialog said "already in" or announced a success — the same
+    // click, two different answers, depending on what the client happened to
+    // have seen. noticeFor()'s success copy is outcome-neutral for exactly
+    // this reason, so a no-op reads true.
     if (!hooks.invite) {
         setErrorText(QStringLiteral("Not connected to this server."));
         return;
