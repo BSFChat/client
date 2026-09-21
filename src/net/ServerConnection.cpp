@@ -2243,6 +2243,8 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
     }
     m_voiceEngine = new VoiceEngine(m_client, this);
     m_voiceEngine->setLocalUserId(m_userId);
+    if (m_settings)
+        m_voiceEngine->setVideoSmoothingMs(m_settings->videoSmoothingMs());
 
     // All remote video — decoded RTP frames and legacy JPEG stills —
     // lands on the registry's per-peer sinks; QML VideoOutputs attach to
@@ -2957,6 +2959,14 @@ void ServerConnection::setSettings(Settings* settings)
         // one people will believe they have turned on while it is not.
         connect(settings, &Settings::voiceRelayModeChanged,
                 this, &ServerConnection::applyVoiceRelayMode);
+#ifdef BSFCHAT_VOICE_ENABLED
+        // Video smoothing applies to streams already playing: the user
+        // drags the slider while watching and judges the result.
+        connect(settings, &Settings::videoSmoothingMsChanged, this, [this]() {
+            if (m_voiceEngine && m_settings)
+                m_voiceEngine->setVideoSmoothingMs(m_settings->videoSmoothingMs());
+        });
+#endif
     }
 }
 

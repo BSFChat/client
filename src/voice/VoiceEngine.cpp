@@ -338,20 +338,22 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
     // RTP video receive: reassembled access units → per-peer decoder.
     connect(peer, &PeerConnectionManager::videoFrameReceived,
             this, [this, userId](int streamId, const QByteArray& au, bool loss,
-                                 int codec) {
+                                 int codec, qint64 mediaTimeUs) {
                 // S-18: the codec comes from the payload type the AU
                 // arrived under. recvPipeline() rebuilds the decoder
                 // when it changes, so a sender switching H.264 ↔ H.265
                 // mid-stream needs nothing else here.
                 recvPipeline(userId, streamId, VideoCodecKind(codec))
                     ->submitAccessUnit(au, /*keyframeHint=*/false,
-                                       /*lossSuspected=*/loss);
+                                       /*lossSuspected=*/loss, mediaTimeUs);
             });
     // Lossless tier: AV1 temporal units off the reliable channel.
     connect(peer, &PeerConnectionManager::losslessFrameReceived,
-            this, [this, userId](int streamId, const QByteArray& tu, bool kf) {
+            this, [this, userId](int streamId, const QByteArray& tu, bool kf,
+                                 qint64 mediaTimeUs) {
                 recvPipeline(userId, streamId, VideoCodecKind::Av1Lossless)
-                    ->submitAccessUnit(tu, kf);
+                    ->submitAccessUnit(tu, kf, /*lossSuspected=*/false,
+                                       mediaTimeUs);
             });
     // Peer PLI'd our send stream, or its track just opened — either
     // way the next frame we send must be an IDR (a late joiner can't
@@ -470,6 +472,13 @@ QVariantMap VoiceEngine::videoReceiveStats(const QString& userId,
     // The overlay names the codec the DECODER is actually running, not
     // the one we think the sender picked.
     out["codec"] = QString::fromLatin1(videoCodecName(pipeline->codec()));
+    // Playout smoothing, for the overlay: the ceiling in force, how long
+    // the last picture was actually held, the measured arrival jitter,
+    // and pictures skipped because a newer one was already due.
+    out["smoothingMaxMs"] = pipeline->playoutMaxDelayMs();
+    out["smoothingHeldMs"] = pipeline->playoutHeldMs();
+    out["jitterMs"] = pipeline->playoutJitterMs();
+    out["smoothingSkipped"] = quint64(pipeline->playoutSkipped());
     return out;
 }
 
@@ -698,7 +707,7 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
             // worth keeping, and its queued AUs would decode into the
             // cleared tile.
             if (auto* p = m_recvPipelines.take({userId, stream}))
-                p->deleteLater();
+                retireRecvPipeline(p);
         }
         qCInfo(logVoice, "peer %s stream %d %s", qPrintable(userId), stream,
               on ? "started" : "stopped");
@@ -922,6 +931,7 @@ VideoReceivePipeline* VoiceEngine::recvPipeline(const QString& userId, int strea
     }
     auto* pipeline = new VideoReceivePipeline(userId, VideoStreamId(streamId),
                                               codec, this);
+    pipeline->setPlayoutMaxDelayMs(m_videoSmoothingMs);
     m_recvPipelines[key] = pipeline;
     connect(pipeline, &VideoReceivePipeline::frameDecoded,
             this, &VoiceEngine::peerVideoFrameDecoded);
@@ -941,8 +951,25 @@ VideoReceivePipeline* VoiceEngine::recvPipeline(const QString& userId, int strea
 
 void VoiceEngine::dropRecvPipelines(const QString& userId) {
     for (int s = 0; s < kVideoStreamCount; ++s) {
-        if (auto* p = m_recvPipelines.take({userId, s})) p->deleteLater();
+        if (auto* p = m_recvPipelines.take({userId, s})) retireRecvPipeline(p);
     }
+}
+
+void VoiceEngine::retireRecvPipeline(VideoReceivePipeline* p) {
+    // With playout smoothing on, a pipeline holds up to a ceiling's worth
+    // of decoded pictures and releases them from a GUI-thread timer — and
+    // deleteLater() is not immediate, so that timer can still fire. Its
+    // frames would land in a tile the stream's stop has just blanked and
+    // mark it live again for the registry's 4 s timeout. Cut the output
+    // first; nothing a retired pipeline shows is wanted.
+    disconnect(p, &VideoReceivePipeline::frameDecoded, this, nullptr);
+    p->deleteLater();
+}
+
+void VoiceEngine::setVideoSmoothingMs(int ms) {
+    m_videoSmoothingMs = qMax(0, ms);
+    for (auto* p : std::as_const(m_recvPipelines))
+        if (p) p->setPlayoutMaxDelayMs(m_videoSmoothingMs);
 }
 
 void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId,

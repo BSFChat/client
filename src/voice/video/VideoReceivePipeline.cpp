@@ -5,6 +5,8 @@
 #include <QDateTime>
 #include <QLoggingCategory>
 
+#include <limits>
+
 Q_LOGGING_CATEGORY(logVideoRecv, "bsfchat.video.recv", QtWarningMsg)
 
 namespace {
@@ -55,6 +57,15 @@ VideoReceivePipeline::VideoReceivePipeline(const QString& userId,
     m_worker.moveToThread(&m_thread);
     m_thread.setObjectName(QStringLiteral("video-dec-%1").arg(userId.left(12)));
     m_thread.start();
+
+    // Presentation timer. PreciseTimer: the default CoarseTimer may fire
+    // up to 5% of the interval late, and a buffer that exists to put
+    // frames on an even cadence cannot be driven by an uneven clock.
+    m_playoutTimer.setSingleShot(true);
+    m_playoutTimer.setTimerType(Qt::PreciseTimer);
+    connect(&m_playoutTimer, &QTimer::timeout, this,
+            &VideoReceivePipeline::presentDue);
+    m_playoutElapsed.start();
 }
 
 VideoReceivePipeline::~VideoReceivePipeline() {
@@ -67,7 +78,8 @@ VideoReceivePipeline::~VideoReceivePipeline() {
 
 void VideoReceivePipeline::submitAccessUnit(const QByteArray& au,
                                             bool keyframeHint,
-                                            bool lossSuspected) {
+                                            bool lossSuspected,
+                                            qint64 mediaTimeUs) {
     m_rxFrames.fetch_add(1);
     m_rxBytes.fetch_add(quint64(au.size()));
     bool overflowed = false;
@@ -80,7 +92,7 @@ void VideoReceivePipeline::submitAccessUnit(const QByteArray& au,
             m_queue.clear();
             overflowed = true;
         }
-        m_queue.append({au, keyframeHint, lossSuspected});
+        m_queue.append({au, keyframeHint, lossSuspected, mediaTimeUs});
     }
     if (overflowed) {
         qCWarning(logVideoRecv, "[%s/%d] decode backlog dropped",
@@ -215,7 +227,20 @@ void VideoReceivePipeline::drainQueue() {
             m_decodedFrames.fetch_add(1);
             m_lastWidth.store(frame.width());
             m_lastHeight.store(frame.height());
-            emit frameDecoded(m_userId, int(m_streamId), frame);
+            if (queued.mediaTimeUs >= 0) frame.setStartTime(queued.mediaTimeUs);
+            if (m_playoutMaxDelayUs.load(std::memory_order_relaxed) > 0
+                && queued.mediaTimeUs >= 0) {
+                // Hand the picture to the GUI-thread playout buffer.
+                // Queued to `this`, which lives on the GUI thread: if the
+                // pipeline is destroyed first, Qt drops the invocation.
+                const qint64 media = queued.mediaTimeUs;
+                QMetaObject::invokeMethod(this, [this, frame, media]() {
+                    enqueueForPlayout(frame, media);
+                }, Qt::QueuedConnection);
+            } else {
+                // Smoothing off (or no timestamp): today's path, unchanged.
+                emit frameDecoded(m_userId, int(m_streamId), frame);
+            }
             break;
         case VideoDecoder::Result::NeedMore:
             break;
@@ -228,4 +253,65 @@ void VideoReceivePipeline::drainQueue() {
             break;
         }
     }
+}
+
+// ---- Playout (GUI thread) ------------------------------------------
+
+int VideoReceivePipeline::effectivePlayoutCeilingMs(VideoStreamId stream,
+                                                    int userMs) {
+    const int ms = qMax(0, userMs);
+    return stream == VideoStreamId::Camera ? qMin(ms, kCameraPlayoutCapMs) : ms;
+}
+
+void VideoReceivePipeline::setPlayoutMaxDelayMs(int ms) {
+    const int effective = effectivePlayoutCeilingMs(m_streamId, ms);
+    m_playoutMaxDelayUs.store(qint64(effective) * 1000);
+    m_playout.setMaxDelayUs(qint64(effective) * 1000);
+    if (effective == 0) {
+        // Switched off mid-stream: show the newest held picture now and
+        // forget the rest — the user asked for the lowest latency, and
+        // pictures already superseded are not worth a frame each.
+        m_playoutTimer.stop();
+        std::optional<QVideoFrame> newest;
+        while (auto f = m_playout.popDue(std::numeric_limits<qint64>::max()))
+            newest = std::move(f);
+        m_playout.clear();
+        if (newest) emit frameDecoded(m_userId, int(m_streamId), *newest);
+    }
+}
+
+qint64 VideoReceivePipeline::playoutNowUs() const {
+    return m_playoutClock ? m_playoutClock() : m_playoutElapsed.nsecsElapsed() / 1000;
+}
+
+void VideoReceivePipeline::enqueueForPlayout(const QVideoFrame& frame,
+                                             qint64 mediaTimeUs) {
+    // The ceiling can have dropped to zero while this was in flight from
+    // the worker; then it is simply late and goes straight out.
+    if (m_playoutMaxDelayUs.load(std::memory_order_relaxed) <= 0) {
+        emit frameDecoded(m_userId, int(m_streamId), frame);
+        return;
+    }
+    m_playout.push(frame, mediaTimeUs, playoutNowUs());
+    presentDue();
+}
+
+void VideoReceivePipeline::presentDue() {
+    // popDue returns the NEWEST due picture and counts the rest as
+    // skipped, so a timer that woke late costs frames, never latency.
+    if (auto f = m_playout.popDue(playoutNowUs()))
+        emit frameDecoded(m_userId, int(m_streamId), *f);
+    schedulePlayout();
+}
+
+void VideoReceivePipeline::schedulePlayout() {
+    const auto due = m_playout.nextDueUs();
+    if (!due) {
+        m_playoutTimer.stop();
+        return;
+    }
+    // Round UP to the next millisecond: waking a fraction early would
+    // find nothing due and cost a second wake-up.
+    const qint64 waitUs = qMax<qint64>(0, *due - playoutNowUs());
+    m_playoutTimer.start(int((waitUs + 999) / 1000));
 }

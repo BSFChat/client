@@ -1021,6 +1021,45 @@ Popup {
                         }
                     }
 
+                    // The one RECEIVE-side knob on this page: how much
+                    // delay the playout buffer may add to other people's
+                    // video to show it at an even pace. Worded as the
+                    // trade-off it is rather than as a buffer size; the
+                    // number is shown because it is a real latency cost.
+                    // Default and range are argued at
+                    // Settings::videoSmoothingMs().
+                    SettingRow {
+                        title: "Smoothness of others' video"
+                        description: "Holds incoming video back by up to this "
+                                   + "much so it plays at an even pace instead "
+                                   + "of stuttering when the network delivers "
+                                   + "frames in bursts. Only as much as needed "
+                                   + "is used. Off shows every frame the moment "
+                                   + "it arrives — lowest delay, choppiest. "
+                                   + "Camera video is limited to 100 ms so lips "
+                                   + "stay in sync with voices."
+                        RowLayout {
+                            spacing: Theme.sp.s3
+                            ThemedSlider {
+                                id: smoothingSlider
+                                implicitWidth: 200
+                                from: 0; to: 400; stepSize: 10
+                                value: appSettings.videoSmoothingMs
+                                onMoved: appSettings.videoSmoothingMs = Math.round(value)
+                            }
+                            Text {
+                                Layout.preferredWidth: 120
+                                text: appSettings.videoSmoothingMs === 0
+                                    ? "Off · lowest delay"
+                                    : "up to " + appSettings.videoSmoothingMs + " ms"
+                                font.family: Theme.fontMono
+                                font.pixelSize: Theme.fontSize.sm
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+                    }
+
                     InfoBanner {
                         icon: "signal"
                         text: "Settings apply live — moving a slider mid-share "

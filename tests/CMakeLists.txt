@@ -525,6 +525,75 @@ if(BSFCHAT_ENABLE_VOICE)
     endif()
 endif()
 
+# Receive-side playout buffer (VideoPlayoutBuffer) and its wiring into
+# VideoReceivePipeline: steady cadence under keyframe bursts, the ceiling
+# as a hard latency bound, zero = the pre-buffer path, loss and long gaps
+# without stalls, bounded under clock drift. The buffer cases run on a
+# fake clock; the pipeline cases use a stub decoder. The factory still
+# links the real backends, hence the same OpenH264 condition.
+if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
+    qt_add_executable(test_video_playout
+        test_video_playout.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoCodecFactory.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/FrameConverter.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/OpenH264Encoder.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/OpenH264Decoder.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoReceivePipeline.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoDecodeHealth.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
+    )
+    target_include_directories(test_video_playout PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${libyuv_SOURCE_DIR}/include)
+    target_compile_definitions(test_video_playout PRIVATE BSFCHAT_HAVE_OPENH264)
+    target_link_libraries(test_video_playout PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test
+        yuv openh264::openh264)
+    if(APPLE AND NOT IOS)
+        target_sources(test_video_playout PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm)
+        target_compile_definitions(test_video_playout PRIVATE BSFCHAT_HAVE_VIDEOTOOLBOX)
+        target_link_libraries(test_video_playout PRIVATE
+            "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo")
+    endif()
+    add_test(NAME test_video_playout COMMAND test_video_playout)
+    set_tests_properties(test_video_playout PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
+
+# Receive-cadence probe: measures, over the same real loopback RTP chain,
+# how irregularly video reaches the GUI thread and what the playout
+# buffer makes of it. A diagnostic, deliberately NOT an add_test — its
+# output is numbers for a human, and wall-clock timing on a shared runner
+# is exactly what CI cannot promise. Run `probe_video_cadence` (and
+# `probe_video_cadence decode`) by hand.
+if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
+    qt_add_executable(probe_video_cadence
+        probe_video_cadence.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/PeerConnectionManager.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoCodecFactory.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/FrameConverter.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/OpenH264Encoder.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/OpenH264Decoder.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoDecodeHealth.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
+    )
+    target_include_directories(probe_video_cadence PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${libyuv_SOURCE_DIR}/include)
+    target_compile_definitions(probe_video_cadence PRIVATE BSFCHAT_HAVE_OPENH264)
+    target_link_libraries(probe_video_cadence PRIVATE
+        bsfchat_protocol Qt6::Core Qt6::Gui Qt6::Multimedia
+        LibDataChannel::LibDataChannel yuv openh264::openh264)
+    if(APPLE AND NOT IOS)
+        target_sources(probe_video_cadence PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm)
+        target_compile_definitions(probe_video_cadence PRIVATE BSFCHAT_HAVE_VIDEOTOOLBOX)
+        target_link_libraries(probe_video_cadence PRIVATE
+            "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo")
+    endif()
+endif()
+
 # Video-player playback maths (qml/js/PlaybackMath.js), driven through a
 # QML test runner because that is where the code lives and where the app
 # calls it — a C++ copy of the same arithmetic would prove nothing about

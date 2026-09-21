@@ -1362,8 +1362,12 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
         // read-and-clear pairs exactly with the AU it corrupted.
         const bool loss = m_video[idx].lossPending.exchange(
             false, std::memory_order_relaxed);
-        QMetaObject::invokeMethod(this, [this, idx, au, loss, codec]() {
-            emit videoFrameReceived(idx, au, loss, int(codec));
+        // The sender writes captureTimeUs into this timestamp; it is the
+        // receiver's only record of WHEN the frame was captured, and the
+        // playout buffer schedules by it.
+        const qint64 mediaUs = m_video[idx].rxClock.toUs(info.timestamp);
+        QMetaObject::invokeMethod(this, [this, idx, au, loss, codec, mediaUs]() {
+            emit videoFrameReceived(idx, au, loss, int(codec), mediaUs);
         }, Qt::QueuedConnection);
     });
     track->onOpen([this, idx, alive = m_alive]() {
@@ -1514,6 +1518,11 @@ void PeerConnectionManager::setupLosslessChannel(std::shared_ptr<rtc::DataChanne
         if (stream < 0 || stream >= kVideoStreamCount) return;
         const uint8_t flags = std::to_integer<uint8_t>(data[1]);
         const bool keyframe = (flags & 0x1) != 0;
+        // [6..9] is the sender's capture time in ms (sendLosslessFrame).
+        // Every chunk of a frame carries the same value.
+        quint32 tsMs = 0;
+        for (int i = 6; i < 10; ++i)
+            tsMs = (tsMs << 8) | std::to_integer<uint8_t>(data[i]);
 
         // Chunked frame (flags 0x2): header grows by
         // [chunkIdx:u16][chunkTotal:u16]; payload chunks of one frame
@@ -1549,16 +1558,18 @@ void PeerConnectionManager::setupLosslessChannel(std::shared_ptr<rtc::DataChanne
 
             QByteArray tu = std::move(m_losslessAsm[stream]);
             m_losslessAsm[stream] = QByteArray();
-            QMetaObject::invokeMethod(this, [this, stream, tu, keyframe]() {
-                emit losslessFrameReceived(stream, tu, keyframe);
+            const qint64 mediaUs = m_losslessRxClock[stream].toUs(tsMs);
+            QMetaObject::invokeMethod(this, [this, stream, tu, keyframe, mediaUs]() {
+                emit losslessFrameReceived(stream, tu, keyframe, mediaUs);
             }, Qt::QueuedConnection);
             return;
         }
 
         QByteArray tu(reinterpret_cast<const char*>(data.data() + 10),
                       int(data.size() - 10));
-        QMetaObject::invokeMethod(this, [this, stream, tu, keyframe]() {
-            emit losslessFrameReceived(stream, tu, keyframe);
+        const qint64 mediaUs = m_losslessRxClock[stream].toUs(tsMs);
+        QMetaObject::invokeMethod(this, [this, stream, tu, keyframe, mediaUs]() {
+            emit losslessFrameReceived(stream, tu, keyframe, mediaUs);
         }, Qt::QueuedConnection);
     });
 }

@@ -338,7 +338,14 @@ Rectangle {
                         : kbps.toFixed(0) + " kbps")
                     + " · " + (ratio > 0 ? ratio.toFixed(0) + ":1" : "–")
                     + " · drops " + st.droppedAus
-                    + " · " + st.codec;
+                    + " · " + st.codec
+                    // Playout smoothing: how long the last frame was
+                    // held against the measured arrival jitter.
+                    + (st.smoothingMaxMs > 0
+                        ? " · held " + st.smoothingHeldMs + "/"
+                          + st.smoothingMaxMs + " ms (jitter "
+                          + st.jitterMs + ")"
+                        : " · smoothing off");
             }
         }
 

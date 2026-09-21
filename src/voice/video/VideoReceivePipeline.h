@@ -1,15 +1,19 @@
 #pragma once
 
 #include "voice/video/VideoCodec.h"
+#include "voice/video/VideoPlayoutBuffer.h"
 
 #include <QByteArray>
 #include <QList>
 #include <QMutex>
 #include <QObject>
+#include <QElapsedTimer>
 #include <QThread>
+#include <QTimer>
 #include <QVideoFrame>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 
 class VideoDecoder;
@@ -24,6 +28,22 @@ class VideoDecoder;
 // whole backlog is dropped and the stream re-enters at the next
 // keyframe, which keyframeNeeded() asks the sender to produce. Same
 // recovery path for decode errors after packet loss.
+//
+// PLAYOUT. With a smoothing ceiling above zero (Settings::
+// videoSmoothingMs, applied by VoiceEngine), decoded pictures do not go
+// straight out: they are handed back to this object's own (GUI) thread,
+// held in a VideoPlayoutBuffer and released on the sender's capture
+// cadence by a precise timer — see VideoPlayoutBuffer.h for why and how.
+// The timer lives on the GUI thread rather than the decode worker on
+// purpose: presentation happens there anyway (the registry and the
+// video sinks are GUI-thread objects), and a worker-thread timer would
+// be held up by every IDR decode it is supposed to be smoothing over.
+//
+// At ZERO the buffer is bypassed entirely and frameDecoded is emitted
+// from the worker the moment a picture decodes, exactly as before the
+// buffer existed. Access units without a media timestamp (mediaTimeUs
+// < 0) take the same bypass: with nothing to schedule by, holding them
+// would only add delay.
 class VideoReceivePipeline : public QObject {
     Q_OBJECT
 public:
@@ -41,8 +61,37 @@ public:
     // without decoding and the stream re-enters at the next keyframe,
     // because decoders (MF especially) error-conceal broken references
     // and report success, which paints smearing corruption on screen.
+    // `mediaTimeUs` is the sender's capture time for this unit (the
+    // unwrapped RTP timestamp, or the lossless header's clock), on the
+    // sender's clock — only differences between units are meaningful.
+    // Negative = unknown; the unit is then presented on arrival.
     void submitAccessUnit(const QByteArray& au, bool keyframeHint = false,
-                          bool lossSuspected = false);
+                          bool lossSuspected = false,
+                          qint64 mediaTimeUs = -1);
+
+    // Playout smoothing ceiling in ms; 0 = off (present on decode, the
+    // pre-buffer behaviour). GUI thread. Lowering it applies at once;
+    // turning it off releases the newest held picture immediately.
+    void setPlayoutMaxDelayMs(int ms);
+    int playoutMaxDelayMs() const { return int(m_playoutMaxDelayUs.load() / 1000); }
+
+    // The ceiling a user setting turns into for a given stream. Camera
+    // is capped for lip sync — see kCameraPlayoutCapMs.
+    static int effectivePlayoutCeilingMs(VideoStreamId stream, int userMs);
+
+    // Diagnostics for the stats overlay (GUI thread). Local only.
+    int playoutTargetMs() const { return int(m_playout.targetUs() / 1000); }
+    int playoutHeldMs() const { return int(m_playout.lastHeldUs() / 1000); }
+    int playoutJitterMs() const { return int(m_playout.jitterUs() / 1000); }
+    quint64 playoutSkipped() const {
+        return m_playout.stats().skippedLate + m_playout.stats().overflowed;
+    }
+
+    // Test seam: replace the playout clock (µs, monotonic). GUI thread,
+    // before the first frame.
+    void setPlayoutClockForTest(std::function<qint64()> clock) {
+        m_playoutClock = std::move(clock);
+    }
 
     // Cumulative receive counters, read by VoiceEngine's 500 ms
     // receiver-report tick and sent to the remote sender, which
@@ -96,6 +145,12 @@ signals:
 
 private:
     void drainQueue();   // worker thread
+    // GUI thread: a decoded picture arriving for playout, and the timer
+    // that releases held pictures when they fall due.
+    void enqueueForPlayout(const QVideoFrame& frame, qint64 mediaTimeUs);
+    void presentDue();
+    void schedulePlayout();
+    qint64 playoutNowUs() const;
     // Emit keyframeNeeded at most once per kKfRequestMinIntervalMs.
     // Under sustained loss every gap would otherwise fire a request,
     // and the sender counts request bursts as a congestion signal —
@@ -110,7 +165,12 @@ private:
     QObject m_worker;
 
     QMutex m_mutex;
-    struct QueuedAu { QByteArray data; bool keyframe = false; bool loss = false; };
+    struct QueuedAu {
+        QByteArray data;
+        bool keyframe = false;
+        bool loss = false;
+        qint64 mediaTimeUs = -1;
+    };
     QList<QueuedAu> m_queue;
     std::atomic<bool> m_drainQueued{false};
     std::atomic<quint64> m_rxFrames{0};
@@ -141,7 +201,35 @@ private:
     // The decoderUnavailable edge has been spent for this pipeline.
     bool m_decoderFailureAnnounced = false;
 
+    // Playout. The ceiling is atomic because the worker reads it to
+    // choose between the bypass and the buffer; everything else is
+    // GUI-thread only.
+    std::atomic<qint64> m_playoutMaxDelayUs{0};
+    VideoPlayoutBuffer<QVideoFrame> m_playout;
+    QTimer m_playoutTimer;
+    QElapsedTimer m_playoutElapsed;
+    std::function<qint64()> m_playoutClock;
+
     static constexpr int kMaxQueuedAus = 16;
     static constexpr qint64 kKfRequestMinIntervalMs = 700;
     static constexpr qint64 kDecoderRetryMs = 5000;
+
+public:
+    // Lip-sync cap on the CAMERA stream's smoothing ceiling.
+    //
+    // Audio and video are not synchronised in this client: audio rides
+    // its own data channel with a 20 ms sequence counter and no capture
+    // clock, video rides RTP with one, and nothing relates the two. What
+    // CAN be reasoned about is the direction of the error. The audio
+    // JitterBuffer holds 40-200 ms (60 ms initially) and video, before
+    // this buffer, held nothing — so camera video already ran AHEAD of
+    // the voice it belongs to by roughly the audio buffer's depth. Delay
+    // added to video first cancels that lead and then turns into audio
+    // leading video, which is the direction people notice first (ITU-R
+    // BT.1359: audio early by more than ~45 ms is detectable; late by up
+    // to ~125 ms is not). 60 ms of audio depth + 45 ms of tolerance =
+    // ~100 ms. Beyond that the smoother camera would visibly break lip
+    // sync, so the camera ceiling stops there whatever the setting says.
+    // Screen share has no lips; it takes the user's full ceiling.
+    static constexpr int kCameraPlayoutCapMs = 100;
 };

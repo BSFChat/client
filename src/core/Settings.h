@@ -318,6 +318,15 @@ public:
     int cameraTargetKbps() const;
     void setCameraTargetKbps(int kbps);
 
+    // Received-video smoothing: the most delay (ms) the playout buffer
+    // may add to other people's video to show it at an even pace.
+    // 0 = off, frames shown the moment they decode (lowest latency).
+    // Envelope 0..400, default 150 — the reasoning is at
+    // Settings::videoSmoothingMs() in Settings.cpp.
+    Q_PROPERTY(int videoSmoothingMs READ videoSmoothingMs WRITE setVideoSmoothingMs NOTIFY videoSmoothingMsChanged)
+    int videoSmoothingMs() const;
+    void setVideoSmoothingMs(int ms);
+
     // Voice mode: "open" ⇒ open mic (current behaviour), "ptt" ⇒
     // push-to-talk. In PTT the mic only transmits while the user is
     // holding down `pttKeySequence`.
@@ -378,6 +387,7 @@ signals:
     void cameraFpsChanged();
     void cameraMaxWidthChanged();
     void cameraTargetKbpsChanged();
+    void videoSmoothingMsChanged();
     void voiceModeChanged();
     void pttKeySequenceChanged();
     void voiceRelayModeChanged();
