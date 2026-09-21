@@ -2,6 +2,7 @@
 #include "voice/AudioPacketQueue.h"
 #include "voice/AudioWorker.h"
 #include "core/AudioDeviceStatus.h"
+#include "core/AudioGainSettings.h"
 
 #include <QAudioDevice>
 #include <QMediaDevices>
@@ -24,6 +25,25 @@ AudioEngine::AudioEngine(QObject* parent)
             this, [this]() { pushDeviceSnapshot(true, true); });
     connect(m_mediaDevices, &QMediaDevices::audioOutputsChanged,
             this, [this]() { pushDeviceSnapshot(false, true); });
+
+    // Volume and AGC. Read when a session starts (see start()) and
+    // followed live, so a slider moved mid-call is heard as it moves.
+    auto& gains = bsfchat::AudioGainSettings::instance();
+    connect(&gains, &bsfchat::AudioGainSettings::changed,
+            this, &AudioEngine::applyGainSettings);
+    connect(&gains, &bsfchat::AudioGainSettings::peerGainChanged, this,
+            [this](const QString& userId, float gain) {
+                if (m_worker) m_queue->pushPeerGain(userId, gain);
+            });
+}
+
+void AudioEngine::applyGainSettings()
+{
+    if (!m_worker) return;
+    const auto& gains = bsfchat::AudioGainSettings::instance();
+    m_worker->setInputGain(gains.inputGain());
+    m_worker->setOutputGain(gains.outputGain());
+    m_worker->setAutoGain(gains.autoGain());
 }
 
 void AudioEngine::pushDeviceSnapshot(bool input, bool live)
@@ -72,6 +92,9 @@ bool AudioEngine::start() {
     // rather than one applyMicGate() later.
     m_worker->setMuted(m_muted);
     m_worker->setDeafened(m_deafened);
+    // Same for volume: in force from the first frame, so a boosted or
+    // attenuated user never hears one frame at unity on join.
+    applyGainSettings();
     m_worker->moveToThread(m_thread);
     // Canonical worker-object idiom: the worker deletes itself inside
     // its own thread once the event loop exits, so we never destroy an
@@ -131,6 +154,14 @@ bool AudioEngine::start() {
         teardownThread();
         return false;
     }
+
+    // Per-user volumes for everyone who has one. Pushed from here, on the
+    // GUI thread, before this function returns — and so ahead of any
+    // packet from those users, since receivePeerAudio() runs on this
+    // thread too. The first pump drains them before its first render.
+    const auto& peerGains = bsfchat::AudioGainSettings::instance().peerGains();
+    for (auto it = peerGains.cbegin(); it != peerGains.cend(); ++it)
+        m_queue->pushPeerGain(it.key(), it.value());
     return true;
 }
 

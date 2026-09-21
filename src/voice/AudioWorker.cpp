@@ -32,6 +32,8 @@ AudioWorker::AudioWorker(std::shared_ptr<AudioPacketQueue> queue,
     , m_mixer(new AudioMixer(kFrameSamples))
 {
     m_captureFrame.assign(kFrameSamples, 0);
+    m_captureFloat.assign(kFrameSamples, 0.0f);
+    m_captureOut.assign(kFrameSamples, 0);
     m_playbackFrame.assign(kFrameSamples, 0);
     m_peerFrame.assign(kFrameSamples, 0);
 }
@@ -124,6 +126,14 @@ bool AudioWorker::startDevices() {
     m_playbackPendingHead = 0;
     m_peerLevelFrames = 0;
 
+    m_captureFrames = 0;
+    m_captureLimitedFrames = 0;
+    m_playbackFrames = 0;
+    m_playbackLimitedFrames = 0;
+    m_levelSummaryLogged = false;
+    m_appliedInputGain = m_inputGain.load(std::memory_order_relaxed);
+    m_appliedOutputGain = m_outputGain.load(std::memory_order_relaxed);
+
     // The timer is only a pump: it decides *when* we look at the sink,
     // never how much we write. Wall-clock timers drift against the
     // sound card's 48kHz crystal, so clocking playback off a 20ms
@@ -161,6 +171,10 @@ void AudioWorker::stopDevices() {
         return;
     }
     m_started = false;
+
+    // What the call actually sounded like, level-wise, before the state
+    // that knows is torn down.
+    if (m_captureFrames > 0 || m_playbackFrames > 0) logLevelSummary("session end");
 
     // Stop the pump first: nothing below should run concurrently with a
     // render, and the timer is the only thing that triggers one.
@@ -250,6 +264,15 @@ void AudioWorker::onMicDataReady() {
                     kFrameBytes);
         const int16_t* pcm = m_captureFrame.data();
 
+        // ----- Gain control -----
+        // AGC, input volume, limiter. See processCaptureFrame(). What is
+        // encoded below is m_captureOut; the level meter still reads the
+        // raw frame (times the input volume) — see the note there.
+        bsfchat::voice::int16ToFloat(pcm, m_captureFloat.data(), kFrameSamples);
+        processCaptureFrame();
+        bsfchat::voice::floatToInt16(m_captureFloat.data(), m_captureOut.data(),
+                                     kFrameSamples);
+
         // ----- Mic transmit level -----
         // Linear RMS in int16 units, normalized to 0..1 by int16 max, then
         // log-compressed so the UI isn't dominated by the top 10 dB.
@@ -264,7 +287,16 @@ void AudioWorker::onMicDataReady() {
                 double s = pcm[i];
                 acc += s * s;
             }
-            float rms = static_cast<float>(std::sqrt(acc / kFrameSamples) / 32768.0);
+            // The RAW mic level scaled by the input volume, deliberately
+            // not the AGC's output. The speaking ring lights at 0.05, i.e.
+            // about -57 dBFS on this scale, and the AGC may legitimately
+            // lift a quiet mic's room tone to -40 dBFS: measured after the
+            // AGC, the ring would be lit permanently for exactly the users
+            // the AGC helps most. The input volume IS included, so turning
+            // yourself down to 0% also turns the ring off — the ring must
+            // not claim you are heard when you are not.
+            float rms = static_cast<float>(std::sqrt(acc / kFrameSamples) / 32768.0)
+                        * m_appliedInputGain;
             // Map to a perceptual 0..1: everything below ~-60 dBFS → 0,
             // above ~-10 dBFS → 1, linear-in-dB in between.
             constexpr float kFloor = -60.0f;
@@ -291,7 +323,8 @@ void AudioWorker::onMicDataReady() {
         // ----- Encode + transmit -----
         if (!muted) {
             unsigned char opusBuf[kMaxOpusPacket];
-            int encoded = opus_encode(m_encoder, pcm, kFrameSamples, opusBuf, kMaxOpusPacket);
+            int encoded = opus_encode(m_encoder, m_captureOut.data(), kFrameSamples,
+                                      opusBuf, kMaxOpusPacket);
 
             if (encoded > 0) {
                 // Build frame: 2 bytes sequence + 2 bytes timestamp_delta + opus data
@@ -331,6 +364,72 @@ void AudioWorker::onMicDataReady() {
     }
 }
 
+void AudioWorker::processCaptureFrame() {
+    float* buf = m_captureFloat.data();
+
+    const bool agcOn = !kPlatformVoiceProcessing
+                       && m_autoGain.load(std::memory_order_relaxed);
+    if (agcOn) {
+        m_agc.processFrame(buf, kFrameSamples);
+    } else if (m_agcRan) {
+        // Switched off mid-call: fade from whatever gain the AGC had
+        // reached back to unity over this one frame, instead of stepping
+        // there, and forget its state so switching it back on starts
+        // from unity rather than from a stale level estimate.
+        bsfchat::voice::applyGainRamp(
+            buf, kFrameSamples, bsfchat::voice::dbToLinear(m_agc.gainDb()), 1.0f);
+        m_agc.reset();
+    }
+    m_agcRan = agcOn;
+
+    const float inGain = m_inputGain.load(std::memory_order_relaxed);
+    bsfchat::voice::applyGainRamp(buf, kFrameSamples, m_appliedInputGain, inGain);
+    m_appliedInputGain = inGain;
+
+    // Always, including when muted: the limiter's 2 ms delay line must
+    // stay continuous with the mic, or unmuting would splice in a stale
+    // tail.
+    m_captureLimiter.process(buf, kFrameSamples);
+
+    ++m_captureFrames;
+    if (m_captureLimiter.lastBlockMinGain() < 0.999f) ++m_captureLimitedFrames;
+
+    // One line, once, ten seconds of speech into the call — the earliest
+    // point at which the numbers mean anything. Not per-frame logging:
+    // the flag makes it fire at most once per session.
+    if (!m_levelSummaryLogged && agcOn
+        && m_agc.speechFrames() >= kLevelSummarySpeechFrames) {
+        m_levelSummaryLogged = true;
+        logLevelSummary("after 10 s of speech");
+    }
+}
+
+void AudioWorker::logLevelSummary(const char* when) {
+    // Levels only, to the local log. Nothing here leaves the machine.
+    //
+    // Raw speech percentiles are what the microphone delivered BEFORE any
+    // gain, over frames the AGC classified as speech — the number that
+    // answers "was the mic simply quiet". Only collected while the AGC
+    // runs; on Android, or with AGC switched off, they read -120.
+    const double capLimited = m_captureFrames > 0
+        ? 100.0 * double(m_captureLimitedFrames) / double(m_captureFrames) : 0.0;
+    const double playLimited = m_playbackFrames > 0
+        ? 100.0 * double(m_playbackLimitedFrames) / double(m_playbackFrames) : 0.0;
+    qInfo("[voice] levels (%s): %.1f s speech, raw speech p10/p50/p90 "
+          "%.0f/%.0f/%.0f dBFS, noise floor %.0f dBFS, AGC %s gain %+.1f dB, "
+          "input vol x%.2f, capture limiter active %.1f%% of frames; "
+          "output vol x%.2f, playback limiter active %.1f%% of frames",
+          when, double(m_agc.speechFrames()) * 0.02,
+          double(m_agc.rawSpeechPercentileDbfs(0.1f)),
+          double(m_agc.rawSpeechPercentileDbfs(0.5f)),
+          double(m_agc.rawSpeechPercentileDbfs(0.9f)),
+          double(m_agc.noiseFloorDbfs()),
+          kPlatformVoiceProcessing ? "platform"
+              : (m_autoGain.load(std::memory_order_relaxed) ? "on" : "off"),
+          double(m_agc.gainDb()), double(m_appliedInputGain), capLimited,
+          double(m_appliedOutputGain), playLimited);
+}
+
 void AudioWorker::ingestQueuedPackets() {
     if (!m_queue) return;
     m_queue->drain(m_inbox);
@@ -354,6 +453,13 @@ void AudioWorker::ingestQueuedPackets() {
                            static_cast<int>(item.data.size()));
             break;
         }
+        case AudioPacketQueue::Kind::PeerGain:
+            // operator[] inserts on first sight of a peer — one small
+            // allocation per user whose volume is changed, on a user
+            // action, the same class of event as jitterFor() creating a
+            // buffer. Never per frame.
+            m_peerGains[item.peerId].target = item.gain;
+            break;
         }
     }
     m_inbox.clear();
@@ -400,7 +506,16 @@ void AudioWorker::renderMixedFrame(int16_t* out) {
                 const int16_t a = v < 0 ? static_cast<int16_t>(-(v + 1)) : v;
                 if (a > peak) peak = a;
             }
-            m_mixer->add(m_peerFrame.data(), kFrameSamples);
+            // Per-user volume, ramped from where the last frame ended.
+            // find() on an unshared QMap neither allocates nor detaches.
+            float from = 1.0f, to = 1.0f;
+            auto g = m_peerGains.find(it.key());
+            if (g != m_peerGains.end()) {
+                from = g->applied;
+                to = g->target;
+                g->applied = to;
+            }
+            m_mixer->add(m_peerFrame.data(), kFrameSamples, from, to);
         }
         const float raw = static_cast<float>(peak) / 32768.0f;
         const float prev = m_peerLevels.value(it.key(), 0.0f);
@@ -426,7 +541,13 @@ void AudioWorker::renderMixedFrame(int16_t* out) {
 
     if (emitLevels) m_peerLevelFrames = 0;
 
-    const auto& mixed = m_mixer->finish();
+    // Output volume, then the limiter, inside finish(). The limiter runs
+    // even while deafened (below) so its delay line stays continuous.
+    const float outGain = m_outputGain.load(std::memory_order_relaxed);
+    const auto& mixed = m_mixer->finish(m_appliedOutputGain, outGain);
+    m_appliedOutputGain = outGain;
+    ++m_playbackFrames;
+    if (m_mixer->lastLimiterMinGain() < 0.999f) ++m_playbackLimitedFrames;
     if (m_deafened.load(std::memory_order_relaxed)) {
         // Still pop every jitter buffer above (so they keep draining
         // and don't resync-thrash while deafened) — just don't play it.
@@ -663,6 +784,11 @@ void AudioWorker::openSource(const QAudioDevice& device) {
     // Parented to `this`, which lives on the audio thread, and
     // constructed here — so the source and the QIODevice it hands
     // back are both affine to the thread that will drive them.
+    // A different microphone: its noise floor, level history and the
+    // tail in the limiter's delay line all belonged to the old one. The
+    // AGC re-learns within its 0.5 s warm-up, starting from unity.
+    m_agc.reset();
+    m_captureLimiter.reset();
     m_audioSource = new QAudioSource(device, m_format, this);
     m_captureDevice = m_audioSource->start();
     if (m_captureDevice) {
@@ -696,6 +822,7 @@ void AudioWorker::closeSource() {
 
 void AudioWorker::openSink(const QAudioDevice& device) {
     if (device.isNull()) return;
+    m_mixer->resetLimiter();
     m_audioSink = new QAudioSink(device, m_format, this);
     // Must be set before start(). Bounds the amount of audio the
     // device holds, and therefore the floor on output latency.

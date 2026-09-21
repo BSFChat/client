@@ -33,11 +33,19 @@ class Settings : public QObject {
     // member list. Stored as a string so Theme.variant can bind directly.
     Q_PROPERTY(QString layoutVariant READ layoutVariant WRITE setLayoutVariant NOTIFY layoutVariantChanged)
     // Audio: preferred input/output device description strings (human-readable
-    // names from QMediaDevices). Empty == system default. Volume is 0..100.
+    // names from QMediaDevices). Empty == system default.
+    //
+    // Volumes are percentages, 0..200, 100 = unchanged; square-law taper,
+    // so 200 = +12 dB. They are APPLIED (they were not before 2026-09-21)
+    // through AudioGainSettings — see core/AudioVolume.h for the taper and
+    // the one-time reset of values stored while the sliders did nothing.
+    // autoGainControl switches the capture AGC (voice/VoiceGain.h); it has
+    // no effect on Android, where the OS's own voice processing is used.
     Q_PROPERTY(QString audioInputDevice READ audioInputDevice WRITE setAudioInputDevice NOTIFY audioInputDeviceChanged)
     Q_PROPERTY(QString audioOutputDevice READ audioOutputDevice WRITE setAudioOutputDevice NOTIFY audioOutputDeviceChanged)
     Q_PROPERTY(int inputVolume READ inputVolume WRITE setInputVolume NOTIFY inputVolumeChanged)
     Q_PROPERTY(int outputVolume READ outputVolume WRITE setOutputVolume NOTIFY outputVolumeChanged)
+    Q_PROPERTY(bool autoGainControl READ autoGainControl WRITE setAutoGainControl NOTIFY autoGainControlChanged)
     // Notifications (placeholder — not yet routed through the OS; setting
     // persists so the UI keeps the user's choice across restarts.)
     Q_PROPERTY(bool notificationsEnabled READ notificationsEnabled WRITE setNotificationsEnabled NOTIFY notificationsEnabledChanged)
@@ -166,6 +174,13 @@ public:
     void setInputVolume(int v);
     int outputVolume() const;
     void setOutputVolume(int v);
+    bool autoGainControl() const;
+    void setAutoGainControl(bool on);
+    // Per-user playback volume, same 0..200 scale, keyed by user id.
+    // Local to this device and never sent anywhere — it is how loud YOU
+    // hear someone, not how loud they are.
+    Q_INVOKABLE int peerVolume(const QString& userId) const;
+    Q_INVOKABLE void setPeerVolume(const QString& userId, int percent);
     bool notificationsEnabled() const;
     void setNotificationsEnabled(bool v);
     bool notificationSound() const;
@@ -415,6 +430,7 @@ signals:
     void audioOutputDeviceChanged();
     void inputVolumeChanged();
     void outputVolumeChanged();
+    void autoGainControlChanged();
     void notificationsEnabledChanged();
     void notificationSoundChanged();
     void showMemberListChanged();

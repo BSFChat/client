@@ -295,6 +295,25 @@ if(BSFCHAT_ENABLE_VOICE)
     set_tests_properties(test_audio_handoff PROPERTIES TIMEOUT 120)
 endif()
 
+# Voice level control: the capture AGC, the look-ahead limiter, the
+# mixer that now ends in it, the volume-percentage taper and its one-time
+# migration, and an Opus round trip showing the codec and jitter buffer
+# preserve level. PURE DSP: synthetic buffers in, samples out. It must
+# never construct a QAudioSource/QAudioSink or open any device — on a dev
+# Mac each new binary that touches the microphone is a fresh macOS
+# permission prompt on the owner's screen.
+if(BSFCHAT_ENABLE_VOICE)
+    qt_add_executable(test_voice_gain
+        test_voice_gain.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/VoiceGain.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/AudioMixer.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/JitterBuffer.cpp
+    )
+    target_include_directories(test_voice_gain PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_voice_gain PRIVATE Qt6::Core Qt6::Test opus)
+    add_test(NAME test_voice_gain COMMAND test_voice_gain)
+endif()
+
 # Live audio device selection: which device the voice pipeline should be
 # on, given the saved preference, the current device set and what is
 # already open — plus the debounce that collapses a Bluetooth connect's
@@ -696,6 +715,7 @@ qt_add_executable(test_identity_provider_url
     ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AudioDeviceStatus.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AudioGainSettings.cpp
     # ServerConnection::openMediaExternally downloads with an Authorization
     # header and opens the local copy, so the downloader comes with it.
     ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
@@ -750,6 +770,7 @@ qt_add_executable(test_error_surface_guards
     ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AudioDeviceStatus.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AudioGainSettings.cpp
     ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
@@ -795,6 +816,7 @@ qt_add_executable(test_composer_upload_lock
     ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AudioDeviceStatus.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AudioGainSettings.cpp
     ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp

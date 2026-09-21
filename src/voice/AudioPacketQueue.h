@@ -52,12 +52,18 @@ public:
     enum class Kind : uint8_t {
         Audio,       // one wire frame (4-byte header + Opus) for peerId
         RemovePeer,  // destroy peerId's jitter buffer
+        // Per-user volume for peerId, in `gain` (linear). Rides this queue
+        // rather than a side channel for the same reason RemovePeer does:
+        // it is then observed in order against that peer's audio, and it
+        // reaches the audio thread without a lock on the render path.
+        PeerGain,
     };
 
     struct Item {
         Kind kind = Kind::Audio;
         QString peerId;
         QByteArray data;
+        float gain = 1.0f;  // PeerGain only
     };
 
     // 400 items is ~8 s of a single peer's audio, or ~1 s across eight
@@ -78,6 +84,8 @@ public:
     // always accepted — dropping one would leak a jitter buffer, and
     // there can only ever be as many outstanding as there are peers.
     bool push(Kind kind, const QString& peerId, const QByteArray& data = {});
+    // Control item, always accepted, like RemovePeer.
+    void pushPeerGain(const QString& peerId, float gain);
 
     // Consumer side (audio thread). Moves the entire backlog into `out`
     // with a deque swap, so the lock is held for O(1) and the caller
