@@ -1,6 +1,7 @@
 #pragma once
 
 #include "voice/video/VideoCodec.h"
+#include "voice/video/VideoSendStats.h"
 
 #include <QMutex>
 #include <QObject>
@@ -35,6 +36,12 @@ public:
     void forceKeyframe() { m_forceKeyframe.store(true); }
     void setBitrate(int targetKbps, int maxKbps);
 
+    // Cumulative encode-side counters for videosend::Accumulator. The
+    // capture-side fields are left zero for the owner to fill. Reading
+    // resets the per-window worst-frame time, so call it once per
+    // evaluation. Thread-safe (atomics; no lock taken).
+    videosend::Counters takeCounters();
+
 signals:
     // Emitted from the worker thread (queued to receivers).
     void encodedFrameReady(int streamId, const EncodedFrame& frame);
@@ -54,6 +61,19 @@ private:
     bool m_configDirty = true;
     std::atomic<bool> m_processQueued{false};
     std::atomic<bool> m_forceKeyframe{false};
+
+    // Send-side instrumentation (VideoSendStats.h). `superseded` is the
+    // latest-wins slot overflowing — a frame the worker never got to,
+    // the most direct evidence that encode, not capture or network, is
+    // what is costing frames.
+    std::atomic<quint64> m_submitted{0};
+    std::atomic<quint64> m_superseded{0};
+    std::atomic<quint64> m_encoded{0};
+    std::atomic<quint64> m_bytes{0};
+    std::atomic<quint64> m_packets{0};
+    std::atomic<quint64> m_keyframes{0};
+    std::atomic<quint64> m_workUs{0};
+    std::atomic<quint32> m_maxWorkUs{0};
 
     // Worker-thread-only state.
     std::unique_ptr<VideoEncoder> m_encoder;

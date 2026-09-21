@@ -1,5 +1,6 @@
 #include "voice/PeerConnectionManager.h"
 
+#include "voice/video/RtpPacerCore.h"
 #include "voice/video/RtpSeqTracker.h"
 #include <QDateTime>
 #include <mutex>
@@ -7,7 +8,10 @@
 #include <QLoggingCategory>
 #include <QRandomGenerator>
 #include <chrono>
+#include <condition_variable>
+#include <memory>
 #include <queue>
+#include <thread>
 
 // Mirror VoiceEngine's category. Each TU owns its own QLoggingCategory
 // instance — Qt coalesces them by name at runtime, so enabling
@@ -363,7 +367,8 @@ private:
     const uint8_t m_ptH265;
 };
 
-// Token-bucket RTP pacer with a BOUNDED backlog (S-15).
+// Token-bucket RTP pacer with a BOUNDED backlog (S-15), draining on its
+// OWN clock (2026-09-21).
 //
 // Replaces rtc::PacingHandler, whose budget is fixed at construction.
 // That fixed 20 Mbps sat BELOW what the encoder is allowed to produce
@@ -373,7 +378,7 @@ private:
 // misconfigured-high bitrate the send queue — and with it the viewer's
 // latency — grew without limit while the picture stayed "smooth".
 //
-// Two changes fix that:
+// Two changes fixed that:
 //   * the ceiling is live-settable and is driven from the encoder's own
 //     max bitrate (VoiceEngine::setVideoSendCeiling), so pacing only
 //     ever shaves bursts, never throttles the steady state;
@@ -383,114 +388,176 @@ private:
 //     a keyframe (which now actually re-fires, see S-2) instead of
 //     replaying stale pictures late.
 //
-// Leftovers ride out on the next outgoing() call rather than a timer —
-// libdatachannel's scheduler lives in a private header. With the
-// ceiling tracking the encoder that path is reached only by an IDR
-// burst, and the next access unit is one frame interval away.
+// …and a third, the one behind "sharp but very choppy": leftovers used
+// to ride out only on the NEXT outgoing() call, capping throughput at
+// ceiling × fps × 0.05 — the full story and the numbers are in
+// RtpPacerCore.h, which now holds the arithmetic so it can be tested
+// with a fake clock. Here a drain thread wakes every kTickMs while
+// anything is queued, so throughput is the ceiling at any frame rate:
+// a B-byte IDR leaves in B / ceiling (150 KB at a 6 Mbps ceiling:
+// ~200 ms; at 30 Mbps: ~40 ms) and the frames behind it follow at line
+// rate. outgoing() still sends whatever the bucket allows at once, so a
+// P-frame with budget available gains no delay at all.
+//
+// Lifetime, which is the delicate part:
+//   * The send callback libdatachannel hands to outgoing() holds only a
+//     weak reference to its track (impl/track.cpp) and may be called
+//     later — the stock PacingHandler stores it and calls it from the
+//     library's thread pool the same way. It throws once the track has
+//     closed; that ends the drain for the queue it had.
+//   * All state lives in a shared_ptr the drain thread co-owns, and the
+//     thread is DETACHED. The destructor only raises an atomic flag and
+//     notifies — it takes no lock and joins nothing. A joining destructor
+//     could deadlock: the drain thread may be inside the send callback
+//     waiting on the track's mutex, and nothing guarantees the handler's
+//     last reference is not dropped by a thread holding that mutex. With
+//     the flag, the thread notices within one idle wait (kIdleWaitMs),
+//     drops the callback and exits, freeing the state.
 class PacedRtpSender final : public rtc::MediaHandler {
 public:
-    explicit PacedRtpSender(int ceilingKbps) { setCeilingKbps(ceilingKbps); }
+    explicit PacedRtpSender(int ceilingKbps) : m_state(std::make_shared<State>()) {
+        setCeilingKbps(ceilingKbps);
+        std::thread([s = m_state] { drainLoop(s); }).detach();
+    }
+
+    ~PacedRtpSender() override {
+        m_state->stop.store(true);
+        m_state->wake.notify_all();
+    }
 
     // Thread-safe; called from the Qt main thread while outgoing()
     // runs on libdatachannel's network thread.
     void setCeilingKbps(int kbps) {
-        m_bytesPerSecond.store(double(std::max(kbps, kMinCeilingKbps))
-                                   * 1000.0 / 8.0,
-                               std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(m_state->mutex);
+        m_state->core.setCeilingKbps(kbps);
     }
 
     quint64 droppedPackets() const {
-        return m_dropped.load(std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(m_state->mutex);
+        return m_state->core.dropped();
     }
 
     void outgoing(rtc::message_vector& messages,
                   const rtc::message_callback& send) override {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        const double rate = m_bytesPerSecond.load(std::memory_order_relaxed);
-        const auto now = std::chrono::steady_clock::now();
-        if (m_started) {
-            const double elapsed =
-                std::chrono::duration<double>(now - m_lastRun).count();
-            m_budget = std::min(m_budget + elapsed * rate,
-                                rate * kMaxBurstSeconds);
-        } else {
-            // First burst starts with a full bucket: a share's opening
-            // IDR must not be held back behind an empty budget.
-            m_budget = rate * kMaxBurstSeconds;
-            m_started = true;
-        }
-        m_lastRun = now;
-
-        for (auto& m : messages) {
-            if (!m) continue;
-            m_backlogBytes += m->size();
-            m_queue.push(std::move(m));
-        }
-        messages.clear();
-
-        const size_t maxBacklog =
-            size_t(std::max(rate * kMaxBacklogSeconds, kMinBacklogBytes));
-        quint64 droppedNow = 0;
-        while (m_backlogBytes > maxBacklog && !m_queue.empty()) {
-            m_backlogBytes -= m_queue.front()->size();
-            m_queue.pop();
-            m_dropped.fetch_add(1, std::memory_order_relaxed);
-            ++droppedNow;
-        }
-        // Never silent: a pacer that discards media is the difference
-        // between "the share is slow" and "the share never appears", and
-        // the first version of this class dropped keyframes without a word.
-        if (droppedNow > 0) {
-            const auto sinceLog = std::chrono::duration<double>(now - m_lastDropLog).count();
-            if (!m_everLoggedDrop || sinceLog > 2.0) {
-                m_everLoggedDrop = true;
-                m_lastDropLog = now;
-                qCWarning(logVoicePc, " RTP pacer dropped %llu packet(s) (backlog cap %zu bytes, "
-                          "ceiling %.0f kbps, %llu dropped in total)",
-                          static_cast<unsigned long long>(droppedNow), maxBacklog,
-                          rate * 8.0 / 1000.0,
-                          static_cast<unsigned long long>(m_dropped.load(std::memory_order_relaxed)));
+        State& s = *m_state;
+        bool leftovers = false;
+        {
+            std::lock_guard<std::mutex> lock(s.mutex);
+            if (s.stop.load()) { messages.clear(); return; }
+            s.send = send;
+            const qint64 now = nowUs();
+            quint64 droppedNow = 0;
+            for (auto& m : messages) {
+                if (!m) continue;
+                const size_t size = m->size();
+                droppedNow += s.core.push(now, std::move(m), size);
             }
+            messages.clear();
+            if (droppedNow) logDrop(s, droppedNow);
+            drainLocked(s, now);
+            leftovers = !s.core.empty();
         }
-
-        while (!m_queue.empty() && m_budget > 0) {
-            auto msg = std::move(m_queue.front());
-            m_queue.pop();
-            const double size = double(msg->size());
-            m_backlogBytes -= msg->size();
-            send(std::move(msg));
-            m_budget -= size;
-        }
+        if (leftovers) s.wake.notify_one();
     }
 
 private:
-    // A pacer that can throttle below this would be a bug generator,
-    // not a smoother.
-    static constexpr int kMinCeilingKbps = 1000;
-    // Bucket depth: how much of a burst may leave back to back.
-    static constexpr double kMaxBurstSeconds = 0.05;
-    // Hard bound on queued-but-unsent bytes, in seconds of budget.
-    // Must comfortably hold a whole keyframe. A 1080p screen IDR is
-    // routinely 150-400 KB (field: 133 KB and 293 KB at 7.7 Mbps), and at
-    // that bitrate the old 0.25 s cap was ~250 KB — so the leading packets
-    // of every large IDR were dropped as "oldest", the viewer could never
-    // assemble a complete keyframe, asked for another, and lost that one
-    // the same way: a share that never appears. The cap still bounds
-    // latency on a misconfigured-high bitrate; it must never bite on a
-    // single access unit.
-    static constexpr double kMaxBacklogSeconds = 1.0;
-    static constexpr double kMinBacklogBytes = 4.0 * 1024 * 1024;
+    using Core = RtpPacerCore<rtc::message_ptr>;
+    struct State {
+        mutable std::mutex mutex;
+        std::condition_variable wake;
+        std::atomic<bool> stop{false};
+        Core core;
+        rtc::message_callback send;
+        std::chrono::steady_clock::time_point lastDropLog{};
+        std::chrono::steady_clock::time_point lastQueueLog{};
+        bool everLoggedDrop = false;
+    };
 
-    std::atomic<double> m_bytesPerSecond{0.0};
-    std::atomic<quint64> m_dropped{0};
-    std::mutex m_mutex;
-    std::queue<rtc::message_ptr> m_queue;
-    size_t m_backlogBytes = 0;
-    double m_budget = 0.0;
-    bool m_started = false;
-    std::chrono::steady_clock::time_point m_lastRun;
-    std::chrono::steady_clock::time_point m_lastDropLog;
-    bool m_everLoggedDrop = false;
+    // Drain tick. 5 ms quantises an IDR's spread finely (≈ 3.8 KB per
+    // tick at 6 Mbps, ~3 packets) and costs 200 wake-ups a second only
+    // while something is queued — normally the few tens of milliseconds
+    // after each keyframe.
+    static constexpr int kTickMs = 5;
+    // Idle wait: how quickly a destroyed pacer's thread notices and
+    // exits when there was nothing to wake it.
+    static constexpr int kIdleWaitMs = 200;
+    // Head-of-line wait worth a (rate-limited) warning. With the ceiling
+    // tracking the encoder this stays at about one IDR's send time;
+    // sustained queueing means the encoder is out-running its own max
+    // bitrate, which is the case the backlog cap exists for.
+    static constexpr qint64 kQueueWarnUs = 250000;
+
+    static qint64 nowUs() {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    // Caller holds s.mutex.
+    static void drainLocked(State& s, qint64 now) {
+        if (!s.send) return;
+        s.core.drain(now, [&s](rtc::message_ptr&& m) {
+            try {
+                s.send(std::move(m));
+                return true;
+            } catch (const std::exception&) {
+                // "Track is not open": nothing queued can ever be sent on
+                // this callback. A reopened track calls outgoing() again.
+                s.send = nullptr;
+                return false;
+            }
+        });
+    }
+
+    static void logDrop(State& s, quint64 droppedNow) {
+        // Never silent: a pacer that discards media is the difference
+        // between "the share is slow" and "the share never appears", and
+        // the first version of this class dropped keyframes without a word.
+        const auto now = std::chrono::steady_clock::now();
+        if (s.everLoggedDrop
+            && std::chrono::duration<double>(now - s.lastDropLog).count() <= 2.0)
+            return;
+        s.everLoggedDrop = true;
+        s.lastDropLog = now;
+        qCWarning(logVoicePc, " RTP pacer dropped %llu packet(s) (backlog cap "
+                  "%.0f bytes, ceiling %.0f kbps, %llu dropped in total)",
+                  static_cast<unsigned long long>(droppedNow),
+                  std::max(s.core.bytesPerSecond() * Core::kMaxBacklogSeconds,
+                           Core::kMinBacklogBytes),
+                  s.core.bytesPerSecond() * 8.0 / 1000.0,
+                  static_cast<unsigned long long>(s.core.dropped()));
+    }
+
+    static void drainLoop(std::shared_ptr<State> sp) {
+        State& s = *sp;
+        std::unique_lock<std::mutex> lock(s.mutex);
+        while (!s.stop.load()) {
+            if (s.core.empty() || !s.send) {
+                s.wake.wait_for(lock, std::chrono::milliseconds(kIdleWaitMs));
+                continue;
+            }
+            s.wake.wait_for(lock, std::chrono::milliseconds(kTickMs));
+            if (s.stop.load()) break;
+            const qint64 now = nowUs();
+            drainLocked(s, now);
+            const qint64 waited = s.core.headWaitUs(now);
+            const auto wall = std::chrono::steady_clock::now();
+            if (waited > kQueueWarnUs
+                && std::chrono::duration<double>(wall - s.lastQueueLog).count() > 5.0) {
+                s.lastQueueLog = wall;
+                qCWarning(logVoicePc, " RTP pacer queue: head waited %lld ms, "
+                          "%zu bytes queued at %.0f kbps",
+                          static_cast<long long>(waited / 1000),
+                          s.core.backlogBytes(),
+                          s.core.bytesPerSecond() * 8.0 / 1000.0);
+            }
+        }
+        // Drop the track callback and anything queued on this thread,
+        // not in whichever thread destroyed the handler.
+        s.send = nullptr;
+        s.core.clear();
+    }
+
+    std::shared_ptr<State> m_state;
 };
 } // namespace
 

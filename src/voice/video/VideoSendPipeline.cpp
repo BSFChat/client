@@ -3,6 +3,7 @@
 #include "voice/video/FrameConverter.h"
 #include "voice/video/VideoEncoder.h"
 
+#include <QElapsedTimer>
 #include <QLoggingCategory>
 
 Q_LOGGING_CATEGORY(logVideoSend, "bsfchat.video.send", QtWarningMsg)
@@ -51,10 +52,28 @@ void VideoSendPipeline::setBitrate(int targetKbps, int maxKbps) {
     }, Qt::QueuedConnection);
 }
 
+videosend::Counters VideoSendPipeline::takeCounters() {
+    videosend::Counters c;
+    c.submitted = m_submitted.load(std::memory_order_relaxed);
+    c.superseded = m_superseded.load(std::memory_order_relaxed);
+    c.encoded = m_encoded.load(std::memory_order_relaxed);
+    c.bytes = m_bytes.load(std::memory_order_relaxed);
+    c.packets = m_packets.load(std::memory_order_relaxed);
+    c.keyframes = m_keyframes.load(std::memory_order_relaxed);
+    c.workUs = m_workUs.load(std::memory_order_relaxed);
+    c.maxWorkUs = m_maxWorkUs.exchange(0, std::memory_order_relaxed);
+    return c;
+}
+
 void VideoSendPipeline::submitFrame(const QVideoFrame& frame, qint64 captureTimeUs) {
+    m_submitted.fetch_add(1, std::memory_order_relaxed);
     {
         QMutexLocker lock(&m_mutex);
-        // Latest-wins: an unprocessed older frame is simply replaced.
+        // Latest-wins: an unprocessed older frame is simply replaced —
+        // and counted, because a replaced frame is a frame the encoder
+        // could not keep up with.
+        if (m_pendingFrame.isValid())
+            m_superseded.fetch_add(1, std::memory_order_relaxed);
         m_pendingFrame = frame;
         m_pendingTimeUs = captureTimeUs;
     }
@@ -96,6 +115,12 @@ void VideoSendPipeline::processPending() {
         m_processQueued.store(false);
     }
     if (!frame.isValid()) return;
+    // Convert + encode, the whole per-frame cost this worker carries.
+    // Session (re)creation is included on purpose: it is paid in the
+    // same thread, and a rebuild storm is exactly what the rate
+    // controller's sender dwell exists to prevent.
+    QElapsedTimer work;
+    work.start();
 
     // Lossless takes the identity-I444 path at FULL capture size —
     // any scaling would be lossy, defeating the tier's whole point.
@@ -155,5 +180,19 @@ void VideoSendPipeline::processPending() {
         return;
     }
     out.codec = m_sessionConfig.codec;
+
+    const quint64 us = quint64(work.nsecsElapsed() / 1000);
+    m_encoded.fetch_add(1, std::memory_order_relaxed);
+    m_bytes.fetch_add(quint64(out.data.size()), std::memory_order_relaxed);
+    m_packets.fetch_add(videosend::packetsFor(out.data.size()),
+                        std::memory_order_relaxed);
+    if (out.keyframe) m_keyframes.fetch_add(1, std::memory_order_relaxed);
+    m_workUs.fetch_add(us, std::memory_order_relaxed);
+    const quint32 us32 = quint32(qMin<quint64>(us, 0xffffffffu));
+    quint32 prevMax = m_maxWorkUs.load(std::memory_order_relaxed);
+    while (us32 > prevMax
+           && !m_maxWorkUs.compare_exchange_weak(prevMax, us32,
+                                                 std::memory_order_relaxed)) {}
+
     emit encodedFrameReady(int(m_streamId), out);
 }

@@ -7,8 +7,10 @@
 #include <QTimer>
 #include <QPointer>
 #include <QVariantList>
+#include <QVariantMap>
 
 #include "voice/video/LatestWinsWorker.h"
+#include "voice/video/VideoSendStats.h"
 
 #include <memory>
 
@@ -57,6 +59,12 @@ class ScreenShareController : public QObject {
     // Refreshed on demand — call refreshWindows() when the picker
     // opens; the OS window list churns too much to watch live.
     Q_PROPERTY(QVariantList availableWindows READ availableWindows NOTIFY windowsChanged)
+    // Local send-side statistics for a debug surface: what capture and
+    // encode actually achieved over the last ~500 ms window, which one
+    // is the bottleneck, and what the rate controller made of it (see
+    // VideoSendStats.h). Updated each rate-controller tick while
+    // sharing. Never leaves this machine.
+    Q_PROPERTY(QVariantMap sendStats READ sendStats NOTIFY sendStatsChanged)
 
 public:
     explicit ScreenShareController(QObject* parent = nullptr);
@@ -67,6 +75,7 @@ public:
     QVideoSink* previewSink() const { return m_sink; }
     QVariantList availableScreens() const;
     QVariantList availableWindows() const { return m_windowList; }
+    QVariantMap sendStats() const { return m_sendStatsMap; }
 
     // Quality-preset application. The controller resolves the user's
     // Settings pref and the active server's max on every start(), so
@@ -141,6 +150,7 @@ signals:
     void lastErrorChanged();
     void screensChanged();
     void windowsChanged();
+    void sendStatsChanged();
 
 private:
 #ifdef Q_OS_MACOS
@@ -177,6 +187,22 @@ private:
     // server).
     QList<QMetaObject::Connection> m_voiceRoomConns;
     QVideoFrame m_pendingFrame;
+    // When m_pendingFrame was captured. RTP timestamps derive from the
+    // value handed to the encoder, and they used to be stamped at PUSH
+    // time — up to a frame interval after capture, varying tick to
+    // tick — so the receiver saw the push timer's jitter written into
+    // the stream's own clock. Stamped on arrival now.
+    qint64 m_pendingFrameUs = 0;
+    // Capture-side counters for videosend::Counters (GUI thread only).
+    quint64 m_statCaptured = 0;
+    quint64 m_statOverwritten = 0;
+    quint64 m_statPushTicks = 0;
+    quint64 m_statEmptyTicks = 0;
+    videosend::Accumulator m_sendStats;
+    QVariantMap m_sendStatsMap;
+    // The frame rate the capture/push cadence is currently running at
+    // (0 = not yet applied). See applyCaptureCadence().
+    int m_cadenceFps = 0;
     // Off-GUI-thread helpers (S-10): the capture QImage -> QVideoFrame
     // copy and the legacy JPEG encode. Declared after everything they
     // touch so destruction joins their threads first.
@@ -187,6 +213,17 @@ private:
     QString m_lastError;
 
     void pushFrameToPeers();
+    // Throttle timer slot. On macOS frames are pushed as they ARRIVE
+    // (see the frameReady handler), so the timer only drives the push
+    // on the Qt capture paths.
+    void onThrottleTick();
+    // A frame landed in m_pendingFrame: count it (and whether it
+    // displaced one no push had consumed) and stamp its capture time.
+    void notePendingFrame(const QVideoFrame& frame, qint64 captureUs);
+    // Run capture and push at `fps` — the rate controller's output,
+    // not just the static setting. Only acts when the rate changes.
+    void applyCaptureCadence(int fps);
+    videosend::Window sampleSendWindow(int askedFps);
     void setTransmitting(bool transmitting);
     // Single place the active flag flips. Forces an IDR on the way up
     // (S-11 — a restarted share reuses the encoder session, so its

@@ -217,6 +217,53 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
         TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
+# Send-side frame-rate awareness: the capture/encode instrumentation
+# (VideoSendStats), frame-damage grading, knee memory and the sender
+# capacity policy in VideoRateController. The controller cases are pure
+# and step a fake clock; one case drives the real encode worker, hence
+# the same software-H.264 condition as test_video_pipeline. Kept apart
+# from that target so it does not compile the receive pipeline.
+if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
+    qt_add_executable(test_video_send_rate
+        test_video_send_rate.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoCodecFactory.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/FrameConverter.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/OpenH264Encoder.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/OpenH264Decoder.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoRateController.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoSendPipeline.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoDecodeHealth.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
+    )
+    target_include_directories(test_video_send_rate PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${libyuv_SOURCE_DIR}/include)
+    target_compile_definitions(test_video_send_rate PRIVATE BSFCHAT_HAVE_OPENH264)
+    target_link_libraries(test_video_send_rate PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test
+        yuv openh264::openh264)
+    if(APPLE AND NOT IOS)
+        target_sources(test_video_send_rate PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm)
+        target_compile_definitions(test_video_send_rate PRIVATE
+            BSFCHAT_HAVE_VIDEOTOOLBOX)
+        target_link_libraries(test_video_send_rate PRIVATE
+            "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo")
+    endif()
+    if(BSFCHAT_HAVE_AOM)
+        target_sources(test_video_send_rate PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/voice/video/AomLosslessEncoder.cpp
+            ${CMAKE_SOURCE_DIR}/src/voice/video/AomLosslessDecoder.cpp)
+        target_compile_definitions(test_video_send_rate PRIVATE BSFCHAT_HAVE_AOM)
+        target_link_libraries(test_video_send_rate PRIVATE aom)
+        target_include_directories(test_video_send_rate PRIVATE
+            ${libaom_SOURCE_DIR} ${libaom_BINARY_DIR})
+    endif()
+    add_test(NAME test_video_send_rate COMMAND test_video_send_rate)
+    set_tests_properties(test_video_send_rate PROPERTIES
+        TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
+
 # Voice receive jitter buffer: reordering, PLC on gaps, late/duplicate
 # discard and uint16 sequence wraparound. Pure logic — no Qt Multimedia,
 # no audio device, no network. Links opus for the decoder handle.
