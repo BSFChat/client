@@ -94,6 +94,17 @@ ScreenShareController::ScreenShareController(QObject* parent)
             emit lastErrorChanged();
             stop();
         });
+    // The picked window/display is gone or the user stopped sharing
+    // from the menu bar: end cleanly. Not captureFailed — its advice
+    // (reset the TCC grant) is wrong here; re-picking is the fix.
+    connect(m_mac, &MacScreenCapturer::shareEnded, this,
+        [this](const QString& message) {
+            if (!message.isEmpty()) {
+                m_lastError = message;
+                emit lastErrorChanged();
+            }
+            stop();
+        });
     // S-12: showPicker() starts the capture throttle up front so the
     // first frame after a selection isn't delayed by a timer tick. If
     // the user cancels instead, that timer was left running forever,
