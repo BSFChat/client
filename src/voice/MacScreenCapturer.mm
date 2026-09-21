@@ -1,4 +1,5 @@
 #include "voice/MacScreenCapturer.h"
+#include "voice/ScreenCapturePolicy.h"
 
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -14,7 +15,13 @@
 //
 // For source selection we hook SCContentSharingPicker (macOS 14+) —
 // the same native UI Zoom / Discord use. The picker delivers an
-// SCContentFilter we retain and use as the capture target.
+// SCContentFilter we retain and use as the capture target, and it is
+// the ONLY capture target: this file never calls
+// CGRequestScreenCaptureAccess and never builds a filter from
+// SCShareableContent. Both used to be here and both invite the
+// Screen Recording prompts macOS shows picker-less apps — see
+// ScreenCapturePolicy.h (tests/test_screen_capture_policy.cpp guards
+// the source against their return).
 
 @interface MacPickerObserver : NSObject <SCContentSharingPickerObserver>
 @property (nonatomic, assign) MacScreenCapturer *owner;
@@ -79,42 +86,49 @@ MacScreenCapturer::~MacScreenCapturer() {
     }
 }
 
-void MacScreenCapturer::ensureScreenAccess()
-{
-    // SCScreenshotManager NEVER triggers the Screen Recording TCC
-    // prompt — it just fails with "user declined" when no valid grant
-    // exists (fresh install, tccutil reset, or a stale grant from a
-    // differently-signed build). CGRequestScreenCaptureAccess is the
-    // only API that asks. With no TCC entry it shows the real system
-    // prompt; with a denied/stale entry it opens System Settings —
-    // either way, once per app run is the right amount of nagging.
-    if (CGPreflightScreenCaptureAccess()) return;
-    if (m_accessRequested) return;
-    m_accessRequested = true;
-    qInfo("[mac-capture] no screen-capture grant — requesting");
-    CGRequestScreenCaptureAccess();
-}
-
+// There used to be an ensureScreenAccess() here, called from
+// showPicker() and start(): CGPreflightScreenCaptureAccess(), and when
+// that was false, CGRequestScreenCaptureAccess() "once per app run".
+// It was added because SCScreenshotManager never prompts, on the
+// theory that capture needs the legacy grant. On the picker path it
+// does not: the picker's filter carries access to the selection, and a
+// false preflight is a NORMAL state for an app that only uses the
+// picker — so the request prompted for a permission the app never
+// needed, on the first share of a launch, for an owner who had already
+// allowed BSFChat (0.0.44, macOS 26.3). Do not re-add it. A picker
+// capture that fails is handled in handleCaptureFailure(): end the
+// share and let the user pick again.
 void MacScreenCapturer::showPicker()
 {
-    if (@available(macOS 14.0, *)) {
-        ensureScreenAccess();
-        m_pickerPending = true;
-        SCContentSharingPicker* picker = [SCContentSharingPicker sharedPicker];
-        picker.active = YES;
-        // Allow all source kinds (display / window / application).
-        SCContentSharingPickerConfiguration* cfg =
-            [[SCContentSharingPickerConfiguration alloc] init];
-        cfg.allowedPickerModes = SCContentSharingPickerModeSingleDisplay
-                               | SCContentSharingPickerModeSingleWindow
-                               | SCContentSharingPickerModeMultipleWindows
-                               | SCContentSharingPickerModeSingleApplication;
-        picker.defaultConfiguration = cfg;
-        [picker present];
-    } else {
-        qWarning("[mac-capture] showPicker requires macOS 14+; "
-                 "falling back to primary display capture");
-        start(0, 5);
+    bool pickerAvailable = false;
+    if (@available(macOS 14.0, *)) pickerAvailable = true;
+    switch (screencap::routeStart(pickerAvailable)) {
+    case screencap::StartRoute::PresentPicker:
+        if (@available(macOS 14.0, *)) {
+            m_pickerPending = true;
+            SCContentSharingPicker* picker = [SCContentSharingPicker sharedPicker];
+            picker.active = YES;
+            // Allow all source kinds (display / window / application).
+            SCContentSharingPickerConfiguration* cfg =
+                [[SCContentSharingPickerConfiguration alloc] init];
+            cfg.allowedPickerModes = SCContentSharingPickerModeSingleDisplay
+                                   | SCContentSharingPickerModeSingleWindow
+                                   | SCContentSharingPickerModeMultipleWindows
+                                   | SCContentSharingPickerModeSingleApplication;
+            picker.defaultConfiguration = cfg;
+            [cfg release];
+            [picker present];
+        }
+        return;
+    case screencap::StartRoute::Unsupported:
+        // Unreachable in shipped builds (minos 14.0), and there is no
+        // pre-picker capture path to fall back to: SCScreenshotManager
+        // is 14+ too. Say so instead of ticking a timer that grabs
+        // nothing, which is what the old "primary display" fallback did.
+        qWarning("[mac-capture] screen sharing requires macOS 14+");
+        emit shareEnded(QStringLiteral(
+            "Screen sharing needs macOS 14 (Sonoma) or later."));
+        return;
     }
 }
 
@@ -136,6 +150,7 @@ void MacScreenCapturer::_onPickerSelection(SCContentFilter* filter)
         m_filter = nullptr;
     }
     m_filter = (SCContentFilter*)[(id)filter retain];
+    ++m_selection;
     qInfo("[mac-capture] picker returned a filter; starting capture");
     // Fresh share attempt — re-arm the failure notifier so a capture
     // problem surfaces again (it latches per attempt, not per app run).
@@ -160,19 +175,17 @@ void MacScreenCapturer::_onPickerCancel()
     emit pickerCancelled();
 }
 
-void MacScreenCapturer::start(uint32_t displayID, int fps)
+void MacScreenCapturer::start(uint32_t /*displayID*/, int fps)
 {
     if (m_active) return;
-    ensureScreenAccess();
-    m_displayID = displayID ? displayID : CGMainDisplayID();
-    m_fps = fps > 0 ? fps : 5;
-    m_timer->setInterval(1000 / m_fps);
-    m_timer->start();
-    m_active = true;
-    m_consecutiveFails = 0;
-    m_failureNotified = false;
-    qInfo("[mac-capture] start displayID=%u fps=%d", m_displayID, m_fps);
-    grabWithFilter();
+    // No direct display capture: this entry point used to start a timer
+    // with no filter, which made every tick build a display-wide filter
+    // from SCShareableContent — capture outside the picker, the access
+    // macOS 15+ periodically makes the user re-approve. Picking is the
+    // only way in.
+    setFps(fps);
+    qInfo("[mac-capture] start(fps=%d) → picker", m_fps);
+    showPicker();
 }
 
 void MacScreenCapturer::setFps(int fps)
@@ -197,12 +210,50 @@ void MacScreenCapturer::stop()
         [(id)m_filter release];
         m_filter = nullptr;
     }
+    ++m_selection;
     qInfo("[mac-capture] stop");
 }
 
-// Helper that does the actual SCScreenshotManager capture — either
-// with the user-picked filter, or by building one from the main
-// display as a fallback.
+
+void MacScreenCapturer::endShare(const QString& message)
+{
+    stop();
+    emit shareEnded(message);
+}
+
+void MacScreenCapturer::handleCaptureFailure(quint64 selection,
+                                             bool isScreenCaptureKitError,
+                                             long code, const QString& desc)
+{
+    if (!m_active) return;
+    // A straggler from a selection the user has since replaced (or a
+    // share that has since stopped) says nothing about the current one.
+    if (selection != m_selection) return;
+    const auto kind = screencap::classifyFailure(isScreenCaptureKitError, code);
+    switch (screencap::onCaptureFailure(kind, ++m_consecutiveFails,
+                                        kMaxConsecutiveFails,
+                                        m_failureNotified)) {
+    case screencap::FailureAction::KeepTrying:
+        return;
+    case screencap::FailureAction::EndShare:
+        qInfo("[mac-capture] selection ended (code %ld) — ending share", code);
+        endShare(QString::fromUtf8(screencap::selectionEndedMessage(code)));
+        return;
+    case screencap::FailureAction::ReportFailure:
+        // Per-call failures (e.g. "user declined") must surface after a
+        // few consecutive misses rather than retrying silently forever.
+        // This reports; it does NOT go looking for a wider permission —
+        // the controller ends the share and the user can pick again.
+        m_failureNotified = true;
+        emit captureFailed(desc);
+        return;
+    }
+}
+
+// The actual SCScreenshotManager capture, always with the filter the
+// user picked. With no filter there is nothing to capture: the
+// display-wide SCShareableContent fallback that used to live here was
+// capture outside the picker (see ScreenCapturePolicy.h).
 void MacScreenCapturer::grabWithFilter()
 {
     static int s_tick = 0;
@@ -211,32 +262,41 @@ void MacScreenCapturer::grabWithFilter()
         qInfo("[mac-capture] tick #%d filter=%p active=%d",
               s_tick, (void*)m_filter, int(m_active));
     }
+    bool pickerAvailable = false;
+    if (@available(macOS 14.0, *)) pickerAvailable = true;
+    switch (screencap::routeTick(pickerAvailable, m_filter != nullptr)) {
+    case screencap::TickRoute::CaptureWithPickerFilter:
+        break;
+    case screencap::TickRoute::Skip:
+    case screencap::TickRoute::Unsupported:
+        return;
+    }
+
     if (@available(macOS 14.0, *)) {
-        __block SCContentFilter* filter = m_filter;
+        const quint64 selection = m_selection;
         auto completion = ^(CGImageRef image, NSError *err) {
             if (err || !image) {
                 static int s_failCount = 0;
                 ++s_failCount;
                 if (s_failCount <= 3 || s_failCount % 25 == 0) {
-                    qWarning("[mac-capture] captureImage failed #%d: %s",
+                    qWarning("[mac-capture] captureImage failed #%d: %s (%ld)",
                              s_failCount,
                              err ? err.localizedDescription.UTF8String
-                                 : "nil image");
+                                 : "nil image",
+                             err ? long(err.code) : 0L);
                 }
-                // Per-call failures (stale TCC grant, revoked mid-share)
-                // must surface after a few consecutive misses — the
-                // completion runs off-thread, so count on the Qt thread.
+                // The completion runs off-thread; count and decide on
+                // the Qt thread.
+                const bool isSCK = err
+                    && [err.domain isEqualToString:SCStreamErrorDomain];
+                const long code = err ? long(err.code) : 0L;
                 QString desc = err
                     ? QString::fromNSString(err.localizedDescription)
                     : QStringLiteral("capture returned no image");
-                QMetaObject::invokeMethod(this, [this, desc]() {
-                    if (!m_active) return;
-                    if (++m_consecutiveFails >= kMaxConsecutiveFails
-                        && !m_failureNotified) {
-                        m_failureNotified = true;
-                        emit captureFailed(desc);
-                    }
-                }, Qt::QueuedConnection);
+                QMetaObject::invokeMethod(this,
+                    [this, selection, isSCK, code, desc]() {
+                        handleCaptureFailure(selection, isSCK, code, desc);
+                    }, Qt::QueuedConnection);
                 return;
             }
             static int s_okCount = 0;
@@ -280,50 +340,10 @@ void MacScreenCapturer::grabWithFilter()
         SCStreamConfiguration *config = [[SCStreamConfiguration alloc] init];
         config.capturesAudio = NO;
         config.showsCursor = YES;
-
-        if (filter) {
-            // Config width/height will auto-match the filter's source.
-            [SCScreenshotManager captureImageWithFilter:filter
-                                           configuration:config
-                                       completionHandler:completion];
-            return;
-        }
-
-        // Fallback: build a display-wide filter from SCShareableContent.
-        uint32_t wantDisplayID = m_displayID;
-        [SCShareableContent getShareableContentWithCompletionHandler:
-            ^(SCShareableContent *content, NSError *error) {
-            if (error || !content || content.displays.count == 0) {
-                QString desc = error
-                    ? QString::fromNSString(error.localizedDescription)
-                    : QStringLiteral("no displays");
-                qWarning("[mac-capture] getShareableContent failed: %s",
-                         qUtf8Printable(desc));
-                static bool warned = false;
-                if (!warned) {
-                    warned = true;
-                    QMetaObject::invokeMethod(this, [this, desc]() {
-                        emit captureFailed(desc);
-                    }, Qt::QueuedConnection);
-                }
-                return;
-            }
-            SCDisplay *target = content.displays.firstObject;
-            for (SCDisplay *d in content.displays) {
-                if (d.displayID == wantDisplayID) { target = d; break; }
-            }
-            SCContentFilter *fallbackFilter =
-                [[SCContentFilter alloc] initWithDisplay:target
-                                        excludingWindows:@[]];
-            SCStreamConfiguration *cfg = [[SCStreamConfiguration alloc] init];
-            cfg.width = target.width;
-            cfg.height = target.height;
-            cfg.capturesAudio = NO;
-            cfg.showsCursor = YES;
-            [SCScreenshotManager captureImageWithFilter:fallbackFilter
-                                           configuration:cfg
-                                       completionHandler:completion];
-        }];
-        return;
+        // Config width/height will auto-match the filter's source.
+        [SCScreenshotManager captureImageWithFilter:(SCContentFilter*)m_filter
+                                       configuration:config
+                                   completionHandler:completion];
+        [config release];
     }
 }

@@ -965,3 +965,15 @@ target_link_libraries(test_channel_invite PRIVATE
     Qt6::Core Qt6::Test
 )
 add_test(NAME test_channel_invite COMMAND test_channel_invite)
+
+# macOS screen capture path selection + failure handling, and a source guard
+# on MacScreenCapturer.mm. Pure logic (voice/ScreenCapturePolicy.h is
+# header-only) plus a read of the .mm, so it builds and runs on every
+# platform and never touches ScreenCaptureKit — running a real capture on a
+# dev Mac pops the Screen Recording prompts this exists to prevent.
+qt_add_executable(test_screen_capture_policy test_screen_capture_policy.cpp)
+target_include_directories(test_screen_capture_policy PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_screen_capture_policy PRIVATE
+    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_screen_capture_policy PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_screen_capture_policy COMMAND test_screen_capture_policy)

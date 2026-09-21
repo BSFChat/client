@@ -610,9 +610,11 @@ if(BSFCHAT_HAVE_LIVEKIT)
     bsfchat_livekit_bundle_runtime(bsfchat-app)
 endif()
 
-# CoreGraphics gives us CGRequestScreenCaptureAccess to trigger the
-# macOS TCC prompt for Screen Recording — Qt's QScreenCapture won't
-# ask on its own.
+# ScreenCaptureKit + CoreGraphics back MacScreenCapturer (picker-selected
+# capture; CGImage conversion). It deliberately does NOT call
+# CGRequestScreenCaptureAccess any more — the picker needs no Screen
+# Recording grant and asking for one re-prompted users every launch; see
+# src/voice/ScreenCapturePolicy.h.
 if(APPLE AND NOT IOS)
     # Desktop-macOS only — ScreenCaptureKit is mac-exclusive, and
     # the others are mostly used by the capture paths that don't run
