@@ -635,13 +635,27 @@ LegacyPreset legacyPreset(int level) {
     case 3:  default: return {15, 1920, 85};
     }
 }
+constexpr int kDefaultScreenShareFps = 30;
 }  // namespace
 
 int Settings::screenShareFps() const
 {
     if (m_settings.contains(QStringLiteral("screenShare/fps")))
         return std::clamp(m_settings.value("screenShare/fps").toInt(), 1, 60);
-    return legacyPreset(screenShareQuality()).fps;
+    // No explicit value = the slider has never been moved (only
+    // setScreenShareFps writes this key). This used to fall back to the
+    // legacy preset, whose "Medium" default is 5 fps — a JPEG-era number
+    // (2026-09-21). Every fresh install therefore shared at 5 fps, and at
+    // 5 fps the old RTP pacer released so little per frame that most
+    // frames never arrived. The presets' fps column (2/5/10/15) was sized
+    // for a JPEG slideshow over a data channel and is never right for
+    // H.264/HEVC over RTP, so it is no longer consulted for fps even when
+    // a legacy preset is stored; resolution and JPEG quality still
+    // hydrate from it. 30 fps: smooth motion, and what the rate
+    // controller's floors and the default 4 Mbps target are sized for
+    // (the controller trades it down itself when the path or the
+    // machine cannot carry it).
+    return kDefaultScreenShareFps;
 }
 
 void Settings::setScreenShareFps(int fps)

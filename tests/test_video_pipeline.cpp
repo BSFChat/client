@@ -912,9 +912,12 @@ private slots:
 
     void theLadderGivesUpTheRightThingFirst() {
         using namespace videorate;
-        // Screen: fps first, long edge defended.
-        QCOMPARE(rungAt(Content::Screen, 1).resScale, 1.0);
-        QVERIFY(rungAt(Content::Screen, 1).fpsScale < 1.0);
+        // Screen: one modest resolution step at full frame rate first —
+        // smooth over sharp (2026-09-21, see kScreenLadder) — and the
+        // long edge is still defended to 3/8 while any fps is left.
+        QCOMPARE(rungAt(Content::Screen, 1).resScale, 0.75);
+        QCOMPARE(rungAt(Content::Screen, 1).fpsScale, 1.0);
+        QVERIFY(rungAt(Content::Screen, 2).fpsScale < 1.0);
         // Camera: resolution first, frame rate defended.
         QVERIFY(rungAt(Content::Camera, 1).resScale < 1.0);
         QCOMPARE(rungAt(Content::Camera, 1).fpsScale, 1.0);
@@ -1057,20 +1060,24 @@ private slots:
         VideoRateController rc(VideoStreamId::Screen);
         rc.setEnvelope(250, 20000, 30, 1920);
         rc.setActive(true);
-        // Two hard cuts take 1080p30 below its floor → fps gives way.
+        // Two hard cuts take 1080p30 below its floor → the first screen
+        // rung gives way: a resolution step, frame rate kept.
         run(rc, 2, lossReport(600, 25.0));
-        QVERIFY2(rc.fps() < 30, "screen content spends fps first");
-        QCOMPARE(rc.longEdge(), 1920);
-        const int downFps = rc.fps();
+        QVERIFY2(rc.longEdge() < 1920, "screen content steps resolution first");
+        QCOMPARE(rc.fps(), 30);
+        const int downEdge = rc.longEdge();
 
         // Minimum dwell: the path is instantly clean again and the
         // bitrate climbs straight back, but the ladder must not.
         for (int i = 0; i < videorate::Thresholds::kDwellTicks; ++i) {
             rc.reportDelivery(kPeerA, lossReport(600, 0.0));
             rc.tick();
-            QCOMPARE(rc.fps(), downFps);
+            QCOMPARE(rc.longEdge(), downEdge);
         }
-        run(rc, 40, lossReport(600, 0.0));
+        // 50 s, not 20: the loss hit at the opening rate, so the last
+        // stretch back up to it creeps (knee memory, VideoRatePolicy.h)
+        // until the knee ages out after 30 s.
+        run(rc, 100, lossReport(600, 0.0));
         QCOMPARE(rc.fps(), 30);
         QCOMPARE(rc.longEdge(), 1920);
     }

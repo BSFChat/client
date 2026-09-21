@@ -107,6 +107,14 @@ CameraController::CameraController(QObject* parent)
     m_rate = new VideoRateController(VideoStreamId::Camera, this);
     connect(m_rate, &VideoRateController::forceKeyframe,
             m_pipeline, &VideoSendPipeline::forceKeyframe);
+    // Measured packets per frame is what turns the receivers' packet
+    // loss into frame damage (videorate::frameDamagePct); encode
+    // pressure lets an overloaded machine shed resolution.
+    m_rate->setSendWindowSource([this](int askedFps) {
+        return m_sendStats.sample(m_pipeline->takeCounters(),
+                                  QDateTime::currentMSecsSinceEpoch(),
+                                  askedFps, /*capturePolled=*/false);
+    });
 }
 
 QVariantList CameraController::availableCameras() const

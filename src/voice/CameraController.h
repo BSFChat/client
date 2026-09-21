@@ -6,6 +6,8 @@
 #include <QVideoFrame>
 #include <QTimer>
 #include <QVariantList>
+
+#include "voice/video/VideoSendStats.h"
 #ifdef Q_OS_MACOS
 class MacCameraCapturer;
 #else
@@ -126,6 +128,11 @@ private:
     // Capture ticks at RTP rate; the legacy JPEG branch subsamples
     // via this counter to keep old peers at their accustomed ~5 fps.
     int m_tick = 0;
+    // Send-side windows for the rate controller (VideoSendStats.h):
+    // encode counters and packets per frame. Capture-side fields stay
+    // zero — cameras deliver on their own clock, so a missing frame is
+    // not evidence the capture was late.
+    videosend::Accumulator m_sendStats;
     // Per-connection voice-room subscriptions (one per server, not
     // just the active one — voice can be live on a backgrounded
     // server).

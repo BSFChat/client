@@ -118,6 +118,10 @@ ScreenShareController::ScreenShareController(QObject* parent)
         });
     connect(m_mac, &MacScreenCapturer::frameReady, this,
         [this](const QImage& img) {
+            // Stamped here, before the copy hop, so the frame's RTP
+            // timestamp reflects when it was captured rather than when
+            // a worker got round to it.
+            const qint64 captureUs = QDateTime::currentMSecsSinceEpoch() * 1000;
             // First frame — flip active state so QML preview shows.
             if (!m_active) setActiveState(true);
             // S-10: the QImage -> QVideoFrame copy is a full-frame
@@ -131,7 +135,7 @@ ScreenShareController::ScreenShareController(QObject* parent)
                 m_frameWorker = std::make_unique<LatestWinsWorker>(
                     QStringLiteral("video-frame-copy"));
             }
-            m_frameWorker->submit([this, img]() {
+            m_frameWorker->submit([this, img, captureUs]() {
                 QVideoFrameFormat fmt(img.size(),
                     QVideoFrameFormat::pixelFormatFromImageFormat(img.format()));
                 QVideoFrame vf(fmt);
@@ -140,13 +144,27 @@ ScreenShareController::ScreenShareController(QObject* parent)
                 std::memcpy(vf.bits(0), img.bits(),
                             size_t(img.bytesPerLine()) * size_t(img.height()));
                 vf.unmap();
-                QMetaObject::invokeMethod(this, [this, vf]() {
+                QMetaObject::invokeMethod(this, [this, vf, captureUs]() {
                     if (!m_active) return;
                     // Feed the internal sink so any VideoOutput
                     // mirroring via forwardTo() receives frames, and
                     // cache the latest for the peer push.
                     m_sink->setVideoFrame(vf);
-                    m_pendingFrame = vf;
+                    notePendingFrame(vf, captureUs);
+                    // Push on ARRIVAL. This path used to cache the
+                    // frame and wait for m_throttle, a second free-
+                    // running timer at the same nominal period as the
+                    // capturer's own. Two 33 ms timers with coarse
+                    // slop drift through each other's phase: in the
+                    // field 105 of 303 sampled push ticks found no new
+                    // frame while capture was delivering 27.7 fps —
+                    // the frames were there, they were just overwritten
+                    // in m_pendingFrame by the next one before a tick
+                    // came, and the share went out at an uneven ~20 fps.
+                    // The capturer's timer already IS the cadence (and
+                    // follows the rate controller's fps, see
+                    // applyCaptureCadence), so there is one clock now.
+                    pushFrameToPeers();
                 }, Qt::QueuedConnection);
             });
         });
@@ -189,12 +207,20 @@ ScreenShareController::ScreenShareController(QObject* parent)
             reportError(description);
         });
     connect(m_sink, &QVideoSink::videoFrameChanged, this,
-        [this](const QVideoFrame& frame) { m_pendingFrame = frame; });
+        [this](const QVideoFrame& frame) {
+            notePendingFrame(frame, QDateTime::currentMSecsSinceEpoch() * 1000);
+        });
 #endif
 
     m_throttle->setInterval(g_frameIntervalMs);
+    // Precise, not Qt's default coarse timer: coarse allows ±5 % slop,
+    // which on a 33 ms interval is enough to walk the push phase
+    // through the source's frame cadence and drop or double frames in
+    // bursts — the same beat the macOS path removed by pushing on
+    // arrival.
+    m_throttle->setTimerType(Qt::PreciseTimer);
     connect(m_throttle, &QTimer::timeout, this,
-            &ScreenShareController::pushFrameToPeers);
+            &ScreenShareController::onThrottleTick);
 
     // Encode worker for the RTP video path. Encoded access units come
     // back on a queued signal; the voice engine is re-resolved per
@@ -219,6 +245,105 @@ ScreenShareController::ScreenShareController(QObject* parent)
     m_rate = new VideoRateController(VideoStreamId::Screen, this);
     connect(m_rate, &VideoRateController::forceKeyframe,
             m_pipeline, &VideoSendPipeline::forceKeyframe);
+    // Frame-rate awareness: every controller tick pulls one window of
+    // what capture and encode actually achieved (VideoSendStats.h).
+    m_rate->setSendWindowSource(
+        [this](int askedFps) { return sampleSendWindow(askedFps); });
+}
+
+void ScreenShareController::notePendingFrame(const QVideoFrame& frame,
+                                             qint64 captureUs)
+{
+    ++m_statCaptured;
+    // Displacing a frame no push consumed = a captured frame that will
+    // never be sent. The "cadence" bottleneck, in VideoSendStats terms.
+    if (m_pendingFrame.isValid()) ++m_statOverwritten;
+    m_pendingFrame = frame;
+    m_pendingFrameUs = captureUs;
+}
+
+void ScreenShareController::onThrottleTick()
+{
+#ifdef Q_OS_MACOS
+    // Pushes happen on frame arrival (see the frameReady handler). The
+    // timer still runs so the start/stop plumbing stays one code path
+    // on every platform; here it only keeps the badge honest when a
+    // share has ended underneath it.
+    if (!m_active) setTransmitting(false);
+#else
+    pushFrameToPeers();
+#endif
+}
+
+void ScreenShareController::applyCaptureCadence(int fps)
+{
+    fps = std::clamp(fps, 1, 60);
+    if (fps == m_cadenceFps) return;
+    // The rate controller's fps used to reach only the ENCODER's
+    // expected frame rate: the capture poller and the push throttle
+    // kept running at the configured rate, so a ladder step "down to
+    // 20 fps" rebuilt the encoder session (an IDR) and then fed it 30
+    // frames a second anyway — the field log shows exactly that at
+    // 23:05:03, "encoder up: 1920x1080@20fps" with capture unchanged.
+    // Now the cadence follows, so a lower rate really means fewer
+    // screenshots taken and fewer frames encoded — which is the only
+    // way a capture- or encode-bound sender gets its time back.
+    qInfo("[screenshare] capture cadence %d → %d fps", m_cadenceFps, fps);
+    m_cadenceFps = fps;
+    m_throttle->setInterval(1000 / fps);
+#ifdef Q_OS_MACOS
+    if (m_mac) m_mac->setFps(fps);
+#endif
+}
+
+videosend::Window ScreenShareController::sampleSendWindow(int askedFps)
+{
+    videosend::Counters c = m_pipeline->takeCounters();
+    c.captured = m_statCaptured;
+    c.overwritten = m_statOverwritten;
+    c.pushTicks = m_statPushTicks;
+    c.emptyTicks = m_statEmptyTicks;
+#ifdef Q_OS_MACOS
+    // MacScreenCapturer polls — one screenshot per timer tick, whether
+    // or not anything moved — so a missing frame there means capture
+    // was late or failed, not that the screen was still.
+    constexpr bool kCapturePolled = true;
+#else
+    // QScreenCapture / QWindowCapture deliver on change on some
+    // backends; a missing frame proves nothing.
+    constexpr bool kCapturePolled = false;
+#endif
+    const videosend::Window w = m_sendStats.sample(
+        c, QDateTime::currentMSecsSinceEpoch(), askedFps, kCapturePolled);
+    if (!w.valid) return w;
+
+    QVariantMap m;
+    m[QStringLiteral("targetFps")] = w.targetFps;
+    m[QStringLiteral("captureFps")] = w.captureFps;
+    m[QStringLiteral("sentFps")] = w.sentFps;
+    m[QStringLiteral("overwrittenPerSec")] = w.overwrittenPerSec;
+    m[QStringLiteral("emptyTickFraction")] = w.emptyTickFraction;
+    m[QStringLiteral("encoderSlotDropsPerSec")] = w.supersededPerSec;
+    m[QStringLiteral("meanWorkMs")] = w.meanWorkMs;
+    m[QStringLiteral("maxWorkMs")] = w.maxWorkMs;
+    m[QStringLiteral("sentKbps")] = w.sentKbps;
+    m[QStringLiteral("packetsPerFrame")] = w.packetsPerFrame;
+    m[QStringLiteral("keyframes")] = w.keyframes;
+    m[QStringLiteral("bottleneck")] =
+        QString::fromLatin1(videosend::bottleneckName(w.bottleneck()));
+    // What the controller made of it, as of its previous decision.
+    m[QStringLiteral("networkKbps")] = m_rate->networkKbps();
+    m[QStringLiteral("targetKbps")] = m_rate->targetKbps();
+    m[QStringLiteral("bitrateScale")] = m_rate->bitrateScale();
+    m[QStringLiteral("lossPct")] = m_rate->lastWorstLossPct();
+    m[QStringLiteral("frameDamagePct")] = m_rate->lastFrameDamagePct();
+    m[QStringLiteral("kneeKbps")] = m_rate->kneeKbps();
+    m[QStringLiteral("senderFpsCap")] = m_rate->senderFpsCap();
+    m[QStringLiteral("longEdge")] = m_rate->longEdge();
+    m[QStringLiteral("fps")] = m_rate->fps();
+    m_sendStatsMap = m;
+    emit sendStatsChanged();
+    return w;
 }
 
 // Forward decl — definition is below applyEffectiveQuality, which
@@ -248,6 +373,8 @@ void ScreenShareController::setSettings(Settings* settings)
 #ifdef Q_OS_MACOS
                 if (m_mac) m_mac->setFps(1000 / g_frameIntervalMs);
 #endif
+                // The next push re-applies the rate controller's fps.
+                m_cadenceFps = 0;
             }
         });
     }
@@ -346,6 +473,7 @@ void ScreenShareController::startForWindow(int windowIndex)
     m_windowCapture->start();
     m_throttle->setInterval(g_frameIntervalMs);
     m_throttle->start();
+    m_cadenceFps = 0;
 #endif
 }
 
@@ -423,7 +551,7 @@ void ScreenShareController::start() { startForScreen(-1); }
 // when set; -1 sentinels mean "no cap on this axis".
 static void applyEffectiveQuality(Settings* settings, ServerManager* servers)
 {
-    int userFps   = settings ? settings->screenShareFps() : 5;
+    int userFps   = settings ? settings->screenShareFps() : 30;
     int userMaxW  = settings ? settings->screenShareMaxWidth() : 1280;
     int userJpegQ = settings ? settings->screenShareJpegQuality() : 60;
     int userKbps  = settings ? settings->screenShareTargetKbps() : 4000;
@@ -543,6 +671,7 @@ void ScreenShareController::startForScreen(int screenIndex)
     m_mac->start(0, 1000 / g_frameIntervalMs);
     m_throttle->setInterval(g_frameIntervalMs);
     m_throttle->start();
+    m_cadenceFps = 0;
 #else
     auto screens = QGuiApplication::screens();
     QScreen* target = nullptr;
@@ -562,6 +691,7 @@ void ScreenShareController::startForScreen(int screenIndex)
     m_capture->start();
     m_throttle->setInterval(g_frameIntervalMs);
     m_throttle->start();
+    m_cadenceFps = 0;
 #endif
 }
 
@@ -597,6 +727,13 @@ void ScreenShareController::setActiveState(bool active)
         // here (after the flag drops) keeps a late one from becoming
         // the first frame of the NEXT share.
         m_pendingFrame = {};
+    }
+    if (active) {
+        // A new share measures from its own first frame: the window
+        // spanning the gap since the last share would read as a
+        // capturer that delivered nothing.
+        m_sendStats.reset();
+        m_cadenceFps = 0;
     }
     if (active && m_pipeline) {
         // S-11: the encode session survives a stop/start (that is the
@@ -674,6 +811,7 @@ void ScreenShareController::showPicker()
     } else {
         m_throttle->setInterval(g_frameIntervalMs);
     }
+    m_cadenceFps = 0;
     m_mac->showPicker();
 #else
     start();
@@ -732,7 +870,13 @@ void ScreenShareController::pushFrameToPeers()
     const bool canTransmit = voice && voice->hasOpenPeers();
     if (!canTransmit) setTransmitting(false);
     if (!voice) return;
-    if (!m_pendingFrame.isValid()) return;
+    ++m_statPushTicks;
+    if (!m_pendingFrame.isValid()) {
+        ++m_statEmptyTicks;
+        return;
+    }
+    const qint64 captureUs = m_pendingFrameUs > 0
+        ? m_pendingFrameUs : QDateTime::currentMSecsSinceEpoch() * 1000;
 
     // Engines are per-voice-session; (re)wire this one's keyframe
     // demands (RTCP PLI, app-level "kf", late-joiner track opens) to
@@ -805,9 +949,11 @@ void ScreenShareController::pushFrameToPeers()
             EncoderConfig cfg = g_encoderConfig;
             cfg.codec = VideoCodecKind::Av1Lossless;
             cfg.lossless = true;
+            // No rate controller on this tier, so the cadence is the
+            // configured one.
+            applyCaptureCadence(g_encoderConfig.fps);
             m_pipeline->configure(cfg);
-            m_pipeline->submitFrame(m_pendingFrame,
-                                    QDateTime::currentMSecsSinceEpoch() * 1000);
+            m_pipeline->submitFrame(m_pendingFrame, captureUs);
         } else {
             // Emit the best profile every current receiver decodes — a
             // profile flip rebuilds the encoder session and IDRs.
@@ -827,8 +973,33 @@ void ScreenShareController::pushFrameToPeers()
             // Rate-controller outputs override the static envelope:
             // the governor moves bitrate live and steps the resolution
             // ladder down/up with the measured delivery ratio.
-            m_rate->setEnvelope(250, g_encoderConfig.maxBitrateKbps,
-                                g_encoderConfig.fps, g_maxWidth);
+            // Judge the SOURCE, not the setting. With "Maximum
+            // resolution" at 3840 and a 1920x1080 display, the ladder
+            // used to think it was carrying 4K: every floor was 4x too
+            // high, so ~9 Mbps of HEVC — plenty for 1080p — read as
+            // "cannot carry this size" and stepped the share down (the
+            // 23:05:03 fps drop in the field log). And the envelope
+            // ceiling is capped at the rate that codes every frame of
+            // THIS source as a high-quality keyframe (~0.5 bits per
+            // pixel per frame; the same bound applyEffectiveQuality
+            // uses, there against the setting): bits above it cannot
+            // improve the picture, they only make frames bigger —
+            // and bigger frames are the fragile ones.
+            const int srcW = m_pendingFrame.width();
+            const int srcH = m_pendingFrame.height();
+            const int srcEdge = qMax(srcW, srcH);
+            const int edgeEnvelope = srcEdge > 0 ? qMin(g_maxWidth, srcEdge)
+                                                 : g_maxWidth;
+            int maxKbps = g_encoderConfig.maxBitrateKbps;
+            if (srcEdge > 0) {
+                const double scale = double(edgeEnvelope) / double(srcEdge);
+                const double px = double(srcW) * scale * double(srcH) * scale;
+                const int allKeyframeKbps =
+                    int(px * double(g_encoderConfig.fps) * 0.5 / 1000.0);
+                maxKbps = qMin(maxKbps, qMax(allKeyframeKbps, 1000));
+            }
+            m_rate->setEnvelope(250, maxKbps, g_encoderConfig.fps,
+                                edgeEnvelope);
             m_rate->setActive(true);
             EncoderConfig cfg = g_encoderConfig;
             cfg.targetBitrateKbps = m_rate->targetKbps();
@@ -839,14 +1010,16 @@ void ScreenShareController::pushFrameToPeers()
             // half the long edge is not — so the ladder's fps is an
             // output now, not the static setting.
             cfg.fps = qMin(g_encoderConfig.fps, m_rate->fps());
+            // …and the capture/push cadence follows it, or the fps
+            // output is a label on the encoder and nothing more.
+            applyCaptureCadence(cfg.fps);
             // S-15: keep every peer's RTP pacer above what this config
             // allows the encoder to emit. A pacer budget below it does
             // not shave peaks, it accumulates them.
             voice->setVideoSendCeiling(VideoStreamId::Screen,
                                        cfg.maxBitrateKbps);
             m_pipeline->configure(cfg);
-            m_pipeline->submitFrame(m_pendingFrame,
-                                    QDateTime::currentMSecsSinceEpoch() * 1000);
+            m_pipeline->submitFrame(m_pendingFrame, captureUs);
         }
     }
 

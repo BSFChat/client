@@ -3,12 +3,15 @@
 #include "voice/video/VideoCodec.h"
 #include "voice/video/VideoDeliveryReport.h"
 #include "voice/video/VideoRatePolicy.h"
+#include "voice/video/VideoSendStats.h"
 
 #include <QDateTime>
 #include <QHash>
 #include <QObject>
 #include <QString>
 #include <QTimer>
+
+#include <functional>
 
 // The "always smooth" brain. One per outgoing stream, evaluating every
 // 500 ms. Moves QUALITY (bitrate, then fps or resolution per content
@@ -51,6 +54,37 @@
 // VideoRatePolicy.h so they can be reasoned about without a Qt event
 // loop. The WORST governing peer sets the rate — a share is only as
 // smooth as its worst receiver — and the log line names it.
+//
+// ---- Frame-rate awareness (2026-09-21, "sharp but very choppy") ----
+//
+// Three changes, each answering a specific line of the field log that
+// accompanied the report (numbers in VideoSendStats.h):
+//
+//  1. The loss the law grades is FRAME damage, 1-(1-p)^n with n the
+//     measured packets per frame, not raw packet loss p — the receiver
+//     freezes on any hole, so a 150-packet frame at 0.5 % loss is lost
+//     more often than not. Same thresholds, now in frames.
+//  2. A KNEE is remembered where loss last began, and the probe creeps
+//     near it instead of charging it every second (the sawtooth).
+//  3. The SENDER's achieved frame rate is a second input
+//     (reportSendWindow). A sender that cannot keep up sheds pixels
+//     (encode-bound) or asks for a rate it can sustain (capture-bound),
+//     and the bitrate is scaled by sent/asked fps so bytes per frame —
+//     and so fragility — stay constant as the frame rate falls.
+//
+// How the inputs combine: each one only ever LOWERS the outputs, and
+// every output is the minimum over what each input allows, all inside
+// the user/server envelope:
+//
+//   targetKbps = network allowance × sender fps scale      (≤ envelope)
+//   fps        = min(envelope, network rung fps, sender fps cap)
+//   longEdge   = min(envelope, network rung edge, sender edge cap)
+//
+// The network allowance does NOT probe upward while the sender is the
+// limit (scale < 0.95): bits we are not sending prove nothing about the
+// path — the "app-limited" rule every modern congestion controller
+// has — and when the sender recovers, the allowance it last validated
+// is still there to return to immediately.
 class VideoRateController : public QObject {
     Q_OBJECT
 public:
@@ -70,7 +104,7 @@ public:
     VideoCodecKind codec() const { return m_codec; }
 
     // Current outputs, read by the sender each capture tick.
-    int targetKbps() const { return m_bitrate; }
+    int targetKbps() const;
     int maxKbps() const;
     // Long edge and frame rate after the ladder (≤ the envelope).
     int longEdge() const;
@@ -79,6 +113,31 @@ public:
     // Inputs.
     void reportDelivery(const QString& userId, const VideoDeliveryReport& r);
     void reportKeyframeRequest();
+    // One window of what the SENDER achieved (capture/encode rates,
+    // packets per frame). Production feeds it through the source below
+    // at the top of every tick; tests call it directly.
+    void reportSendWindow(const videosend::Window& w);
+    // Called at the start of each tick with the fps the sender is
+    // currently being asked for; returns the window since the last
+    // call (invalid = nothing to report). Owners wire their counters
+    // here so the window and the decision that uses it are always the
+    // same age.
+    using SendWindowSource = std::function<videosend::Window(int askedFps)>;
+    void setSendWindowSource(SendWindowSource source) {
+        m_sendSource = std::move(source);
+    }
+
+    // Diagnostics — for logs, tests and a local stats surface only.
+    int networkKbps() const { return m_bitrate; }
+    double bitrateScale() const { return m_bitrateScale; }
+    int senderFpsCap() const { return m_senderFpsCap; }      // 0 = none
+    int senderEdgeStep() const { return m_senderEdgeStep; }  // 0 = full
+    double sentFpsEstimate() const { return m_sentFpsEwma; }
+    double packetsPerFrameEstimate() const { return m_pktPerFrameEwma; }
+    double lastWorstLossPct() const { return m_lastLossPct; }
+    double lastFrameDamagePct() const { return m_lastDamagePct; }
+    int kneeKbps() const { return m_kneeKbps; }
+    const videosend::Window& lastSendWindow() const { return m_lastWindow; }
 
     // One evaluation of the control law. Production drives this from
     // the internal 500 ms timer and nothing else calls it; it is public
@@ -106,10 +165,14 @@ private:
     int startBitrate() const;
     int blindCeiling() const;
     void resetState();
-    // Worst governing peer this window; writes its id and loss.
+    // Worst governing peer this window; writes its id, its packet loss
+    // and the frame damage that loss implies at the current frame size.
     Health classify(qint64 now, QString& worstPeer, double& worstLossPct,
-                    int kf) const;
+                    double& damagePct, int kf) const;
     void applyLadder();
+    void evaluateSender();
+    int rungFps() const;
+    void logSendWindow() const;
 
     const VideoStreamId m_streamId;
     QTimer m_timer;
@@ -130,11 +193,54 @@ private:
     bool m_everGoverned = false;   // a peer has reported loss at least once
     qint64 m_testNowMs = -1;
 
-    struct PeerSample { VideoDeliveryReport report; qint64 atMs = 0; };
+    struct PeerSample {
+        VideoDeliveryReport report;
+        qint64 atMs = 0;
+        // Smoothed packet counts (Thresholds::kLossEwmaDecay).
+        double lostAcc = 0.0;
+        double expectedAcc = 0.0;
+        double gradedLossPct() const;
+    };
     QHash<QString, PeerSample> m_peers;
 
     qint64 m_activeSinceMs = 0;
     bool m_wasBlind = false;       // edge-detect for the blind-mode log
+    double m_lastLossPct = 0.0;
+    double m_lastDamagePct = 0.0;
+
+    // Knee memory (Thresholds::kKnee*): the rate at which loss last
+    // began, and when.
+    int m_kneeKbps = 0;
+    int m_kneeAtTick = 0;
+    // Last tick the probe moved inside the knee band — or a loss event
+    // happened. Its own clock, so a trim does not restart the creep's
+    // 4 s interval from zero and let it fire two ticks later.
+    int m_lastKneeStepTick = 0;
+    // Highest rate a healthy tick was seen at, and when
+    // (Thresholds::kKneeNeedsCleanRatio).
+    int m_cleanKbps = 0;
+    int m_cleanAtTick = 0;
+
+    // Sender-capacity state (SenderPolicy).
+    SendWindowSource m_sendSource;
+    videosend::Window m_lastWindow;
+    bool m_windowFresh = false;    // m_lastWindow not yet evaluated
+    double m_sentFpsEwma = 0.0;
+    double m_captureFpsEwma = 0.0;
+    double m_workMsEwma = 0.0;
+    double m_pktPerFrameEwma = 0.0; // 0 = unknown → damage == loss
+    bool m_haveEwma = false;
+    double m_bitrateScale = 1.0;
+    int m_senderFpsCap = 0;
+    int m_senderEdgeStep = 0;
+    videosend::Bottleneck m_fpsCapReason = videosend::Bottleneck::None;
+    int m_senderBadTicks = 0;
+    int m_senderGoodTicks = 0;
+    int m_senderDwellTicks = 0;
+    int m_senderUpWaitTicks = videorate::SenderPolicy::kUpWaitTicks;
+    int m_ticksSinceSenderUp = 1 << 20;
+    int m_ticksSinceSenderDown = 1 << 20;
+    int m_tickCount = 0;
 
     static constexpr qint64 kPeerSampleTtlMs = 2500;
     // Blind mode: no peer has reported anything for kPeerSampleTtlMs
