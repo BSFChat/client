@@ -297,8 +297,11 @@ void VideoReceivePipeline::enqueueForPlayout(const QVideoFrame& frame,
 }
 
 void VideoReceivePipeline::presentDue() {
-    // popDue returns the NEWEST due picture and counts the rest as
-    // skipped, so a timer that woke late costs frames, never latency.
+    // A wake-up that is late (timer deferred, GUI thread busy) costs
+    // latency, not frames: popDue shows the oldest due picture and
+    // re-times the rest, within the ceiling — see "A late wake-up" in
+    // VideoPlayoutBuffer.h. Only what the ceiling cannot absorb is
+    // skipped.
     if (auto f = m_playout.popDue(playoutNowUs()))
         emit frameDecoded(m_userId, int(m_streamId), *f);
     schedulePlayout();
