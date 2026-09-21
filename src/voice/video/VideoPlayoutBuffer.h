@@ -99,6 +99,38 @@
 // older one is skipped — the viewer has already waited for it, and
 // showing a stale picture late only makes the freeze longer.
 //
+// A late wake-up
+// --------------
+// The other way to find several frames due at once is for the CALLER to
+// be late: the presentation timer fired behind schedule, or the GUI
+// thread it runs on was busy (QML layout, the message list, a busy or
+// virtualised machine; the OS may also defer a timer). Those frames
+// arrived in time and are held; nothing about the stream is wrong. The
+// first version treated this like network lateness and skipped all but
+// the newest, so ANY wake-up late by a frame interval (33 ms at 30 fps)
+// cost frames. macOS CI found it: a clump of ten held frames lost two
+// to one slow wake-up (reproduced exactly by stalling the GUI thread
+// 110 ms after the clump's first frame) — dropped frames, from a buffer
+// that was holding ~300 ms of slack at the time, in the feature whose
+// purpose is smoother video.
+//
+// So a late wake-up costs latency, not pictures: the oldest due frame is
+// shown now, late, and everything held behind it is re-timed to follow
+// it at capture spacing (the offset follows, for frames still to come).
+// The re-timing is bounded by the ceiling — no held frame may end up
+// due more than the ceiling after its arrival — and a frame the ceiling
+// will not let move far enough is skipped by the old rule, so the
+// latency promise still wins over completeness. The added delay is
+// excess offset like any other and slews back off at kSlewRatio. How
+// much a wake-up can absorb is the ceiling minus the current hold: at
+// the 150 ms default with ~20 ms held, over 100 ms.
+//
+// Only a wake-up late enough to skip is absorbed. One late by less than
+// the gap to the next frame shortens that one interval and costs
+// nothing; absorbing it would add latency on every wake (the timer is
+// routinely a few ms late, and schedulePlayout rounds up to the ms)
+// without saving a picture.
+//
 // Clock drift
 // -----------
 // Sender and receiver clocks run at slightly different rates, so d_i
@@ -220,7 +252,7 @@ public:
         // order for every codec configuration we send: no B-frames).
         if (!m_queue.empty()) due = std::max(due, m_queue.back().dueUs);
 
-        m_queue.push_back({std::move(payload), due, nowUs});
+        m_queue.push_back({std::move(payload), due, nowUs, mediaUs});
         while (int(m_queue.size()) > kMaxQueued) {
             m_queue.pop_front();
             ++m_stats.overflowed;
@@ -233,11 +265,43 @@ public:
         return m_queue.front().dueUs;
     }
 
-    // The frame to show now, if any is due. When several are (the timer
-    // woke late), the newest is returned and the rest are skipped.
+    // The frame to show now, if any is due. When several are because the
+    // caller woke late, the oldest is shown late and the rest re-timed
+    // behind it (see "A late wake-up" above) as far as the ceiling
+    // allows; whatever is still due after that is skipped, newest shown.
     std::optional<Payload> popDue(qint64 nowUs) {
         if (m_queue.empty() || m_queue.front().dueUs > nowUs)
             return std::nullopt;
+        // The WAKE-UP is late when we are past the front frame's due
+        // time, or past its arrival if it came in already overdue — that
+        // part is network lateness beyond the ceiling, which the skip
+        // rule below exists for.
+        const qint64 frontMedia = m_queue.front().mediaUs;
+        const qint64 frontReady = std::max(m_queue.front().dueUs, m_queue.front().arrivalUs);
+        if (m_queue.size() > 1 && m_queue[1].dueUs <= nowUs && nowUs > frontReady) {
+            // Re-time everything held behind the front, which is shown
+            // now: each frame no sooner than its capture gap after the
+            // one before it, and never due more than the ceiling after
+            // its own arrival (the promise push() keeps). A frame that
+            // is already later than that — pushed after the stall, on
+            // an offset that grew to cover it — keeps its time, so a
+            // stall is never counted twice.
+            qint64 prevDue = nowUs;
+            qint64 prevMedia = frontMedia;
+            for (size_t k = 1; k < m_queue.size(); ++k) {
+                Entry& e = m_queue[k];
+                const qint64 want = std::min(prevDue + (e.mediaUs - prevMedia),
+                                             e.arrivalUs + m_maxDelayUs);
+                e.dueUs = std::max(e.dueUs, want);
+                prevDue = e.dueUs;
+                prevMedia = e.mediaUs;
+            }
+            // Frames still to come follow the re-timed tail, or push()
+            // would order them onto it and they would fall due together.
+            // The next push slews this back off like any excess delay.
+            const Entry& back = m_queue.back();
+            m_offsetUs = std::max(m_offsetUs, back.dueUs - back.mediaUs);
+        }
         while (m_queue.size() > 1 && m_queue[1].dueUs <= nowUs) {
             m_queue.pop_front();
             ++m_stats.skippedLate;
@@ -274,6 +338,7 @@ private:
         Payload payload;
         qint64 dueUs = 0;
         qint64 arrivalUs = 0;
+        qint64 mediaUs = 0;
     };
 
     qint64 baseline() const {
@@ -289,8 +354,14 @@ private:
         m_startupUntilUs = nowUs + kStartupUs;
         m_lastMediaUs = std::numeric_limits<qint64>::min() / 2;
         // Whatever is still held belongs to the old timeline and cannot
-        // be ordered against the new one. Make it due now: the newest
-        // is shown on the next pop, the rest are skipped.
+        // be ordered against the new one. Keep only the newest, due now,
+        // so it is shown on the next pop. Dropped here rather than left
+        // due for popDue to skip: a late pop would re-time them and show
+        // stale pictures one by one ahead of the new timeline.
+        while (m_queue.size() > 1) {
+            m_queue.pop_front();
+            ++m_stats.skippedLate;
+        }
         for (auto& e : m_queue) e.dueUs = nowUs;
     }
 

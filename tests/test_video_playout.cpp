@@ -25,6 +25,9 @@
 //   * drift                          — a fixed anchor fills or drains
 //                                      forever; this one must not;
 //   * slewed shrink                  — giving latency back must not skip;
+//   * late wake-up                   — a busy GUI thread or a deferred
+//                                      timer must cost latency, not
+//                                      frames (macOS CI caught this);
 //   * clock unwrap                   — the 90 kHz RTP clock wraps at 13 h.
 
 #include "voice/video/MediaClockUnwrapper.h"
@@ -389,6 +392,177 @@ private slots:
         // ...and the latency did come back down once the burst aged out.
         const Shown& last = shown.back();
         QVERIFY(last.presentUs - last.arrivalUs <= 20 * kMs);
+    }
+
+    // ---- A late presentation timer ---------------------------------
+
+    // The shape aClumpIsSpreadBackOutToCaptureCadence drives through the
+    // real pipeline, on the fake clock: one on-time frame at the start of
+    // a stream, then ten frames captured 33 ms apart arriving together
+    // 300 ms later. The wake-up that should show the first of the clump
+    // comes `lateUs` late — the GUI thread was busy (QML, the message
+    // list, a loaded CI runner) or the OS deferred the timer — and every
+    // wake after it is on time.
+    //
+    // With an on-time timer (row "on time") this pins that the start of
+    // a stream is not the problem: the clump's first frame raises the
+    // measured jitter as it arrives, so it is due a margin after arrival
+    // and nothing is overdue. A late wake used to show only the NEWEST
+    // due frame and skip the ones before it — 40 ms late cost a frame,
+    // 110 ms cost two (the 9-of-11 macOS CI saw). While the ceiling has
+    // room, lateness must cost latency, not pictures: all eleven shown,
+    // in order, the rest of the clump still on capture cadence, and no
+    // frame held past the ceiling.
+    void aLateWakeDelaysRatherThanSkips_data() {
+        QTest::addColumn<qint64>("lateUs");
+        QTest::newRow("on time") << qint64(0);
+        QTest::newRow("under one frame late") << 20 * kMs;
+        QTest::newRow("one frame late") << 40 * kMs;
+        QTest::newRow("three frames late") << 110 * kMs;
+    }
+    void aLateWakeDelaysRatherThanSkips() {
+        QFETCH(qint64, lateUs);
+        const qint64 ceiling = 400 * kMs;
+        VideoPlayoutBuffer<int> buf;
+        buf.setMaxDelayUs(ceiling);
+        const qint64 media0 = qint64(1) << 40;
+        const qint64 t0 = 1'000'000;
+        std::vector<Shown> shown;
+        auto popAt = [&](qint64 now) {
+            if (auto i = buf.popDue(now))
+                shown.push_back({*i, media0 + qint64(*i) * kFrameUs, now, 0});
+        };
+        buf.push(0, media0, t0);
+        popAt(*buf.nextDueUs());
+        const qint64 t1 = t0 + 300 * kMs;
+        for (int i = 1; i <= 10; ++i) buf.push(i, media0 + qint64(i) * kFrameUs, t1);
+        popAt(*buf.nextDueUs() + lateUs);
+        while (auto due = buf.nextDueUs()) popAt(std::max(*due, shown.back().presentUs));
+
+        QCOMPARE(buf.stats().skippedLate, quint64(0));
+        QCOMPARE(int(shown.size()), 11);
+        for (size_t k = 1; k < shown.size(); ++k) {
+            QCOMPARE(shown[k].index, shown[k - 1].index + 1);
+            // Every frame arrived by t1; the ceiling bounds the hold.
+            QVERIFY(shown[k].presentUs - t1 <= ceiling);
+        }
+        // The late wake shows frame 1 late; the rest of the clump then
+        // keeps its capture spacing (to the µs: the fake clock wakes
+        // exactly), with two exceptions. Frame 2 can follow sooner, by
+        // no more than frame 1 was late: a wake late by less than a
+        // frame costs nothing, and absorbing it would add latency for no
+        // picture saved. And a frame the ceiling stops short is held
+        // exactly the ceiling (at 110 ms late, frame 10 would otherwise
+        // be held 415 ms).
+        for (size_t k = 2; k < shown.size(); ++k) {
+            const qint64 gap = shown[k].presentUs - shown[k - 1].presentUs;
+            const bool onCadence = std::llabs(gap - kFrameUs) <= 1;
+            const bool afterShortLateWake = k == 2 && gap > 0 && gap >= kFrameUs - lateUs;
+            const bool heldToCeiling = shown[k].presentUs - t1 == ceiling;
+            QVERIFY2(onCadence || afterShortLateWake || heldToCeiling,
+                     qPrintable(QStringLiteral("frame %1 shown %2 us after the previous")
+                                    .arg(k).arg(gap)));
+        }
+    }
+
+    // Past what the ceiling allows, the latency promise still wins over
+    // completeness. The clump above holds its last frame ~305 ms, so a
+    // 400 ms ceiling leaves ~95 ms to absorb a late wake; a wake 250 ms
+    // late cannot be absorbed without holding frames past the ceiling,
+    // so frames that are overdue even after using that room are skipped
+    // (the old rule) — and every frame shown on time is still inside the
+    // ceiling. Nothing disappears without being counted.
+    void aWakeLaterThanTheCeilingAllowsStillSkips() {
+        const qint64 ceiling = 400 * kMs;
+        VideoPlayoutBuffer<int> buf;
+        buf.setMaxDelayUs(ceiling);
+        const qint64 media0 = qint64(1) << 40;
+        const qint64 t0 = 1'000'000;
+        std::vector<qint64> presentAt;
+        buf.push(0, media0, t0);
+        QVERIFY(buf.popDue(*buf.nextDueUs()));
+        const qint64 t1 = t0 + 300 * kMs;
+        for (int i = 1; i <= 10; ++i) buf.push(i, media0 + qint64(i) * kFrameUs, t1);
+        qint64 now = *buf.nextDueUs() + 250 * kMs;
+        int shownCount = 0;
+        int last = 0;
+        for (;;) {
+            if (auto i = buf.popDue(now)) {
+                QVERIFY(*i > last);
+                last = *i;
+                ++shownCount;
+                presentAt.push_back(now);
+            }
+            const auto due = buf.nextDueUs();
+            if (!due) break;
+            now = std::max(now, *due);
+        }
+        QVERIFY(buf.stats().skippedLate > 0);
+        QCOMPARE(quint64(shownCount) + buf.stats().skippedLate, quint64(10));
+        QCOMPARE(last, 10);
+        // After the late wake itself, no frame is held past the ceiling.
+        for (size_t k = 1; k < presentAt.size(); ++k)
+            QVERIFY(presentAt[k] - t1 <= ceiling);
+    }
+
+    // A GUI thread that stalls now and then (a stall of one to three
+    // frame intervals every two seconds) on an ordinary stream: with the
+    // ceiling leaving room for it, none of it may cost a picture, and
+    // the latency it adds must not ratchet up over three minutes. Frames
+    // that arrive during a stall are pushed when it ends, so the jitter
+    // estimate learns the stalls too and holds ~110 ms — hence a ceiling
+    // with room for a 105 ms stall on top of that.
+    void occasionalStallsCostNoFrames() {
+        const auto arrivals = share(5400, 0, 0, 10 * kMs);
+        const qint64 ceiling = 300 * kMs;
+        VideoPlayoutBuffer<Arrival> buf;
+        buf.setMaxDelayUs(ceiling);
+        std::vector<Shown> shown;
+        size_t i = 0;
+        qint64 clock = 0;
+        int wakes = 0;
+        while (i < arrivals.size() || buf.queued() > 0) {
+            const qint64 next = i < arrivals.size() ? arrivals[i].arrivalUs
+                                                    : std::numeric_limits<qint64>::max();
+            const auto due = buf.nextDueUs();
+            if (due && *due <= next) {
+                // Every 60th wake is late by 35, 70 or 105 ms in turn.
+                ++wakes;
+                const qint64 late = wakes % 60 == 0 ? qint64((wakes / 60) % 3 + 1) * 35 * kMs : 0;
+                clock = std::max(*due + late, clock);
+                // A stalled thread cannot take arrivals either: push
+                // whatever came in meanwhile first, as the event loop
+                // would once it is free.
+                while (i < arrivals.size() && arrivals[i].arrivalUs <= clock) {
+                    buf.push(arrivals[i], arrivals[i].mediaUs, clock);
+                    ++i;
+                }
+                if (auto a = buf.popDue(clock)) shown.push_back({a->index, a->mediaUs, clock, a->arrivalUs});
+            } else {
+                clock = arrivals[i].arrivalUs;
+                buf.push(arrivals[i], arrivals[i].mediaUs, clock);
+                ++i;
+            }
+        }
+        QCOMPARE(buf.stats().skippedLate, quint64(0));
+        QCOMPARE(int(shown.size()), 5400);
+        for (size_t k = 1; k < shown.size(); ++k) QVERIFY(shown[k].index > shown[k - 1].index);
+        // A frame can be held past the ceiling only by the stall itself.
+        QVERIFY2(worstHeldUs(shown) <= ceiling + 105 * kMs,
+                 qPrintable(QStringLiteral("held %1 us").arg(worstHeldUs(shown))));
+        // No ratchet: what a stall adds is slewed back off, so the third
+        // minute holds no longer on average than the second (the stall
+        // pattern repeats every 180 wakes; both minutes see the same).
+        auto meanHold = [&](size_t from, size_t to) {
+            double sum = 0;
+            for (size_t k = from; k < to; ++k) sum += double(shown[k].presentUs - shown[k].arrivalUs);
+            return sum / double(to - from);
+        };
+        const double second = meanHold(1800, 3600);
+        const double third = meanHold(3600, 5400);
+        QVERIFY2(third - second <= 10.0 * kMs,
+                 qPrintable(QStringLiteral("mean hold %1 us in minute 2 vs %2 us in minute 3")
+                                .arg(second).arg(third)));
     }
 
     // ---- Clock unwrap ----------------------------------------------
