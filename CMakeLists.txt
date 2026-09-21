@@ -94,6 +94,7 @@ qt_add_executable(bsfchat-app
     src/core/App.cpp
     src/core/AppProfile.cpp
     src/core/AudioDeviceStatus.cpp
+    src/core/AudioGainSettings.cpp
     src/core/NotificationManager.cpp
     src/core/Settings.cpp
     src/core/TintedIconProvider.cpp
@@ -167,6 +168,9 @@ if(BSFCHAT_ENABLE_VOICE)
         src/voice/AudioWorker.cpp
         src/voice/AudioPacketQueue.cpp
         src/voice/AudioMixer.cpp
+        # Capture AGC + look-ahead limiter (both directions). Pure DSP,
+        # unit-tested in test_voice_gain.
+        src/voice/VoiceGain.cpp
         # Per-peer receive jitter buffer: reordering, Opus PLC and
         # playout scheduling for the unreliable/unordered audio channel.
         src/voice/JitterBuffer.cpp

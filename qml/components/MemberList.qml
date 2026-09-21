@@ -435,6 +435,8 @@ Rectangle {
         property string userId: ""
         property string displayName: ""
 
+        onAboutToShow: peerVolumeSlider.value = appSettings.peerVolume(userId)
+
         readonly property bool isSelf: serverManager.activeServer
             && userId === serverManager.activeServer.userId
         // Probe a real roomId for the permission check — Members list is
@@ -516,6 +518,61 @@ Rectangle {
             iconName: "copy"
             onTriggered: {
                 if (serverManager) serverManager.copyToClipboard(memberContextMenu.userId);
+            }
+        }
+
+        // Per-user volume: how loud YOU hear this person, 0-200%. Local to
+        // this device (Settings::setPeerVolume), never sent to them or the
+        // server. Applied live by the audio worker to that user's decoded
+        // stream before the mix, and the mix ends in the limiter, so a
+        // boosted voice cannot clip. The common case is turning one loud
+        // person down without turning everyone down.
+        //
+        // Not a MenuItem, like the identity block in ChannelList's user
+        // menu: there is nothing to trigger. Folded to zero height for
+        // yourself — your own voice is never played back to you.
+        Item {
+            id: peerVolumeRow
+            visible: !memberContextMenu.isSelf && memberContextMenu.userId !== ""
+            implicitWidth: 220
+            implicitHeight: visible ? peerVolumeCol.implicitHeight + Theme.sp.s3 * 2 : 0
+            height: implicitHeight
+            ColumnLayout {
+                id: peerVolumeCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Theme.sp.s3
+                anchors.rightMargin: Theme.sp.s3
+                spacing: 2
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text {
+                        text: "User volume"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        color: Theme.fg1
+                        Layout.fillWidth: true
+                    }
+                    Text {
+                        text: Math.round(peerVolumeSlider.value) + "%"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        color: Theme.fg2
+                    }
+                }
+                ThemedSlider {
+                    id: peerVolumeSlider
+                    Layout.fillWidth: true
+                    from: 0; to: 200; stepSize: 5
+                    // Set imperatively in the menu's onAboutToShow: the stored
+                    // value is not a notifying property, and a binding the
+                    // slider breaks on its first drag would show the previous
+                    // person's volume the next time the menu opens.
+                    value: 100
+                    onMoved: appSettings.setPeerVolume(memberContextMenu.userId,
+                                                       Math.round(value))
+                }
             }
         }
 

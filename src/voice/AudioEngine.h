@@ -133,6 +133,11 @@ private:
     // stop() and the failure path in start().
     void teardownThread();
 
+    // Pushes AudioGainSettings' input/output gain and AGC switch into the
+    // worker. No-op when there is no worker; start() calls it on the new
+    // one before the thread runs.
+    void applyGainSettings();
+
     // Enumerate one direction on this thread and hand the result to the
     // worker. `live` distinguishes the seeding call made before
     // startDevices() — blocking, and never restarts anything — from a

@@ -1,6 +1,8 @@
 #include "core/Settings.h"
 #include "core/AppProfile.h"
 #include "core/AudioDeviceStatus.h"
+#include "core/AudioGainSettings.h"
+#include "core/AudioVolume.h"
 #include "core/ReadState.h"
 #include "core/ReleaseSelection.h"
 #include "util/FileLogger.h"
@@ -11,6 +13,7 @@
 
 #include <algorithm>
 #include <QCryptographicHash>
+#include <QUrl>
 #include <QMediaDevices>
 #include <QAudioDevice>
 #include <QVariantMap>
@@ -23,6 +26,15 @@ void applyVerboseVoiceLogging(bool on)
 {
     QLoggingCategory::setFilterRules(
         on ? QStringLiteral("bsfchat.*=true") : QString());
+}
+
+// Per-user volume keys live under audio/peerVolume/, one per user id,
+// percent-encoded: a Matrix id carries '@' and ':', and QSettings gives
+// '/' and '\\' meaning of their own on every backend.
+QString peerVolumeKey(const QString& userId)
+{
+    return QStringLiteral("audio/peerVolume/")
+        + QString::fromLatin1(QUrl::toPercentEncoding(userId));
 }
 } // namespace
 
@@ -51,6 +63,38 @@ Settings::Settings(QObject* parent)
     connect(&bsfchat::AudioDeviceStatus::instance(),
             &bsfchat::AudioDeviceStatus::changed,
             this, &Settings::audioInUseChanged);
+
+    // Volume settings: migrate once, then hand the live values to the
+    // audio pipeline. See core/AudioVolume.h for why a value stored
+    // before the sliders did anything is reset rather than honoured.
+    const int schema = m_settings.value("audio/volumeSchema", 0).toInt();
+    if (schema < bsfchat::audio::kVolumeSchema) {
+        for (const char* key : {"audio/inputVolume", "audio/outputVolume"}) {
+            const QVariant v = m_settings.value(key);
+            const std::optional<int> stored =
+                v.isValid() ? std::optional<int>(v.toInt()) : std::nullopt;
+            const int kept = bsfchat::audio::migrateStoredVolume(stored, schema);
+            if (stored && *stored != kept) {
+                qInfo("[settings] %s was %d%% but never applied by earlier "
+                      "builds; reset to %d%%", key, *stored, kept);
+            }
+            if (stored) m_settings.setValue(key, kept);
+        }
+        m_settings.setValue("audio/volumeSchema", bsfchat::audio::kVolumeSchema);
+    }
+    auto& gains = bsfchat::AudioGainSettings::instance();
+    gains.setInputGain(bsfchat::audio::volumeToGain(inputVolume()));
+    gains.setOutputGain(bsfchat::audio::volumeToGain(outputVolume()));
+    gains.setAutoGain(autoGainControl());
+    m_settings.beginGroup(QStringLiteral("audio/peerVolume"));
+    const QStringList peerKeys = m_settings.childKeys();
+    for (const QString& k : peerKeys) {
+        const QString userId =
+            QString::fromUtf8(QByteArray::fromPercentEncoding(k.toLatin1()));
+        gains.setPeerGain(userId, bsfchat::audio::volumeToGain(
+                                      m_settings.value(k).toInt()));
+    }
+    m_settings.endGroup();
 }
 
 bool Settings::verboseVoiceLogging() const
@@ -276,24 +320,56 @@ void Settings::setAudioOutputDevice(const QString& desc) {
     }
 }
 int Settings::inputVolume() const {
-    return m_settings.value("audio/inputVolume", 100).toInt();
+    return bsfchat::audio::clampVolume(
+        m_settings.value("audio/inputVolume", bsfchat::audio::kVolumeUnity).toInt());
 }
 void Settings::setInputVolume(int v) {
-    v = qBound(0, v, 100);
+    v = bsfchat::audio::clampVolume(v);
     if (inputVolume() != v) {
         m_settings.setValue("audio/inputVolume", v);
+        bsfchat::AudioGainSettings::instance().setInputGain(
+            bsfchat::audio::volumeToGain(v));
         emit inputVolumeChanged();
     }
 }
 int Settings::outputVolume() const {
-    return m_settings.value("audio/outputVolume", 100).toInt();
+    return bsfchat::audio::clampVolume(
+        m_settings.value("audio/outputVolume", bsfchat::audio::kVolumeUnity).toInt());
 }
 void Settings::setOutputVolume(int v) {
-    v = qBound(0, v, 100);
+    v = bsfchat::audio::clampVolume(v);
     if (outputVolume() != v) {
         m_settings.setValue("audio/outputVolume", v);
+        bsfchat::AudioGainSettings::instance().setOutputGain(
+            bsfchat::audio::volumeToGain(v));
         emit outputVolumeChanged();
     }
+}
+bool Settings::autoGainControl() const {
+    return m_settings.value("audio/autoGainControl", true).toBool();
+}
+void Settings::setAutoGainControl(bool on) {
+    if (autoGainControl() == on) return;
+    m_settings.setValue("audio/autoGainControl", on);
+    bsfchat::AudioGainSettings::instance().setAutoGain(on);
+    emit autoGainControlChanged();
+}
+int Settings::peerVolume(const QString& userId) const {
+    if (userId.isEmpty()) return bsfchat::audio::kVolumeUnity;
+    return bsfchat::audio::clampVolume(
+        m_settings.value(peerVolumeKey(userId), bsfchat::audio::kVolumeUnity).toInt());
+}
+void Settings::setPeerVolume(const QString& userId, int percent) {
+    if (userId.isEmpty()) return;
+    percent = bsfchat::audio::clampVolume(percent);
+    // Unity is stored as "no entry", so the group only ever holds the
+    // people someone actually adjusted.
+    if (percent == bsfchat::audio::kVolumeUnity)
+        m_settings.remove(peerVolumeKey(userId));
+    else
+        m_settings.setValue(peerVolumeKey(userId), percent);
+    bsfchat::AudioGainSettings::instance().setPeerGain(
+        userId, bsfchat::audio::volumeToGain(percent));
 }
 bool Settings::notificationsEnabled() const {
     return m_settings.value("notifications/enabled", true).toBool();

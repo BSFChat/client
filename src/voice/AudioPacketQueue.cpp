@@ -1,5 +1,7 @@
 #include "voice/AudioPacketQueue.h"
 
+#include <utility>
+
 namespace bsfchat::voice {
 
 AudioPacketQueue::AudioPacketQueue(int capacity)
@@ -22,6 +24,14 @@ bool AudioPacketQueue::push(Kind kind, const QString& peerId,
     m_items.push_back(Item{kind, peerId, data});
     m_pushed++;
     return true;
+}
+
+void AudioPacketQueue::pushPeerGain(const QString& peerId, float gain) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    Item item{Kind::PeerGain, peerId, {}};
+    item.gain = gain;
+    m_items.push_back(std::move(item));
+    m_pushed++;
 }
 
 void AudioPacketQueue::drain(std::deque<Item>& out) {

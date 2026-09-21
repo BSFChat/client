@@ -77,6 +77,7 @@
 
 #include "voice/AudioPacketQueue.h"
 #include "voice/AudioDevicePolicy.h"
+#include "voice/VoiceGain.h"
 
 class AudioMixer;
 class QAudioSource;
@@ -156,6 +157,30 @@ public:
     // feels immediate.
     static constexpr int kDeviceDebounceMs = 500;
 
+    // Whether the OS already runs voice processing (gain control, and
+    // usually noise suppression and echo cancellation) on the capture
+    // stream. True on Android, where enterVoiceMode() switches to
+    // MODE_IN_COMMUNICATION. When it does, SpeechAgc is NOT run whatever
+    // the setting says: two AGCs in series each see the other's gain
+    // changes as level changes and chase them, which pumps. The capture
+    // limiter still runs everywhere — a limiter only ever turns peaks
+    // down, so it cannot fight anything.
+    //
+    // Not yet verified on a device: whether Qt's Android QAudioSource
+    // actually opens the VOICE_COMMUNICATION input preset under
+    // MODE_IN_COMMUNICATION (which is what engages the platform AGC), or
+    // only the routing. If a real Android sender turns out to be as quiet
+    // as desktop was, this is the switch to revisit.
+#ifdef Q_OS_ANDROID
+    static constexpr bool kPlatformVoiceProcessing = true;
+#else
+    static constexpr bool kPlatformVoiceProcessing = false;
+#endif
+
+    // One-shot capture-level log line after this much detected speech
+    // (500 frames = 10 s), and again at session end. See logLevelSummary().
+    static constexpr int kLevelSummarySpeechFrames = 500;
+
     explicit AudioWorker(std::shared_ptr<bsfchat::voice::AudioPacketQueue> queue,
                          QObject* parent = nullptr);
     ~AudioWorker() override;
@@ -170,6 +195,15 @@ public:
     // inaudible.
     void setMuted(bool muted) { m_muted.store(muted, std::memory_order_relaxed); }
     void setDeafened(bool d) { m_deafened.store(d, std::memory_order_relaxed); }
+
+    // Same route as mute, for the same reasons: single values read once
+    // per frame, and a slider should be heard as it moves rather than
+    // after whatever is queued on the audio thread. Linear gains (see
+    // core/AudioVolume.h for the percentage mapping). Each is applied as
+    // a ramp from the previous frame's value, so a change is a fade.
+    void setInputGain(float g) { m_inputGain.store(g, std::memory_order_relaxed); }
+    void setOutputGain(float g) { m_outputGain.store(g, std::memory_order_relaxed); }
+    void setAutoGain(bool on) { m_autoGain.store(on, std::memory_order_relaxed); }
 
     // ---- audio-thread only, invoked via BlockingQueuedConnection ----
 
@@ -230,6 +264,12 @@ private:
     bool flushPendingPlayback();
     bsfchat::voice::JitterBuffer* jitterFor(const QString& peerId);
     void dropPeer(const QString& peerId);
+    // Capture and playback level summary to the log — measured levels,
+    // never audio, and local only. Called off the per-frame path except
+    // for the single one-shot after kLevelSummarySpeechFrames.
+    void logLevelSummary(const char* when);
+    // Runs the capture chain over m_captureFloat in place.
+    void processCaptureFrame();
 
     // Resolve `dir` against the current snapshot and act on the answer.
     // The single place a device is chosen, at join and on every change.
@@ -259,6 +299,30 @@ private:
     // is the common case) once per drain.
     int m_captureHead = 0;
     std::vector<int16_t> m_captureFrame;  // one aligned 20ms mic frame
+    std::vector<float> m_captureFloat;    // the same frame, being processed
+    std::vector<int16_t> m_captureOut;    // processed frame, what is encoded
+
+    // Capture chain: SpeechAgc -> input volume -> PeakLimiter. AUDIO
+    // THREAD ONLY, and reset whenever a new input device opens — its
+    // noise floor and level history belong to the old microphone.
+    bsfchat::voice::SpeechAgc m_agc;
+    bsfchat::voice::PeakLimiter m_captureLimiter;
+    bool m_agcRan = false;            // whether the last frame used the AGC
+    float m_appliedInputGain = 1.0f;  // input gain the last frame ended on
+    float m_appliedOutputGain = 1.0f;
+
+    // Per-user volume, fed by AudioPacketQueue::Kind::PeerGain. Kept
+    // separately from m_jitter, and not dropped with the peer, so someone
+    // who leaves and rejoins keeps the volume you gave them.
+    struct PeerGain { float target = 1.0f; float applied = 1.0f; };
+    QMap<QString, PeerGain> m_peerGains;
+
+    // Level-summary counters. Increments only on the frame path.
+    int64_t m_captureFrames = 0;
+    int64_t m_captureLimitedFrames = 0;
+    int64_t m_playbackFrames = 0;
+    int64_t m_playbackLimitedFrames = 0;
+    bool m_levelSummaryLogged = false;
 
     QAudioSink* m_audioSink = nullptr;
     QIODevice* m_playbackDevice = nullptr;
@@ -282,6 +346,9 @@ private:
 
     std::atomic<bool> m_muted{false};
     std::atomic<bool> m_deafened{false};
+    std::atomic<float> m_inputGain{1.0f};
+    std::atomic<float> m_outputGain{1.0f};
+    std::atomic<bool> m_autoGain{true};
     uint16_t m_sequence = 0;
     bool m_started = false;
 

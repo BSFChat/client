@@ -487,29 +487,61 @@ Popup {
                         }
                     }
 
-                    // HIDDEN, DELIBERATELY. `inputVolume` is persisted and has
-                    // no consumer anywhere in the app: no gain is applied to the
-                    // captured audio, so dragging this changed a number in
-                    // QSettings and nothing else. A control that does nothing is
-                    // worse than an absent one — the user turns it down, is
-                    // still too loud, and now distrusts the rest of the page.
-                    //
-                    // The row is kept (not deleted) because the setting itself
-                    // is sound and the UI is the finished half: applying it is a
-                    // gain multiplier in the audio worker (src/voice/), which
-                    // this workstream does not own. The value is already exposed
-                    // as Settings::inputVolume with a NOTIFY signal, so wiring it
-                    // up is a read on that side and flipping `visible` here.
+                    // Input volume and automatic gain control. Both were
+                    // missing in effect until 2026-09-21: this slider existed,
+                    // persisted, and changed nothing (it was hidden in edff6cf
+                    // for exactly that reason), and there was no AGC at all, so
+                    // every sender was transmitted at whatever level their mic
+                    // produced — which is why calls sounded quiet. The worker
+                    // now applies AGC -> this gain -> a limiter; see
+                    // src/voice/VoiceGain.h and src/core/AudioVolume.h.
                     SettingRow {
-                        visible: false
+                        title: "Automatic gain control"
+                        description: "Evens out your microphone level so others hear you at a consistent volume. Turn off only if you already level your mic with other software or hardware."
+                        // Android runs the OS's own voice processing instead,
+                        // and the worker never applies ours there; a switch
+                        // that does nothing is the thing this page stopped
+                        // shipping.
+                        visible: Qt.platform.os !== "android"
+                        ThemedSwitch {
+                            checked: appSettings.autoGainControl
+                            // Re-bind after the user's write (D-C1).
+                            onToggled: {
+                                appSettings.autoGainControl = checked;
+                                checked = Qt.binding(function() {
+                                    return appSettings.autoGainControl;
+                                });
+                            }
+                        }
+                    }
+
+                    SettingRow {
                         title: "Input volume"
-                        description: "Gain applied to your microphone before encoding."
-                        ThemedSlider {
-                            id: inputVolSlider
-                            implicitWidth: 260
-                            from: 0; to: 100; stepSize: 1
-                            value: appSettings.inputVolume
-                            onMoved: appSettings.inputVolume = Math.round(value)
+                        description: "How loud you are to others, applied after automatic gain control. 100% leaves it unchanged."
+                        RowLayout {
+                            spacing: Theme.sp.s3
+                            ThemedSlider {
+                                id: inputVolSlider
+                                implicitWidth: 220
+                                from: 0; to: 200; stepSize: 5
+                                value: appSettings.inputVolume
+                                // Moving the slider writes `value` itself,
+                                // replacing the binding — restore it (D-C1).
+                                onMoved: {
+                                    appSettings.inputVolume = Math.round(value);
+                                    value = Qt.binding(function() {
+                                        return appSettings.inputVolume;
+                                    });
+                                }
+                            }
+                            Text {
+                                Layout.preferredWidth: 40
+                                text: appSettings.inputVolume + "%"
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                color: Theme.fg2
+                                horizontalAlignment: Text.AlignRight
+                            }
                         }
                     }
 
@@ -575,19 +607,36 @@ Popup {
                         }
                     }
 
-                    // Hidden for the same reason as "Input volume" above:
-                    // Settings::outputVolume has no consumer, so this slider
-                    // moved a stored number and no audio.
+                    // Output volume, 0-200%. Above 100% is a boost, which is
+                    // the answer to "are we not offering 100% output volume?":
+                    // we were, and the useful fix for a quiet call is being
+                    // able to go past it. Boosted peaks go through a limiter,
+                    // so they are turned down smoothly instead of clipping.
                     SettingRow {
-                        visible: false
                         title: "Output volume"
-                        description: "Applied on top of your OS volume."
-                        ThemedSlider {
-                            id: outputVolSlider
-                            implicitWidth: 260
-                            from: 0; to: 100; stepSize: 1
-                            value: appSettings.outputVolume
-                            onMoved: appSettings.outputVolume = Math.round(value)
+                        description: "Applied on top of your system volume. 100% is unchanged; up to 200% boosts quiet voices, with loud peaks smoothly limited instead of distorting."
+                        RowLayout {
+                            spacing: Theme.sp.s3
+                            ThemedSlider {
+                                id: outputVolSlider
+                                implicitWidth: 220
+                                from: 0; to: 200; stepSize: 5
+                                value: appSettings.outputVolume
+                                onMoved: {
+                                    appSettings.outputVolume = Math.round(value);
+                                    value = Qt.binding(function() {
+                                        return appSettings.outputVolume;
+                                    });
+                                }
+                            }
+                            Text {
+                                Layout.preferredWidth: 40
+                                text: appSettings.outputVolume + "%"
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                color: Theme.fg2
+                                horizontalAlignment: Text.AlignRight
+                            }
                         }
                     }
 
