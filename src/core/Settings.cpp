@@ -794,6 +794,44 @@ void Settings::setCameraTargetKbps(int kbps)
     emit cameraTargetKbpsChanged();
 }
 
+// ── Received-video smoothing ──────────────────────────────────────
+// A CEILING, not a fixed delay: the playout buffer adapts to measured
+// arrival jitter and only holds frames as long as that requires (a few
+// ms on a steady stream), up to this. See VideoPlayoutBuffer.h.
+//
+// Default 150 ms. Measured on the loopback probe (probe_video_cadence),
+// with no network at all, the sender's RTP pacer alone delivers every
+// keyframe of a 30 fps share ~165 ms late with the frames behind it
+// queued up, i.e. a visible freeze-then-clump every keyframe. A 150 ms
+// ceiling absorbs that to at most one frame of irregularity per
+// keyframe (worst 16-30 ms); 100 ms still leaves a 65 ms freeze and
+// 50 ms a 115 ms one; 250 ms absorbs it entirely but then holds ~170 ms
+// all the time. At 60 fps the same bursts are ~96 ms, which 100 ms
+// already covers. 150 ms is also where interactive
+// latency starts to be felt (ITU-T G.114), and screen share — the
+// stream people complained about — is watched more than conversed with.
+// The camera stream is capped lower still for lip sync
+// (VideoReceivePipeline::kCameraPlayoutCapMs).
+//
+// Envelope 0..400. Zero is the pre-buffer code path, for anyone who
+// prefers latency to smoothness. 400 ms is G.114's "unacceptable for
+// interactive use" line; jitter beyond it is a network problem that
+// showing video half a second late would only disguise, and it is the
+// most the buffer's picture cap (24 frames at 60 fps) can hold anyway.
+int Settings::videoSmoothingMs() const
+{
+    return std::clamp(m_settings.value(
+        QStringLiteral("video/smoothingMs"), 150).toInt(), 0, 400);
+}
+
+void Settings::setVideoSmoothingMs(int ms)
+{
+    ms = std::clamp(ms, 0, 400);
+    if (ms == videoSmoothingMs()) return;
+    m_settings.setValue(QStringLiteral("video/smoothingMs"), ms);
+    emit videoSmoothingMsChanged();
+}
+
 bool Settings::autoUpdateCheck() const
 {
     return m_settings.value(QStringLiteral("autoUpdateCheck"), true).toBool();

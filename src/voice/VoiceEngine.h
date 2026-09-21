@@ -160,6 +160,11 @@ public:
     // rxFrames/rxBytes/decoded/dropped/width/height/codec. Empty map
     // when no receive pipeline exists for (userId, streamId).
     QVariantMap videoReceiveStats(const QString& userId, int streamId) const override;
+    // Receive-side playout smoothing ceiling, ms (0 = present on decode).
+    // See VideoPlayoutBuffer.h. Not on IVoiceTransport: VoiceEngine is
+    // the only transport that decodes video itself today; an SFU
+    // transport would bring its SDK's own playout.
+    void setVideoSmoothingMs(int ms);
 
     // Fan out a JPEG-encoded screen frame to every connected LEGACY
     // peer (no video_rtp capability). RTP-capable peers get real video
@@ -297,6 +302,7 @@ private:
     VideoReceivePipeline* recvPipeline(const QString& userId, int streamId,
                                        VideoCodecKind codec);
     void dropRecvPipelines(const QString& userId);
+    void retireRecvPipeline(VideoReceivePipeline* p);
 
     MatrixClient* m_client;
     QString m_roomId;
@@ -356,6 +362,10 @@ private:
     // get tracks as soon as their caps arrive.
     bool m_videoSendActive = false;
     QMap<QPair<QString, int>, VideoReceivePipeline*> m_recvPipelines;
+    // Playout smoothing ceiling for received video (ms, 0 = off). Set by
+    // ServerConnection from Settings::videoSmoothingMs; applied to every
+    // pipeline now and to each one as it is created.
+    int m_videoSmoothingMs = 0;
     // Last announced on/off state per outgoing stream (S-7), replayed
     // to peers whose caps arrive after the share started.
     bool m_streamAnnounced[kVideoStreamCount] = {};

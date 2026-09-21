@@ -6,6 +6,7 @@
 
 #include "voice/PeerCaps.h"
 #include "voice/video/VideoCodec.h"
+#include "voice/video/MediaClockUnwrapper.h"
 
 #include <QTimer>
 
@@ -218,8 +219,10 @@ signals:
     void controlMessageReceived(const QByteArray& json);
     // AV1 temporal unit from the peer's "video-lossless" channel
     // (framing already stripped).
+    // `mediaTimeUs`: the sender's capture clock from the channel header
+    // (unwrapped, µs) — the playout buffer's schedule.
     void losslessFrameReceived(int streamId, const QByteArray& temporalUnit,
-                               bool keyframe);
+                               bool keyframe, qint64 mediaTimeUs);
     // The lossless channel rejected sends (throttled to one emission
     // per few seconds) — the share should fall back to H.264 rather
     // than keep pushing frames that never arrive.
@@ -233,8 +236,13 @@ signals:
     // AU arrived under — NOT from what we think the sender is using.
     // It is an int because Qt's queued-connection metatype registry is
     // not worth a new entry for an enum this signal already fits.
+    // `mediaTimeUs` is the AU's RTP timestamp, unwrapped to µs on the
+    // sender's capture clock. It used to be thrown away here — the same
+    // mistake as the audio path's discarded sequence header (PLAN-2026-09)
+    // — and without it the receiver cannot present on the cadence the
+    // frames were captured at.
     void videoFrameReceived(int streamId, const QByteArray& accessUnit,
-                            bool lossSuspected, int codec);
+                            bool lossSuspected, int codec, qint64 mediaTimeUs);
     // The send direction of a video track became usable.
     void videoTrackOpen(int streamId);
     // Remote sent RTCP PLI — it needs a keyframe on our send stream.
@@ -371,6 +379,9 @@ private:
         bool txLogged = false;
         std::atomic<bool> rxLogged{false};
         qint64 txSkipLogMs = 0;
+        // RTP timestamp -> µs for received AUs. Touched only in onFrame,
+        // on libdatachannel's thread.
+        MediaClockUnwrapper rxClock{90000};
     };
     VideoTrackCtx m_video[kVideoStreamCount];
     // Pacer ceiling per stream, remembered so a track attached later
@@ -394,6 +405,11 @@ private:
     // ~PeerConnectionManager ends up doing to m_dc (close +
     // resetCallbacks) MUST also be done to m_controlDc.
     std::shared_ptr<rtc::DataChannel> m_controlDc;
+    // Lossless header clock (ms) -> µs, per stream; touched only in the
+    // lossless channel's onMessage.
+    static_assert(kVideoStreamCount == 2, "one initialiser per stream");
+    MediaClockUnwrapper m_losslessRxClock[kVideoStreamCount] = {
+        MediaClockUnwrapper{1000}, MediaClockUnwrapper{1000}};
 
     // Control messages that arrived before any channel could carry
     // them. sendControl() is driven by the caps handshake, which
