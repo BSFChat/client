@@ -190,11 +190,28 @@ ScreenShareController::ScreenShareController(QObject* parent)
     connect(m_windowCapture, &QWindowCapture::activeChanged,
             this, updateActive);
 
+    // A capture error ENDS the share, and is reported ONCE.
+    //
+    // Qt's capturers do not give up when their source disappears: close a
+    // shared window and QWindowCapture keeps retrying, firing errorOccurred
+    // on every frame. This used to set the error and emit lastErrorChanged
+    // each time without stopping anything -- so every retry raised another
+    // toast, and closing the window you were streaming produced a stream of
+    // "window was closed" notifications. The comment below on the window
+    // handler already said the toast "doubles as your share just ended";
+    // now the share actually ends.
+    //
+    // The latch is reset when a share starts, so a later, unrelated failure
+    // is still reported. Errors that arrive after stop() -- Qt delivers the
+    // ones already queued -- hit the latch and are dropped.
     auto reportError = [this](const QString& description) {
         if (description.isEmpty()) return;
+        if (m_captureErrorReported) return;
+        m_captureErrorReported = true;
         m_lastError = description;
         qWarning("[screenshare] error: %s", qUtf8Printable(description));
         emit lastErrorChanged();
+        stop();
     };
     connect(m_capture, &QScreenCapture::errorOccurred, this,
         [reportError](QScreenCapture::Error, const QString& description) {
@@ -470,6 +487,7 @@ void ScreenShareController::startForWindow(int windowIndex)
     emit lastErrorChanged();
     m_capture->stop();
     m_windowCapture->setWindow(win);
+    m_captureErrorReported = false;   // a new share may report its own failure
     m_windowCapture->start();
     m_throttle->setInterval(g_frameIntervalMs);
     m_throttle->start();
@@ -688,6 +706,7 @@ void ScreenShareController::startForScreen(int screenIndex)
     emit lastErrorChanged();
     m_windowCapture->stop();
     m_capture->setScreen(target);
+    m_captureErrorReported = false;   // a new share may report its own failure
     m_capture->start();
     m_throttle->setInterval(g_frameIntervalMs);
     m_throttle->start();
@@ -708,12 +727,15 @@ void ScreenShareController::stop()
     if (m_mac) m_mac->stop();
     if (m_active) setActiveState(false);
 #else
-    if (m_active) {
-        // Both capturers report through updateActive(), which routes
-        // the flip through setActiveState().
-        m_capture->stop();
-        m_windowCapture->stop();
-    }
+    // Stopped UNCONDITIONALLY, not only while m_active. m_active follows
+    // the capturers' activeChanged, and a capturer whose source vanished
+    // can still be retrying (and erroring) after it has reported itself
+    // inactive -- gating on m_active would leave exactly that one running.
+    // stop() on an idle QScreenCapture/QWindowCapture is a no-op.
+    // Both capturers report through updateActive(), which routes the flip
+    // through setActiveState().
+    m_capture->stop();
+    m_windowCapture->stop();
 #endif
 }
 
