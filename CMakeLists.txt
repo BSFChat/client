@@ -135,6 +135,18 @@ qt_add_executable(bsfchat-app
     # its only dep (a tiny pure-DSP helper).
     src/voice/NotificationSounds.cpp
     src/voice/SoundGenerator.cpp
+    # Mesh-vs-SFU choice per join. Pure logic, no transport instances —
+    # see the header for why a channel must be all-mesh or all-SFU and
+    # what the server has to enforce.
+    #
+    # NOT voice-gated, same as the two above. ServerConnection.cpp is
+    # compiled unconditionally and calls voice::chooseTransport() in
+    # joinVoiceChannel(), so gating the .cpp on BSFCHAT_ENABLE_VOICE
+    # left an undefined symbol in every voice-off build — which meant
+    # the iOS target had never linked. Its only headers are QJsonArray,
+    # QJsonObject, QString and QStringList; there is nothing here to
+    # gate.
+    src/voice/VoiceTransportSelector.cpp
 )
 
 if(BSFCHAT_ENABLE_VOICE)
@@ -149,10 +161,6 @@ if(BSFCHAT_ENABLE_VOICE)
         # screen-share tier.
         src/voice/VoiceEngine.cpp
         src/voice/PeerConnectionManager.cpp
-        # Mesh-vs-SFU choice per join. Pure logic, no transport
-        # instances — see the header for why a channel must be
-        # all-mesh or all-SFU and what the server has to enforce.
-        src/voice/VoiceTransportSelector.cpp
         # Media-key parsing and the ONE home for security labelling.
         # Read the header before writing any string about voice security.
         src/voice/VoiceEncryption.cpp
