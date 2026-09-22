@@ -292,7 +292,13 @@ QString IdentityClient::generateCodeVerifier()
 
     QString verifier;
     verifier.reserve(43);
-    auto* rng = QRandomGenerator::global();
+    // system(), not global(): global() is a Mersenne Twister seeded once
+    // per process, and Qt documents it as unsuitable for cryptography. A
+    // verifier an observer can predict is a verifier that protects nothing
+    // -- PKCE's whole point is that only this client knows it. system() is
+    // the OS CSPRNG, the same source OidcRequest.h already uses for the
+    // nonce. (This project shipped a mt19937-seeded token bug once already.)
+    auto* rng = QRandomGenerator::system();
     for (int i = 0; i < 43; ++i) {
         verifier.append(QLatin1Char(charset[rng->bounded(charsetLen)]));
     }
@@ -309,6 +315,8 @@ QString IdentityClient::generateState()
 {
     // 32 hex characters = 16 random bytes
     QByteArray bytes(16, Qt::Uninitialized);
-    QRandomGenerator::global()->fillRange(reinterpret_cast<quint32*>(bytes.data()), 4);
+    // system(), for the same reason as the PKCE verifier above: state is
+    // the CSRF guard on the redirect, so it must not be predictable.
+    QRandomGenerator::system()->fillRange(reinterpret_cast<quint32*>(bytes.data()), 4);
     return QString::fromLatin1(bytes.toHex());
 }
