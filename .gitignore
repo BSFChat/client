@@ -23,10 +23,16 @@ deps/
 .vscode/
 .idea/
 
-# Signed APKs / installers etc. live in /tmp by convention; guard anyway
+# Signed APKs / installers etc. live in /tmp by convention; guard anyway.
+# *.idsig is apksigner's detached v4 signature, emitted next to the APK.
+# *.jks is the PKCS12 form keytool produces for the Play upload key —
+# that one must NEVER reach the repo (see docs/android-release.md).
 *.apk
 *.aab
+*.idsig
 *.keystore
+*.jks
+artifacts/
 
 # iOS signing material and archives. The .p8 App Store Connect key in
 # particular is downloadable exactly once and grants upload rights to

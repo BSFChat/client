@@ -40,10 +40,28 @@ cd "$SRC"
 make clean 2>/dev/null || true
 rm -f configdata.pm
 
+# The NDK's prebuilt toolchain lives under a host-triplet directory.
+# This used to be hard-coded to darwin-x86_64, which meant the script
+# only ever worked on the dev Mac and died on the Linux CI runner with
+# a PATH pointing at a directory that does not exist. Detect it.
+# (Apple Silicon still uses darwin-x86_64 — the NDK ships one universal
+# host toolchain under that name, there is no darwin-arm64 dir.)
+case "$(uname -s)" in
+    Darwin) NDK_HOST_TAG="darwin-x86_64" ;;
+    Linux)  NDK_HOST_TAG="linux-x86_64" ;;
+    *) echo "Unsupported host $(uname -s) for the Android NDK" >&2; exit 1 ;;
+esac
+NDK_TC="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST_TAG"
+[ -d "$NDK_TC" ] || { echo "NDK toolchain not found at $NDK_TC" >&2; exit 1; }
+
 # Put the NDK's prebuilt llvm toolchain on PATH — OpenSSL's Configure
 # hard-codes the `android-arm64` target to look for NDK-style clang.
-export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/darwin-x86_64/bin:$PATH"
+export PATH="$NDK_TC/bin:$PATH"
 export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
+
+# getconf rather than `sysctl -n hw.ncpu` (macOS-only) or `nproc`
+# (GNU-only): POSIX, and present on both hosts.
+NCPU="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
 # Shared libs required — Qt on Android pulls libssl/libcrypto via
 # androiddeployqt's --extra-libs, which only accepts .so files.
@@ -55,7 +73,7 @@ export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
     --openssldir="$OUT/ssl" \
     shared no-tests no-dso
 
-make -j"$(sysctl -n hw.ncpu)" build_libs >/dev/null
+make -j"$NCPU" build_libs >/dev/null
 make install_dev >/dev/null
 
 # Re-link the .so files from the static archives, dropping OpenSSL's
@@ -73,8 +91,13 @@ make install_dev >/dev/null
 # Re-linking from the .a archives with `--whole-archive` sidesteps
 # both: no version script is applied, so the resulting .so has no
 # .gnu.version_r entries referring to the old unqualified filenames.
+# OpenSSL picks its libdir per target; android-arm64 uses lib, but a
+# lib64 install would leave CMakeLists.txt and androiddeployqt (both of
+# which hard-code $OUT/lib) looking at nothing. Normalise.
+if [ ! -d "$OUT/lib" ] && [ -d "$OUT/lib64" ]; then
+    ln -sfn lib64 "$OUT/lib"
+fi
 cd "$OUT/lib"
-NDK_TC="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/darwin-x86_64"
 CC="$NDK_TC/bin/aarch64-linux-android24-clang"
 
 "$CC" -shared \

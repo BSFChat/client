@@ -1,15 +1,47 @@
 <?xml version="1.0"?>
+<!--
+  Application id: com.bsfchat.app.
+
+  Google Play locks the application id PERMANENTLY at first upload —
+  it can never be changed for the life of the listing. It therefore
+  has to match BSFCHAT_BUNDLE_ID (CMakeLists.txt) before anything is
+  pushed to the Play Console, not after.
+
+  This `package` attribute is how Qt 6.5-era androiddeployqt (AGP
+  7.x) learns the id. AGP 8 (Qt 6.8+) ignores it and reads
+  `namespace` out of gradle.properties instead, which is why
+  CMakeLists.txt also sets QT_ANDROID_PACKAGE_NAME on Qt >= 6.8.
+  Both must stay in sync; the CI job asserts the built artefact's id.
+
+  Note the Java classes stay in package com.bsfchat.client. The
+  application id and the Java package are independent, no app-level
+  R class is referenced anywhere in android/src (only framework
+  android.R.drawable), and every component below is named by its
+  fully-qualified class, so nothing needs moving.
+-->
+<!--
+  The two version placeholders below must match Qt's own template
+  (qtbase/src/android/templates/AndroidManifest.xml) EXACTLY, including
+  the trailing space-dash-dash. They were previously written without it,
+  androiddeployqt did not recognise them, and the QT_ANDROID_VERSION_CODE
+  and QT_ANDROID_VERSION_NAME properties set in CMakeLists.txt were
+  silently discarded: the last Android build to come out of this tree
+  carried versionCode 1 / versionName 1.0 regardless of the release it
+  was cut from. Leaving them unsubstituted is a hard Gradle failure
+  (NumberFormatException on applicationId). Either way, do not reformat.
+
+  (And note this file is parsed as strict XML by androiddeployqt before
+  Gradle ever sees it, so no comment in it may contain a double dash.)
+-->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="org.qtproject.example.bsfchat_app"
+    package="com.bsfchat.app"
     android:installLocation="auto"
-    android:versionCode="-- %%INSERT_VERSION_CODE%%"
-    android:versionName="-- %%INSERT_VERSION_NAME%%">
+    android:versionCode="-- %%INSERT_VERSION_CODE%% --"
+    android:versionName="-- %%INSERT_VERSION_NAME%% --">
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- Foreground-service plumbing so the OS doesn't kill the
          process mid-voice-call while the app is backgrounded. -->
@@ -31,7 +63,43 @@
     <!-- Keep wake during a call so the OS doesn't doze us off the
          network mid-conversation. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    
+
+    <!--
+      REMOVED, deliberately — do not re-add without a caller:
+
+      WRITE_EXTERNAL_STORAGE — a no-op since scoped storage (API 29)
+      and fully ignored from API 33. Nothing under src/ or android/
+      touches external storage; downloads go through SAF/the app's
+      own sandbox. Keeping it costs a Play Console "sensitive
+      permission" justification for a permission we never exercise.
+      android:requestLegacyExternalStorage went with it (it only ever
+      had meaning on API 29/30 alongside that permission).
+
+      BLUETOOTH — the legacy (maxSdkVersion 30) permission. Grep for
+      Bluetooth APIs in android/src and src/ finds none: the only
+      hits are desktop AudioDevicePolicy comments about headset
+      hot-plug debouncing. Routing call audio to an already-paired
+      BT headset is done through AudioManager (MODIFY_AUDIO_SETTINGS)
+      and needs no Bluetooth permission at all. If we ever want to
+      *enumerate* BT devices we need BLUETOOTH_CONNECT (API 31+) and
+      a runtime prompt — a different permission with a different
+      justification, so this one would not have helped anyway.
+    -->
+
+    <!--
+      Play derives implied <uses-feature> requirements from
+      permissions: CAMERA implies android.hardware.camera required,
+      RECORD_AUDIO implies android.hardware.microphone required.
+      Left implicit, Play would hide the listing from every device
+      without a camera — and BSFChat is a perfectly good text client
+      on such a device. Declare them optional and let the runtime
+      permission flow deal with absence.
+    -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
     <supports-screens
         android:anyDensity="true"
         android:largeScreens="true"
@@ -43,10 +111,19 @@
         android:label="BSFChat"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:requestLegacyExternalStorage="true"
         android:allowNativeHeapPointerTagging="false"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:fullBackupOnly="false">
+        <!--
+          allowBackup="false": Android Auto Backup would copy this
+          app's private data dir — which holds the OIDC refresh token,
+          the access token and the homeserver session state — into the
+          user's Google Drive, silently and unencrypted-to-us. That is
+          both a credential-exfiltration path we don't control and a
+          direct contradiction of the project's own-your-server
+          promise. Was "true" (Qt's template default) until the Play
+          hardening pass; it has never shipped to a store.
+        -->
         <activity
             android:name="com.bsfchat.client.BSFChatActivity"
             android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density"

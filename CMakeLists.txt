@@ -189,7 +189,20 @@ if(BSFCHAT_ENABLE_VOICE)
         # the source is unconditionally compiled.
         src/voice/AndroidAudioRouting.cpp
         src/voice/AndroidScreenShareController.cpp
-        src/voice/ScreenShareController.cpp
+        # Desktop-only screen capture. ScreenShareController.h includes
+        # <QScreenCapture>/<QWindowCapture>/<QCapturableWindow> on every
+        # non-macOS target, and Qt ships none of those for Android or
+        # iOS — Qt Multimedia's capture backends are desktop-only, and
+        # mobile screen share goes through MediaProjection instead (see
+        # AndroidScreenShareController above).
+        #
+        # main.cpp has always gated the include and the instantiation on
+        # exactly this platform set; only the source list was
+        # unconditional, so AUTOMOC still ran moc over the header and the
+        # Android build died in mocs_compilation.cpp on a missing
+        # <QWindowCapture>. Keep this gate in step with the #if in
+        # main.cpp around `#include "voice/ScreenShareController.h"`.
+        $<$<AND:$<NOT:$<BOOL:${ANDROID}>>,$<NOT:$<BOOL:${IOS}>>>:src/voice/ScreenShareController.cpp>
         src/voice/CameraController.cpp
         # Real-video pipeline: RTP H.264 tracks (+ AV1 lossless tier).
         # Codec backends are per-platform; the factory (#ifdef matrix)
@@ -259,6 +272,26 @@ if(BSFCHAT_ENABLE_VOICE)
     endif()
 endif()
 
+# Bundle ID / Android application id — resolved HERE, above the
+# Android block, because that block derives QT_ANDROID_PACKAGE_NAME
+# from it. Moving it later silently yields an empty application id.
+#
+# Overridable — the default `com.bsfchat.app.dev` keeps local Debug
+# builds out of Launch Services' way when a release BSFChat.app is
+# also installed (otherwise `open` picks the installed one and the dev
+# build is unreachable from the Dock / ⌘Q → reopen flow), and on
+# Android lets a debug sideload sit alongside a Play install. CI +
+# release builds pass -DBSFCHAT_BUNDLE_ID=com.bsfchat.app to restore
+# the canonical identity — which for Android is the id Play locks
+# forever at first upload.
+if(NOT DEFINED BSFCHAT_BUNDLE_ID)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+        set(BSFCHAT_BUNDLE_ID "com.bsfchat.app")
+    else()
+        set(BSFCHAT_BUNDLE_ID "com.bsfchat.app.dev")
+    endif()
+endif()
+
 # Android: point Qt at our custom package source dir which carries a
 # patched AndroidManifest.xml with softInputMode=adjustResize so the
 # on-screen keyboard shrinks the window rather than covering the
@@ -275,6 +308,59 @@ if(ANDROID)
         QT_ANDROID_VERSION_NAME "${BSFCHAT_VERSION}")
     set_property(TARGET bsfchat-app PROPERTY
         QT_ANDROID_VERSION_CODE "${BSFCHAT_VERSION_CODE}")
+
+    # Application id. Play locks this permanently at first upload, so
+    # it is derived from the same BSFCHAT_BUNDLE_ID the macOS bundle
+    # uses rather than being spelled out twice.
+    #
+    # Two mechanisms because androiddeployqt changed under us:
+    #   Qt <= 6.7 / AGP 7.x — reads the `package` attribute out of
+    #       android/AndroidManifest.xml. Nothing to set here.
+    #   Qt >= 6.8 / AGP 8.x — the manifest `package` attribute is
+    #       ignored (AGP 8 took the namespace out of the manifest);
+    #       androiddeployqt writes gradle.properties' androidPackageName
+    #       from the QT_ANDROID_PACKAGE_NAME property instead.
+    # Setting both keeps one source of truth across the Qt bump that
+    # CI is already mid-way through (desktop is on 6.10, the local
+    # Android SDK install is still 6.5.3).
+    if(QT_VERSION VERSION_GREATER_EQUAL 6.8)
+        set_property(TARGET bsfchat-app PROPERTY
+            QT_ANDROID_PACKAGE_NAME "${BSFCHAT_BUNDLE_ID}")
+    endif()
+
+    # SDK levels. Both are overridable so a machine whose SDK manager
+    # only has an older platform installed can still produce a
+    # sideloadable APK, but the DEFAULTS are what Play demands:
+    #
+    #   target 36 — since 2026-08-31 Google Play refuses new apps AND
+    #       updates that target below Android 16 (API 36). There is an
+    #       extension route to 2026-11-01, nothing beyond. Building
+    #       with a lower value produces an artefact the Console will
+    #       reject at upload, so this must not silently drift.
+    #       NOTE: AGP wants compileSdk >= targetSdk. androiddeployqt
+    #       picks compileSdk from the newest platform installed in the
+    #       SDK, so the builder needs platforms/android-36 present —
+    #       the CI job installs it explicitly.
+    #
+    #   min 28 — Qt 6.8+ will not build for anything older, so this is
+    #       forced the moment Android follows desktop onto 6.10. Qt
+    #       6.5's own floor was 23; API 28 (Android 9, 2018) still
+    #       covers essentially the whole install base. The vendored
+    #       OpenSSL is compiled against API 24 and runs fine on 28+.
+    set(BSFCHAT_ANDROID_TARGET_SDK "36" CACHE STRING
+        "Android targetSdkVersion (Play requires >= 36 for uploads)")
+    set(BSFCHAT_ANDROID_MIN_SDK "28" CACHE STRING
+        "Android minSdkVersion")
+    set_property(TARGET bsfchat-app PROPERTY
+        QT_ANDROID_TARGET_SDK_VERSION "${BSFCHAT_ANDROID_TARGET_SDK}")
+    set_property(TARGET bsfchat-app PROPERTY
+        QT_ANDROID_MIN_SDK_VERSION "${BSFCHAT_ANDROID_MIN_SDK}")
+    if(BSFCHAT_ANDROID_TARGET_SDK LESS 36)
+        message(WARNING
+            "Android targetSdkVersion=${BSFCHAT_ANDROID_TARGET_SDK} is below "
+            "Play's current floor of 36. This build is fine for sideloading "
+            "but the Play Console will reject it at upload.")
+    endif()
 
     # Bundle OpenSSL with the APK. Qt for Android ships without SSL, so
     # HTTPS requests (OIDC token exchange, the Matrix/JSON client,
@@ -296,21 +382,6 @@ if(ANDROID)
     endif()
 endif()
 
-# Ensure macOS .app bundle is created.
-#
-# Bundle ID is overridable — the default `com.bsfchat.app.dev` keeps
-# local Debug builds out of Launch Services' way when a release
-# BSFChat.app is also installed (otherwise `open` picks the installed
-# one and the dev build is unreachable from the Dock / ⌘Q → reopen
-# flow). CI + release builds pass -DBSFCHAT_BUNDLE_ID=com.bsfchat.app
-# to restore the canonical identity.
-if(NOT DEFINED BSFCHAT_BUNDLE_ID)
-    if(CMAKE_BUILD_TYPE STREQUAL "Release")
-        set(BSFCHAT_BUNDLE_ID "com.bsfchat.app")
-    else()
-        set(BSFCHAT_BUNDLE_ID "com.bsfchat.app.dev")
-    endif()
-endif()
 # The user-visible version string. Read by the Updater for its
 # semver comparison with GitHub Releases' tag_name. BSFCHAT_VERSION
 # may carry a -suffix (e.g. "0.0.0-dev"); BSFCHAT_VERSION_DOTS is the
@@ -319,6 +390,7 @@ endif()
 target_compile_definitions(bsfchat-app PRIVATE
     BSFCHAT_VERSION="${BSFCHAT_VERSION}")
 
+# Ensure macOS .app bundle is created.
 set_target_properties(bsfchat-app PROPERTIES
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_BUNDLE_NAME "BSFChat"
