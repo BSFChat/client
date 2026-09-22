@@ -41,14 +41,18 @@
 //
 // ---- Control law ---------------------------------------------------
 //
-//   loss < 2 %                → probe up (×1.10, ×1.25 while far below
-//                               the configured max)
-//   2 % ≤ loss < 6 %          → hold
-//   6 % ≤ loss < 10 %         → trim ×0.95, 2 s dwell
-//   loss ≥ 10 % or kf-storm   → cut ×0.70, then a 4 s dwell
+//   damage < 2 %              → probe up (×1.02, ×1.04 while far below
+//                               the configured max), never past a
+//                               margin over what is actually being sent
+//   2 % ≤ damage < 6 %        → hold
+//   damage ≥ 6 %, persistent  → back off by 2 × packet loss, clamped to
+//     (or kf-storm)             3-15 %, never below 70 % of recent
+//                               goodput; 4 s with no ladder upshift
 //   no peer reports loss      → hold (old client — must NOT read as
 //                               100 % loss, and must not license a
 //                               climb on no evidence either)
+//
+// ("damage" = the fraction of frames that lose a packet; see below.)
 //
 // Thresholds, floors and the fps/resolution ladder all live in
 // VideoRatePolicy.h so they can be reasoned about without a Qt event
@@ -85,6 +89,45 @@
 // path — the "app-limited" rule every modern congestion controller
 // has — and when the sender recovers, the allowance it last validated
 // is still there to return to immediately.
+//
+// ---- The spiral (2026-09-22, two viewers, 30 fps / 3840 / Q50) -----
+//
+// The field log showed the law above failing in a loop:
+//  1. Application-limited inflation. A mostly-static desktop sent
+//     ~2.2 Mbps while clean reports let the allowance climb ×1.25 a
+//     tick to 23.9 Mbps. The pacer ceiling and encoder max follow the
+//     allowance (×1.5), so the next scene change's keyframe left at
+//     ~35 Mbps into a path that carried a fraction of that.
+//  2. That burst lost packets; frame grading turned ~8 % packet loss
+//     into ~99 % "frames lost"; the law cut ×0.70 per tick while the
+//     lagging reports kept showing it: 23.9 → 16.7 → 11.7 → 8.2 → 5.7
+//     … Mbps to the 250 kbps floor at 480 px, actually sending 20-270
+//     kbps. The ladder followed every step (1440/1920/480/960 px).
+//  3. The knee was forgotten 30 s later and the cycle repeated: 178
+//     cuts to 565 raises in one session.
+// The fixes, each a targeted change to the law above (constants and
+// reasoning in VideoRatePolicy.h, Thresholds):
+//  a. Probing is capped at max(1.5 × sent, sent + 1 Mbps) of the
+//     sender's measured output (kAppLimited*), so the allowance means
+//     "probed capacity", not "nobody objected yet".
+//  b. The probe is ~8 %/s far below the max, ~4 %/s near it.
+//  c. Back-off size comes from packet loss, clamped to 3-15 % per
+//     tick, needs damaging loss on 2 consecutive ticks (3 right after a
+//     keyframe: one IDR's loss straddles two report windows), and never
+//     goes below 70 % of the recent achieved goodput.
+//  d. The resolution ladder steps down only after 3 s below a rung's
+//     floor, up only after 8 s of comfort, and never changes twice
+//     within 6 s.
+//  e. The knee relaxes upward after 15 s without loss instead of being
+//     forgotten at 30 s; the creep stops at 97 % of it.
+//  f. The worst governing peer still sets the rate (a share is only as
+//     smooth as its worst receiver), but through (c): one viewer's
+//     transient — a single lossy window — costs nothing, and a
+//     persistent one walks the share down ≤ 15 % a tick and stops at
+//     70 % of what the path was carrying, instead of repeating ×0.70
+//     cuts. Persistence is counted across the worst peer of each tick,
+//     so loss that moves between viewers (a shared uplink) is still
+//     persistence.
 class VideoRateController : public QObject {
     Q_OBJECT
 public:
@@ -137,6 +180,12 @@ public:
     double lastWorstLossPct() const { return m_lastLossPct; }
     double lastFrameDamagePct() const { return m_lastDamagePct; }
     int kneeKbps() const { return m_kneeKbps; }
+    // Smoothed measured sender output (kbps); < 0 = no measurement yet.
+    double sentKbpsEstimate() const { return m_haveSentRate ? m_sentKbpsEwma : -1.0; }
+    // The most probing may lift the allowance to right now (app-limited
+    // cap, Thresholds::kAppLimited*); the envelope max without a
+    // measurement.
+    int probeCapKbps() const;
     const videosend::Window& lastSendWindow() const { return m_lastWindow; }
 
     // One evaluation of the control law. Production drives this from
@@ -167,8 +216,11 @@ private:
     void resetState();
     // Worst governing peer this window; writes its id, its packet loss
     // and the frame damage that loss implies at the current frame size.
+    // Cut here means "damaging loss this window, or a keyframe storm" —
+    // a back-off CANDIDATE; tick() applies persistence and sizes it
+    // from `smoothedLossPct` (the worst peer's smoothed packet loss).
     Health classify(qint64 now, QString& worstPeer, double& worstLossPct,
-                    double& damagePct, int kf) const;
+                    double& smoothedLossPct, double& damagePct, int kf) const;
     void applyLadder();
     void evaluateSender();
     int rungFps() const;
@@ -188,7 +240,11 @@ private:
     int m_rungIdx = 0;             // index into the content's ladder
     int m_healthyTicks = 0;        // consecutive healthy evaluations
     int m_comfortTicks = 0;        // consecutive upshift-worthy ones
-    int m_dwellTicks = 0;          // minimum wait after any downshift
+    int m_dwellTicks = 0;          // no ladder upshift for this long after a cut
+    int m_ladderDwellTicks = 0;    // no ladder change of either kind
+    int m_belowFloorTicks = 0;     // consecutive ticks below the rung floor
+    int m_lossStreak = 0;          // consecutive ticks with damaging loss
+    quint32 m_lossHistory = 0;     // one bit per tick: damaging loss?
     int m_kfRequests = 0;          // since last tick
     bool m_everGoverned = false;   // a peer has reported loss at least once
     qint64 m_testNowMs = -1;
@@ -200,6 +256,7 @@ private:
         double lostAcc = 0.0;
         double expectedAcc = 0.0;
         double gradedLossPct() const;
+        double smoothedLossPct() const;
     };
     QHash<QString, PeerSample> m_peers;
 
@@ -220,6 +277,14 @@ private:
     // (Thresholds::kKneeNeedsCleanRatio).
     int m_cleanKbps = 0;
     int m_cleanAtTick = 0;
+
+    // Measured sender output (Thresholds::kSentRateAlpha) — the basis of
+    // the app-limited probe cap and the goodput floor.
+    double m_sentKbpsEwma = 0.0;
+    bool m_haveSentRate = false;
+    int m_ticksSinceKeyframe = 1 << 20;  // ticks since a send window held an IDR
+    bool m_windowHadKeyframe = false;    // reported since the last tick
+    int m_lastLossTick = 0;              // last back-off (knee hold clock)
 
     // Sender-capacity state (SenderPolicy).
     SendWindowSource m_sendSource;

@@ -52,10 +52,14 @@ VideoDeliveryReport report(quint64 expected, double lossPct) {
 }
 
 // A window as the ScreenShareController would produce it.
+// `sentKbps` 0 means "this window carries no rate measurement" — the
+// controller then has no app-limited probe cap and no goodput floor,
+// which is what the pure frame-rate cases below want.
 Window window(int targetFps, double sentFps, double captureFps,
               double packetsPerFrame, bool polled = true,
               double supersededPerSec = 0.0, double workMs = 4.0,
-              double overwrittenPerSec = 0.0) {
+              double overwrittenPerSec = 0.0, double sentKbps = 0.0,
+              int keyframes = 0) {
     Window w;
     w.valid = true;
     w.seconds = 0.5;
@@ -67,7 +71,18 @@ Window window(int targetFps, double sentFps, double captureFps,
     w.supersededPerSec = supersededPerSec;
     w.meanWorkMs = workMs;
     w.overwrittenPerSec = overwrittenPerSec;
+    w.sentKbps = sentKbps;
+    w.keyframes = keyframes;
     return w;
+}
+
+// A window from a sender that is filling its allowance: what it sends
+// IS the controller's current output. The closed-loop cases below use
+// it so the app-limited cap and the goodput floor see real numbers.
+Window fullWindow(const VideoRateController& rc, double packetsPerFrame,
+                  int keyframes = 0) {
+    return window(rc.fps(), rc.fps(), rc.fps(), packetsPerFrame, true, 0.0,
+                  4.0, 0.0, double(rc.targetKbps()), keyframes);
 }
 
 // Packets per frame the controller's CURRENT output implies.
@@ -134,7 +149,7 @@ RunStats runPath(VideoRateController& rc, PathModel& path, int ticks,
         const int before = rc.networkKbps();
         const int out = rc.targetKbps();
         const double loss = path.lossFor(out);
-        rc.reportSendWindow(window(rc.fps(), rc.fps(), rc.fps(), packetsAt(rc)));
+        rc.reportSendWindow(fullWindow(rc, packetsAt(rc)));
         rc.reportDelivery(kPeer, path.reportFor(out, packetsPerTick(rc)));
         rc.tick();
         if (i < ticks - measure) {
@@ -395,9 +410,11 @@ private slots:
         VideoRateController rc(VideoStreamId::Screen);
         rc.setEnvelope(250, 31000, 30, 1920);
         rc.setActive(true);
-        // Get it up high on a clean path first, as in the field.
-        for (int i = 0; i < 30; ++i) {
-            rc.reportSendWindow(window(rc.fps(), rc.fps(), rc.fps(), packetsAt(rc)));
+        // Get it up high on a clean path first, as in the field. The
+        // probe is ~8 %/s now (it used to be ×1.25 a TICK, which is what
+        // inflated the allowance in the field log), so this is ~27 s.
+        for (int i = 0; i < 60; ++i) {
+            rc.reportSendWindow(fullWindow(rc, packetsAt(rc)));
             rc.reportDelivery(kPeer, report(packetsPerTick(rc), 0.0));
             rc.tick();
         }
@@ -473,6 +490,158 @@ private slots:
                 .arg(rc.targetKbps())));
     }
 
+    // ---- The spiral (2026-09-22): the four failures in the field log
+
+    // 1. APPLICATION-LIMITED INFLATION. A mostly-static desktop sends
+    //    ~2.2 Mbps and every report is clean, so the old law climbed
+    //    ×1.25 a tick — 5769 → 7243 → … → 23883 kbps — an allowance ten
+    //    times the real usage, carrying no information about the path
+    //    and sizing both the encoder max and the pacer ceiling (1.5 ×
+    //    target) for the burst that started the collapse.
+    void anAppLimitedSenderDoesNotInflateTheAllowance() {
+        VideoRateController rc(VideoStreamId::Screen);
+        rc.setEnvelope(250, 31000, 30, 1920);
+        rc.setActive(true);
+        const int start = rc.targetKbps();
+        const double sent = 2200.0;      // the field's 5 s "send:" figure
+        for (int i = 0; i < 120; ++i) {  // a full minute of clean reports
+            rc.reportSendWindow(window(30, 30, 30, 8, true, 0.0, 4.0, 0.0,
+                                       sent, i % 20 == 0 ? 1 : 0));
+            rc.reportDelivery(kPeer, report(packetsPerTick(rc), 0.0));
+            rc.tick();
+        }
+        // The old law reached the envelope maximum here — 31 Mbps of
+        // allowance for a 2.2 Mbps share, and an encoder max and pacer
+        // ceiling of 1.5 × that. The cap is a margin over what is
+        // actually sent…
+        QVERIFY2(rc.probeCapKbps()
+                     <= qMax(int(sent * 1.5), int(sent) + 1000) + 1,
+                 qPrintable(QStringLiteral("probe cap %1 kbps while sending "
+                                           "%2").arg(rc.probeCapKbps())
+                                .arg(sent)));
+        // …so nothing was climbed; and nothing was taken away either,
+        // because bits we are not sending are not evidence in either
+        // direction. The share keeps the budget it opened with for its
+        // next burst of motion.
+        QCOMPARE(rc.networkKbps(), start);
+        QCOMPARE(rc.targetKbps(), start);
+        QCOMPARE(rc.longEdge(), 1920);
+        QCOMPARE(rc.fps(), 30);
+
+        // The cap is about being application-limited, not a general
+        // freeze: a sender that fills its allowance still probes all
+        // the way to the envelope maximum on the same clean path.
+        VideoRateController full(VideoStreamId::Screen);
+        full.setEnvelope(250, 31000, 30, 1920);
+        full.setActive(true);
+        for (int i = 0; i < 120; ++i) {
+            full.reportSendWindow(fullWindow(full, packetsAt(full)));
+            full.reportDelivery(kPeer, report(packetsPerTick(full), 0.0));
+            full.tick();
+        }
+        QCOMPARE(full.targetKbps(), 31000);
+    }
+
+    // 2. ONE KEYFRAME BURST. The field log cut 23883 → 16718 → 11702 →
+    //    8191 → 5733 … on the loss from a single scene change, because
+    //    ~8 % packet loss on 17-packet frames grades as ~99 % of frames
+    //    and every such tick cut ×0.70. One burst must now cost a few
+    //    percent at most — the goodput the path just carried is the
+    //    floor — and the share must not lose resolution over it.
+    void oneKeyframeBurstDoesNotCollapseTheShare() {
+        VideoRateController rc(VideoStreamId::Screen);
+        rc.setEnvelope(250, 31000, 30, 1920);
+        rc.setActive(true);
+        const double sent = 2200.0;
+        for (int i = 0; i < 40; ++i) {
+            rc.reportSendWindow(window(30, 30, 30, 8, true, 0.0, 4.0, 0.0, sent));
+            rc.reportDelivery(kPeer, report(packetsPerTick(rc), 0.0));
+            rc.tick();
+        }
+        const int before = rc.targetKbps();
+        const int edge = rc.longEdge();
+
+        // The burst: a keyframe window at 9 Mbps, 8 % of its packets
+        // lost (the field's "loss=8.41% frames=98.8%"), then the tail
+        // of it in the next window.
+        rc.reportSendWindow(window(30, 30, 30, 31, true, 0.0, 4.0, 0.0,
+                                   9000.0, /*keyframes=*/1));
+        rc.reportDelivery(kPeer, report(920, 8.41));
+        rc.tick();
+        rc.reportSendWindow(window(30, 30, 30, 10, true, 0.0, 4.0, 0.0, 3000.0));
+        rc.reportDelivery(kPeer, report(300, 3.0));
+        rc.tick();
+        QVERIFY2(rc.targetKbps() >= before * 7 / 10, qPrintable(
+            QStringLiteral("one keyframe burst took %1 → %2 kbps")
+                .arg(before).arg(rc.targetKbps())));
+
+        // Five clean seconds later it is still there, at full size.
+        for (int i = 0; i < 10; ++i) {
+            rc.reportSendWindow(window(30, 30, 30, 8, true, 0.0, 4.0, 0.0, sent));
+            rc.reportDelivery(kPeer, report(packetsPerTick(rc), 0.0));
+            rc.tick();
+        }
+        QVERIFY(rc.targetKbps() >= before * 7 / 10);
+        QCOMPARE(rc.longEdge(), edge);
+    }
+
+    // 3. …and the bounded, persistence-gated back-off must still find a
+    //    real capacity drop. A 20 Mbps path that becomes a 3 Mbps one.
+    void sustainedCapacityLossStillConverges() {
+        VideoRateController rc(VideoStreamId::Screen);
+        rc.setEnvelope(250, 31000, 30, 1920);
+        rc.setActive(true);
+        PathModel path;
+        path.capacityKbps = 20000;
+        runPath(rc, path, 120, 1);
+        const int settled = rc.targetKbps();
+        QVERIFY2(settled >= 12000, qPrintable(QStringLiteral(
+            "only reached %1 kbps of a 20 Mbps path").arg(settled)));
+
+        path.capacityKbps = 3000;
+        const RunStats st = runPath(rc, path, 60, 30);   // 30 s, last 15 s
+        qInfo("20 → 3 Mbps: %d kbps after 30 s (range %d-%d), %d back-offs",
+              rc.targetKbps(), st.minKbps, st.maxKbps, st.lossEvents);
+        QVERIFY2(rc.targetKbps() <= 3600, qPrintable(QStringLiteral(
+            "still asking for %1 kbps of a 3 Mbps path").arg(rc.targetKbps())));
+        QVERIFY2(rc.targetKbps() >= 1500, qPrintable(QStringLiteral(
+            "overshot the drop and collapsed to %1 kbps").arg(rc.targetKbps())));
+    }
+
+    // 4. RESOLUTION FLAPPING. The field session ran 1440 → 1920 → 480 →
+    //    960 px; every change rebuilds the encoder session and costs an
+    //    IDR, which is itself the burst that starts the next cut. Under
+    //    a bitrate that oscillates around a rung boundary the ladder
+    //    must sit still.
+    void theLadderDoesNotFlapWhenTheBitrateOscillates() {
+        VideoRateController rc(VideoStreamId::Screen);
+        rc.setEnvelope(250, 31000, 30, 1920);
+        rc.setActive(true);
+        // A path that alternates between comfortably above and just
+        // below what 1080p30 needs, every 3 s.
+        PathModel path;
+        int changes = 0;
+        int lastEdge = rc.longEdge(), lastFps = rc.fps();
+        for (int i = 0; i < 400; ++i) {
+            path.capacityKbps = (i / 6) % 2 == 0 ? 8000 : 3200;
+            const int out = rc.targetKbps();
+            rc.reportSendWindow(fullWindow(rc, packetsAt(rc), i % 20 == 0 ? 1 : 0));
+            rc.reportDelivery(kPeer, path.reportFor(out, packetsPerTick(rc)));
+            rc.tick();
+            if (rc.longEdge() != lastEdge || rc.fps() != lastFps) {
+                ++changes;
+                lastEdge = rc.longEdge();
+                lastFps = rc.fps();
+            }
+        }
+        qInfo("oscillating path: %d ladder changes in 200 s, ended at %d px "
+              "@ %d fps, %d kbps", changes, rc.longEdge(), rc.fps(),
+              rc.targetKbps());
+        QVERIFY2(changes <= 4, qPrintable(QStringLiteral(
+            "ladder changed %1 times in 200 s — that is flapping")
+                .arg(changes)));
+    }
+
     // ---- Sender input: frame-rate awareness ------------------------
 
     // The owner's ask, literally: bitrate follows the frame rate that
@@ -483,7 +652,7 @@ private slots:
         VideoRateController rc(VideoStreamId::Screen);
         rc.setEnvelope(250, 20000, 30, 1920);
         rc.setActive(true);
-        for (int i = 0; i < 30; ++i) {
+        for (int i = 0; i < 60; ++i) {
             rc.reportSendWindow(window(30, 30, 30, 10));
             rc.reportDelivery(kPeer, report(800, 0.0));
             rc.tick();
@@ -671,7 +840,7 @@ private slots:
         VideoRateController rc(VideoStreamId::Screen);
         rc.setEnvelope(250, 8000, 24, 1280);   // e.g. server caps
         rc.setActive(true);
-        for (int i = 0; i < 40; ++i) {
+        for (int i = 0; i < 80; ++i) {
             rc.reportSendWindow(window(rc.fps(), rc.fps(), rc.fps(), 4));
             rc.reportDelivery(kPeer, report(400, 0.0));
             rc.tick();
@@ -684,6 +853,7 @@ private slots:
 
         // Network trouble AND a capture-bound sender at once: each
         // lowers what it governs; neither raises what the other lowered.
+        // (Six ticks: a back-off needs loss on two consecutive ones.)
         for (int i = 0; i < 6; ++i) {
             rc.reportSendWindow(window(rc.fps(), 12, 12, 4));
             rc.reportDelivery(kPeer, report(400, 25.0));

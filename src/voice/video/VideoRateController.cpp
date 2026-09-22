@@ -73,6 +73,8 @@ void VideoRateController::resetState() {
     m_bitrate = startBitrate();
     m_rungIdx = 0;
     m_healthyTicks = m_comfortTicks = m_dwellTicks = m_kfRequests = 0;
+    m_ladderDwellTicks = m_belowFloorTicks = m_lossStreak = 0;
+    m_lossHistory = 0;
     m_everGoverned = false;
     m_peers.clear();
     m_activeSinceMs = nowMs();
@@ -83,6 +85,11 @@ void VideoRateController::resetState() {
     m_lastKneeStepTick = 0;
     m_cleanKbps = 0;
     m_cleanAtTick = 0;
+    m_lastLossTick = 0;
+    m_sentKbpsEwma = 0.0;
+    m_haveSentRate = false;
+    m_ticksSinceKeyframe = 1 << 20;
+    m_windowHadKeyframe = false;
     // Sender state is per share too: a machine that was encode-bound
     // on the last share (a 4K window, a busy moment) must get a fresh
     // chance at the full envelope on this one.
@@ -151,6 +158,18 @@ void VideoRateController::reportSendWindow(const videosend::Window& w) {
     if (!w.valid) return;
     m_lastWindow = w;
     m_windowFresh = true;
+    if (w.keyframes > 0) m_windowHadKeyframe = true;
+    // Measured output, for the app-limited probe cap and the goodput
+    // floor. A window that encoded frames but reports no bytes carries
+    // no rate measurement (only synthetic windows do that); an empty
+    // window is a genuine 0 kbps.
+    if (w.sentFps <= 0.0 || w.sentKbps > 0.0) {
+        const double kbps = std::max(0.0, w.sentKbps);
+        m_sentKbpsEwma = m_haveSentRate
+            ? m_sentKbpsEwma + T::kSentRateAlpha * (kbps - m_sentKbpsEwma)
+            : kbps;
+        m_haveSentRate = true;
+    }
     // Exponentially weighted, time constant ≈ 1.4 s (SenderPolicy).
     // Packets per frame only moves on windows that HAD frames: an
     // empty window says nothing about how big frames are.
@@ -195,18 +214,31 @@ double VideoRateController::PeerSample::gradedLossPct() const {
     return smoothed;
 }
 
+double VideoRateController::PeerSample::smoothedLossPct() const {
+    return expectedAcc > 0.0 ? 100.0 * lostAcc / expectedAcc : report.lossPct();
+}
+
+int VideoRateController::probeCapKbps() const {
+    if (!m_haveSentRate) return m_maxKbps;
+    const double s = m_sentKbpsEwma;
+    return qMin(m_maxKbps,
+                int(std::max(s * T::kAppLimitedHeadroom,
+                             s + double(T::kAppLimitedMarginKbps))));
+}
+
 void VideoRateController::reportKeyframeRequest() {
     ++m_kfRequests;
 }
 
 VideoRateController::Health
 VideoRateController::classify(qint64 now, QString& worstPeer,
-                              double& worstLossPct, double& damagePct,
-                              int kf) const {
+                              double& worstLossPct, double& smoothedLossPct,
+                              double& damagePct, int kf) const {
     bool anyFresh = false;
     bool anyGovernor = false;
     bool anyLossNow = false;   // some governor lost packets THIS window
     double worst = -1.0;
+    double worstSmoothed = 0.0;
     for (auto it = m_peers.constBegin(); it != m_peers.constEnd(); ++it) {
         if (now - it->atMs > kPeerSampleTtlMs) continue;
         anyFresh = true;
@@ -218,6 +250,7 @@ VideoRateController::classify(qint64 now, QString& worstPeer,
         const double loss = it->gradedLossPct();
         if (loss > worst) {
             worst = loss;
+            worstSmoothed = it->smoothedLossPct();
             worstPeer = it.key();
         }
     }
@@ -229,6 +262,7 @@ VideoRateController::classify(qint64 now, QString& worstPeer,
     // Frame damage is monotonic in packet loss at a given frame size,
     // so the worst-loss peer is also the worst-damage peer.
     const double n = m_pktPerFrameEwma > 0.0 ? m_pktPerFrameEwma : 1.0;
+    smoothedLossPct = worstSmoothed;
     if (kf >= T::kKeyframeStorm) {
         worstLossPct = std::max(worst, 0.0);
         damagePct = videorate::frameDamagePct(worstLossPct, n);
@@ -244,8 +278,9 @@ VideoRateController::classify(qint64 now, QString& worstPeer,
     if (damagePct >= T::kTrimPct)
         // Back off only on loss in THIS window; the smoothed tail of an
         // earlier burst can hold, not cut (Thresholds, loss smoothing).
-        return !anyLossNow ? Health::Hold
-             : damagePct >= T::kCutPct ? Health::Cut : Health::Trim;
+        // Whether it is a trim or a cut, and whether it is persistent
+        // enough to act on at all, is tick()'s call.
+        return anyLossNow ? Health::Cut : Health::Hold;
     if (damagePct >= T::kHealthyPct) return Health::Hold;
     return Health::Healthy;
 }
@@ -402,12 +437,14 @@ void VideoRateController::evaluateSender() {
 void VideoRateController::logSendWindow() const {
     qCInfo(logVideoRate,
            "[%d] send: %s | net: loss %.2f%% → %.1f%% of frames (%.0f pkt/frame) "
-           "| allowance %d kbps × %.2f = %d kbps | knee %d | caps: %s fps, "
-           "edge step %d | out %d px @ %d fps",
+           "| allowance %d kbps × %.2f = %d kbps | sent avg %d, probe cap %d "
+           "| knee %d | caps: %s fps, edge step %d | out %d px @ %d fps",
            int(m_streamId), qPrintable(m_lastWindow.describe()),
            m_lastLossPct, m_lastDamagePct,
            m_pktPerFrameEwma > 0.0 ? m_pktPerFrameEwma : 1.0,
-           m_bitrate, m_bitrateScale, targetKbps(), m_kneeKbps,
+           m_bitrate, m_bitrateScale, targetKbps(),
+           m_haveSentRate ? int(m_sentKbpsEwma) : -1, probeCapKbps(),
+           m_kneeKbps,
            m_senderFpsCap > 0 ? qPrintable(QString::number(m_senderFpsCap))
                               : "no",
            m_senderEdgeStep, longEdge(), fps());
@@ -417,20 +454,31 @@ void VideoRateController::applyLadder() {
     const Content c = content();
     const int floorHere =
         videorate::rungMinKbps(c, m_maxLongEdge, m_fps, m_rungIdx, m_codec);
+    if (m_ladderDwellTicks > 0) --m_ladderDwellTicks;
 
+    // Every rung change rebuilds the encoder session and opens on an
+    // IDR, so the ladder moves only on SUSTAINED evidence, and never
+    // twice within kLadderDwellTicks (Thresholds, resolution ladder).
     if (m_bitrate < floorHere) {
-        if (m_rungIdx >= videorate::kLadderRungs - 1) return;  // bottom
-        ++m_rungIdx;
         m_comfortTicks = 0;
-        m_dwellTicks = T::kDwellTicks;
-        qCInfo(logVideoRate, "[%d] quality down → %d px @ %d fps",
-              int(m_streamId), longEdge(), fps());
+        if (m_rungIdx >= videorate::kLadderRungs - 1) return;  // bottom
+        if (++m_belowFloorTicks < T::kDownshiftTicks) return;
+        if (m_ladderDwellTicks > 0) return;
+        ++m_rungIdx;
+        m_belowFloorTicks = 0;
+        m_dwellTicks = qMax(m_dwellTicks, T::kDwellTicks);
+        m_ladderDwellTicks = T::kLadderDwellTicks;
+        qCInfo(logVideoRate, "[%d] quality down → %d px @ %d fps "
+               "(%d kbps < %d floor for %d s)",
+               int(m_streamId), longEdge(), fps(), m_bitrate, floorHere,
+               T::kDownshiftTicks / 2);
         return;
     }
+    m_belowFloorTicks = 0;
     if (m_rungIdx == 0) { m_comfortTicks = 0; return; }
-    // Minimum dwell after any downshift: without it a bitrate sitting
-    // on a rung boundary walks the ladder up and down every second.
-    if (m_dwellTicks > 0) { m_comfortTicks = 0; return; }
+    // No upshift while a recent cut says the path is still settling, nor
+    // within the dwell after any ladder change.
+    if (m_dwellTicks > 0 || m_ladderDwellTicks > 0) { m_comfortTicks = 0; return; }
 
     const int upIdx = m_rungIdx - 1;
     const int comfortThere = videorate::comfortKbpsFor(
@@ -441,6 +489,7 @@ void VideoRateController::applyLadder() {
 
     m_rungIdx = upIdx;
     m_comfortTicks = 0;
+    m_ladderDwellTicks = T::kLadderDwellTicks;
     qCInfo(logVideoRate, "[%d] quality up → %d px @ %d fps",
           int(m_streamId), longEdge(), fps());
 }
@@ -458,12 +507,18 @@ void VideoRateController::tick() {
     // Sender first: its window is pulled at the same instant the
     // decision is made, and its scale gates the probe below.
     if (m_sendSource) reportSendWindow(m_sendSource(fps()));
+    // Age the keyframe clock on the same schedule whether the window was
+    // pulled here or pushed by a test before the tick.
+    m_ticksSinceKeyframe = m_windowHadKeyframe
+        ? 0 : qMin(m_ticksSinceKeyframe + 1, 1 << 20);
+    m_windowHadKeyframe = false;
     evaluateSender();
 
     QString worstPeer;
     double worstLoss = 0.0;
+    double smoothedLoss = 0.0;
     double damage = 0.0;
-    const Health h = classify(now, worstPeer, worstLoss, damage, kf);
+    Health h = classify(now, worstPeer, worstLoss, smoothedLoss, damage, kf);
     m_lastLossPct = worstLoss;
     m_lastDamagePct = damage;
     // A person-readable picture every 5 s (10 ticks) while verbose
@@ -502,10 +557,46 @@ void VideoRateController::tick() {
     const int before = m_bitrate;
     if (m_dwellTicks > 0) --m_dwellTicks;
 
-    // Knee expiry: exceeded cleanly, or simply old.
+    // ---- Is this a back-off, and how big? --------------------------
+    //
+    // classify() says "damaging loss right now"; persistence and size
+    // are decided here (Thresholds, back-off severity). One lossy
+    // window — a keyframe, a scene cut, one viewer's WiFi hiccup — is
+    // not a capacity measurement and must cost nothing.
+    const bool storm = h == Health::Cut && kf >= T::kKeyframeStorm;
+    double cutFraction = 0.0;
+    m_lossHistory = (m_lossHistory << 1) | quint32(h == Health::Cut ? 1 : 0);
+    // How many of the last kRecurringWindowTicks windows were damaging.
+    int recurring = 0;
+    for (int i = 0; i < T::kRecurringWindowTicks; ++i)
+        recurring += int((m_lossHistory >> i) & 1u);
+    if (h == Health::Cut) {
+        ++m_lossStreak;
+        const int need = m_ticksSinceKeyframe < T::kKeyframeGraceTicks
+            ? T::kKeyframeBurstPersistTicks : T::kBackoffPersistTicks;
+        if (storm) {
+            cutFraction = T::kMaxCut;
+        } else if (m_lossStreak >= need
+                   || recurring >= T::kRecurringLossTicks) {
+            cutFraction = std::clamp(T::kCutPerLoss * smoothedLoss / 100.0,
+                                     T::kMinCut, T::kMaxCut);
+        } else {
+            // Not persistent yet: hold (stop probing) and, below, clamp
+            // an unearned allowance — but do not cut.
+            h = Health::Hold;
+        }
+        if (cutFraction > 0.0 && cutFraction < T::kCutLabelAt)
+            h = Health::Trim;
+    } else {
+        // No damaging loss in THIS window (including the smoothed tail
+        // of an earlier burst, which holds): the streak lapses.
+        m_lossStreak = 0;
+    }
+
+    // Knee expiry: exceeded cleanly, or no longer constraining anything.
     if (m_kneeKbps > 0
-        && (m_tickCount - m_kneeAtTick > T::kKneeMemoryTicks
-            || double(m_bitrate) > T::kKneeForgetAbove * double(m_kneeKbps))) {
+        && (double(m_bitrate) > T::kKneeForgetAbove * double(m_kneeKbps)
+            || double(m_kneeKbps) * T::kKneeBand >= double(m_maxKbps))) {
         m_kneeKbps = 0;
     }
 
@@ -518,6 +609,7 @@ void VideoRateController::tick() {
     // measurement of the path. ("Back-to-back" = within two ticks.)
     auto noteKnee = [&]() {
         m_lastKneeStepTick = m_tickCount;
+        m_lastLossTick = m_tickCount;
         // Loss below a rate that was clean moments ago is a burst, not
         // the wall: cut for it, learn nothing from it.
         if (m_cleanKbps > 0
@@ -529,22 +621,75 @@ void VideoRateController::tick() {
         m_kneeAtTick = m_tickCount;
     };
 
+    // A damaging-loss window — even one that is not persistent enough to
+    // cut for — says the allowance is not free. If the sender is
+    // application-limited, an allowance far above what it actually sends
+    // was never validated by anything, and it is what sizes the
+    // encoder's max bitrate and the RTP pacer's ceiling (both 1.5 ×
+    // target), i.e. it is what turns the next keyframe into a burst the
+    // path cannot absorb. So a burst clamps the allowance down to the
+    // app-limited probe cap — never below the goodput floor, and never
+    // at all for a sender that is filling its allowance (its cap is
+    // 1.5 × what it sends, which is above the allowance by definition).
+    const int goodputFloorKbps = m_haveSentRate
+        ? int(T::kGoodputFloorRatio * m_sentKbpsEwma
+              * (1.0 - std::clamp(smoothedLoss, 0.0, 100.0) / 100.0))
+        : 0;
+    const int lossClampKbps = m_haveSentRate
+        ? qMax(probeCapKbps(), goodputFloorKbps) : m_maxKbps;
+    if ((h == Health::Hold || h == Health::Trim || h == Health::Cut)
+        && m_lossStreak > 0 && m_bitrate > lossClampKbps) {
+        qCInfo(logVideoRate, "[%d] loss at %d kbps while sending ~%d kbps — "
+               "allowance clamped to the probed %d kbps",
+               int(m_streamId), m_bitrate, int(m_sentKbpsEwma), lossClampKbps);
+        m_bitrate = lossClampKbps;
+    }
+
     switch (h) {
     case Health::Healthy: {
         ++m_healthyTicks;
+        // The knee RELAXES while nothing is being lost, instead of being
+        // forgotten whole 30 s after the last loss event and letting the
+        // next probe sprint straight back into the wall. Slow at first,
+        // then faster, so a fixed ceiling is re-tested every ~15-20 s
+        // and a path that has genuinely grown is found within a minute.
+        if (m_kneeKbps > 0) {
+            const int quiet = m_tickCount - m_lastLossTick - T::kKneeHoldTicks;
+            if (quiet > 0) {
+                const double step = std::min(T::kKneeRelaxStep * double(quiet),
+                                             T::kKneeRelaxMax);
+                m_kneeKbps = int(double(m_kneeKbps) * (1.0 + step)) + 1;
+            }
+        }
         // App-limited: while the sender is the bottleneck we are not
         // sending m_bitrate, so a clean report says nothing about it.
         if (m_bitrateScale < 0.95) break;
-        if (m_bitrate >= m_cleanKbps) {
-            m_cleanKbps = m_bitrate;
+        // "Recently carried cleanly" is about what the path CARRIED, so
+        // it is the measured output, not the allowance, when we have it.
+        const int cleanNow = m_haveSentRate
+            ? qMin(m_bitrate, int(m_sentKbpsEwma)) : m_bitrate;
+        if (cleanNow >= m_cleanKbps) {
+            m_cleanKbps = cleanNow;
             m_cleanAtTick = m_tickCount;
         }
         if (m_healthyTicks < T::kHealthyTicksBeforeProbe) break;
+        // Application-limited probing: never lift the allowance more
+        // than a margin above what is actually going out. Bits we do
+        // not send prove nothing about the path, and an allowance ten
+        // times the real usage is what the encoder and the pacer turn
+        // into the burst that starts a spiral.
+        const int cap = probeCapKbps();
+        if (m_bitrate >= cap) break;
         const double kneeBand = double(m_kneeKbps) * T::kKneeBand;
         if (m_kneeKbps > 0 && double(m_bitrate) >= kneeBand) {
-            // Near where loss last began: creep, one step per 4 s.
+            // Near where loss last began: creep, one step per 4 s, and
+            // stop just short of the knee itself — the knee's own
+            // relaxation is what re-tests the wall.
             if (m_tickCount - m_lastKneeStepTick >= T::kKneeProbeEveryTicks) {
-                m_bitrate = int(double(m_bitrate) * T::kKneeProbeFactor) + 1;
+                const int ceiling = int(double(m_kneeKbps) * T::kKneeCeiling);
+                const int next = qMin(int(double(m_bitrate) * T::kKneeProbeFactor) + 1,
+                                      qMin(ceiling, cap));
+                if (next > m_bitrate) m_bitrate = next;
                 m_lastKneeStepTick = m_tickCount;
             }
             break;
@@ -556,7 +701,7 @@ void VideoRateController::tick() {
         // A sprint lands at the edge of the knee band, never past it.
         if (m_kneeKbps > 0 && double(next) > kneeBand)
             next = qMax(m_bitrate + 1, int(kneeBand));
-        m_bitrate = next;
+        m_bitrate = qMax(m_bitrate, qMin(next, cap));
         break;
     }
     case Health::Hold:
@@ -569,19 +714,21 @@ void VideoRateController::tick() {
         m_comfortTicks = 0;
         break;
     case Health::Trim:
+    case Health::Cut: {
         noteKnee();
-        m_bitrate = int(double(m_bitrate) * T::kTrimFactor);
+        int next = int(double(m_bitrate) * (1.0 - cutFraction));
+        // …but never below a fraction of what the path was just
+        // carrying. Cutting to a tenth of a goodput the receivers were
+        // actually getting is the spiral, not caution; the estimate
+        // follows the output down, so sustained loss still converges.
+        if (m_haveSentRate) next = qMax(next, qMin(goodputFloorKbps, m_bitrate));
+        m_bitrate = next;
         m_healthyTicks = 0;
         m_comfortTicks = 0;
-        m_dwellTicks = qMax(m_dwellTicks, T::kDwellTicks / 2);
+        m_dwellTicks = h == Health::Cut ? T::kDwellTicks
+                                        : qMax(m_dwellTicks, T::kDwellTicks / 2);
         break;
-    case Health::Cut:
-        noteKnee();
-        m_bitrate = int(double(m_bitrate) * T::kCutFactor);
-        m_healthyTicks = 0;
-        m_comfortTicks = 0;
-        m_dwellTicks = T::kDwellTicks;
-        break;
+    }
     case Health::Blind:
         break;                      // handled above
     }
@@ -603,10 +750,11 @@ void VideoRateController::tick() {
         static const char* kNames[] = {"blind", "no-governor", "healthy",
                                        "hold", "trim", "cut"};
         qCInfo(logVideoRate,
-              "[%d] %s: loss=%.2f%% frames=%.1f%% kf=%d peers=%d governor=%s "
+              "[%d] %s: loss=%.2f%% (smoothed %.2f%%) frames=%.1f%% kf=%d "
+              "streak=%d peers=%d governor=%s "
               "bitrate %d→%d kbps (out %d, knee %d) %d px @ %d fps",
-              int(m_streamId), kNames[int(h)], worstLoss, damage, kf,
-              int(m_peers.size()),
+              int(m_streamId), kNames[int(h)], worstLoss, smoothedLoss, damage,
+              kf, m_lossStreak, int(m_peers.size()),
               worstPeer.isEmpty() ? "(none)" : qPrintable(worstPeer),
               before, m_bitrate, targetKbps(), m_kneeKbps, longEdge(), fps());
         // Deliberately NO forceKeyframe on a back-off. An IDR is the

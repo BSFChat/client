@@ -29,6 +29,22 @@
 // ("outgoing-only", the old schedule, and "ticked", the new one) and
 // asserts the difference.
 //
+// ---- What the pacer can and cannot do (2026-09-22) -------------------
+//
+// Keyframes do NOT bypass this: PacedRtpSender::outgoing() pushes every
+// packetised fragment of every access unit into the queue, the drain
+// tick releases them at the ceiling, and kMaxBacklogSeconds is sized so
+// a whole IDR is never the thing that gets discarded. The spiral in the
+// field log (a scene change losing 8 % of its packets) was therefore not
+// an unpaced burst — it was a perfectly paced burst at the wrong RATE:
+// the ceiling follows the encoder's max bitrate, which is 1.5 × the rate
+// controller's target, and that target had climbed to ~10× what the
+// share was actually sending. A keyframe then left at ~35 Mbps, and the
+// bucket (kMaxBurstSeconds of ceiling ≈ 219 KB at that rate) let most of
+// it go back to back. Bounding the target to a margin above the measured
+// output (VideoRatePolicy.h, kAppLimited*) is what makes this ceiling —
+// and so this bucket — mean something again.
+//
 // `Item` is the packet type (rtc::message_ptr in production, anything in
 // tests). Times are microseconds on any monotonic clock.
 template <typename Item>

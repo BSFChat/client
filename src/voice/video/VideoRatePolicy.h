@@ -41,33 +41,118 @@ enum class Content { Screen, Camera };
 // byte ratio averaged 0.808 with 4 samples out of 4069 above 0.97.
 struct Thresholds {
     // Below this the path is carrying everything we give it: probe up.
+    // (kHealthyPct/kTrimPct grade FRAME damage — see frameDamagePct —
+    // and decide whether to probe, hold or back off; how FAR a back-off
+    // goes is graded on packet loss, see kCutPerLoss below.)
     static constexpr double kHealthyPct = 2.0;
     // [kHealthyPct, kTrimPct) — real but tolerable loss. HOLD, do not
     // cut. A band wide enough to be a resting place is the whole point:
     // a law with no hold band and a fixed loss reading walks itself to
     // the floor, which is exactly what the old one did.
-    // [kTrimPct, kCutPct) — shave gently and let the path answer.
+    // At or above kTrimPct, persistently — or a keyframe-request storm
+    // — back off, by an amount set by the packet loss.
     static constexpr double kTrimPct = 6.0;
-    // At or above this — or a keyframe-request storm — cut hard.
-    static constexpr double kCutPct = 10.0;
     static constexpr int kKeyframeStorm = 3;
 
-    // Multipliers applied per 500 ms tick.
-    static constexpr double kCutFactor = 0.70;
-    static constexpr double kTrimFactor = 0.95;
-    // Probing is multiplicative and deliberately brisk while far below
-    // the configured ceiling: a share that needs 12 s to reach the
-    // bitrate the user paid for looks broken for 12 s.
-    static constexpr double kProbeFactor = 1.10;
-    static constexpr double kFastProbeFactor = 1.25;
+    // ---- Back-off severity (the spiral fix, 2026-09-22) -------------
+    //
+    // WHETHER to back off is still judged on frame damage (above): with
+    // no NACK/RTX a big frame with one hole is a lost frame, and the
+    // share must come down until frames survive. HOW FAR it backs off
+    // is judged on PACKET loss, and bounded. The old law cut ×0.70 on
+    // any tick whose damage crossed 10 %, and damage amplifies packet
+    // loss enormously — 8 % packet loss on ~17-packet frames reads as
+    // 99 % of frames — so modest loss produced the maximum cut, tick
+    // after tick. The field log (2026-09-22, two viewers) shows exactly
+    // that: 23883 → 16718 → 11702 → 8191 → 5733 … → the 250 kbps floor
+    // at 480 px, on packet loss that never exceeded ~20 %.
+    //
+    // Now: cut fraction = kCutPerLoss × smoothed packet loss, clamped
+    // to [kMinCut, kMaxCut]. 1 % loss trims 3 %, 5 % trims 10 %, 7.5 %
+    // or more cuts 15 % — never more in one tick. A sustained real
+    // capacity drop still converges (15 % a tick is a halving in ~2 s),
+    // a single overshoot costs a few percent.
+    static constexpr double kCutPerLoss = 2.0;
+    static constexpr double kMinCut = 0.03;
+    static constexpr double kMaxCut = 0.15;
+    // A back-off at or above this fraction is logged as "cut", below it
+    // as "trim" — the two words the log has always used.
+    static constexpr double kCutLabelAt = 0.10;
+    // Persistence: a back-off needs damaging loss on this many
+    // consecutive ticks (loss in each window). One lossy window is a
+    // burst — a keyframe, a scene cut, a WiFi hiccup — not a capacity.
+    static constexpr int kBackoffPersistTicks = 2;
+    // …and one more when the sender emitted a keyframe in the last
+    // kKeyframeGraceTicks windows: the report windows lag the send
+    // windows, so one IDR's loss can straddle two reports. The pacer
+    // spreads IDRs (RtpPacerCore) at 1.5× the target; loss that
+    // outlives that is the path, and is cut for.
+    static constexpr int kKeyframeBurstPersistTicks = 3;
+    static constexpr int kKeyframeGraceTicks = 2;
+    // Loss that RECURS is persistence too, even when no two windows are
+    // adjacent: damaging loss in kRecurringLossTicks of the last
+    // kRecurringWindowTicks windows backs off on the spot. Without this
+    // a path that damages every third window would only ever be held,
+    // never corrected. (2 of 8 — a burst every couple of seconds — is
+    // deliberately left alone: cutting for it is the old sawtooth, and
+    // the field log shows cutting did not stop those bursts.)
+    static constexpr int kRecurringWindowTicks = 8;
+    static constexpr int kRecurringLossTicks = 3;
+    // Never cut below this share of the recent achieved goodput (the
+    // sender's measured output × (1 − loss)). A path that just carried
+    // X kbps can carry most of X: a cut far below it is not caution,
+    // it is the spiral. Sustained loss still walks the rate down — the
+    // goodput estimate follows the output down, one ~2 s EWMA behind.
+    static constexpr double kGoodputFloorRatio = 0.70;
+    // EWMA weight per 500 ms window for the sender's measured output
+    // (≈ 2 s time constant). A 500 ms window at a static desktop swings
+    // 30 kbps ↔ 5 Mbps as keyframes land; one window must not decide.
+    static constexpr double kSentRateAlpha = 0.25;
+
+    // ---- Application-limited probing (2026-09-22) ------------------
+    //
+    // A clean report only proves the path carries what we SENT. The
+    // field log shows the allowance climbing ×1.25 a tick to 23.9 Mbps
+    // while the sender averaged 2.2 Mbps — a static-ish desktop does
+    // not fill the budget — so the allowance carried no information
+    // about the path at all, and the first scene change (encoder max =
+    // 1.5 × allowance, pacer ceiling the same) blasted a keyframe at
+    // ~35 Mbps into a path that carries a fraction of that.
+    //
+    // So probing never lifts the allowance past
+    //     max(sent × kAppLimitedHeadroom, sent + kAppLimitedMarginKbps)
+    // where `sent` is the smoothed measured output. It never LOWERS the
+    // allowance for being unused — a still desktop keeps the budget it
+    // has for its next burst of motion — it only stops unearned growth.
+    // A share that fills its allowance (sent ≈ allowance) is never
+    // held back by this: 1.5 × allowance is always above it.
+    static constexpr double kAppLimitedHeadroom = 1.5;
+    static constexpr int kAppLimitedMarginKbps = 1000;
+
+    // Probing is multiplicative. It used to be ×1.25 a tick (~56 %/s)
+    // far below the envelope max, which is what inflated the allowance
+    // above; now ~8 %/s far below it, ~4 %/s near it. From a halving,
+    // recovery takes ~9 s — slow enough that the loss reports (which
+    // lag the send side by a window or two) can stop the climb before
+    // it overshoots by more than a few percent.
+    static constexpr double kProbeFactor = 1.02;
+    static constexpr double kFastProbeFactor = 1.04;
     // …"far below" meaning under this fraction of the envelope max.
     static constexpr double kFastProbeBelow = 0.5;
     static constexpr int kProbeFloorKbps = 32;   // additive nudge
 
     // Hysteresis, in 500 ms ticks.
     static constexpr int kHealthyTicksBeforeProbe = 2;  // 1 s
-    static constexpr int kUpshiftTicks = 6;             // 3 s comfortable
-    static constexpr int kDwellTicks = 8;               // 4 s after a cut
+    // Resolution ladder (2026-09-22: the field log flapped 1440 → 1920
+    // → 480 → 960 px, every change an encoder rebuild and an IDR):
+    //   down only after the bitrate has sat below the rung's floor for
+    //   kDownshiftTicks in a row; up only after kUpshiftTicks in a row
+    //   at the next rung's comfort rate; and never two changes, either
+    //   direction, within kLadderDwellTicks of each other.
+    static constexpr int kDownshiftTicks = 6;           // 3 s below floor
+    static constexpr int kUpshiftTicks = 16;            // 8 s comfortable
+    static constexpr int kLadderDwellTicks = 12;        // 6 s between changes
+    static constexpr int kDwellTicks = 8;               // 4 s after a cut: no upshift
 
     // ---- Knee memory (the sawtooth fix, 2026-09-21) ----------------
     //
@@ -89,18 +174,35 @@ struct Thresholds {
     // sits at 85-100 % of capacity in between rather than sawtoothing
     // between 70 and 110 %.
     //
-    // A knee is forgotten when the rate passes 1.15× it without loss
-    // (the path has grown — creeping gets there in ~20 s from the knee)
-    // or 30 s after the last loss event, because capacity on WiFi and
-    // shared uplinks moves on that timescale and a stale ceiling would
-    // pin the share below what the path now carries. Every loss event
-    // refreshes it, so against a genuinely fixed ceiling it persists.
+    // The creep stops just short of the knee (kKneeCeiling): with the
+    // bounded back-off below, a loss event only shaves a few percent,
+    // and a creep that walked straight back through the knee would
+    // re-touch the wall every few seconds.
+    //
+    // The knee RELAXES instead of being forgotten (2026-09-22). It used
+    // to vanish outright 30 s after the last loss event, and the log
+    // shows the consequence: the very next tick sprinted ×1.25 back into
+    // the same wall and the whole cycle repeated. Now, after
+    // kKneeHoldTicks without a loss event, the knee rises — slowly at
+    // first (kKneeRelaxStep per tick, growing each tick) and then at up
+    // to kKneeRelaxMax per tick — so a fixed ceiling is re-tested
+    // gently every ~15-20 s, and a path that has grown is found within
+    // a minute or so (the band edge rises with the knee and the probe
+    // follows). Every loss event refreshes the knee and restarts the
+    // hold. It is dropped only once it no longer constrains anything
+    // (its band edge is above the envelope max), or when the rate
+    // passes kKneeForgetAbove × it cleanly.
     static constexpr double kKneeBand = 0.85;          // "near" = ≥ 85 %
+    static constexpr double kKneeCeiling = 0.97;       // creep stops here
     static constexpr double kKneeForgetAbove = 1.15;
     static constexpr double kKneeProbeFactor = 1.03;
     static constexpr int kKneeProbeEveryTicks = 8;     // 4 s
+    static constexpr int kKneeHoldTicks = 30;          // 15 s
+    static constexpr double kKneeRelaxStep = 0.002;    // +0.2 %/tick, per tick
+    static constexpr double kKneeRelaxMax = 0.02;      // ≤ 2 %/tick
     // In ticks like every other hysteresis constant here (60 = 30 s),
-    // so the unit tests can step it without a clock.
+    // so the unit tests can step it without a clock. Now only the
+    // "recently clean" rate below expires on it.
     static constexpr int kKneeMemoryTicks = 60;
     // Only loss at (or above) a rate the path has NOT recently carried
     // cleanly marks a knee. Loss at a rate well below one that was

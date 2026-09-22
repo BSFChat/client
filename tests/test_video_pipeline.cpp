@@ -941,9 +941,11 @@ private slots:
         QVERIFY2(start >= 4000, qPrintable(QStringLiteral(
             "a 1080p30 share must not open at %1 kbps").arg(start)));
 
-        // 30 ticks = 15 s of wall clock at the 500 ms evaluation rate.
+        // 60 ticks = 30 s of wall clock at the 500 ms evaluation rate.
+        // (The probe is ~8 %/s since 2026-09-22 — it used to be ×1.25 a
+        // tick, which is what inflated the allowance in the field.)
         static const quint64 kBursty[] = {900, 120, 640, 210, 880, 150};
-        for (int i = 0; i < 30; ++i) {
+        for (int i = 0; i < 60; ++i) {
             rc.reportDelivery(kPeerA,
                 lossReport(kBursty[i % 6], 0.0,
                            /*goodput swings by 8x*/ 900.0 * double(1 + i % 8)));
@@ -985,14 +987,20 @@ private slots:
         rc.setActive(true);
         const int start = rc.targetKbps();
 
-        run(rc, 8, lossReport(600, 20.0));
+        // Each tick backs off by 2 × the packet loss, bounded at 15 %,
+        // and the first tick of a loss event is never one of them
+        // (persistence): 16 ticks of real 20 % loss is a halving and
+        // then some, which is the point — bounded, not collapsing.
+        run(rc, 16, lossReport(600, 20.0));
         const int trough = rc.targetKbps();
         QVERIFY2(trough < start / 2, qPrintable(QStringLiteral(
             "20 %% loss must actually back off: %1 → %2").arg(start).arg(trough)));
         QVERIFY2(rc.longEdge() < 1920 || rc.fps() < 30,
                  "and must trade quality, not just bits");
 
-        run(rc, 90, lossReport(600, 0.0));
+        // …and comes back, though not at a sprint: the knee at the rate
+        // that failed relaxes upward rather than being forgotten whole.
+        run(rc, 260, lossReport(600, 0.0));
         QCOMPARE(rc.targetKbps(), 20000);
         QCOMPARE(rc.longEdge(), 1920);
         QCOMPARE(rc.fps(), 30);
@@ -1023,9 +1031,19 @@ private slots:
         rc.setActive(true);
         run(rc, 6, lossReport(600, 0.0));
         const int before = rc.targetKbps();
+        // One lossy window from one viewer is a burst, not a capacity:
+        // since 2026-09-22 it holds the rate instead of cutting it (the
+        // field log's 41/60/77 per-viewer cuts were mostly these).
         rc.reportDelivery(kPeerA, lossReport(600, 0.0));
         rc.reportDelivery(kPeerB, lossReport(600, 25.0));
         rc.tick();
+        QCOMPARE(rc.targetKbps(), before);
+        // Persist, and the worst receiver still governs the share.
+        for (int i = 0; i < 3; ++i) {
+            rc.reportDelivery(kPeerA, lossReport(600, 0.0));
+            rc.reportDelivery(kPeerB, lossReport(600, 25.0));
+            rc.tick();
+        }
         QVERIFY2(rc.targetKbps() < before, "the worst receiver governs");
     }
 
@@ -1033,7 +1051,7 @@ private slots:
         VideoRateController rc(VideoStreamId::Screen);
         rc.setEnvelope(250, 20000, 30, 1920);
         rc.setActive(true);
-        for (int i = 0; i < 30; ++i) {
+        for (int i = 0; i < 60; ++i) {
             rc.reportDelivery(kPeerA, lossReport(600, 0.0));   // current build
             rc.reportDelivery(kPeerB, legacyReport());         // old build
             rc.tick();
@@ -1060,24 +1078,26 @@ private slots:
         VideoRateController rc(VideoStreamId::Screen);
         rc.setEnvelope(250, 20000, 30, 1920);
         rc.setActive(true);
-        // Two hard cuts take 1080p30 below its floor → the first screen
-        // rung gives way: a resolution step, frame rate kept.
-        run(rc, 2, lossReport(600, 25.0));
+        // Sustained loss takes 1080p30 below its floor, and keeps it
+        // there for kDownshiftTicks → the first screen rung gives way:
+        // a resolution step, frame rate kept.
+        run(rc, 14, lossReport(600, 25.0));
         QVERIFY2(rc.longEdge() < 1920, "screen content steps resolution first");
         QCOMPARE(rc.fps(), 30);
         const int downEdge = rc.longEdge();
 
         // Minimum dwell: the path is instantly clean again and the
         // bitrate climbs straight back, but the ladder must not.
-        for (int i = 0; i < videorate::Thresholds::kDwellTicks; ++i) {
+        for (int i = 0; i < videorate::Thresholds::kLadderDwellTicks; ++i) {
             rc.reportDelivery(kPeerA, lossReport(600, 0.0));
             rc.tick();
             QCOMPARE(rc.longEdge(), downEdge);
         }
-        // 50 s, not 20: the loss hit at the opening rate, so the last
-        // stretch back up to it creeps (knee memory, VideoRatePolicy.h)
-        // until the knee ages out after 30 s.
-        run(rc, 100, lossReport(600, 0.0));
+        // Minutes, not seconds: the loss hit at the opening rate, so the
+        // climb back up to it creeps (knee memory, VideoRatePolicy.h)
+        // while the knee relaxes, and the upshift itself needs 8 s of
+        // comfort at the rung above.
+        run(rc, 300, lossReport(600, 0.0));
         QCOMPARE(rc.fps(), 30);
         QCOMPARE(rc.longEdge(), 1920);
     }
@@ -1132,7 +1152,7 @@ private slots:
         rc.setActive(true);
         const int start = rc.targetKbps();
 
-        run(rc, 20, lossReport(600, 30.0));
+        run(rc, 24, lossReport(600, 30.0));
         QVERIFY(rc.targetKbps() < start);
         QVERIFY(rc.longEdge() < 1920);
 
@@ -1177,13 +1197,24 @@ private slots:
         QVERIFY2(proven > 8000, qPrintable(QStringLiteral(
             "expected to climb past the blind ceiling, got %1").arg(proven)));
 
-        // Reports stop. Hold — do not descend past a ceiling that was
-        // only ever meant for a path nobody has heard from.
-        for (int i = 0; i < 20; ++i) {
+        // Reports stop. The last samples stay usable for
+        // kPeerSampleTtlMs, so let them age out first — from there on
+        // the controller is blind.
+        for (int i = 0; i < 8; ++i) {
             rc.setNowForTest(t0 + 20000 + i * 500);
             rc.tick();
         }
-        QCOMPARE(rc.targetKbps(), proven);
+        const int held = rc.targetKbps();
+        QVERIFY2(held > 8000, qPrintable(QStringLiteral(
+            "fell to %1 kbps before going blind").arg(held)));
+
+        // Hold — do not descend past a ceiling that was only ever meant
+        // for a path nobody has heard from.
+        for (int i = 8; i < 40; ++i) {
+            rc.setNowForTest(t0 + 20000 + i * 500);
+            rc.tick();
+        }
+        QCOMPARE(rc.targetKbps(), held);
     }
 
     // ---- S-11 / S-16: send pipeline --------------------------------
