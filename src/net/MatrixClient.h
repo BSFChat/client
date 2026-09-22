@@ -357,7 +357,11 @@ signals:
     // request and response (race on cold start, observed v0.0.34).
     void messagesResult(const QString& roomId,
                         const bsfchat::MessagesResponse& response);
-    void messagesError(const QString& error);
+    // `roomId` and `from` identify the request, as they do for a result:
+    // without them a failure could not be matched to the history fill it
+    // belongs to, and the fill stayed "loading" until the room was switched —
+    // one failed page and scroll-up was dead for the rest of the visit.
+    void messagesError(const QString& roomId, const QString& from, const QString& error);
 
     // Search results. `searchTerm` and `requestedNextBatch` echo the request so
     // the receiver can drop a stale response: the search box fires a request

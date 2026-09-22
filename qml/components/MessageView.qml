@@ -801,6 +801,9 @@ Rectangle {
                     target: serverManager.activeServer
                     ignoreUnknownSignals: true
                     function onOlderMessagesLoaded() {
+                        // Whatever landed, the view may still be short of
+                        // full — check once the new rows have laid out.
+                        viewportFillTimer.restart();
                         if (!messageListView._paginationRequested) return;
                         messageListView._paginationRequested = false;
                         if (messageListView.count
@@ -815,6 +818,49 @@ Rectangle {
                             messageListView._disarmPaginationAnchor();
                         }
                     }
+                }
+
+                // ── A list that cannot scroll can never scroll to the top ──
+                //
+                // Back-pagination used to have exactly one trigger: contentY
+                // coming within paginationTriggerPx of the top. A channel
+                // whose loaded window is mostly edits — #notifications on
+                // 2026-09-22, 786 of its 832 events edits of one bot board —
+                // renders one or two rows, the list does not overflow,
+                // onContentYChanged returns before it gets that far, and the
+                // channel looks empty for good. (The owner's first question
+                // was whether the bot was deleting messages.)
+                //
+                // So when the rows do not fill the viewport, ask for more.
+                // Every stop condition is enforced in C++, where it is
+                // tested (util/HistoryFill.h, MessageModel::beginHistoryFill):
+                // the start of the room, a fill already running, and the
+                // per-visit automatic page budget. The checks repeated here
+                // only save a call; none of them is the guard.
+                //
+                // Run from viewportFillTimer — after a fill lands, and after
+                // every settle (resize, content resolving its size) — never
+                // synchronously, because contentHeight straight after a count
+                // change is still an estimate.
+                function _maybeFillViewport() {
+                    if (!_ready) return;
+                    var s = serverManager.activeServer;
+                    if (!s) return;
+                    var mm = s.messageModel;
+                    if (!mm || mm !== _currentModel) return;
+                    if (!mm.hasMoreHistory || mm.loadingHistory
+                        || mm.historyAutoFillSpent) return;
+                    if (contentHeight > height) return;  // scrollable: contentY's trigger covers it
+                    // Anchor it like any other prepend, so the rows already on
+                    // screen stay where they are while older ones land above.
+                    if (count > 0) _armPaginationAnchor();
+                    s.fillHistoryForViewport();
+                }
+
+                Timer {
+                    id: viewportFillTimer
+                    interval: 120
+                    onTriggered: messageListView._maybeFillViewport()
                 }
 
                 function _maybeLoadOlder() {
@@ -1164,6 +1210,9 @@ Rectangle {
                         } else {
                             messageListView.atBottom = messageListView._isAtEnd();
                         }
+                        // The dust has settled, so contentHeight is real:
+                        // does it fill the viewport yet?
+                        messageListView._maybeFillViewport();
                     }
                 }
 
@@ -1555,8 +1604,22 @@ Rectangle {
                     serverManager.activeServer
                     && serverManager.activeServer.messageModel
                     ? serverManager.activeServer.messageModel.loadingHistory : false
+                readonly property bool _hasMoreHistory:
+                    serverManager.activeServer
+                    && serverManager.activeServer.messageModel
+                    ? serverManager.activeServer.messageModel.hasMoreHistory : false
+                readonly property bool _autoFillSpent:
+                    serverManager.activeServer
+                    && serverManager.activeServer.messageModel
+                    ? serverManager.activeServer.messageModel.historyAutoFillSpent : false
+                // "Loading" for the empty state includes the gap between two
+                // automatic fills: with budget left and nothing on screen,
+                // the viewport check is about to ask again, and flashing
+                // "Nothing recent to show" for that instant would be a lie.
                 readonly property string _emptyKind: Overlay.emptyStateKind(
-                    _hasServer, _roomId, messageListView.count)
+                    _hasServer, _roomId, messageListView.count,
+                    _loadingHistory || (_hasMoreHistory && !_autoFillSpent),
+                    _hasMoreHistory)
 
                 // Back-pagination loading indicator at the top of the list.
                 // Visible while a /messages request is in flight; stays tiny
@@ -1579,6 +1642,53 @@ Rectangle {
                             from: 0; to: 360; duration: 900
                             loops: Animation.Infinite
                             running: paginationSpinner.visible
+                        }
+                    }
+                }
+
+                // "Load older messages" — the way to ask for history once the
+                // client has stopped asking on its own (its per-visit page
+                // budget is spent, util/HistoryFill.h) in a list too short to
+                // scroll to the top. Same slot as the spinner, which is never
+                // visible at the same time (the button needs !loading).
+                Rectangle {
+                    id: loadOlderBtn
+                    anchors.top: parent.top
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.topMargin: Theme.sp.s3
+                    width: loadOlderLabel.implicitWidth + 2 * Theme.sp.s5
+                    height: 28
+                    radius: 14
+                    color: loadOlderMouse.containsMouse ? Theme.accent : Theme.bg1
+                    border.color: loadOlderMouse.containsMouse ? Theme.accent : Theme.line
+                    border.width: 1
+                    visible: Overlay.loadOlderVisible(
+                        timelineOverlay._hasMoreHistory, timelineOverlay._loadingHistory,
+                        messageListView.contentHeight > messageListView.height,
+                        timelineOverlay._autoFillSpent)
+
+                    Text {
+                        id: loadOlderLabel
+                        anchors.centerIn: parent
+                        text: qsTr("Load older messages")
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        color: loadOlderMouse.containsMouse ? Theme.onAccent : Theme.fg1
+                    }
+
+                    MouseArea {
+                        id: loadOlderMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            var s = serverManager.activeServer;
+                            if (!s) return;
+                            if (messageListView.count > 0)
+                                messageListView._armPaginationAnchor();
+                            // A user request: not charged to the automatic
+                            // budget, still capped per fill.
+                            s.loadOlderMessages(50);
                         }
                     }
                 }

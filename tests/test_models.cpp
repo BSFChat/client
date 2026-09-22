@@ -32,6 +32,73 @@
 
 #include <string_view>
 
+// ── History-fill fixtures ────────────────────────────────────────────────
+// Synthetic /messages pages, oldest-first as MessageModel receives them.
+// The shape is #notifications on 2026-09-22: a bot board edited every ~2
+// minutes, so a page of history can be nothing but m.replace events whose
+// original is far older than anything loaded.
+namespace hist {
+
+inline bsfchat::RoomEvent message(const std::string& id, int64_t ts,
+                                  const std::string& body = "hello")
+{
+    bsfchat::RoomEvent e;
+    e.event_id = id;
+    e.sender = "@alice:server";
+    e.type = std::string(bsfchat::event_type::kRoomMessage);
+    e.origin_server_ts = ts;
+    e.content.data = {{"msgtype", "m.text"}, {"body", body}};
+    return e;
+}
+
+inline bsfchat::RoomEvent edit(const std::string& id, const std::string& target,
+                               int64_t ts, const std::string& body)
+{
+    bsfchat::RoomEvent e = message(id, ts, "* " + body);
+    e.sender = "@bot:server";
+    e.content.data["m.relates_to"] = {{"rel_type", "m.replace"}, {"event_id", target}};
+    e.content.data["m.new_content"] = {{"msgtype", "m.text"}, {"body", body}};
+    return e;
+}
+
+// `n` edits of `target`, ids prefix0..prefixN-1, one per 132 s from baseTs.
+inline QVector<bsfchat::RoomEvent> editPage(int n, const std::string& target,
+                                            const std::string& prefix, int64_t baseTs)
+{
+    QVector<bsfchat::RoomEvent> page;
+    for (int i = 0; i < n; ++i)
+        page.append(edit(prefix + std::to_string(i), target, baseTs + i * 132000,
+                         "board v" + std::to_string(i)));
+    return page;
+}
+
+inline QVector<bsfchat::RoomEvent> messagePage(int n, const std::string& prefix,
+                                               int64_t baseTs)
+{
+    QVector<bsfchat::RoomEvent> page;
+    for (int i = 0; i < n; ++i)
+        page.append(message(prefix + std::to_string(i), baseTs + i * 1000));
+    return page;
+}
+
+inline bsfchat::RoomEvent reaction(const std::string& id, const std::string& target)
+{
+    bsfchat::RoomEvent e;
+    e.event_id = id;
+    e.sender = "@bob:server";
+    e.type = "m.reaction";
+    e.origin_server_ts = 1;
+    e.content.data = {{"m.relates_to", {{"rel_type", "m.annotation"},
+                                        {"event_id", target}, {"key", "+1"}}}};
+    return e;
+}
+
+using Kind = bsfchat::client::HistoryFillKind;
+using Stop = bsfchat::client::HistoryFillStop;
+using Outcome = MessageModel::HistoryPageOutcome;
+
+} // namespace hist
+
 class TestModels : public QObject {
     Q_OBJECT
 
@@ -1663,6 +1730,389 @@ private slots:
         const auto history = model.editHistory("$old1");
         QCOMPARE(history.size(), 2);
         QCOMPARE(history.at(0).toMap().value("body").toString(), "fxied typo");
+    }
+
+
+    // --- History fills: count what is VISIBLE, not what arrived ----------
+    //
+    // #notifications, 2026-09-22: 832 message events, 786 of them edits of
+    // one bot board, the newest 20 all edits. Opening the room fetched 50 raw
+    // events, rendered one row, and the list was too short to scroll — so
+    // back-pagination, which only a scroll could trigger, never ran. See
+    // util/HistoryFill.h.
+
+    void testRendersAsRowCountsOnlyVisibleMessages()
+    {
+        QVERIFY(MessageModel::rendersAsRow(hist::message("$m", 1)));
+        QVERIFY(!MessageModel::rendersAsRow(hist::edit("$e", "$m", 2, "x")));
+        QVERIFY(!MessageModel::rendersAsRow(hist::reaction("$r", "$m")));
+        QVERIFY(!MessageModel::rendersAsRow(
+            makeRedactionEvent("$x", "@alice:server", "$m")));
+        QVERIFY(!MessageModel::rendersAsRow(
+            makeMemberEvent("@bob:server", "Bob", "join")));
+    }
+
+    void testOpenFillPaginatesPastAPageOfEdits()
+    {
+        MessageModel model;
+        auto first = model.beginHistoryFill(hist::Kind::Open,
+                                            bsfchat::client::kHistoryFirstPageLimit);
+        QVERIFY(first.has_value());
+        QCOMPARE(first->from, QString());
+        QCOMPARE(first->limit, 50);
+        QVERIFY(model.loadingHistory());
+
+        // Page 1 (newest): 20 edits of a board whose original is not loaded.
+        // Before the fix this WAS the room: zero rows, and no way to ask for
+        // more. Now it is just a page that added nothing.
+        auto r1 = model.absorbHistoryPage(
+            QString(), hist::editPage(20, "$board", "$e", 900000000), "t1", "@me:server");
+        QCOMPARE(r1.outcome, hist::Outcome::FetchMore);
+        QCOMPARE(r1.next.from, QString("t1"));
+        QCOMPARE(r1.next.limit, bsfchat::client::kHistoryFollowPageLimit);
+        QVERIFY(model.loadingHistory());
+        // Buffered: the view sees one insertion per request it made.
+        QCOMPARE(model.rowCount(), 0);
+
+        // Page 2: more edits and 12 real messages — still short of 30.
+        auto page2 = hist::editPage(40, "$board", "$f", 800000000);
+        page2 += hist::messagePage(12, "$a", 700000000);
+        auto r2 = model.absorbHistoryPage("t1", page2, "t2", "@me:server");
+        QCOMPARE(r2.outcome, hist::Outcome::FetchMore);
+        QCOMPARE(r2.next.from, QString("t2"));
+
+        // Page 3: 20 more real messages — 32 visible, target met.
+        auto r3 = model.absorbHistoryPage(
+            "t2", hist::messagePage(20, "$b", 600000000), "t3", "@me:server");
+        QCOMPARE(r3.outcome, hist::Outcome::Done);
+        QCOMPARE(model.historyFill().pagesThisFill(), 3);
+        QCOMPARE(model.historyFill().lastStop(), hist::Stop::Filled);
+        QCOMPARE(model.rowCount(), 32);
+        QVERIFY(!model.loadingHistory());
+        // More history remains; the token is the last page's.
+        QVERIFY(model.hasMoreHistory());
+        QCOMPARE(model.prevBatchToken(), QString("t3"));
+        // Chronological: the oldest page is on top.
+        QCOMPARE(model.data(model.index(0), MessageModel::EventIdRole).toString(),
+                 QString("$b0"));
+        QCOMPARE(model.data(model.index(31), MessageModel::EventIdRole).toString(),
+                 QString("$a11"));
+        // No edit became a row, and the board's 60 edits collapsed to one
+        // pending entry — the newest — waiting for the original.
+        QCOMPARE(model.indexForEventId("$e0"), -1);
+        QCOMPARE(model.pendingEditCount(), 1);
+    }
+
+    void testNormalRoomStillCostsOneRequest()
+    {
+        // A channel of ordinary messages: the first page fills the target and
+        // nothing further is asked for.
+        MessageModel model;
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open, 50).has_value());
+        auto r = model.absorbHistoryPage(
+            QString(), hist::messagePage(50, "$m", 1000), "t1", "@me:server");
+        QCOMPARE(r.outcome, hist::Outcome::Done);
+        QCOMPARE(model.historyFill().pagesThisFill(), 1);
+        QCOMPARE(model.rowCount(), 50);
+    }
+
+    void testRoomOfOnlyEditsStopsAtPageCaps()
+    {
+        MessageModel model;
+        QSignalSpy spent(&model, &MessageModel::historyAutoFillSpentChanged);
+        auto req = model.beginHistoryFill(hist::Kind::Open, 50);
+        QVERIFY(req.has_value());
+        int requests = 1;
+        int page = 0;
+        auto feed = [&](const QString& from) {
+            const QString end = QStringLiteral("t%1").arg(++page);
+            return model.absorbHistoryPage(
+                from, hist::editPage(100, "$board", "$p" + std::to_string(page) + "_",
+                                     int64_t(page) * 100000000),
+                end, "@me:server");
+        };
+        auto r = feed(req->from);
+        while (r.outcome == hist::Outcome::FetchMore) {
+            ++requests;
+            r = feed(r.next.from);
+        }
+        // One open: exactly kHistoryMaxPagesPerFill requests, then it stops
+        // with nothing to show rather than crawling the whole room.
+        QCOMPARE(r.outcome, hist::Outcome::Done);
+        QCOMPARE(requests, bsfchat::client::kHistoryMaxPagesPerFill);
+        QCOMPARE(model.historyFill().lastStop(), hist::Stop::PageCap);
+        QCOMPARE(model.rowCount(), 0);
+        QVERIFY(model.hasMoreHistory());
+        QVERIFY(!model.loadingHistory());
+        QVERIFY(!model.historyAutoFillSpent());
+
+        // The view is not scrollable (no rows), so MessageView asks again —
+        // and keeps asking until the per-visit automatic budget is spent.
+        int viewportRequests = 0;
+        while (auto vr = model.beginHistoryFill(hist::Kind::Viewport,
+                                                bsfchat::client::kHistoryFollowPageLimit)) {
+            ++viewportRequests;
+            auto rr = feed(vr->from);
+            while (rr.outcome == hist::Outcome::FetchMore) {
+                ++viewportRequests;
+                rr = feed(rr.next.from);
+            }
+            QVERIFY2(viewportRequests <= bsfchat::client::kHistoryMaxAutoPagesPerOpen,
+                     "the viewport trigger must not loop");
+        }
+        QCOMPARE(requests + viewportRequests,
+                 bsfchat::client::kHistoryMaxAutoPagesPerOpen);
+        QVERIFY(model.historyAutoFillSpent());
+        QCOMPARE(spent.count(), 1);
+        // Spent means the client stops asking on its own...
+        QVERIFY(!model.beginHistoryFill(hist::Kind::Viewport, 100).has_value());
+        QVERIFY(!model.beginHistoryFill(hist::Kind::Open, 50).has_value());
+        // ...but the user still can (the "Load older messages" button), and
+        // a user fill is capped per fill.
+        auto g = model.beginHistoryFill(hist::Kind::Gesture, 50);
+        QVERIFY(g.has_value());
+        int gestureRequests = 1;
+        auto gr = feed(g->from);
+        while (gr.outcome == hist::Outcome::FetchMore) {
+            ++gestureRequests;
+            gr = feed(gr.next.from);
+        }
+        QCOMPARE(gestureRequests, bsfchat::client::kHistoryMaxPagesPerFill);
+        QCOMPARE(model.historyFill().autoPagesThisOpen(),
+                 bsfchat::client::kHistoryMaxAutoPagesPerOpen);
+
+        // A room switch refills the budget.
+        model.clear();
+        QVERIFY(!model.historyAutoFillSpent());
+        QCOMPARE(spent.count(), 2);
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open, 50).has_value());
+    }
+
+    void testFillStopsAtStartOfRoom()
+    {
+        MessageModel model;
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open, 50).has_value());
+        auto page = hist::messagePage(3, "$m", 1000);
+        page += hist::editPage(5, "$m0", "$e", 5000);
+        page.append(hist::reaction("$r", "$m1"));
+        // No end token: this is the whole room.
+        auto r = model.absorbHistoryPage(QString(), page, QString(), "@me:server");
+        QCOMPARE(r.outcome, hist::Outcome::Done);
+        QCOMPARE(model.historyFill().lastStop(), hist::Stop::StartOfRoom);
+        QCOMPARE(model.rowCount(), 3);
+        QVERIFY(!model.hasMoreHistory());
+        // Nothing left to ask for, whoever asks: this is what stops a short
+        // room's non-scrollable view re-triggering after every settle.
+        QVERIFY(!model.beginHistoryFill(hist::Kind::Viewport, 100).has_value());
+        QVERIFY(!model.beginHistoryFill(hist::Kind::Gesture, 50).has_value());
+        QVERIFY(!model.loadingHistory());
+    }
+
+    void testGestureFillCountsNewRowsAndIsNotBudgeted()
+    {
+        MessageModel model;
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open, 50).has_value());
+        model.absorbHistoryPage(QString(), hist::messagePage(30, "$new", 900000),
+                                "t1", "@me:server");
+        QCOMPARE(model.rowCount(), 30);
+        const int autoPages = model.historyFill().autoPagesThisOpen();
+
+        auto g = model.beginHistoryFill(hist::Kind::Gesture, 50);
+        QVERIFY(g.has_value());
+        QCOMPARE(g->from, QString("t1"));
+        QCOMPARE(g->limit, 50);
+        // A page holding an ALREADY-loaded message, a duplicate within the
+        // page and 100 edits adds one row, not 103.
+        auto page = hist::editPage(100, "$board", "$e", 500000);
+        page.append(hist::message("$new0", 900000));
+        page.append(hist::message("$old0", 400000));
+        page.append(hist::message("$old0", 400000));
+        auto r1 = model.absorbHistoryPage("t1", page, "t2", "@me:server");
+        QCOMPARE(r1.outcome, hist::Outcome::FetchMore);
+        // 19 more makes 20 new rows: the scroll-up target.
+        auto r2 = model.absorbHistoryPage(
+            "t2", hist::messagePage(19, "$older", 100000), "t3", "@me:server");
+        QCOMPARE(r2.outcome, hist::Outcome::Done);
+        QCOMPARE(model.rowCount(), 50);
+        QCOMPARE(model.historyFill().autoPagesThisOpen(), autoPages);
+    }
+
+    void testStaleOrForeignPageIsIgnored()
+    {
+        MessageModel model;
+        // No fill running: a page is not ours.
+        QCOMPARE(model.absorbHistoryPage(QString(), hist::messagePage(3, "$m", 1),
+                                         "t1", "@me:server").outcome,
+                 hist::Outcome::Ignored);
+        QCOMPARE(model.rowCount(), 0);
+
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open, 50).has_value());
+        // A second fill cannot start over a running one.
+        QVERIFY(!model.beginHistoryFill(hist::Kind::Open, 50).has_value());
+        QVERIFY(!model.beginHistoryFill(hist::Kind::Gesture, 50).has_value());
+        auto r1 = model.absorbHistoryPage(
+            QString(), hist::editPage(10, "$board", "$e", 1000), "t1", "@me:server");
+        QCOMPARE(r1.outcome, hist::Outcome::FetchMore);
+        // A late duplicate of the FIRST page (room re-opened before its first
+        // answer landed) no longer matches and must not count as page two.
+        QCOMPARE(model.absorbHistoryPage(QString(), hist::messagePage(40, "$x", 1),
+                                         "t9", "@me:server").outcome,
+                 hist::Outcome::Ignored);
+        QCOMPARE(model.historyFill().pagesThisFill(), 1);
+        QCOMPARE(model.prevBatchToken(), QString("t1"));
+    }
+
+    void testFailedPageKeepsWhatArrivedAndEndsTheFill()
+    {
+        MessageModel model;
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open, 50).has_value());
+        auto page = hist::editPage(30, "$board", "$e", 900000);
+        page += hist::messagePage(2, "$m", 800000);
+        QCOMPARE(model.absorbHistoryPage(QString(), page, "t1", "@me:server").outcome,
+                 hist::Outcome::FetchMore);
+        // Some other request's failure is not this fill's.
+        QVERIFY(!model.failHistoryFill("t7", "@me:server"));
+        QVERIFY(model.loadingHistory());
+        QVERIFY(model.failHistoryFill("t1", "@me:server"));
+        QCOMPARE(model.historyFill().lastStop(), hist::Stop::Failed);
+        QCOMPARE(model.rowCount(), 2);
+        // Not stuck "loading": the next scroll-to-top is not refused.
+        QVERIFY(!model.loadingHistory());
+        QVERIFY(!model.failHistoryFill("t1", "@me:server"));
+        QVERIFY(model.beginHistoryFill(hist::Kind::Gesture, 50).has_value());
+    }
+
+    // --- Edits whose original is not loaded -------------------------------
+
+    void testEditBeforeOriginalAppliesWhenOriginalArrives()
+    {
+        // The board's original is far back; its edits keep arriving over
+        // /sync. They used to be dropped, on the promise that the original
+        // would come back already carrying them — which fails whenever an
+        // edit lands after the server built the page holding the original.
+        MessageModel model;
+        model.appendEvent(hist::message("$live", 9000000), "@me:server");
+        model.appendEvent(hist::edit("$e2", "$board", 6000, "v3"), "@me:server");
+        model.appendEvent(hist::edit("$e1", "$board", 5000, "v2"), "@me:server");
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.pendingEditCount(), 1);
+
+        // Backfill reaches the original, un-reconciled (built before $e1/$e2).
+        model.prependEvents({hist::message("$board", 1000, "v1")}, "@me:server");
+        const int row = model.indexForEventId("$board");
+        QCOMPARE(row, 0);
+        // The NEWEST edit won, although it arrived first.
+        QCOMPARE(model.data(model.index(row), MessageModel::BodyRole).toString(),
+                 QString("v3"));
+        QCOMPARE(model.data(model.index(row), MessageModel::EditedRole).toBool(), true);
+        QCOMPARE(model.pendingEditCount(), 0);
+        const auto history = model.editHistory("$board");
+        QCOMPARE(history.size(), 2);
+        QCOMPARE(history.at(0).toMap().value("body").toString(), QString("v1"));
+        QCOMPARE(history.at(1).toMap().value("body").toString(), QString("v3"));
+    }
+
+    void testPendingEditLosesToANewerReconciledOriginal()
+    {
+        // The usual case: the page carrying the original was built after the
+        // stashed edit, so the original already shows something newer.
+        MessageModel model;
+        model.appendEvent(hist::message("$live", 9000000), "@me:server");
+        model.appendEvent(hist::edit("$e1", "$board", 5000, "v2"), "@me:server");
+        model.prependEvents({makeReconciledEvent("$board", "@bot:server", "v3", "v1",
+                                                 "$e2", 1000, 6000)},
+                            "@me:server");
+        const int row = model.indexForEventId("$board");
+        QCOMPARE(model.data(model.index(row), MessageModel::BodyRole).toString(),
+                 QString("v3"));
+        QCOMPARE(model.pendingEditCount(), 0);
+    }
+
+    void testLateOriginalReceivesLatestEditThroughAFill()
+    {
+        // End to end: the newest page is the board's edits, the original is
+        // two pages back and comes back reconciled with the edit that was
+        // current when ITS page was built — then a newer edit that arrived
+        // over /sync while the fill ran is what ends up on screen.
+        MessageModel model;
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open, 50).has_value());
+        auto r1 = model.absorbHistoryPage(
+            QString(), hist::editPage(50, "$board", "$e", 5000000), "t1", "@me:server");
+        QCOMPARE(r1.outcome, hist::Outcome::FetchMore);
+        // Live, mid-fill: the bot edits the board again.
+        model.appendEvent(hist::edit("$live-edit", "$board", 99000000, "latest"),
+                          "@me:server");
+        auto page2 = hist::messagePage(29, "$m", 2000);
+        page2.prepend(makeReconciledEvent("$board", "@bot:server", "board v49",
+                                          "board v0", "$e49", 1000, 5000000 + 49 * 132000));
+        auto r2 = model.absorbHistoryPage("t1", page2, "t2", "@me:server");
+        QCOMPARE(r2.outcome, hist::Outcome::Done);
+        const int row = model.indexForEventId("$board");
+        QVERIFY(row >= 0);
+        QCOMPARE(model.data(model.index(row), MessageModel::BodyRole).toString(),
+                 QString("latest"));
+        QCOMPARE(model.rowCount(), 30);
+    }
+
+    void testOlderEditNeverOverwritesTheReconciledBody()
+    {
+        // A window replayed oldest-first through appendEvent (a room open
+        // whose first page holds both the original and its edits): the
+        // original arrives carrying edit 3's text, then edits 1..3 follow.
+        // Edit 1 overwrote the body, edit 2 followed, edit 3 was skipped as
+        // "already applied" — so the message showed edit 2, forever.
+        MessageModel model;
+        model.appendEvent(makeReconciledEvent("$msg", "@alice:server", "v4", "v1",
+                                              "$e3", 1000, 7000),
+                          "@me:server");
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        model.appendEvent(hist::edit("$e1", "$msg", 5000, "v2"), "@me:server");
+        model.appendEvent(hist::edit("$e2", "$msg", 6000, "v3"), "@me:server");
+        model.appendEvent(hist::edit("$e3", "$msg", 7000, "v4"), "@me:server");
+
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.data(model.index(0), MessageModel::BodyRole).toString(),
+                 QString("v4"));
+        // Nothing the user can see changed, so nothing repainted.
+        QCOMPARE(spy.count(), 0);
+        // And the superseded versions slot into history in order.
+        const auto history = model.editHistory("$msg");
+        QCOMPARE(history.size(), 4);
+        QCOMPARE(history.at(0).toMap().value("body").toString(), QString("v1"));
+        QCOMPARE(history.at(1).toMap().value("body").toString(), QString("v2"));
+        QCOMPARE(history.at(2).toMap().value("body").toString(), QString("v3"));
+        QCOMPARE(history.at(3).toMap().value("body").toString(), QString("v4"));
+        QCOMPARE(history.at(3).toMap().value("isCurrent").toBool(), true);
+
+        // A genuinely newer edit still lands.
+        model.appendEvent(hist::edit("$e4", "$msg", 8000, "v5"), "@me:server");
+        QCOMPARE(model.data(model.index(0), MessageModel::BodyRole).toString(),
+                 QString("v5"));
+    }
+
+    void testPendingEditsAreBounded()
+    {
+        MessageModel model;
+        for (int i = 0; i < 1000; ++i)
+            model.appendEvent(hist::edit("$e" + std::to_string(i),
+                                         "$t" + std::to_string(i), 1000 + i, "x"),
+                              "@me:server");
+        QVERIFY(model.pendingEditCount() <= 256);
+        QVERIFY(model.pendingEditCount() > 0);
+        model.clear();
+        QCOMPARE(model.pendingEditCount(), 0);
+    }
+
+    void testMalformedEditIsNotARow()
+    {
+        // An m.replace naming no target: prependEvents always dropped it, but
+        // appendEvent turned it into a "* text" row — and rendersAsRow has to
+        // be right for both paths or the visible count lies.
+        MessageModel model;
+        auto e = hist::edit("$bad", "", 1000, "x");
+        model.appendEvent(e, "@me:server");
+        QCOMPARE(model.rowCount(), 0);
+        QVERIFY(!MessageModel::rendersAsRow(e));
     }
 
     // --- @mentions --------------------------------------------------------

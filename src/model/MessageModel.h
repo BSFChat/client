@@ -13,9 +13,11 @@
 #include <bsfchat/MatrixTypes.h>
 
 #include "net/MediaTicketCache.h"
+#include "util/HistoryFill.h"
 #include "util/MentionRenderer.h"
 
 #include <functional>
+#include <optional>
 
 class ThreadFilterModel;
 
@@ -30,6 +32,12 @@ class MessageModel : public QAbstractListModel {
     // MessageView binds to this to show a spinner and suppress repeated
     // triggers from rapid scroll-to-top events.
     Q_PROPERTY(bool loadingHistory READ loadingHistory NOTIFY loadingHistoryChanged)
+    // True once the client has spent its own per-visit page budget
+    // (util/HistoryFill.h) and will not fetch more history unprompted.
+    // MessageView uses it to offer a "Load older messages" button when the
+    // list cannot scroll — the only way left to ask, since scrolling to the
+    // top is impossible in a list that does not overflow.
+    Q_PROPERTY(bool historyAutoFillSpent READ historyAutoFillSpent NOTIFY historyAutoFillSpentChanged)
 
 public:
     enum Roles {
@@ -328,6 +336,69 @@ public:
     bool loadingHistory() const { return m_loadingHistory; }
     void setLoadingHistory(bool v);
 
+    // ── History fills (util/HistoryFill.h) ────────────────────────────────
+    //
+    // The paging LOOP lives here rather than in ServerConnection so that it
+    // can be driven with synthetic pages in tests/test_models.cpp; the
+    // connection only performs the requests this hands it.
+    //
+    // A fill's pages are BUFFERED and put into the model in one go when the
+    // fill ends. Two reasons. MessageView anchors the scroll position on
+    // "the page I asked for landed" (its _paginationRequested/_Landed
+    // pair): one request, one prepend, one olderMessagesLoaded. A fill that
+    // prepended page by page would land rows the view never asked for, and
+    // a reader scrolled up would be shoved by each of them. And counting
+    // what a page WOULD add is the same question as dedupe — events already
+    // loaded, or already in an earlier page of this fill, are not new rows.
+    struct HistoryRequest {
+        QString from;   // "" for the newest page (a room open)
+        int limit = 0;
+    };
+    enum class HistoryPageOutcome {
+        Ignored,   // not a page of the running fill (stale, or no fill)
+        FetchMore, // request `next`
+        Done,      // the fill is over and its rows are in the model
+    };
+    struct HistoryPageResult {
+        HistoryPageOutcome outcome = HistoryPageOutcome::Ignored;
+        HistoryRequest next;
+    };
+
+    // Start a fill, or refuse with nullopt: one already running, no token to
+    // continue from (start of room — the guard that stops a view at the top
+    // of a short room from re-asking forever), or an automatic fill with the
+    // per-visit budget spent. An Open fill always starts from the newest
+    // page. Sets loadingHistory for the whole fill, not per request.
+    std::optional<HistoryRequest> beginHistoryFill(bsfchat::client::HistoryFillKind kind,
+                                                   int firstPageLimit);
+    // Absorb one /messages page. `requestedFrom` is the `from` the page was
+    // requested with ("" for the newest page) and is how a page is matched to
+    // the running fill; `chronological` is oldest-first; `endToken` is the
+    // server's token for going further back, empty at the start of the room.
+    HistoryPageResult absorbHistoryPage(const QString& requestedFrom,
+                                        const QVector<bsfchat::RoomEvent>& chronological,
+                                        const QString& endToken,
+                                        const QString& ownUserId);
+    // The request for `requestedFrom` failed. Keeps whatever the fill had
+    // already gathered, ends it, and returns true if a fill was ended (the
+    // caller then reports completion exactly as for Done).
+    bool failHistoryFill(const QString& requestedFrom, const QString& ownUserId);
+    bool historyAutoFillSpent() const { return m_historyFill.autoBudgetSpent(); }
+    const bsfchat::client::HistoryFill& historyFill() const { return m_historyFill; }
+
+    // Whether `event` would become a row of this timeline, i.e. whether it is
+    // something the user can SEE. An m.room.message that is not an edit
+    // sibling. Edits fold into their target, reactions fold into a row's
+    // chips, redactions remove rows, and state events are not drawn — none of
+    // them may count towards "enough history is loaded". Deliberately the
+    // same test prependEvents and appendEvent use to decide what becomes a
+    // row, so the count and the rows cannot disagree.
+    static bool rendersAsRow(const bsfchat::RoomEvent& event);
+
+    // Edits that arrived for a message that is not loaded, newest per target.
+    // Exposed for tests.
+    int pendingEditCount() const { return static_cast<int>(m_pendingEdits.size()); }
+
     // Re-resolve every sender display name from the cache and emit
     // dataChanged so the UI updates when a user changes their profile.
     void refreshDisplayNames();
@@ -336,6 +407,7 @@ signals:
     void countChanged();
     void hasMoreHistoryChanged();
     void loadingHistoryChanged();
+    void historyAutoFillSpentChanged();
 
 private:
     struct MessageEntry {
@@ -415,6 +487,31 @@ private:
         QString reactionEventId;
     };
 
+    // THE NEWEST EDIT for a message that is not loaded yet, keyed by the
+    // target's event id.
+    //
+    // These used to be dropped on the floor ("a future sync/backfill will
+    // bring the original, and we'll see this edit again") — and nothing
+    // guaranteed that. /messages returns the original reconciled with the
+    // winning edit AS OF THE FETCH, so an edit that lands over /sync between
+    // the server answering a back-page and the client absorbing it was lost:
+    // the original showed its older text until the room was re-opened. The
+    // board in #notifications (edited every ~2 minutes, its original far
+    // outside the loaded window) makes that window routine rather than rare.
+    //
+    // Only the newest per target is kept — the body it carries is the whole
+    // answer, older ones would lose to it anyway — which bounds this by the
+    // number of distinct unloaded targets, and kMaxPendingEditTargets bounds
+    // that. Cleared with the model on a room switch.
+    struct PendingEdit {
+        QString editEventId;
+        qint64 timestamp = 0;
+        QString body;
+        QString formattedBody; // raw; rendered against the target's msgtype
+    };
+    static constexpr int kMaxPendingEditTargets = 256;
+    QHash<QString, PendingEdit> m_pendingEdits;
+
     QVector<MessageEntry> m_messages;
     // event id -> row index. Every "find the message this event refers to"
     // path — edits, reactions, redactions, reply-preview resolution, append
@@ -441,6 +538,14 @@ private:
     ThreadFilterModel* m_threadProxy = nullptr;
     QString m_prevBatchToken;
     bool m_loadingHistory = false;
+    // The running fill, and the pages it has gathered so far (each
+    // oldest-first, in arrival order — so NEWEST page first) plus the ids of
+    // the rows they will add, for dedupe across pages.
+    bsfchat::client::HistoryFill m_historyFill;
+    QString m_historyFillFrom;
+    QVector<QVector<bsfchat::RoomEvent>> m_historyFillPages;
+    QSet<QString> m_historyFillRowIds;
+    void finishHistoryFill(const QString& ownUserId, bool wasSpent);
     RoleMentionResolver m_roleResolver;
     const QMap<QString, QString>* m_dnCache = nullptr;
     const QSet<QString>* m_botUsers = nullptr;
@@ -460,6 +565,16 @@ private:
     // its body is the "* new text" fallback for clients that can't apply
     // edits. appendEvent folds it into its target; prependEvents drops it.
     static bool isReplacementEvent(const bsfchat::RoomEvent& event);
+    // An edit's payload, parsed once so a live edit and a stashed one are
+    // applied by the same code.
+    static PendingEdit editPayload(const bsfchat::RoomEvent& event);
+    // Apply an edit to an entry. Returns true when the displayed body changed.
+    // An edit OLDER than the one the entry already shows (by server
+    // timestamp) never overwrites it — see the note in the .cpp.
+    bool applyEditToEntry(MessageEntry& entry, const PendingEdit& edit) const;
+    void stashPendingEdit(const QString& targetId, const PendingEdit& edit);
+    // A row is about to be inserted: fold in any edit that beat it here.
+    void drainPendingEdit(MessageEntry& entry);
     // Rewrite `entry.formattedBody` so the mentions recorded on the entry are
     // rendered as highlighted anchors. Reads m_dnCache for display names and
     // m_ownUserId to pick the self-mention style.
