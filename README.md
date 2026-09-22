@@ -43,6 +43,17 @@ else, or `-DBSFCHAT_USE_CCACHE=OFF` to opt out. The first build is cold and
 takes tens of minutes (libaom and libdatachannel dominate); later ones are
 minutes.
 
+### iOS
+
+`scripts/build-ios.sh [device|simulator]` generates an Xcode project.
+Voice is compiled out on iOS by default (`BSFCHAT_ENABLE_VOICE=ON` to
+work on the port). Bundle configuration — Info.plist, launch screen, app
+icon — lives in `ios/` and is wired up by the `if(IOS)` branches of
+`CMakeLists.txt`; do not pass `-DMACOSX_BUNDLE_INFO_PLIST`.
+
+App Store signing, secrets and review prerequisites:
+[`docs/ios-release.md`](docs/ios-release.md).
+
 ## Tests
 
 ```sh

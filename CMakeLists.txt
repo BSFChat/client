@@ -322,7 +322,14 @@ set_target_properties(bsfchat-app PROPERTIES
     WIN32_EXECUTABLE TRUE
 )
 
-if(APPLE)
+# NOT `if(APPLE)`: IOS is APPLE too, and this block used to run for the
+# iOS target as well — handing it macos/Info.plist.in, complete with
+# NSPrincipalClass=NSApplication and an .icns reference, and missing
+# every iOS-required key. The target property set here also beats the
+# -DMACOSX_BUNDLE_INFO_PLIST=ios/Info.plist cache variable that
+# scripts/build-ios.sh passes, so ios/Info.plist was dead code from the
+# day it was written. The iOS branch is below.
+if(APPLE AND NOT IOS)
     # V-H4. This property is load-bearing twice over: it is the bundle's
     # Info.plist, AND it is what Qt reads at CONFIGURE time to decide
     # whether to link the static QMicrophonePermission /
@@ -350,6 +357,67 @@ if(APPLE)
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/Info.plist")
 endif()
 
+if(IOS)
+    # The iOS bundle's plist. Same V-H4 reasoning as macOS — Qt's
+    # _qt_internal_darwin_permission_finalizer reads the file named by
+    # this property at CONFIGURE time to decide whether to link the
+    # static QDarwinMicrophonePermission / QDarwinCameraPermission
+    # backends — with one extra consequence on iOS: a missing usage
+    # description does not merely deny the permission, it makes iOS
+    # terminate the process the moment the API is touched.
+    #
+    # CFBundleVersion is the App Store build number and has to strictly
+    # increase across uploads for a given CFBundleShortVersionString,
+    # including over uploads that were rejected. CI passes the workflow
+    # run number; everything else falls back to the version, which is
+    # fine because no other build reaches App Store Connect.
+    set(MACOSX_BUNDLE_EXECUTABLE_NAME "bsfchat-app")
+    set(MACOSX_BUNDLE_GUI_IDENTIFIER "${BSFCHAT_BUNDLE_ID}")
+    set(MACOSX_BUNDLE_SHORT_VERSION_STRING "${BSFCHAT_VERSION_DOTS}")
+    if(DEFINED BSFCHAT_BUILD_NUMBER AND NOT BSFCHAT_BUILD_NUMBER STREQUAL "")
+        set(BSFCHAT_IOS_BUNDLE_VERSION "${BSFCHAT_BUILD_NUMBER}")
+    else()
+        set(BSFCHAT_IOS_BUNDLE_VERSION "${BSFCHAT_VERSION_DOTS}")
+    endif()
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist.in"
+                   "${CMAKE_CURRENT_BINARY_DIR}/Info.plist" @ONLY)
+    set_target_properties(bsfchat-app PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/Info.plist")
+
+    # iPhone only (1), not universal (1,2), which is Qt's default.
+    #
+    # This is a review-surface decision, not a technical limit: App
+    # Review runs an iPad pass on any build that claims iPad support,
+    # and the QML has no iPad adaptation whatsoever — MobileMain.qml is
+    # a phone-shaped drawer layout, and the settings popups
+    # (ClientSettings, ServerSettings) are unmodified desktop panes.
+    # Shipping iPhone-only removes a whole class of "the layout is
+    # broken on iPad" rejections. Flip to "1,2" once someone has
+    # actually laid the app out for a tablet.
+    set_target_properties(bsfchat-app PROPERTIES
+        XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1")
+
+    # Launch screen. Committed rather than left to Qt's generated
+    # default so that UILaunchStoryboardName in ios/Info.plist.in
+    # resolves to a file we control: without a launch storyboard iOS
+    # letterboxes the app at a legacy screen size, which App Review
+    # reads as a broken layout.
+    set_target_properties(bsfchat-app PROPERTIES
+        QT_IOS_LAUNCH_SCREEN "${CMAKE_CURRENT_SOURCE_DIR}/ios/LaunchScreen.storyboard")
+
+    # App icon. An iOS bundle with no compiled asset catalog is
+    # REJECTED AT UPLOAD ("Missing Info.plist value -
+    # CFBundleIconName"), before a human ever sees it — the .icns the
+    # macOS bundle uses is not a substitute. The catalog carries the
+    # single 1024×1024 universal icon (all Xcode has needed since 14).
+    set(BSFCHAT_IOS_ASSETS "${CMAKE_CURRENT_SOURCE_DIR}/ios/Assets.xcassets")
+    target_sources(bsfchat-app PRIVATE "${BSFCHAT_IOS_ASSETS}")
+    set_source_files_properties("${BSFCHAT_IOS_ASSETS}" PROPERTIES
+        MACOSX_PACKAGE_LOCATION Resources)
+    set_target_properties(bsfchat-app PROPERTIES
+        XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon")
+endif()
+
 # Bundle the brand .icns into Contents/Resources/ so the value of
 # MACOSX_BUNDLE_ICON_FILE actually resolves at runtime. Without
 # this, Finder shows the generic Qt icon even though Info.plist
@@ -373,7 +441,11 @@ if(WIN32)
     target_sources(bsfchat-app PRIVATE "${BSFCHAT_RC}")
 endif()
 
-if(APPLE)
+# NOT `if(APPLE)`: an iOS .app is a FLAT bundle whose Info.plist sits at
+# the bundle root, so every one of these PlistBuddy calls pointed at a
+# Contents/ directory that does not exist and failed the iOS build. The
+# iOS equivalent is below, against the right path and the right keys.
+if(APPLE AND NOT IOS)
     # The usage descriptions and the bsfchat:// URL scheme used to be
     # injected here, POST_BUILD, with plutil and PlistBuddy. They now live
     # in macos/Info.plist.in, because Qt has to be able to READ them at
@@ -396,6 +468,31 @@ if(APPLE)
         COMMAND /usr/libexec/PlistBuddy -c "print CFBundleURLTypes:0:CFBundleURLSchemes:0"
                 "$<TARGET_BUNDLE_DIR:bsfchat-app>/Contents/Info.plist" > /dev/null
         COMMENT "Checking the bundle's TCC usage descriptions and URL scheme"
+        VERBATIM
+    )
+endif()
+
+if(IOS)
+    # Same guard, iOS keys and iOS bundle layout. The two that are not
+    # about permissions are the ones that cost a round trip through App
+    # Store Connect rather than a runtime bug:
+    # ITSAppUsesNonExemptEncryption missing turns every single upload
+    # into a manual export-compliance questionnaire, and a build with no
+    # CFBundleShortVersionString is rejected by the upload validator.
+    add_custom_command(TARGET bsfchat-app POST_BUILD
+        COMMAND /usr/libexec/PlistBuddy -c "print NSMicrophoneUsageDescription"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Info.plist" > /dev/null
+        COMMAND /usr/libexec/PlistBuddy -c "print NSCameraUsageDescription"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Info.plist" > /dev/null
+        COMMAND /usr/libexec/PlistBuddy -c "print NSLocalNetworkUsageDescription"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Info.plist" > /dev/null
+        COMMAND /usr/libexec/PlistBuddy -c "print ITSAppUsesNonExemptEncryption"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Info.plist" > /dev/null
+        COMMAND /usr/libexec/PlistBuddy -c "print CFBundleShortVersionString"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Info.plist" > /dev/null
+        COMMAND /usr/libexec/PlistBuddy -c "print CFBundleURLTypes:0:CFBundleURLSchemes:0"
+                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Info.plist" > /dev/null
+        COMMENT "Checking the iOS bundle's usage descriptions, URL scheme and export-compliance key"
         VERBATIM
     )
 endif()
