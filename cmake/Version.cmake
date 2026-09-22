@@ -68,18 +68,81 @@ endif()
 set(BSFCHAT_VERSION_NSIS "${BSFCHAT_VERSION_DOTS}.0")
 
 # Android versionCode: MAJOR * 1_000_000 + MINOR * 10_000 + PATCH * 100
-# The trailing two zero-digits are reserved for hotfix bumps (e.g. a
-# packaging-only fix that needs to outrank the just-shipped APK
-# without consuming a real patch number).
-string(REPLACE "." ";" _ver_parts "${BSFCHAT_VERSION_DOTS}")
-list(GET _ver_parts 0 _v_major)
-list(GET _ver_parts 1 _v_minor)
-list(GET _ver_parts 2 _v_patch)
-math(EXPR BSFCHAT_VERSION_CODE
-     "${_v_major} * 1000000 + ${_v_minor} * 10000 + ${_v_patch} * 100")
-# Play Store rejects versionCode < 1. Floor for the dev fallback.
+#
+# Google Play burns a versionCode permanently the moment an artefact
+# carrying it is uploaded to ANY track, including internal testing —
+# it can never be reused, and a later upload must be strictly greater.
+# So this mapping has to be both monotonic in semver order and free of
+# collisions between a release candidate and the release it becomes.
+#
+# The trailing two digits are the prerelease band. A final release is
+# always a multiple of 100; `X.Y.Z-rc.N` sits at (that value - 100 + N),
+# i.e. in the gap between the previous patch's release and its own:
+#
+#     0.0.51        ->  5100
+#     0.0.52-rc.1   ->  5101
+#     0.0.52-rc.3   ->  5103
+#     0.0.52        ->  5200
+#
+# which is the ordering Play needs to accept an RC on internal testing
+# and then promote the final build over it. (An explicit
+# -DBSFCHAT_VERSION_CODE=N override wins over all of this, for the
+# hotfix case where a packaging-only rebuild has to outrank an already
+# uploaded artefact without consuming a patch number.)
+if(NOT DEFINED BSFCHAT_VERSION_CODE OR BSFCHAT_VERSION_CODE STREQUAL "")
+    string(REPLACE "." ";" _ver_parts "${BSFCHAT_VERSION_DOTS}")
+    list(GET _ver_parts 0 _v_major)
+    list(GET _ver_parts 1 _v_minor)
+    list(GET _ver_parts 2 _v_patch)
+    math(EXPR BSFCHAT_VERSION_CODE
+         "${_v_major} * 1000000 + ${_v_minor} * 10000 + ${_v_patch} * 100")
+
+    # Prerelease suffix, if any: everything after the first '-'.
+    set(_ver_suffix "")
+    if(BSFCHAT_VERSION MATCHES "^[^-]+-(.+)$")
+        set(_ver_suffix "${CMAKE_MATCH_1}")
+    endif()
+
+    if(_ver_suffix MATCHES "^rc\\.?([0-9]+)$")
+        set(_rc_num "${CMAKE_MATCH_1}")
+        if(_rc_num LESS 1 OR _rc_num GREATER 99)
+            message(FATAL_ERROR
+                "Release candidate number ${_rc_num} in BSFCHAT_VERSION="
+                "'${BSFCHAT_VERSION}' is outside the 1..99 prerelease band. "
+                "Pass -DBSFCHAT_VERSION_CODE explicitly if you really need "
+                "more than 99 RCs for one patch.")
+        endif()
+        math(EXPR BSFCHAT_VERSION_CODE
+             "${BSFCHAT_VERSION_CODE} - 100 + ${_rc_num}")
+    elseif(NOT _ver_suffix STREQUAL "")
+        # -dev.<sha> and friends. These are CI/branch artefacts that are
+        # never uploaded, so they simply share the final release's code
+        # rather than getting an ordering they cannot have. Uploading one
+        # WOULD burn the real release's versionCode, hence the warning.
+        # STATUS, not WARNING: every branch and PR build on all three
+        # desktop platforms carries a -dev.<sha> version, and none of
+        # them can reach Play — CI only produces an .aab on tag pushes,
+        # and a tag always resolves to a clean version. Warning here
+        # would put a CMake warning in every build in the project for a
+        # hazard that only exists if someone uploads by hand.
+        message(STATUS
+            "BSFCHAT_VERSION='${BSFCHAT_VERSION}' has a non-rc prerelease "
+            "suffix, so its Android versionCode (${BSFCHAT_VERSION_CODE}) is "
+            "the same as the eventual ${BSFCHAT_VERSION_DOTS} release. Fine "
+            "for a sideload or a CI artefact; do NOT upload this build to "
+            "Google Play or that versionCode is burned for good.")
+    endif()
+endif()
+
+# Play rejects versionCode < 1, and the platform caps it at
+# 2_100_000_000 (just under INT32_MAX, which is aapt's limit).
 if(BSFCHAT_VERSION_CODE LESS 1)
     set(BSFCHAT_VERSION_CODE 1)
+endif()
+if(BSFCHAT_VERSION_CODE GREATER 2100000000)
+    message(FATAL_ERROR
+        "Android versionCode ${BSFCHAT_VERSION_CODE} exceeds Play's "
+        "2100000000 ceiling.")
 endif()
 
 message(STATUS "BSFChat version: ${BSFCHAT_VERSION} "

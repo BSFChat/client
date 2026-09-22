@@ -821,6 +821,279 @@ jobs:
           name: BSFChat-Linux
           path: BSFChat-linux-x86_64.tar.gz
 
+  # === Android ===
+  #
+  # Its own job rather than a fourth entry in the `build` matrix: the
+  # Android build needs a CROSS Qt plus a HOST Qt, an NDK, a pinned SDK
+  # platform and a JDK, and none of the desktop packaging (dmg, NSIS,
+  # the ldd sweep) applies to it. Folded into the matrix it would have
+  # put an `if:` on nearly every step over there.
+  #
+  # Outputs, both from one compile:
+  #   * APK  — every build, uploaded as an artifact for sideloading.
+  #   * AAB  — tags only. Play has required the App Bundle format for
+  #            new apps since 2021; an APK cannot be uploaded to a
+  #            Play listing at all, only handed round directly.
+  #
+  # Not gated on `build`, same reasoning as `sanitizers`: an Android
+  # packaging break should be visible even when the desktop jobs are
+  # red, and vice versa.
+  android:
+    name: android (arm64-v8a)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags so cmake/Version.cmake's git-describe
+          # fallback works for non-tag pushes, exactly as in `build`.
+          fetch-depth: 0
+
+      # Same grammar and the same -dev suffix rule as the build job's
+      # "Derive version" step — keep the two in step. Android also
+      # needs the versionCode, which cmake/Version.cmake derives from
+      # the version string (final releases land on a multiple of 100,
+      # rc.N in the 99-wide band just below it) so nothing to compute
+      # here beyond the name.
+      - name: Derive version
+        id: version
+        shell: bash
+        run: |
+          REF="${GITHUB_REF_NAME:-}"
+          if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            VER="${REF#v}"
+          else
+            LAST=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+            LAST="${LAST#v}"
+            VER="${LAST}-dev.$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "BSFChat version: $VER"
+
+      # JDK 17: what Qt 6.10 documents for its Gradle/AGP 8.10.1
+      # toolchain. The runner's default JDK drifts; pin it.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # platforms;android-36 is not optional — Play has required
+      # targetSdk 36 for new apps AND updates since 2026-08-31, AGP
+      # wants compileSdk >= targetSdk, and androiddeployqt picks
+      # compileSdk from the newest platform installed here. Without
+      # this step the build silently compiles against whatever the
+      # runner image happens to ship.
+      #
+      # NDK r27c (27.2.12479018) is the version Qt 6.10's official
+      # Android libraries were built with; Qt's own docs warn that a
+      # mismatch shows up as missing symbols at link time. Bump this
+      # together with the Qt version below, never separately.
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+          SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+          "$SDKMGR" --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "platform-tools" \
+            "ndk;27.2.12479018"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      # Two Qt installs, both pinned to an explicit `dir` so the paths
+      # below are deterministic rather than depending on whichever of
+      # them set QT_ROOT_DIR last:
+      #   host  -> $GITHUB_WORKSPACE/Qt/6.10.3/gcc_64  (moc, rcc,
+      #            qmlimportscanner — androiddeployqt runs these on the
+      #            builder, so they must be host binaries)
+      #   cross -> $GITHUB_WORKSPACE/Qt/6.10.3/android_arm64_v8a
+      # Version stays in lockstep with the desktop `build` job — see the
+      # long comment there for why 6.10.3 and not 6.8/6.11.
+      - name: Install Qt (host tools)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.10.3'
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: 'qtmultimedia'
+          dir: ${{ github.workspace }}
+          cache: true
+          set-env: false
+
+      - name: Install Qt (android arm64-v8a)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.10.3'
+          host: linux
+          target: android
+          arch: android_arm64_v8a
+          modules: 'qtmultimedia'
+          dir: ${{ github.workspace }}
+          cache: true
+          set-env: false
+
+      # Qt for Android ships no TLS backend, so OIDC token exchange,
+      # the Matrix client and every media fetch fail silently at the
+      # TLS layer unless we package our own libssl/libcrypto. deps/ is
+      # gitignored, same contract as the desktop jobs' openh264 step.
+      - name: Build vendored OpenSSL for Android
+        run: bash scripts/build-openssl-android.sh
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          QT_ANDROID="$GITHUB_WORKSPACE/Qt/6.10.3/android_arm64_v8a"
+          cmake -B build-android -G Ninja -Wno-dev \
+            -DCMAKE_TOOLCHAIN_FILE="$QT_ANDROID/lib/cmake/Qt6/qt.toolchain.cmake" \
+            -DQT_HOST_PATH="$GITHUB_WORKSPACE/Qt/6.10.3/gcc_64" \
+            -DANDROID_SDK_ROOT="$ANDROID_HOME" \
+            -DANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DQT_ANDROID_ABIS=arm64-v8a \
+            -DANDROID_ABI=arm64-v8a \
+            -DGAMECHAT_CLIENT_BUILD_TESTS=OFF \
+            -DBSFCHAT_BUNDLE_ID=com.bsfchat.app \
+            -DBSFCHAT_VERSION="${{ steps.version.outputs.version }}"
+
+      # -j4 to match the desktop jobs. No ctest step: the client test
+      # suite is host-architecture and there is no device to run it on
+      # (an emulator on a hosted runner is both slow and flaky). The
+      # desktop matrix is what gates correctness; this job gates
+      # "does the Android artefact build and carry the right identity".
+      - name: Build APK
+        run: cmake --build build-android --config Release -j4
+
+      # Guard the two things that are IRREVERSIBLE once an artefact
+      # reaches the Play Console. The application id is locked to the
+      # listing forever at first upload, and a versionCode is burned
+      # permanently the moment any track sees it — so assert them on
+      # the built artefact rather than trusting the source.
+      - name: Verify APK identity
+        run: |
+          set -euo pipefail
+          # Pin the exact output path. A bare `find -name "*.apk"` also
+          # matches the debug APK and Gradle's intermediates, and which
+          # one `head -1` returns is filesystem order — i.e. the
+          # verification could pass on a different file than the one we
+          # ship. Same reasoning for the bundle path further down.
+          APK=build-android/android-build/build/outputs/apk/release/android-build-release-unsigned.apk
+          [ -f "$APK" ] || { echo "::error::no release APK at $APK"; find build-android -name '*.apk'; exit 1; }
+          echo "APK: $APK"
+          AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -1)
+          BADGING=$("$AAPT" dump badging "$APK")
+          echo "$BADGING" | head -5
+          PKG=$(echo "$BADGING" | sed -n "s/.*package: name='\([^']*\)'.*/\1/p")
+          TGT=$(echo "$BADGING" | sed -n "s/.*targetSdkVersion:'\([^']*\)'.*/\1/p")
+          if [ "$PKG" != "com.bsfchat.app" ]; then
+            echo "::error::application id is '$PKG', expected com.bsfchat.app." \
+                 "Play locks this permanently at first upload — do not ship this."
+            exit 1
+          fi
+          if [ "${TGT:-0}" -lt 36 ]; then
+            echo "::error::targetSdkVersion is '$TGT'; Play requires >= 36 for" \
+                 "new apps and updates since 2026-08-31."
+            exit 1
+          fi
+          # 64-bit coverage: Play requires a 64-bit native library for
+          # every 32-bit one. We ship arm64-v8a only, so assert that the
+          # native libs really landed under it.
+          if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libbsfchat-app_arm64-v8a.so"; then
+            echo "::error::no arm64-v8a native library in the APK"
+            exit 1
+          fi
+          if unzip -l "$APK" | grep -qE "lib/(armeabi-v7a|x86)/"; then
+            echo "::error::32-bit ABI present without a matching 64-bit build"
+            exit 1
+          fi
+          echo "APK identity OK: $PKG targetSdk=$TGT arm64-v8a"
+
+      # The `secrets` context cannot be read from a step-level `if`, and a
+      # step's own `env:` block is not applied until after its `if` is
+      # evaluated — so presence has to be turned into a plain output here
+      # before the two steps below can branch on it.
+      - name: Check for signing secrets
+        id: signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Signing is best-effort on branch/PR builds: forks and Dependabot
+      # runs get no secrets, and a missing keystore must not turn the
+      # whole job red. On tags it is NOT optional — see the gate below.
+      - name: Sign APK
+        id: sign_apk
+        if: steps.signing.outputs.available == 'true'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          APK=build-android/android-build/build/outputs/apk/release/android-build-release-unsigned.apk
+          bash scripts/sign-android.sh "$APK" "$GITHUB_WORKSPACE/BSFChat-android-arm64.apk"
+
+      - name: Stage unsigned APK
+        if: steps.signing.outputs.available != 'true'
+        run: |
+          set -euo pipefail
+          APK=build-android/android-build/build/outputs/apk/release/android-build-release-unsigned.apk
+          cp "$APK" "$GITHUB_WORKSPACE/BSFChat-android-arm64-unsigned.apk"
+          echo "::warning::ANDROID_KEYSTORE_BASE64 is not set — this APK is" \
+               "UNSIGNED and cannot be installed without signing it first."
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BSFChat-Android-APK
+          path: BSFChat-android-arm64*.apk
+
+      # === App Bundle: tag builds only ===
+      # The .aab is the only format Play accepts for the listing. It is
+      # built from the same tree that produced the APK above, so the
+      # identity assertions already passed for these bits.
+      - name: Build AAB
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: cmake --build build-android --target bsfchat-app_make_aab
+
+      # Hard failure, not a warning: a tag that publishes an unsigned
+      # bundle is a release nobody can upload, and it would be noticed
+      # only in the Play Console.
+      - name: Sign AAB
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANDROID_KEYSTORE_BASE64}" ]; then
+            echo "::error::Tag build with no ANDROID_KEYSTORE_BASE64 secret." \
+                 "Create the upload-keystore secrets before tagging —" \
+                 "see docs/android-release.md."
+            exit 1
+          fi
+          # RELEASE bundle specifically: the same target also emits a
+          # debug .aab and a much larger intermediary-bundle.aab, and
+          # signing/uploading either of those would be silently wrong.
+          AAB=build-android/android-build/build/outputs/bundle/release/android-build-release.aab
+          [ -f "$AAB" ] || { echo "::error::no release AAB at $AAB"; find build-android -name '*.aab'; exit 1; }
+          bash scripts/sign-android.sh "$AAB" "$GITHUB_WORKSPACE/BSFChat-android.aab"
+
+      - name: Upload AAB artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: BSFChat-Android-AAB
+          path: BSFChat-android.aab
+
   # ASan+UBSan over the client test targets, mirroring the server's
   # `sanitizers` job. The teardown use-after-free in
   # ~PeerConnectionManager (V-C2 in PLAN-2026-09.md) is exactly the class
@@ -883,6 +1156,16 @@ jobs:
         run: ctest --test-dir build-asan --output-on-failure -j4 -E test_media_loopback
 
   # Create GitHub Release on tag push
+  #
+  # Deliberately still `needs: build` only, NOT `[build, android]`. The
+  # Android job is new and unproven; making it a release gate would let a
+  # first-run Android packaging hiccup block a desktop release, and the
+  # .aab's real destination is the Play Console rather than a GitHub
+  # Release anyway. Once the Android job has a few green runs behind it,
+  # add it to `needs` and add
+  #   artifacts/BSFChat-Android-APK/BSFChat-android-arm64.apk
+  # to the files list below so sideloaders get it straight off the
+  # release page.
   release:
     needs: build
     runs-on: ubuntu-latest
