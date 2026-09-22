@@ -1112,7 +1112,6 @@ jobs:
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_SYSROOT=iphoneos \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DGAMECHAT_CLIENT_BUILD_TESTS=OFF \
@@ -1126,6 +1125,18 @@ jobs:
             -DOPENSSL_INCLUDE_DIR="$OPENSSL_IOS/include" \
             -DOPENSSL_CRYPTO_LIBRARY="$OPENSSL_IOS/lib/libcrypto.a" \
             -DOPENSSL_SSL_LIBRARY="$OPENSSL_IOS/lib/libssl.a"
+
+      # We deliberately pass no -DCMAKE_OSX_DEPLOYMENT_TARGET: Qt's own
+      # toolchain picks it, so the floor we declare always matches what
+      # Qt's objects were actually built for. That does mean a Qt
+      # upgrade can move the minimum iOS version under us — and raising
+      # it drops devices — so print it here, where a diff in the log
+      # makes the change visible instead of silent.
+      - name: Report iOS deployment target
+        run: |
+          TARGET=$(grep -m1 '^CMAKE_OSX_DEPLOYMENT_TARGET:' build-ios/CMakeCache.txt | cut -d= -f2)
+          echo "Minimum iOS version (chosen by the Qt toolchain): ${TARGET:-<unset>}"
+          echo "iOS deployment target: ${TARGET:-<unset>}" >> "$GITHUB_STEP_SUMMARY"
 
       # Compile-only gate. Runs on fork PRs where no secrets exist, so
       # it must not need an identity — CODE_SIGNING_ALLOWED=NO turns the
