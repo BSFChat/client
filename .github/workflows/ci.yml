@@ -890,17 +890,19 @@ jobs:
   # test targets are host binaries), and a signing/packaging path with
   # nothing in common with .dmg or NSIS.
   #
-  # continue-on-error, deliberately and TEMPORARILY: this is the first
-  # iOS CI this repo has ever had, and the iOS build itself has only
-  # ever been driven by hand through scripts/build-ios.sh. Releases are
-  # gated on main's CI being green before a tag is pushed, so a
-  # brand-new job that goes red would block every desktop release over
-  # an iOS problem. Same precedent as the qmllint step above. REMOVE
-  # continue-on-error and this paragraph once the first run passes.
+  # This job used to carry continue-on-error: true, on the grounds that
+  # brand-new iOS CI going red should not block a desktop release. That
+  # was not what it did. continue-on-error at JOB level does not mark
+  # the job as a warning — it makes the whole WORKFLOW RUN conclude
+  # "success" while the job shows a red X, so run 35764752126 reported
+  # green with the iOS build failing outright. A release gated on "main's
+  # CI is green" would have sailed straight past it, which is worse than
+  # the problem it was there to avoid. Removed now that the job passes;
+  # do not put it back — if iOS needs to stop gating, drop the job from
+  # the required set instead, where it is visible.
   ios:
     name: iOS (archive + TestFlight)
     runs-on: macos-15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
