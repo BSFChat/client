@@ -979,9 +979,15 @@ jobs:
       # so a bump changes the hash and a rebuild happens automatically,
       # while an unchanged script costs ~10s instead of ~10 minutes of
       # cross-compiling on every run.
-      - name: Cache vendored OpenSSL for iOS
+      # restore + save rather than actions/cache, because that action's
+      # implicit save runs as a POST step and is skipped when the job
+      # fails — so a run that spent ten minutes cross-compiling OpenSSL
+      # and then failed at the compile step threw it away and paid for
+      # it again next time. Saving inline, right after a successful
+      # build, keeps it whatever the rest of the job does.
+      - name: Restore vendored OpenSSL for iOS
         id: openssl_cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: deps/openssl-ios-device
           key: openssl-ios-device-${{ hashFiles('scripts/build-openssl-ios.sh') }}
@@ -989,6 +995,13 @@ jobs:
       - name: Build vendored OpenSSL for iOS
         if: steps.openssl_cache.outputs.cache-hit != 'true'
         run: bash scripts/build-openssl-ios.sh device
+
+      - name: Save vendored OpenSSL for iOS
+        if: steps.openssl_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: deps/openssl-ios-device
+          key: openssl-ios-device-${{ hashFiles('scripts/build-openssl-ios.sh') }}
 
       # === iOS: Import the Apple Distribution certificate ===
       #

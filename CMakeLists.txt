@@ -410,6 +410,35 @@ if(IOS)
     # CFBundleIconName"), before a human ever sees it — the .icns the
     # macOS bundle uses is not a substitute. The catalog carries the
     # single 1024×1024 universal icon (all Xcode has needed since 14).
+    # Multimedia backend: AVFoundation only, never FFmpeg.
+    #
+    # Qt for iOS is a STATIC build, so every plugin of every module the
+    # app uses is linked in automatically — including
+    # libffmpegmediaplugin.a. But Qt ships FFmpeg for iOS as five
+    # DYLIBS in <qt>/lib/ffmpeg and does NOT put them in that plugin's
+    # INTERFACE_LINK_LIBRARIES, so the link ends in ~200 undefined
+    # av*/sws_*/swr_* symbols. That is what the ios CI job failed on.
+    #
+    # Supplying the dylibs is the wrong fix even though it would link:
+    # an App Store bundle has to embed, re-sign and thin every one of
+    # them, and this client has no use for FFmpeg on iOS — voice is
+    # compiled out, and the only Multimedia use left is notification
+    # sounds and media playback, which the Darwin/AVFoundation backend
+    # handles natively. So restrict the multimedia plugin set instead.
+    #
+    # Guarded on the target existing so a Qt build without the Darwin
+    # backend fails with a plain missing-backend error rather than a
+    # confusing CMake one.
+    if(TARGET Qt6::QDarwinMediaPlugin)
+        qt_import_plugins(bsfchat-app
+            INCLUDE_BY_TYPE multimedia Qt6::QDarwinMediaPlugin)
+    else()
+        message(FATAL_ERROR
+            "Qt6::QDarwinMediaPlugin is missing from this Qt for iOS "
+            "install — QtMultimedia would fall back to the FFmpeg "
+            "backend, which does not link on iOS.")
+    endif()
+
     set(BSFCHAT_IOS_ASSETS "${CMAKE_CURRENT_SOURCE_DIR}/ios/Assets.xcassets")
     target_sources(bsfchat-app PRIVATE "${BSFCHAT_IOS_ASSETS}")
     set_source_files_properties("${BSFCHAT_IOS_ASSETS}" PROPERTIES
