@@ -68,6 +68,20 @@ public final class ScreenCaptureHelper {
     private long mLastFrameMs = 0;
     private int mCapWidth, mCapHeight;
 
+    // Application context, captured from the Activity when a capture
+    // session starts. stopCapture() needs a Context to stop the
+    // foreground service and may run after the Activity is gone, so
+    // the *application* context is the right one to hold — it is a
+    // process singleton and holding it leaks nothing.
+    //
+    // This used to call org.qtproject.qt.android.QtNative.getContext().
+    // That is Qt-internal and is not public in Qt 6.10 ("getContext()
+    // is not public in QtNative; cannot be accessed from outside
+    // package"), which broke the Java compile outright. Every entry
+    // point into this class already receives the Activity, so there
+    // was never a reason to ask Qt for one.
+    private android.content.Context mAppContext;
+
     public static synchronized ScreenCaptureHelper instance() {
         if (sInstance == null) sInstance = new ScreenCaptureHelper();
         return sInstance;
@@ -98,6 +112,10 @@ public final class ScreenCaptureHelper {
 
     private void startCapture(Activity activity, int resultCode, Intent data) {
         stopCapture();  // clean any previous session
+
+        // Remember the application context for the teardown path (see
+        // the field's comment) before anything can fail below.
+        mAppContext = activity.getApplicationContext();
 
         // Start the foreground service BEFORE acquiring the
         // projection — Android 10+ requires the FGS to be alive
@@ -196,8 +214,7 @@ public final class ScreenCaptureHelper {
         // stopService is the application context — the activity
         // may have been destroyed by the time we get here.
         try {
-            android.content.Context ctx =
-                org.qtproject.qt.android.QtNative.getContext();
+            android.content.Context ctx = mAppContext;
             if (ctx != null) {
                 ctx.stopService(
                     new Intent(ctx, MediaProjectionService.class));
