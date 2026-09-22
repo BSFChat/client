@@ -95,6 +95,22 @@ Item {
     // thread (threadRootId set), we open the thread, not a new one.
     signal threadOpenRequested(string rootEventId)
 
+    // Whether the SENDER of this message is on our block list.
+    //
+    // Reading `blockedUsersModel.users` is what makes this a live binding:
+    // isUserBlocked() is a plain invokable and cannot notify on its own, so a
+    // binding that only called it would evaluate once and then show "Block"
+    // forever on a user who had just been blocked. The list property changes
+    // identity on every rebuild, which is the dependency this needs.
+    readonly property bool senderBlocked: {
+        var s = serverManager.activeServer;
+        if (!s) return false;
+        var subscribe = s.blockedUsersModel.users;
+        return s.isUserBlocked(bubble.sender);
+    }
+    readonly property bool senderIsSelf: serverManager.activeServer
+        && bubble.sender === serverManager.activeServer.userId
+
     // Threading fields — mirrored from the model.
     property string threadRootId: ""
     property int threadReplyCount: 0
@@ -396,12 +412,25 @@ Item {
         }
 
         MenuSeparator {
-            visible: bubble.canDelete
+            visible: bubble.canDelete || !bubble.senderIsSelf
             contentItem: Rectangle {
                 implicitWidth: 160
                 implicitHeight: 1
                 color: Theme.line
             }
+        }
+
+        // Reporting your own message would file a report against yourself,
+        // which is the only case the server would happily accept and no
+        // administrator could act on.
+        CtxItem {
+            text: "Report message…"
+            iconName: "bolt"
+            visible: !bubble.senderIsSelf
+            onTriggered: Window.window.openReportDialog(
+                "message", bubble.sender, bubble.senderDisplayName,
+                serverManager.activeServer ? serverManager.activeServer.activeRoomId : "",
+                bubble.eventId, bubble.body)
         }
 
         CtxItem {
@@ -446,6 +475,42 @@ Item {
             onTriggered: {
                 if (serverManager) serverManager.copyToClipboard(bubble.sender);
             }
+        }
+
+        MenuSeparator {
+            visible: !userContextMenu.isSelfUser
+            contentItem: Rectangle {
+                implicitWidth: 180
+                implicitHeight: 1
+                color: Theme.line
+            }
+        }
+
+        // Block and report, in that order and together. They are not the same
+        // thing and the pair is the point: blocking stops it now and privately,
+        // reporting asks a server administrator to deal with it and changes
+        // nothing by itself. Neither is permission-gated — this is what an
+        // ordinary member has instead of moderation.
+        CtxItem {
+            text: bubble.senderBlocked
+                ? "Unblock " + bubble.senderDisplayName
+                : "Block " + bubble.senderDisplayName
+            iconName: "lock"
+            labelColor: bubble.senderBlocked ? Theme.fg0 : Theme.danger
+            visible: !userContextMenu.isSelfUser
+            onTriggered: {
+                var s = serverManager.activeServer;
+                if (!s) return;
+                if (bubble.senderBlocked) s.unblockUser(bubble.sender);
+                else s.blockUser(bubble.sender);
+            }
+        }
+        CtxItem {
+            text: "Report user…"
+            iconName: "bolt"
+            visible: !userContextMenu.isSelfUser
+            onTriggered: Window.window.openReportDialog(
+                "user", bubble.sender, bubble.senderDisplayName, "", "", "")
         }
 
         MenuSeparator {

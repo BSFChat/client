@@ -699,16 +699,18 @@ qt_add_executable(test_identity_provider_url
     test_identity_provider_url.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
     # ServerConnection gained a BotAdminModel* Q_PROPERTY when feat/bots merged,
-    # a SelfRoleModel* with the self-role picker, and a ChannelInviteModel* with
-    # "add a member to a channel". AUTOMOC instantiates each pointer meta-type,
-    # which needs the complete type, so every target that compiles
-    # ServerConnection.cpp has to carry all three even though these tests use
-    # none of them. Expect to add a line here whenever a view-model is hung off
-    # ServerConnection — the failure is a static_assert about is_complete<> in
-    # qmetatype.h and names the model, which is the only clue it gives.
+    # a SelfRoleModel* with the self-role picker, a ChannelInviteModel* with
+    # "add a member to a channel", and a BlockedUsersModel* with blocking.
+    # AUTOMOC instantiates each pointer meta-type, which needs the complete
+    # type, so every target that compiles ServerConnection.cpp has to carry all
+    # four even though these tests use none of them. Expect to add a line here
+    # whenever a view-model is hung off ServerConnection — the failure is a
+    # static_assert about is_complete<> in qmetatype.h and names the model,
+    # which is the only clue it gives.
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/SelfRoleModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ChannelInviteModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/BlockedUsersModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
@@ -765,6 +767,7 @@ qt_add_executable(test_error_surface_guards
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/SelfRoleModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ChannelInviteModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/BlockedUsersModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
@@ -811,6 +814,7 @@ qt_add_executable(test_composer_upload_lock
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/SelfRoleModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ChannelInviteModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/BlockedUsersModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
@@ -1128,3 +1132,41 @@ target_compile_definitions(test_screen_capture_policy PRIVATE
     BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test_screen_capture_policy PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_screen_capture_policy COMMAND test_screen_capture_policy)
+
+# Blocking, reporting and account deletion — the App Store gates (Apple
+# guideline 1.2 for user-generated content, 5.1.1(v) for account deletion).
+#
+# Every one of these fails SILENTLY when it is wrong, which is why they are
+# pinned here rather than left to a live server: a block list written from a
+# stale copy unblocks everybody, a report to a mistyped path answers 404 under
+# a dialog that says "sent", a 429 surfaced without its wait makes the user
+# press the button again, and a UIA 401 mistaken for a dead token replaces the
+# password prompt with a sign-in banner.
+#
+# All four are header-only (net/IgnoredUsers.h, net/ReportRequest.h,
+# net/MatrixFailure.h, net/DeactivateFlow.h) precisely so this needs no socket
+# and no event loop; BlockedUsersModel comes in as a source and is driven
+# through its std::function hooks, the seam SelfRoleModel uses.
+#
+# bsfchat_protocol is linked for UserId::is_valid — the client mirrors the
+# server's ignore-list validation by calling the SAME function, so the two
+# cannot drift into disagreeing about what a user id is.
+#
+# The source scans at the end cover what nothing headless can reach: that the
+# controls exist on all three entry points, that the member list has a
+# long-press so they are reachable on a phone at all, that both shells can
+# open every new dialog (U-C2), and that the report dialog does not promise an
+# outcome the server does not deliver.
+qt_add_executable(test_ugc_safety
+    test_ugc_safety.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/BlockedUsersModel.cpp
+)
+target_include_directories(test_ugc_safety PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_ugc_safety PRIVATE
+    BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml"
+    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_ugc_safety PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Test
+)
+add_test(NAME test_ugc_safety COMMAND test_ugc_safety)

@@ -121,6 +121,7 @@ qt_add_executable(bsfchat-app
     src/model/MessageModel.cpp
     src/model/ThreadFilterModel.cpp
     src/model/MemberListModel.cpp
+    src/model/BlockedUsersModel.cpp
     src/model/BotAdminModel.cpp
     src/model/ChannelInviteModel.cpp
     src/model/SelfRoleModel.cpp
@@ -463,6 +464,9 @@ qt_add_qml_module(bsfchat-app
         qml/components/BotBadge.qml
         qml/components/BotManagerPane.qml
         qml/components/AddMemberDialog.qml
+        qml/components/ReportDialog.qml
+        qml/components/BlockedUsersDialog.qml
+        qml/components/DeleteAccountDialog.qml
         qml/theme/Theme.qml
     RESOURCES
         qml/data/EmojiData.js

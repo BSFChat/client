@@ -384,6 +384,23 @@ Rectangle {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        // MobileMain embeds this very component in a drawer,
+                        // so until this existed the member menu was reachable
+                        // only by right-click — which is to say, not at all on
+                        // a phone. That is where Block and Report now live, and
+                        // where the store guidelines that require them are
+                        // enforced, so the long press is not a nicety.
+                        //
+                        // pressAndHold rather than a second TapHandler because
+                        // this MouseArea already owns the press; two handlers
+                        // competing for it is how the left-tap profile card
+                        // would start opening behind the menu.
+                        onPressAndHold: {
+                            if (typeof haptics !== "undefined") haptics.longPress();
+                            memberContextMenu.userId = model.userId;
+                            memberContextMenu.displayName = model.displayName || model.userId;
+                            memberContextMenu.popup();
+                        }
                         onClicked: (mouse) => {
                             if (mouse.button === Qt.RightButton) {
                                 memberContextMenu.userId = model.userId;
@@ -445,6 +462,16 @@ Rectangle {
         readonly property bool canManageRoles: serverManager.activeServer
             && serverManager.activeServer.canManageRoles(
                    serverManager.activeServer.activeRoomId)
+        // Reading `users` is what subscribes this to the model's change
+        // signal — isUserBlocked() is a plain invokable and cannot notify on
+        // its own, so a binding that only called it would be evaluated once
+        // and go stale. Same trick as permissionsGeneration.
+        readonly property bool isBlocked: {
+            var s = serverManager.activeServer;
+            if (!s || memberContextMenu.userId === "") return false;
+            var subscribe = s.blockedUsersModel.users;
+            return s.isUserBlocked(memberContextMenu.userId);
+        }
 
         background: Rectangle {
             color: Theme.bg1
@@ -574,6 +601,42 @@ Rectangle {
                                                        Math.round(value))
                 }
             }
+        }
+
+        MenuSeparator {
+            visible: !memberContextMenu.isSelf
+            contentItem: Rectangle {
+                implicitWidth: 180
+                implicitHeight: 1
+                color: Theme.line
+            }
+        }
+
+        // Block and report, offered together and to everybody. Blocking is
+        // instant and private — the server stops delivering that account's
+        // messages, mentions and push to this one, and never tells them.
+        // Reporting changes nothing by itself; it files a row for a server
+        // administrator. Neither needs a permission, which is the point: they
+        // are what a member has when a moderator is not around.
+        MemberCtxItem {
+            text: memberContextMenu.isBlocked ? "Unblock" : "Block"
+            iconName: "lock"
+            labelColor: memberContextMenu.isBlocked ? Theme.fg0 : Theme.danger
+            visible: !memberContextMenu.isSelf
+            onTriggered: {
+                var s = serverManager.activeServer;
+                if (!s) return;
+                if (memberContextMenu.isBlocked) s.unblockUser(memberContextMenu.userId);
+                else s.blockUser(memberContextMenu.userId);
+            }
+        }
+        MemberCtxItem {
+            text: "Report user…"
+            iconName: "bolt"
+            visible: !memberContextMenu.isSelf
+            onTriggered: Window.window.openReportDialog(
+                "user", memberContextMenu.userId,
+                memberContextMenu.displayName, "", "", "")
         }
 
         MenuSeparator {

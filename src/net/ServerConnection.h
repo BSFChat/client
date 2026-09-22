@@ -27,7 +27,9 @@
 // (CallSignal is a plain value type), so it is safe in non-voice builds
 // too — the session runs there as well; it simply has no transport to
 // start. See src/net/VoiceSession.h.
+#include "net/DeactivateFlow.h"
 #include "net/DirectRooms.h"
+#include "net/MatrixFailure.h"
 #include "net/VoiceSession.h"
 
 class MatrixClient;
@@ -37,6 +39,7 @@ class LocalCache;
 class RoomListModel;
 class MessageModel;
 class MemberListModel;
+class BlockedUsersModel;
 class BotAdminModel;
 class ChannelInviteModel;
 class SelfRoleModel;
@@ -105,6 +108,16 @@ class ServerConnection : public QObject {
     // point: the locked state is the thing a member without MANAGE_CHANNELS
     // most needs to be able to reach.
     Q_PROPERTY(ChannelInviteModel* channelInviteModel READ channelInviteModel CONSTANT)
+    // View-model behind blocking: who is on this account's m.ignored_user_list,
+    // and the toggle behind every Block / Unblock control. Always present and
+    // ungated for the reason selfRoleModel is — blocking is a thing every
+    // account may do, and it is the control a user reaches for when a
+    // moderator is not around.
+    //
+    // It is NOT fed by /sync: this server sends no account_data there, so the
+    // list changes only when something asks. See BlockedUsersModel's header
+    // for where those asks happen and what the UI is allowed to claim.
+    Q_PROPERTY(BlockedUsersModel* blockedUsersModel READ blockedUsersModel CONSTANT)
     // Bumped whenever the set of known bot user ids changes, so QML that
     // asks isBot(userId) directly (the profile card, which has a user id and
     // no model row) re-evaluates. The member list and the message list do not
@@ -353,6 +366,7 @@ public:
     BotAdminModel* botAdminModel() const { return m_botAdminModel; }
     SelfRoleModel* selfRoleModel() const { return m_selfRoleModel; }
     ChannelInviteModel* channelInviteModel() const { return m_channelInviteModel; }
+    BlockedUsersModel* blockedUsersModel() const { return m_blockedUsersModel; }
     MatrixClient* client() const { return m_client; }
 
     // Set credentials (for restoring from settings)
@@ -696,6 +710,91 @@ public:
                                 const QString& reason = {});
     Q_INVOKABLE void unbanMember(const QString& roomId, const QString& userId);
 
+    // ── Blocking and reporting ────────────────────────────────────────────
+    //
+    // The pair a user reaches for when another account is the problem. They do
+    // different things and the UI must offer both, because neither is the
+    // other:
+    //
+    //   * BLOCK is instant, private and needs nobody's help. The server stops
+    //     delivering that account's messages, mentions, unread counts and push
+    //     to this one. The blocked party is never told.
+    //   * REPORT changes nothing at all. It files a row for a server
+    //     administrator to act on later, by hand. Nothing is redacted, nobody
+    //     is muted, and the reported account learns nothing.
+    //
+    // Neither is moderation and neither is permission-gated: every account may
+    // do both, including an account with no roles in a channel it cannot
+    // moderate. That is the point of them.
+
+    // Whether `userId` is on this account's block list. Never asks the
+    // network — safe from a paint-time binding — and counts a write in flight
+    // as already landed so a menu does not flicker mid-round-trip.
+    //
+    // False for everyone until the list has been fetched once. It cannot be
+    // otherwise: there is no block list in /sync to have arrived with the
+    // session. Callers that care (the managed pane) read
+    // blockedUsersModel.loaded.
+    Q_INVOKABLE bool isUserBlocked(const QString& userId) const;
+    Q_INVOKABLE void blockUser(const QString& userId);
+    Q_INVOKABLE void unblockUser(const QString& userId);
+    // Re-read the list from the server. There is no push for this document, so
+    // this is the ONLY thing that learns about a block made on another device.
+    // Called on connect, after our own writes, and from the managed pane.
+    Q_INVOKABLE void refreshBlockedUsers();
+
+    // File a report. `reason` may be empty — a report with nothing said is
+    // still a report, and demanding an explanation from somebody who has just
+    // been abused is its own kind of failure. Answers through reportFiled /
+    // reportRejected, both carrying `requestId` so a reply that lands after
+    // the dialog was closed and reopened for a different target is not
+    // attributed to the new one.
+    //
+    // reportMessage takes the ACTIVE room's id from the connection rather than
+    // from the caller: the event id alone does not identify a room to the
+    // server, and a QML delegate that passed one would be passing the room it
+    // was built in, which is not necessarily the room on screen when the
+    // dialog was submitted.
+    Q_INVOKABLE void reportMessage(const QString& requestId, const QString& roomId,
+                                   const QString& eventId, const QString& reason);
+    Q_INVOKABLE void reportUser(const QString& requestId, const QString& userId,
+                                const QString& reason);
+
+    // ── Account deletion ──────────────────────────────────────────────────
+    //
+    // Apple App Store guideline 5.1.1(v): an app that lets people create an
+    // account must let them delete it from inside the app. This is that.
+    //
+    // THE CONFIRMATION MUST BE COMPLETE BEFORE beginAccountDeletion() IS
+    // CALLED. For an account with no password on this server — one signed in
+    // through the identity provider — the first request deletes it outright;
+    // the password prompt is a second gate that only password accounts ever
+    // see, and a UI that posted in order to find out which kind it was dealing
+    // with would delete the other kind without asking. net/DeactivateFlow.h
+    // carries the same warning at greater length.
+    Q_INVOKABLE void beginAccountDeletion();
+    // Answer the m.login.password stage. Only meaningful after
+    // accountDeletionPasswordRequired.
+    Q_INVOKABLE void submitAccountDeletionPassword(const QString& password);
+    // The user closed the dialog. Abandons a challenge that has not been
+    // answered; it cannot abandon a deletion that has already succeeded.
+    Q_INVOKABLE void cancelAccountDeletion();
+    // True while a deactivate request is in flight — the dialog disables its
+    // buttons on this.
+    Q_PROPERTY(bool accountDeletionBusy READ accountDeletionBusy
+               NOTIFY accountDeletionChanged)
+    // True once the server has asked for a password and until the flow is
+    // reset. Stays true WHILE the password is being checked, so the field does
+    // not vanish under a wrong-password message.
+    Q_PROPERTY(bool accountDeletionNeedsPassword READ accountDeletionNeedsPassword
+               NOTIFY accountDeletionChanged)
+    // Last refusal, for the inline error line. Empty when nothing has failed.
+    Q_PROPERTY(QString accountDeletionError READ accountDeletionError
+               NOTIFY accountDeletionChanged)
+    bool accountDeletionBusy() const { return m_deactivate.busy(); }
+    bool accountDeletionNeedsPassword() const { return m_deactivate.needsPassword(); }
+    QString accountDeletionError() const { return m_deactivate.errorText(); }
+
     // Server-scope moderation. NOT symmetric, on purpose:
     //   * ban / unban are ONE request — the server keeps a real server-wide ban
     //     list and projects the membership across every room itself, including
@@ -959,6 +1058,26 @@ signals:
     void micSilentChanged();
     void avatarUrlChanged();
     void typingDisplayChanged();
+    // ── Blocking / reporting / deletion ───────────────────────────────────
+
+    // A report landed, or was refused. `requestId` echoes the request so a
+    // dialog can ignore a reply to an attempt it no longer owns; `message` on
+    // the refusal is already user-facing, rate-limit wait included.
+    void reportFiled(const QString& requestId);
+    void reportRejected(const QString& requestId, const QString& message);
+
+    // Any change to the deletion flow's phase or error. One signal for the
+    // three properties because they always move together — the dialog reads
+    // all three on every change.
+    void accountDeletionChanged();
+    // The server wants the account password before it will delete. Emitted
+    // once per challenge; the dialog shows its field on this.
+    void accountDeletionPasswordRequired();
+    // The account is gone. Sync has been stopped and the credential dropped;
+    // ServerManager removes the server entry on this, because there is
+    // nothing left on the other end to reconnect to.
+    void accountDeactivated(const QString& serverUrl);
+
     // User-facing send feedback — emitted when the server rejects
     // a message with a useful-to-surface error (rate limits, size
     // caps, permission errors). QML subscribes and routes to
@@ -1202,6 +1321,16 @@ public:
     BotAdminModel* m_botAdminModel = nullptr;
     SelfRoleModel* m_selfRoleModel = nullptr;
     ChannelInviteModel* m_channelInviteModel = nullptr;
+    BlockedUsersModel* m_blockedUsersModel = nullptr;
+    // The account-deletion handshake. Owned here rather than by the dialog so
+    // a dialog closed mid-flight cannot leave a half-completed UIA session
+    // that the next attempt inherits.
+    bsfchat::net::DeactivateFlow m_deactivate;
+    // The password for the stage in flight, held only between
+    // submitAccountDeletionPassword() and the reply it produces. Cleared on
+    // every terminal outcome — it is the account's real credential and there
+    // is no reason for it to outlive the one request it was typed for.
+    QString m_deactivatePassword;
     // Push the current role document and OUR OWN member.roles into the self-role
     // picker. Hung off this class's own serverRolesChanged() rather than called
     // from each write path, because all four of them (a server.roles event, a
@@ -1313,6 +1442,11 @@ public:
     // a rule the next caller will not, so it is enforced here instead, the way
     // setVoiceError above already does it for the voice surface.
     void emitFeedback(const QString& text, const QString& kind);
+    // Every reply to POST /account/deactivate, 401 included. Hands it to
+    // m_deactivate and acts on the verdict. A member rather than a lambda
+    // because the success branch tears this connection down, which is too much
+    // to read inside a constructor.
+    void onDeactivateResponse(int status, const QJsonObject& body);
 
     // The ONLY place `searchErrored` is emitted from. Do not emit it directly.
     //

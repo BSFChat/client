@@ -425,6 +425,30 @@ ApplicationWindow {
     // (overlayed when `serverManager.viewingDms`); no separate
     // popup. openDirectMessages() just flips the view flag.
 
+    // ── Safety surfaces: block, report, delete account ──
+    //
+    // Global for the reason the others are — they are opened from the message
+    // bubble, the member list, the profile card and the settings popup, none
+    // of which can see an id in another file — and reachable with no
+    // permission at all, which is the point of them.
+    //
+    // MIRROR EVERY ONE OF THESE IN MobileMain.qml. A Window.window.openX()
+    // that exists in one shell and not the other is a TypeError on whichever
+    // platform was forgotten (U-C2), and for these three that platform is the
+    // one whose store rules require them.
+    ReportDialog {
+        id: reportDialogGlobal
+        parent: Overlay.overlay
+    }
+    BlockedUsersDialog {
+        id: blockedUsersGlobal
+        parent: Overlay.overlay
+    }
+    DeleteAccountDialog {
+        id: deleteAccountGlobal
+        parent: Overlay.overlay
+    }
+
     // Presence + custom-status picker, reachable from the user
     // menu in the channel-list footer (and the mobile overflow).
     StatusPicker {
@@ -484,6 +508,13 @@ ApplicationWindow {
     function openRoleAssignment(userId, displayName) {
         roleAssignGlobal.openFor(userId, displayName);
     }
+    // `kind` is "message" or "user". The trailing three are only read for a
+    // message report; pass "" for a user one.
+    function openReportDialog(kind, userId, displayName, roomId, eventId, preview) {
+        reportDialogGlobal.openFor(kind, userId, displayName, roomId, eventId, preview);
+    }
+    function openBlockedUsers() { blockedUsersGlobal.open(); }
+    function openDeleteAccount() { deleteAccountGlobal.open(); }
     // Toast API — kind defaults to "info". Shortcut helpers are also
     // exposed so call sites read naturally (`Window.window.toastError(...)`).
     function toast(text, kind)   { toastHostGlobal.toast(text, kind || "info"); }

@@ -1,7 +1,9 @@
 #include "net/MatrixClient.h"
 
 #include "net/AuthError.h"
+#include "net/IgnoredUsers.h"
 #include "net/ReplyFields.h"
+#include "net/ReportRequest.h"
 #include "util/MediaUrl.h"
 
 #include <QDateTime>
@@ -992,10 +994,36 @@ void decodeMatrixError(QNetworkReply* reply, int* status, QString* message)
     *message = msg;
 }
 
+// The same reading, plus the two things decodeMatrixError throws away: the
+// errcode itself and the wait a 429 asks for.
+//
+// Separate rather than a widening of decodeMatrixError because that function
+// has eight call sites whose behaviour must not change, and because this one
+// takes the Retry-After header too — a refusal written by something in FRONT of
+// the server (a proxy, a load balancer) has that header and no Matrix body at
+// all, and a caller that read only the body would report such a refusal as
+// having asked for no wait.
+//
+// Same rule as decodeMatrixError about what it reads: error fields only, never
+// the whole body.
+bsfchat::net::MatrixFailure decodeMatrixFailure(QNetworkReply* reply)
+{
+    const int status =
+        reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    return bsfchat::net::parseMatrixFailure(status, reply->readAll(),
+                                            reply->rawHeader("Retry-After"),
+                                            reply->errorString());
+}
+
 // The bot admin endpoints. Literal rather than a bsfchat::api_path constant
 // because protocol/include/bsfchat/Constants.h is being edited concurrently
 // for the MANAGE_BOTS flag; adding a constant there from here would collide.
 constexpr QLatin1StringView kBotsPath{"/_matrix/client/v3/bsfchat/bots"};
+
+// Account deactivation. Literal for the same reason as kBotsPath — and
+// because this is a Matrix spec path, so a constant in the bsfchat protocol
+// library would be filed under the wrong heading.
+constexpr QLatin1StringView kDeactivatePath{"/_matrix/client/v3/account/deactivate"};
 
 } // namespace
 
@@ -1170,6 +1198,127 @@ void MatrixClient::removeSelfRole(const QString& roleId)
             ids.append(v.toString());
         }
         emit selfRoleChanged(roleId, ids);
+    });
+}
+
+void MatrixClient::getAccountData(const QString& userId, const QString& type)
+{
+    auto* reply = makeRequest("GET", bsfchat::net::accountDataPath(userId, type));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, type]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            const auto failure = decodeMatrixFailure(reply);
+            // 404 is the spec's "this account has never written one", not a
+            // failure. Reported separately so a caller cannot draw an empty
+            // list for a request that actually fell over — see the header.
+            if (failure.status == 404) {
+                emit accountDataAbsent(type);
+                return;
+            }
+            emit accountDataError(type, failure);
+            return;
+        }
+        const auto doc = QJsonDocument::fromJson(reply->readAll());
+        if (!doc.isObject()) {
+            // A 200 whose body is not an object is not a document we can build
+            // the next full replacement from, and treating it as an empty one
+            // would mean the next write silently cleared the list.
+            emit accountDataError(
+                type, bsfchat::net::parseMatrixFailure(
+                          200, {}, {},
+                          QStringLiteral("malformed account data response")));
+            return;
+        }
+        emit accountDataResult(type, doc.object());
+    });
+}
+
+void MatrixClient::putAccountData(const QString& requestId, const QString& userId,
+                                  const QString& type, const QJsonObject& content)
+{
+    const QByteArray body =
+        QJsonDocument(content).toJson(QJsonDocument::Compact);
+    auto* reply = makeRequest("PUT", bsfchat::net::accountDataPath(userId, type), body);
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, requestId, type, content]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit accountDataStoreError(requestId, type, decodeMatrixFailure(reply));
+            return;
+        }
+        // The server answers {} — it does not echo the document. What it
+        // stored is what we sent, so that is what goes back to the caller;
+        // inventing an empty object here would have every writer adopt an
+        // empty list on every successful write.
+        emit accountDataStored(requestId, type, content);
+    });
+}
+
+// Shared body of the two report calls: same reply shape, same signals, only
+// the path and the one extra field differ. Kept as one function so the reply
+// handling cannot drift between them — a report that silently did nothing on
+// one of the two paths is precisely the bug nobody would notice, because a
+// filed report looks exactly like a lost one from the outside.
+void MatrixClient::wireReportReply(QNetworkReply* reply, const QString& requestId)
+{
+    connect(reply, &QNetworkReply::finished, this, [this, reply, requestId]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit reportFailed(requestId, decodeMatrixFailure(reply));
+            return;
+        }
+        emit reportFiled(requestId);
+    });
+}
+
+void MatrixClient::reportEvent(const QString& requestId, const QString& roomId,
+                               const QString& eventId, const QString& reason)
+{
+    const QByteArray body =
+        QJsonDocument(bsfchat::net::reportEventBody(reason))
+            .toJson(QJsonDocument::Compact);
+    wireReportReply(makeRequest("POST",
+                                bsfchat::net::reportEventPath(roomId, eventId), body),
+                    requestId);
+}
+
+void MatrixClient::reportUser(const QString& requestId, const QString& userId,
+                              const QString& reason)
+{
+    const QByteArray body =
+        QJsonDocument(bsfchat::net::reportUserBody(reason))
+            .toJson(QJsonDocument::Compact);
+    wireReportReply(makeRequest("POST", bsfchat::net::reportUserPath(userId), body),
+                    requestId);
+}
+
+void MatrixClient::deactivateAccount(const QJsonObject& auth)
+{
+    QJsonObject body;
+    // Absent, not an empty object: an empty `auth` is a UIA attempt that
+    // completes no stage, and the server would have to decide what that means.
+    // Sending nothing is what the spec calls the first request.
+    if (!auth.isEmpty()) body.insert(QStringLiteral("auth"), auth);
+
+    auto* reply = makeRequest("POST", QString(kDeactivatePath),
+                              QJsonDocument(body).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const int status =
+            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        // A request that never reached a server has no status and no body to
+        // reason about. Reported apart from the status path so the flow cannot
+        // read "status 0" as a refusal it should explain to the user.
+        if (status == 0) {
+            emit deactivateTransportFailure(reply->errorString());
+            return;
+        }
+        // readAll() AFTER watchForTokenRejection has peeked: every status is
+        // delivered, 401 included, because the 401 that is a UIA challenge and
+        // the 401 that is a dead token are told apart by the BODY. See the
+        // header, and net/DeactivateFlow.h for the decision itself.
+        const auto doc = QJsonDocument::fromJson(reply->readAll());
+        emit deactivateResponse(status, doc.isObject() ? doc.object() : QJsonObject());
     });
 }
 

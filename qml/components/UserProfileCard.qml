@@ -531,6 +531,83 @@ Popup {
                 ToolTip.text: "Manage roles"
                 ToolTip.delay: 500
             }
+
+            // Block / unblock. Ghost until it is doing something destructive,
+            // then danger-tinted — the same ghost-danger vocabulary as Log out
+            // in UserSettings. Ungated on purpose: blocking is not moderation,
+            // it is what every member has instead of it.
+            Button {
+                id: blockBtn
+                Layout.preferredWidth: 44
+                Layout.preferredHeight: Theme.controlHeight.lg
+                // Reading `users` is the subscription: isUserBlocked() is a
+                // plain invokable with no notify signal of its own, so a
+                // binding that only called it would evaluate once and then
+                // show the wrong verb for the rest of the card's life.
+                readonly property bool blocked: {
+                    var s = serverManager.activeServer;
+                    if (!s || profileCard.userId === "") return false;
+                    var subscribe = s.blockedUsersModel.users;
+                    return s.isUserBlocked(profileCard.userId);
+                }
+                contentItem: Icon {
+                    anchors.centerIn: parent
+                    name: "lock"
+                    size: 16
+                    color: blockBtn.blocked ? Theme.fg1
+                         : blockBtn.hovered ? Theme.danger : Theme.fg1
+                }
+                background: Rectangle {
+                    color: blockBtn.hovered ? Theme.bg3 : Theme.bg2
+                    border.color: blockBtn.blocked ? Theme.line
+                                : blockBtn.hovered ? Theme.danger : Theme.line
+                    border.width: 1
+                    radius: Theme.r2
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                }
+                onClicked: {
+                    var s = serverManager.activeServer;
+                    if (!s) return;
+                    // The card stays open: the button's verb flips, which is
+                    // the confirmation, and closing would hide the one control
+                    // that undoes an accidental block.
+                    if (blockBtn.blocked) s.unblockUser(profileCard.userId);
+                    else s.blockUser(profileCard.userId);
+                }
+                ToolTip.visible: blockBtn.hovered
+                ToolTip.text: blockBtn.blocked
+                    ? "Unblock — you will see their messages again"
+                    : "Block — you stop seeing their messages. They are not told."
+                ToolTip.delay: 500
+            }
+
+            Button {
+                id: reportBtn
+                Layout.preferredWidth: 44
+                Layout.preferredHeight: Theme.controlHeight.lg
+                contentItem: Icon {
+                    anchors.centerIn: parent
+                    name: "bolt"
+                    size: 16
+                    color: reportBtn.hovered ? Theme.warn : Theme.fg1
+                }
+                background: Rectangle {
+                    color: reportBtn.hovered ? Theme.bg3 : Theme.bg2
+                    border.color: Theme.line
+                    border.width: 1
+                    radius: Theme.r2
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                }
+                onClicked: {
+                    var uid = profileCard.userId;
+                    var dn = profileCard.effectiveName;
+                    profileCard.close();
+                    Window.window.openReportDialog("user", uid, dn, "", "", "");
+                }
+                ToolTip.visible: reportBtn.hovered
+                ToolTip.text: "Report to the server administrators"
+                ToolTip.delay: 500
+            }
         }
     }
 }
