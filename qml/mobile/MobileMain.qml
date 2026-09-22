@@ -547,9 +547,13 @@ ApplicationWindow {
         if (rightDrawer.opened) rightDrawer.close(); else rightDrawer.open();
     }
 
-    // Login dialog when not authenticated to any server. Mobile
-    // builds hit the same LoginDialog — OIDC flow works in-process
-    // via the existing UrlHandler + WebView on mobile.
+    // Login dialog when not authenticated to any server. Mobile builds
+    // hit the same LoginDialog; the OIDC flow behind it is mobile-specific
+    // in C++ (IdentityClient): iOS presents ASWebAuthenticationSession,
+    // Android opens the browser and gets the redirect back through an
+    // intent-filter. There is no WebView anywhere in this app — an earlier
+    // version of this comment claimed one, and said the flow worked, at a
+    // time when it could not complete on either platform.
     LoginDialog {
         id: loginDialogGlobal
         parent: Overlay.overlay
