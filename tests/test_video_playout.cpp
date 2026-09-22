@@ -10,10 +10,11 @@
 // ceiling.
 //
 // The buffer itself is driven with a fake clock and synthetic frames, so
-// every timing assertion here is exact and deterministic. Only the two
-// pipeline cases at the bottom use wall time, and they assert shapes
-// ("spread out, not clumped", "emitted from the worker") with margins
-// only a broken pipeline could miss.
+// every timing assertion here is exact and deterministic. So is the
+// pipeline clump test, which drives the real pipeline's clock (see why
+// there). Only smoothingOffIsTheOldPath and aClumpOnTheRealTimer use wall
+// time, and they assert shapes ("spread out, not clumped", "emitted from
+// the worker") with margins only a broken pipeline could miss.
 //
 // What each property protects:
 //   * steady cadence under jitter    — the point of the feature;
@@ -626,10 +627,128 @@ private slots:
 
     // Smoothing on, and ten frames arrive in ONE clump — the exact shape
     // of the queue behind a paced keyframe. They must come out on the GUI
-    // thread, in order, spread over roughly their 300 ms of capture time
-    // rather than all at once. (With smoothing off this clump reaches the
-    // screen within a few milliseconds; that is the judder.)
+    // thread, in order, on their capture cadence rather than all at once.
+    // (With smoothing off this clump reaches the screen within a few
+    // milliseconds; that is the judder.)
+    //
+    // Driven by a FAKE playout clock, deliberately. The first version ran
+    // on wall time and was red on macOS CI twice (9, then 10 of 11): a
+    // headless test binary on a CI runner is a background process, and
+    // macOS coalesces a background process's timers onto a coarse grid.
+    // Reproduced here with `taskpolicy -b` (PRIO_DARWIN_BG): the
+    // presentation timer fired every ~104 ms and 5 of 11 frames were
+    // shown. No playout design can show 30 fps from a 10 Hz timer, so
+    // wall time made the exact count a test of the runner, not the code.
+    //
+    // What is still real: the decode worker thread, the queued hop to the
+    // GUI thread, the pipeline's QTimer arming and firing, presentDue.
+    // Only the NOW it reads is ours: the test moves the clock to each due
+    // time and then waits — in real time, however late the OS runs the
+    // timer — for that timer to fire. A pipeline that clumps shows the
+    // clump at one fake instant; one that drops frames comes up short;
+    // one that never arms its timer times out. All fail here.
+    //
+    // Row "one wake 90 ms late" moves the clock past the first clump
+    // frame's due time before the timer fires — the late wake-up the
+    // buffer must absorb (VideoPlayoutBuffer.h, "A late wake-up") —
+    // through the real wiring. aClumpOnTheRealTimer keeps a wall-clock
+    // run of the same shape.
+    void aClumpIsSpreadBackOutToCaptureCadence_data() {
+        QTest::addColumn<qint64>("lateUs");
+        QTest::newRow("timer on time") << qint64(0);
+        QTest::newRow("one wake 90 ms late") << 90 * kMs;
+    }
     void aClumpIsSpreadBackOutToCaptureCadence() {
+        QFETCH(qint64, lateUs);
+        VideoDecoder::setFactoryForTest([](VideoCodecKind, bool) {
+            return std::make_unique<StubDecoder>();
+        });
+        VideoReceivePipeline pipe(QStringLiteral("@a:x"), VideoStreamId::Screen,
+                                  VideoCodecKind::H264);
+        const qint64 ceiling = 400 * kMs;
+        pipe.setPlayoutMaxDelayMs(int(ceiling / kMs));
+        qint64 fakeNow = 1'000'000;
+        pipe.setPlayoutClockForTest([&] { return fakeNow; });
+        QThread* gui = QThread::currentThread();
+        std::vector<qint64> starts;
+        std::vector<qint64> at;
+        bool allOnGui = true;
+        connect(&pipe, &VideoReceivePipeline::frameDecoded, &pipe,
+                [&](const QString&, int, const QVideoFrame& f) {
+                    allOnGui = allOnGui && QThread::currentThread() == gui;
+                    starts.push_back(f.startTime());
+                    at.push_back(fakeNow);
+                }, Qt::DirectConnection);
+        const qint64 base = MediaClockUnwrapper::kBaseUs;
+        // Submit AUs [from, to] and wait for the worker to decode them
+        // and the GUI thread to take them into the buffer. The clock is
+        // frozen meanwhile, so this real wait costs no media time.
+        auto submitAndHold = [&](int from, int to) {
+            for (int i = from; i <= to; ++i)
+                pipe.submitAccessUnit(i == 0 ? idrAu() : pAu(), false, false,
+                                      base + qint64(i) * kFrameUs);
+            return QTest::qWaitFor([&] {
+                return int(starts.size()) + pipe.playoutQueued() == to + 1;
+            }, 10000);
+        };
+        // Move the clock to each due time and wait for the pipeline's own
+        // timer to show (or skip) something at it.
+        auto playOut = [&](qint64 lateFirstUs) {
+            for (bool first = true; auto due = pipe.playoutNextDueUs(); first = false) {
+                const size_t shownBefore = starts.size();
+                const quint64 skippedBefore = pipe.playoutSkipped();
+                fakeNow = std::max(fakeNow, *due + (first ? lateFirstUs : 0));
+                if (!QTest::qWaitFor([&] {
+                        return starts.size() > shownBefore
+                               || pipe.playoutSkipped() > skippedBefore;
+                    }, 10000))
+                    return false;
+            }
+            return true;
+        };
+
+        // Prime the timeline with one on-time frame...
+        QVERIFY(submitAndHold(0, 0));
+        QVERIFY(playOut(0));
+        QCOMPARE(int(starts.size()), 1);
+        // ...then the clump: ten frames captured 33 ms apart, all
+        // arriving together 300 ms after the first.
+        fakeNow = 1'000'000 + 300 * kMs;
+        const qint64 clumpAt = fakeNow;
+        QVERIFY(submitAndHold(1, 10));
+        QCOMPARE(int(starts.size()), 1);   // held, not shown on arrival
+        QVERIFY(playOut(lateUs));
+
+        QCOMPARE(pipe.playoutSkipped(), quint64(0));
+        QCOMPARE(int(starts.size()), 11);
+        for (size_t k = 1; k < starts.size(); ++k)
+            QCOMPARE(starts[k], base + qint64(k) * kFrameUs);
+        QVERIFY(allOnGui);
+        // Frame 1 is held the margin (plus the late wake, if any): the
+        // clump's own lateness raised the target as it arrived.
+        QCOMPARE(at[1] - clumpAt,
+                 VideoPlayoutBuffer<QVideoFrame>::kMarginUs + lateUs);
+        // The rest on capture cadence, exactly — the fake clock wakes on
+        // the µs — and none held past the ceiling.
+        for (size_t k = 2; k < at.size(); ++k) {
+            QCOMPARE(at[k] - at[k - 1], kFrameUs);
+            QVERIFY(at[k] - clumpAt <= ceiling);
+        }
+        VideoDecoder::setFactoryForTest({});
+    }
+
+    // The same clump on the REAL clock and timer: the wiring as it runs
+    // in the app, including whatever the OS does to the timer. On a
+    // machine whose timers run on time every frame is shown (it is the
+    // fake-clock test above with the fake removed); a throttled CI runner
+    // may coalesce the timer so coarsely that the ceiling cannot absorb
+    // it (see above), and then the buffer skips — by design, to keep the
+    // latency promise. So here: order, the GUI thread, a spread and not a
+    // clump, and every frame shown or accounted for; a skip is accepted
+    // only with evidence that the timer really was late by a frame
+    // interval or more, and it is reported, so a throttled run says what
+    // the timer did rather than just going red.
+    void aClumpOnTheRealTimer() {
         VideoDecoder::setFactoryForTest([](VideoCodecKind, bool) {
             return std::make_unique<StubDecoder>();
         });
@@ -639,6 +758,7 @@ private slots:
         QThread* gui = QThread::currentThread();
         std::vector<qint64> starts;
         std::vector<qint64> at;
+        std::vector<int> held;
         bool allOnGui = true;
         QElapsedTimer clock;
         clock.start();
@@ -647,20 +767,53 @@ private slots:
                     allOnGui = allOnGui && QThread::currentThread() == gui;
                     starts.push_back(f.startTime());
                     at.push_back(clock.elapsed());
+                    held.push_back(pipe.playoutHeldMs());
                 }, Qt::DirectConnection);
-        // Prime the timeline with one on-time frame, then the clump: ten
-        // frames captured 33 ms apart, all arriving 300 ms late together.
         const qint64 base = MediaClockUnwrapper::kBaseUs;
         pipe.submitAccessUnit(idrAu(), false, false, base);
         QTest::qWait(300);
+        const qint64 clumpAt = clock.elapsed();
         for (int i = 1; i <= 10; ++i)
             pipe.submitAccessUnit(pAu(), false, false, base + qint64(i) * kFrameUs);
-        QTRY_COMPARE_WITH_TIMEOUT(int(starts.size()), 11, 10000);
+        // Done when every frame is shown or counted as skipped — a
+        // skipped frame never arrives, so do not wait 10 s for it.
+        const auto& st = pipe.playoutStats();
+        QTest::qWaitFor([&] {
+            return starts.size() + st.skippedLate + st.overflowed >= 11
+                   && pipe.playoutQueued() == 0;
+        }, 10000);
+
+        // How late the presentation ran: each clump frame is due ~5 ms +
+        // 33.3 ms per index after it arrived; hold beyond that is timer
+        // (or GUI thread) lateness.
+        qint64 worstLateMs = 0;
+        QString log;
+        for (size_t k = 0; k < starts.size(); ++k) {
+            const qint64 idx = (starts[k] - base + kFrameUs / 2) / kFrameUs;
+            log += QStringLiteral("\n  f%1 shown at %2 ms, held %3 ms").arg(idx).arg(at[k]).arg(held[k]);
+            if (idx >= 1) {
+                const qint64 onTime = 5 + (idx - 1) * kFrameUs / kMs;
+                worstLateMs = std::max(worstLateMs, held[k] - onTime);
+                log += QStringLiteral(" (on time: ~%1)").arg(onTime);
+            }
+        }
+        const quint64 lost = st.skippedLate + st.overflowed;
+        const bool accounted = starts.size() + lost == 11 && pipe.playoutQueued() == 0;
+        if (lost > 0 || !accounted) {
+            qWarning("clump submitted at %lld ms; shown %d, skippedLate %llu, overflowed %llu, "
+                     "resyncs %llu, still held %d; worst presentation lateness %lld ms:%s",
+                     clumpAt, int(starts.size()), (unsigned long long)st.skippedLate,
+                     (unsigned long long)st.overflowed, (unsigned long long)st.resyncs,
+                     pipe.playoutQueued(), worstLateMs, qPrintable(log));
+        }
+        QVERIFY2(accounted, "a frame was neither shown nor skipped");
+        QVERIFY2(lost == 0 || worstLateMs >= kFrameUs / kMs,
+                 "frames skipped although the timer was never a frame interval late");
         for (size_t k = 1; k < starts.size(); ++k) QVERIFY(starts[k] > starts[k - 1]);
+        QCOMPARE(starts.back(), base + 10 * kFrameUs);   // the newest always shown
         // Frames 1..10 span 300 ms of capture time. Presented on arrival
-        // they span a few ms; smoothed, most of the 300. The bound is
-        // loose on both sides on purpose — only a pipeline that clumps
-        // (or stalls) can miss it.
+        // they span a few ms; smoothed, most of the 300.
+        QVERIFY(starts.size() >= 3);
         const qint64 span = at.back() - at[1];
         QVERIFY2(span >= 200 && span <= 2000,
                  qPrintable(QStringLiteral("clump presented over %1 ms").arg(span)));

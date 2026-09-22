@@ -1,6 +1,7 @@
 #pragma once
 
 #include "voice/video/VideoCodec.h"
+#include "voice/video/LatencyCriticalActivity.h"
 #include "voice/video/VideoPlayoutBuffer.h"
 
 #include <QByteArray>
@@ -86,6 +87,11 @@ public:
     quint64 playoutSkipped() const {
         return m_playout.stats().skippedLate + m_playout.stats().overflowed;
     }
+    const VideoPlayoutBuffer<QVideoFrame>::Stats& playoutStats() const {
+        return m_playout.stats();
+    }
+    int playoutQueued() const { return m_playout.queued(); }
+    std::optional<qint64> playoutNextDueUs() const { return m_playout.nextDueUs(); }
 
     // Test seam: replace the playout clock (µs, monotonic). GUI thread,
     // before the first frame.
@@ -209,6 +215,10 @@ private:
     QTimer m_playoutTimer;
     QElapsedTimer m_playoutElapsed;
     std::function<qint64()> m_playoutClock;
+    // Keeps macOS from coalescing m_playoutTimer while we present — see
+    // LatencyCriticalActivity.h. Begun on the first held frame, ended
+    // when smoothing goes off or the pipeline is destroyed.
+    LatencyCriticalActivity m_presentActivity;
 
     static constexpr int kMaxQueuedAus = 16;
     static constexpr qint64 kKfRequestMinIntervalMs = 700;

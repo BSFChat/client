@@ -272,6 +272,7 @@ void VideoReceivePipeline::setPlayoutMaxDelayMs(int ms) {
         // forget the rest — the user asked for the lowest latency, and
         // pictures already superseded are not worth a frame each.
         m_playoutTimer.stop();
+        m_presentActivity.end();
         std::optional<QVideoFrame> newest;
         while (auto f = m_playout.popDue(std::numeric_limits<qint64>::max()))
             newest = std::move(f);
@@ -292,6 +293,7 @@ void VideoReceivePipeline::enqueueForPlayout(const QVideoFrame& frame,
         emit frameDecoded(m_userId, int(m_streamId), frame);
         return;
     }
+    m_presentActivity.begin();
     m_playout.push(frame, mediaTimeUs, playoutNowUs());
     presentDue();
 }
