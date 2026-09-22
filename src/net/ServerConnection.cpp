@@ -17,6 +17,7 @@
 #include "util/ModerationScope.h"
 #include "util/PermissionMath.h"
 #include "identity/IdentityClient.h"
+#include "identity/OidcRequest.h"
 #include "core/MediaDownloader.h"
 #include "core/Settings.h"
 #include "core/ReadState.h"
@@ -1026,6 +1027,20 @@ void ServerConnection::loginWithOidc(const QString& providerUrl)
         return;
     }
 
+    // The server this token is for is the one it will be POSTED to —
+    // m_client's homeserver, where m.login.token goes — and nothing else.
+    // Not the address the user typed (well-known may have moved us), and
+    // never anything this server advertised: that is what keeps a hostile
+    // server from getting us to request a token audienced to another one
+    // (identity audit 2026-09, C1; see identity/OidcRequest.h).
+    const QString resource = oidc::resourceForHomeserver(m_client->homeserver());
+    if (resource.isEmpty()) {
+        onLoginAttemptFailed(
+            tr("This server's address (%1) cannot be used for BSFChat ID sign-in.")
+                .arg(m_client->homeserver()));
+        return;
+    }
+
     if (!m_identityClient) {
         m_identityClient = new IdentityClient(this);
     } else {
@@ -1047,7 +1062,7 @@ void ServerConnection::loginWithOidc(const QString& providerUrl)
             onLoginAttemptFailed(error);
         }, Qt::SingleShotConnection);
 
-    m_identityClient->startLogin(providerUrl);
+    m_identityClient->startLogin(providerUrl, resource);
 }
 
 void ServerConnection::onAccessTokenRejected(const QString& errorBody)

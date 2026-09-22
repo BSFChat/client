@@ -12,7 +12,11 @@ public:
     explicit IdentityClient(QObject* parent = nullptr);
     ~IdentityClient() override;
 
-    void startLogin(const QString& providerUrl);
+    // `resource` is the canonical URL of the chat server the id_token is for
+    // (oidc::resourceForHomeserver of the address it will be posted to), or
+    // empty for a sign-in that is not for a chat server — the account-level
+    // server-list sync, which only uses the access token. See OidcRequest.h.
+    void startLogin(const QString& providerUrl, const QString& resource = QString());
     void cancel();
     bool isActive() const;
     QString providerUrl() const { return m_providerUrl; }
@@ -34,5 +38,7 @@ private:
     QString m_providerUrl;
     QString m_codeVerifier;
     QString m_state;
+    QString m_nonce;
+    QString m_resource;
     int m_port = 0;
 };
