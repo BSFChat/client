@@ -211,6 +211,10 @@ private:
     bool m_active = false;
     bool m_transmitting = false;
     QString m_lastError;
+    // Set by the first capture error of a share, reset when a share starts.
+    // Qt's capturers fire errorOccurred on every retry once their source is
+    // gone; this makes one failure one toast. See reportError in the .cpp.
+    bool m_captureErrorReported = false;
 
     void pushFrameToPeers();
     // Throttle timer slot. On macOS frames are pushed as they ARRIVE
