@@ -510,25 +510,69 @@ if(APPLE AND NOT IOS)
 endif()
 
 if(IOS)
-    # Same guard, iOS keys and iOS bundle layout. The two that are not
-    # about permissions are the ones that cost a round trip through App
-    # Store Connect rather than a runtime bug:
-    # ITSAppUsesNonExemptEncryption missing turns every single upload
-    # into a manual export-compliance questionnaire, and a build with no
-    # CFBundleShortVersionString is rejected by the upload validator.
+    # Same guard as the macOS block above, iOS keys and iOS bundle
+    # layout. The two that are not about permissions are the ones that
+    # cost a round trip through App Store Connect rather than a runtime
+    # bug: ITSAppUsesNonExemptEncryption missing turns every single
+    # upload into a manual export-compliance questionnaire, and a build
+    # with no CFBundleShortVersionString is rejected by the upload
+    # validator.
+    #
+    # Written as a generated script rather than a list of PlistBuddy
+    # COMMANDs, because the obvious spelling DOES NOT WORK under the
+    # Xcode generator and fails in a way that reads like a real problem
+    # with the plist:
+    #
+    #   $<TARGET_BUNDLE_DIR:bsfchat-app> expands to
+    #   <build>/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)/x.app, and
+    #   VERBATIM then escapes the '$' so the shell never expands
+    #   EFFECTIVE_PLATFORM_NAME. PlistBuddy is handed a literal
+    #   "Release${EFFECTIVE_PLATFORM_NAME}/..." path, which does not
+    #   exist; it prints "File Doesn't Exist, Will Create:" on stdout —
+    #   swallowed by the `> /dev/null` — and then "Print: Entry,
+    #   "NSMicrophoneUsageDescription", Does Not Exist" on stderr. The
+    #   CI job failed on exactly that, against a plist that had the key
+    #   all along.
+    #
+    # Resolving the bundle inside the script from Xcode's own exported
+    # build settings sidesteps CMake's escaping entirely: those '$'s
+    # never pass through a genex. iOS is always the Xcode generator here
+    # (qt-cmake -G Xcode, in CI and in scripts/build-ios.sh), so
+    # BUILT_PRODUCTS_DIR is always set; the script says so plainly if it
+    # ever is not.
+    #
+    # It also reports EVERY missing key at once instead of dying on the
+    # first, which matters when the fix is "regenerate the plist".
+    set(_ios_plist_check "${CMAKE_CURRENT_BINARY_DIR}/check-ios-plist.sh")
+    file(GENERATE OUTPUT "${_ios_plist_check}" CONTENT [=[#!/bin/sh
+set -u
+if [ -z "${BUILT_PRODUCTS_DIR:-}" ] || [ -z "${FULL_PRODUCT_NAME:-}" ]; then
+    echo "check-ios-plist: BUILT_PRODUCTS_DIR/FULL_PRODUCT_NAME are not set." >&2
+    echo "  This check expects to run as an Xcode build phase." >&2
+    exit 1
+fi
+PLIST="$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME/Info.plist"
+if [ ! -f "$PLIST" ]; then
+    echo "check-ios-plist: no Info.plist in the built bundle at $PLIST" >&2
+    exit 1
+fi
+missing=""
+for key in NSMicrophoneUsageDescription NSCameraUsageDescription \
+           NSLocalNetworkUsageDescription ITSAppUsesNonExemptEncryption \
+           CFBundleShortVersionString \
+           CFBundleURLTypes:0:CFBundleURLSchemes:0; do
+    if ! /usr/libexec/PlistBuddy -c "print $key" "$PLIST" >/dev/null 2>&1; then
+        missing="$missing $key"
+    fi
+done
+if [ -n "$missing" ]; then
+    echo "check-ios-plist: the built bundle's Info.plist is missing:$missing" >&2
+    echo "  Source template: ios/Info.plist.in (configured by CMakeLists.txt)." >&2
+    exit 1
+fi
+]=])
     add_custom_command(TARGET bsfchat-app POST_BUILD
-        COMMAND /usr/libexec/PlistBuddy -c "print NSMicrophoneUsageDescription"
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Info.plist" > /dev/null
-        COMMAND /usr/libexec/PlistBuddy -c "print NSCameraUsageDescription"
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Info.plist" > /dev/null
-        COMMAND /usr/libexec/PlistBuddy -c "print NSLocalNetworkUsageDescription"
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Info.plist" > /dev/null
-        COMMAND /usr/libexec/PlistBuddy -c "print ITSAppUsesNonExemptEncryption"
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Info.plist" > /dev/null
-        COMMAND /usr/libexec/PlistBuddy -c "print CFBundleShortVersionString"
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Info.plist" > /dev/null
-        COMMAND /usr/libexec/PlistBuddy -c "print CFBundleURLTypes:0:CFBundleURLSchemes:0"
-                "$<TARGET_BUNDLE_DIR:bsfchat-app>/Info.plist" > /dev/null
+        COMMAND /bin/sh "${_ios_plist_check}"
         COMMENT "Checking the iOS bundle's usage descriptions, URL scheme and export-compliance key"
         VERBATIM
     )
