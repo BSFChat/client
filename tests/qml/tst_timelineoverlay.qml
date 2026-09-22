@@ -75,12 +75,27 @@ TestCase {
             { tag: "no channel",  server: true,  room: "",     rows: 5, expect: "no-channel" },
             { tag: "no history",  server: true,  room: "!r:s", rows: 0, expect: "no-history" },
             { tag: "has content", server: true,  room: "!r:s", rows: 1, expect: "" },
+            // An empty LIST is not always an empty CHANNEL (#notifications,
+            // 2026-09-22: the newest history was all edits, which are never
+            // rows, and the view said "be the first to say something" over
+            // 46 real messages).
+            { tag: "empty, loading", server: true, room: "!r:s", rows: 0,
+              loading: true, more: true, expect: "" },
+            { tag: "empty, loading, first page", server: true, room: "!r:s", rows: 0,
+              loading: true, more: false, expect: "" },
+            { tag: "empty, older history exists", server: true, room: "!r:s", rows: 0,
+              loading: false, more: true, expect: "more-history" },
+            { tag: "empty, start of room", server: true, room: "!r:s", rows: 0,
+              loading: false, more: false, expect: "no-history" },
+            { tag: "content, more history", server: true, room: "!r:s", rows: 3,
+              loading: false, more: true, expect: "" },
         ];
     }
     function test_emptyStateKind(d) {
-        var kind = Overlay.emptyStateKind(d.server, d.room, d.rows);
+        var kind = Overlay.emptyStateKind(d.server, d.room, d.rows, d.loading, d.more);
         compare(kind, d.expect);
-        compare(Overlay.emptyStateVisible(d.server, d.room, d.rows), d.expect !== "");
+        compare(Overlay.emptyStateVisible(d.server, d.room, d.rows, d.loading, d.more),
+                d.expect !== "");
         // Every non-empty kind has wording and an icon of its own — the
         // three cases need different copy, which is why the state is a
         // kind and not a bool.
@@ -92,7 +107,7 @@ TestCase {
     }
 
     function test_emptyStateWordingIsDistinctPerKind() {
-        var kinds = ["no-server", "no-channel", "no-history"];
+        var kinds = ["no-server", "no-channel", "no-history", "more-history"];
         var seenTitle = {}, seenIcon = {};
         for (var i = 0; i < kinds.length; ++i) {
             var t = Overlay.emptyStateTitle(kinds[i]);
@@ -102,6 +117,30 @@ TestCase {
             seenTitle[t] = true;
             seenIcon[ic] = true;
         }
+    }
+
+    // The "Load older messages" button appears only where the user has no
+    // other way to ask for history: the list cannot scroll to the top and
+    // the client has stopped asking on its own.
+    function test_loadOlderVisible_data() {
+        return [
+            { tag: "stuck: short list, budget spent", more: true, loading: false,
+              scrollable: false, spent: true, expect: true },
+            { tag: "client still filling on its own", more: true, loading: false,
+              scrollable: false, spent: false, expect: false },
+            { tag: "request in flight", more: true, loading: true,
+              scrollable: false, spent: true, expect: false },
+            { tag: "scrollable: scroll-to-top works", more: true, loading: false,
+              scrollable: true, spent: true, expect: false },
+            // The guard that matters most: at the true start of the room
+            // there is nothing to load, whatever else is true.
+            { tag: "start of room", more: false, loading: false,
+              scrollable: false, spent: true, expect: false },
+        ];
+    }
+    function test_loadOlderVisible(d) {
+        compare(Overlay.loadOlderVisible(d.more, d.loading, d.scrollable, d.spent),
+                d.expect);
     }
 
     // ── 2. The structure ─────────────────────────────────────────────

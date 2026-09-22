@@ -441,64 +441,63 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         }
     });
 
-    // Connect message history results. Two modes:
-    //   resp.start empty → initial room load (from==""); append + seed the
-    //     prev_batch token so scroll-up can walk further back from here.
-    //   resp.start non-empty → back-pagination; prepend the older batch and
-    //     advance the token. resp.end being nullopt means we've hit the
-    //     start of the room's history, so hasMoreHistory flips off.
+    // Connect message history results.
+    //
+    // Every /messages request belongs to a history FILL (util/HistoryFill.h):
+    // the model counts the renderable rows each page adds and answers
+    // whether another page is needed, so a window full of edits — invisible,
+    // they fold into their target — no longer displays as an empty channel
+    // (#notifications, 2026-09-22: 786 of 832 events were edits of one bot
+    // board). The model buffers the pages and puts them in on the last one,
+    // so the view still sees one prepend and one olderMessagesLoaded per
+    // request it made.
     //
     // The roomId filter is the cure for an observed race on cold start:
     // setActiveRoom("A") fires getRoomMessages(A); user (or QML restore)
     // switches to B before A's response lands; without the filter, A's
     // chunk got appended to model B and the user saw a stale snapshot
-    // until they switched away and back.
+    // until they switched away and back. The model's own `from` match
+    // covers the A -> B -> A case, where the room id alone cannot tell the
+    // first visit's answer from the second's.
     connect(m_client, &MatrixClient::messagesResult, this,
             [this](const QString& roomId, const bsfchat::MessagesResponse& resp) {
         if (roomId != m_activeRoomId) return;
         auto events = resp.chunk;
-        // Server returns dir=b newest-first; reverse to chronological so
-        // both append and prepend get oldest→newest.
+        // Server returns dir=b newest-first; reverse to chronological.
         std::reverse(events.begin(), events.end());
-        const bool isBackPaginate = resp.start.has_value() && !resp.start->empty();
-        if (isBackPaginate) {
-            QVector<bsfchat::RoomEvent> vec;
-            vec.reserve(static_cast<int>(events.size()));
-            for (auto& e : events) vec.push_back(e);
-            m_messageModel->prependEvents(vec, m_userId);
-        } else if (m_messageModel->rowCount() > 0) {
-            // Cold-start ordering fix: the response is the most-recent
-            // 50 events, but /sync has likely already populated the
-            // model with the newest of those (the /sync long-poll
-            // races our getRoomMessages fetch on first launch). If we
-            // appendEvent here, the dedupe drops the events /sync
-            // already delivered and the events that /sync DIDN'T
-            // deliver — older history — land at the END of the model.
-            // That's exactly the bug observed pre-v0.0.37: scrolled
-            // to bottom shows YouTube-link messages from a week ago
-            // while April/May messages sit higher up. Treat this
-            // case as an older-history prepend instead.
-            QVector<bsfchat::RoomEvent> vec;
-            vec.reserve(static_cast<int>(events.size()));
-            for (auto& e : events) vec.push_back(e);
-            m_messageModel->prependEvents(vec, m_userId);
-        } else {
-            for (const auto& event : events) {
-                m_messageModel->appendEvent(event, m_userId);
-            }
+        QVector<bsfchat::RoomEvent> vec;
+        vec.reserve(static_cast<int>(events.size()));
+        for (auto& e : events) vec.push_back(std::move(e));
+        // The server echoes `from` as `start`, and omits it for the newest
+        // page — which is the "" an open requested with.
+        const QString from = resp.start ? QString::fromStdString(*resp.start) : QString();
+        // No `end` means the start of the room's history.
+        const QString end = resp.end ? QString::fromStdString(*resp.end) : QString();
+        const auto result = m_messageModel->absorbHistoryPage(from, vec, end, m_userId);
+        switch (result.outcome) {
+        case MessageModel::HistoryPageOutcome::Ignored:
+            return;
+        case MessageModel::HistoryPageOutcome::FetchMore:
+            m_client->getRoomMessages(roomId, result.next.from, QStringLiteral("b"),
+                                      result.next.limit);
+            return;
+        case MessageModel::HistoryPageOutcome::Done:
+            // MessageView listens: the pagination anchor, paginate-until-
+            // found reply jumps, and the "view still not full" re-check.
+            emit olderMessagesLoaded();
+            return;
         }
-        // Always update the pagination token. On back-paginate the token
-        // advances; on initial load the sync may or may not have already
-        // set one — in either case the server's answer here is authoritative.
-        if (resp.end.has_value()) {
-            m_messageModel->setPrevBatchToken(QString::fromStdString(*resp.end));
-        } else {
-            m_messageModel->setPrevBatchToken(QString());
-        }
-        m_messageModel->setLoadingHistory(false);
-        // Fire a signal so MessageView / jumpToEvent loops can react to the
-        // completion of the load (for paginate-until-found).
-        emit olderMessagesLoaded();
+    });
+    // A failed page ends its fill with what had arrived, and reports
+    // completion like any other ending — otherwise loadingHistory stayed true
+    // and every later scroll-to-top was refused as "already loading" until
+    // the user switched rooms. The failed request counts against the fill's
+    // budget, so a server answering errors is not re-asked indefinitely.
+    connect(m_client, &MatrixClient::messagesError, this,
+            [this](const QString& roomId, const QString& from, const QString& error) {
+        qWarning() << "[ServerConnection] /messages failed for" << roomId << ":" << error;
+        if (roomId != m_activeRoomId) return;
+        if (m_messageModel->failHistoryFill(from, m_userId)) emit olderMessagesLoaded();
     });
 
     // ── Server-backed message search ──────────────────────────────────────
@@ -1350,7 +1349,8 @@ void ServerConnection::setActiveRoom(const QString& roomId)
     // Load members and messages for this room
     if (!roomId.isEmpty()) {
         loadMembersForRoom(roomId);
-        m_client->getRoomMessages(roomId, QString(), "b", 50);
+        requestHistoryFill(bsfchat::client::HistoryFillKind::Open,
+                           bsfchat::client::kHistoryFirstPageLimit);
     }
 
     // Recalculate hasUnread
@@ -1507,12 +1507,28 @@ void ServerConnection::toggleReaction(const QString& targetEventId, const QStrin
 
 void ServerConnection::loadOlderMessages(int limit)
 {
+    // The model refuses at the start of history and while a fill is running
+    // (the de-dupe for rapid scroll-to-top triggers).
+    requestHistoryFill(bsfchat::client::HistoryFillKind::Gesture, limit);
+}
+
+void ServerConnection::fillHistoryForViewport()
+{
+    // Refused by the model once this visit's automatic budget is spent, at
+    // the start of history, or while a fill is running — the three things
+    // that stop MessageView's "not scrollable yet" check from looping.
+    requestHistoryFill(bsfchat::client::HistoryFillKind::Viewport,
+                       bsfchat::client::kHistoryFollowPageLimit);
+}
+
+void ServerConnection::requestHistoryFill(bsfchat::client::HistoryFillKind kind,
+                                          int firstPageLimit)
+{
     if (m_activeRoomId.isEmpty()) return;
-    const QString token = m_messageModel->prevBatchToken();
-    if (token.isEmpty()) return;                 // already at start of history
-    if (m_messageModel->loadingHistory()) return; // de-dupe rapid triggers
-    m_messageModel->setLoadingHistory(true);
-    m_client->getRoomMessages(m_activeRoomId, token, QStringLiteral("b"), limit);
+    const auto request = m_messageModel->beginHistoryFill(kind, firstPageLimit);
+    if (!request) return;
+    m_client->getRoomMessages(m_activeRoomId, request->from, QStringLiteral("b"),
+                              request->limit);
 }
 
 void ServerConnection::activateRoomByName(const QString& name)

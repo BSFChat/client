@@ -1616,11 +1616,11 @@ void MatrixClient::getRoomMessages(const QString& roomId, const QString& from,
 
     auto* reply = m_nam.get(request);
     watchForTokenRejection(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId, from]() {
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit messagesError(QString::fromUtf8(data));
+            emit messagesError(roomId, from, QString::fromUtf8(data));
             return;
         }
         try {
@@ -1629,7 +1629,7 @@ void MatrixClient::getRoomMessages(const QString& roomId, const QString& from,
             bsfchat::from_json(j, resp);
             emit messagesResult(roomId, resp);
         } catch (const std::exception& e) {
-            emit messagesError(QString::fromStdString(e.what()));
+            emit messagesError(roomId, from, QString::fromStdString(e.what()));
         }
     });
 }

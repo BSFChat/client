@@ -655,6 +655,137 @@ bool MessageModel::isReplacementEvent(const bsfchat::RoomEvent& event)
     return data["m.relates_to"].value("rel_type", "") == "m.replace";
 }
 
+bool MessageModel::rendersAsRow(const bsfchat::RoomEvent& event)
+{
+    return event.type == std::string(bsfchat::event_type::kRoomMessage)
+        && !isReplacementEvent(event);
+}
+
+MessageModel::PendingEdit MessageModel::editPayload(const bsfchat::RoomEvent& event)
+{
+    PendingEdit edit;
+    edit.editEventId = QString::fromStdString(event.event_id);
+    edit.timestamp = event.origin_server_ts;
+    // Prefer m.new_content; fall back to stripping the "* " prefix.
+    const auto& data = event.content.data;
+    if (data.contains("m.new_content") && data["m.new_content"].is_object()) {
+        const auto& nc = data["m.new_content"];
+        edit.body = QString::fromStdString(nc.value("body", ""));
+        edit.formattedBody = QString::fromStdString(nc.value("formatted_body", ""));
+    } else {
+        QString raw = QString::fromStdString(data.value("body", ""));
+        if (raw.startsWith("* ")) raw = raw.mid(2);
+        edit.body = raw;
+    }
+    return edit;
+}
+
+bool MessageModel::applyEditToEntry(MessageEntry& m, const PendingEdit& edit) const
+{
+    // Already reflected in the body? Then this edit carries no news. Two ways
+    // that happens:
+    //   * The server reconciled the edit before sending us the original,
+    //     and recorded this event id in unsigned.m.relations.m.replace.
+    //     Applying it again would seed `history` with the CURRENT text and
+    //     "Show edit history" would list the same body twice.
+    //   * Sync replayed the same replacement event.
+    // A *later* edit has a different event id and still lands below, which
+    // is what keeps live editing working while the user watches the room.
+    if (!edit.editEventId.isEmpty() && m.appliedEdits.contains(edit.editEventId))
+        return false;
+
+    // AN OLDER EDIT NEVER OVERWRITES A NEWER ONE.
+    //
+    // The server hands the original over already carrying the WINNING edit's
+    // content, and names only that one edit in the bundle. Every earlier edit
+    // is still an ordinary timeline event, and when a window holding the
+    // original and its edits was replayed through appendEvent — oldest first
+    // — edit 1 of N was not in appliedEdits and overwrote the reconciled
+    // body, edits 2..N-1 followed, and edit N was skipped as "already
+    // applied". A message edited N times rendered edit N-1. Rare for a human;
+    // for the #notifications board, edited every ~2 minutes, it is every
+    // single load of a window that holds the original.
+    //
+    // Compared by server timestamp: origin_server_ts is the server's clock
+    // for both, and the bundle carries the winner's. Ties apply, as they
+    // always did — a same-millisecond pair has no better tiebreak available
+    // here than arrival order.
+    //
+    // The superseded text is not thrown away: it slots into `history` at its
+    // own time, so "Show edit history" lists the versions in between rather
+    // than jumping from the original straight to the current body.
+    if (m.edited && edit.timestamp < m.editedAt) {
+        if (!edit.body.isEmpty()) {
+            int pos = 0;
+            while (pos < m.history.size() && m.history[pos].second <= edit.timestamp)
+                ++pos;
+            m.history.insert(pos, {edit.body, edit.timestamp});
+        }
+        if (!edit.editEventId.isEmpty()) m.appliedEdits.insert(edit.editEventId);
+        return false;
+    }
+
+    // Same promotion as a freshly-arrived event: an edit must not be the
+    // thing that changes how a body is rendered. It was — the badge
+    // promoted the row to rich text while the body stayed plain, and the
+    // edit ate the message's line breaks.
+    const QString newFormatted = edit.formattedBody.isEmpty()
+        ? renderBodyHtml(edit.body, m.msgtype) : edit.formattedBody;
+    // Stash the previous body into history so "Show edit history" can
+    // recover it. We push EITHER the pristine original (before any edit) or
+    // the last edit — so the user sees every distinct version.
+    const qint64 prevTs = m.edited ? m.editedAt : m.timestamp;
+    m.history.append({m.body, prevTs});
+    m.body = edit.body;
+    m.formattedBody = newFormatted;
+    m.edited = true;
+    m.editedAt = edit.timestamp;
+    if (!edit.editEventId.isEmpty()) m.appliedEdits.insert(edit.editEventId);
+    // The edit re-wrote the body, which threw away the mention anchors the
+    // previous rendering had baked in. Re-apply from the entry's recorded
+    // mention set so an edited message keeps its highlights.
+    //
+    // From the ENTRY's set — the original's — never from the replacement
+    // event's own m.mentions, which is why editPayload does not read it. The
+    // server records no mention row and fires no push for an m.replace, so
+    // a mention an edit introduces notified nobody and must not render as
+    // though it had. notifiedMentions() is the same rule applied to the
+    // reconciled event a later reload sees; the two paths have to agree or
+    // a highlight would appear on relaunch that was not there live.
+    applyMentionMarkup(m);
+    return true;
+}
+
+void MessageModel::stashPendingEdit(const QString& targetId, const PendingEdit& edit)
+{
+    auto it = m_pendingEdits.find(targetId);
+    if (it != m_pendingEdits.end()) {
+        // Newest wins; an equal timestamp is a later arrival, same as a tie
+        // in applyEditToEntry.
+        if (edit.timestamp >= it->timestamp) *it = edit;
+        return;
+    }
+    if (m_pendingEdits.size() >= kMaxPendingEditTargets) {
+        // Evict the stalest. A linear scan, but only on overflow, and over a
+        // table that small by construction.
+        auto oldest = m_pendingEdits.begin();
+        for (auto p = m_pendingEdits.begin(); p != m_pendingEdits.end(); ++p)
+            if (p->timestamp < oldest->timestamp) oldest = p;
+        m_pendingEdits.erase(oldest);
+    }
+    m_pendingEdits.insert(targetId, edit);
+}
+
+void MessageModel::drainPendingEdit(MessageEntry& entry)
+{
+    auto it = m_pendingEdits.find(entry.eventId);
+    if (it == m_pendingEdits.end()) return;
+    // applyEditToEntry decides: a reconciled original that already carries
+    // this edit (or a newer one) is left alone.
+    applyEditToEntry(entry, it.value());
+    m_pendingEdits.erase(it);
+}
+
 void MessageModel::applyMentionMarkup(MessageEntry& entry) const
 {
     if (entry.mentionedUserIds.isEmpty() && entry.roleMentions.isEmpty()
@@ -772,74 +903,29 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
         }
     }
 
-    if (isEdit && !targetId.isEmpty()) {
-        // Look up the target. If we don't have it yet (edit arrived before
-        // the original via out-of-order sync), silently drop — a future
-        // sync/backfill will bring the original, and we'll see this edit
-        // again or via its own m_new_content chain. Keeping edits in the
-        // timeline would double-render the message.
+    if (isEdit) {
+        // An m.replace with no target is malformed. It is still an edit
+        // sibling, and prependEvents has always dropped it (isReplacement-
+        // Event), so it must not become a "* text" row here either — the two
+        // paths have to agree on what a row is, because rendersAsRow() counts
+        // for both of them.
+        if (targetId.isEmpty()) return;
+
+        const PendingEdit edit = editPayload(event);
         const int i = rowForEventId(targetId);
-        // Target not found — ignore silently.
-        if (i < 0) return;
-
-        // Already reflected in the target's body? Then this sibling carries no
-        // news. Two ways that happens:
-        //   * The server reconciled the edit before sending us the original,
-        //     and recorded this event id in unsigned.m.relations.m.replace.
-        //     Applying it again would seed `history` with the CURRENT text and
-        //     "Show edit history" would list the same body twice.
-        //   * Sync replayed the same replacement event.
-        // A *later* edit has a different event id and still lands below, which
-        // is what keeps live editing working while the user watches the room.
-        const QString editEventId = QString::fromStdString(event.event_id);
-        if (!editEventId.isEmpty()
-            && m_messages[i].appliedEdits.contains(editEventId)) return;
-
-        // Prefer m.new_content; fall back to stripping the "* " prefix.
-        QString newBody;
-        QString newFormatted;
-        if (data.contains("m.new_content") && data["m.new_content"].is_object()) {
-            const auto& nc = data["m.new_content"];
-            newBody = QString::fromStdString(nc.value("body", ""));
-            newFormatted = QString::fromStdString(nc.value("formatted_body", ""));
-        } else {
-            QString raw = QString::fromStdString(data.value("body", ""));
-            if (raw.startsWith("* ")) raw = raw.mid(2);
-            newBody = raw;
+        if (i < 0) {
+            // Target not loaded. It used to be dropped here on the promise
+            // that "a future sync/backfill will bring the original" with the
+            // edit already in it — which only holds if nothing is edited
+            // between the server answering and us absorbing. Keep it; the
+            // row picks it up when it arrives (drainPendingEdit).
+            stashPendingEdit(targetId, edit);
+            return;
         }
-        // Same promotion as a freshly-arrived event: an edit must not be the
-        // thing that changes how a body is rendered. It was — the badge
-        // promoted the row to rich text while the body stayed plain, and the
-        // edit ate the message's line breaks.
-        if (newFormatted.isEmpty()) {
-            newFormatted = renderBodyHtml(newBody, m_messages[i].msgtype);
+        if (applyEditToEntry(m_messages[i], edit)) {
+            auto idx = index(i);
+            emit dataChanged(idx, idx, {BodyRole, FormattedBodyRole, EditedRole});
         }
-        // Stash the previous body into history so "Show edit
-        // history" can recover it. We push EITHER the pristine
-        // original (before any edit) or the last edit — so the
-        // user sees every distinct version.
-        qint64 prevTs = m_messages[i].edited
-            ? m_messages[i].editedAt : m_messages[i].timestamp;
-        m_messages[i].history.append({m_messages[i].body, prevTs});
-        m_messages[i].body = newBody;
-        m_messages[i].formattedBody = newFormatted;
-        m_messages[i].edited = true;
-        m_messages[i].editedAt = event.origin_server_ts;
-        if (!editEventId.isEmpty()) m_messages[i].appliedEdits.insert(editEventId);
-        // The edit re-wrote the body, which threw away the mention anchors the
-        // previous rendering had baked in. Re-apply from the entry's recorded
-        // mention set so an edited message keeps its highlights.
-        //
-        // From the ENTRY's set — the original's — never from this replacement
-        // event's own m.mentions, which is why nothing above reads it. The
-        // server records no mention row and fires no push for an m.replace, so
-        // a mention an edit introduces notified nobody and must not render as
-        // though it had. notifiedMentions() is the same rule applied to the
-        // reconciled event a later reload sees; the two paths have to agree or
-        // a highlight would appear on relaunch that was not there live.
-        applyMentionMarkup(m_messages[i]);
-        auto idx = index(i);
-        emit dataChanged(idx, idx, {BodyRole, FormattedBodyRole, EditedRole});
         return;
     }
 
@@ -849,8 +935,10 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
     QString eventId = QString::fromStdString(event.event_id);
     if (m_indexByEventId.contains(eventId)) return;
 
+    MessageEntry entry = eventToEntry(event, ownUserId);
+    drainPendingEdit(entry);
     beginInsertRows(QModelIndex(), m_messages.size(), m_messages.size());
-    m_messages.append(eventToEntry(event, ownUserId));
+    m_messages.append(std::move(entry));
     m_indexByEventId.insert(eventId, m_messages.size() - 1);
     const QString threadRoot = m_messages.last().threadRootId;
     if (!threadRoot.isEmpty()) ++m_threadReplyCounts[threadRoot];
@@ -897,22 +985,25 @@ void MessageModel::prependEvents(const QVector<bsfchat::RoomEvent>& events, cons
     QVector<MessageEntry> newEntries;
     QSet<QString> queued;
     for (const auto& event : events) {
-        if (event.type != std::string(bsfchat::event_type::kRoomMessage))
-            continue;
-        // Edit siblings are not messages. /messages returns them alongside the
-        // originals, and this path never applied them — so every edit in the
-        // fetched page showed up as its own junk row rendering the "* new text"
-        // fallback body, directly above the message it had already been folded
-        // into. There is nothing to apply either: the original arrives from the
-        // same page already reconciled, carrying the bundle eventToEntry reads.
-        if (isReplacementEvent(event)) continue;
+        // rendersAsRow drops edit siblings: they are not messages. /messages
+        // returns them alongside the originals, and this path never applied
+        // them — so every edit in the fetched page showed up as its own junk
+        // row rendering the "* new text" fallback body, directly above the
+        // message it had already been folded into. There is nothing to apply
+        // either: the original arrives from the same page (or an older one)
+        // already reconciled, carrying the bundle eventToEntry reads.
+        if (!rendersAsRow(event)) continue;
         QString eventId = QString::fromStdString(event.event_id);
         // Against both the loaded rows and the batch itself: overlapping
         // /messages pages can repeat an id inside a single call, which the
         // old m_messages-only scan let through.
         if (m_indexByEventId.contains(eventId) || queued.contains(eventId)) continue;
         queued.insert(eventId);
-        newEntries.append(eventToEntry(event, ownUserId));
+        MessageEntry entry = eventToEntry(event, ownUserId);
+        // An edit that arrived over /sync while this page was in flight — the
+        // server reconciled the original as of ITS answer, not ours.
+        drainPendingEdit(entry);
+        newEntries.append(std::move(entry));
     }
 
     if (newEntries.isEmpty()) return;
@@ -1009,6 +1100,105 @@ void MessageModel::setLoadingHistory(bool v)
     emit loadingHistoryChanged();
 }
 
+std::optional<MessageModel::HistoryRequest>
+MessageModel::beginHistoryFill(bsfchat::client::HistoryFillKind kind, int firstPageLimit)
+{
+    using bsfchat::client::HistoryFillKind;
+    if (!m_historyFill.canStart(kind)) return std::nullopt;
+    // Anything but an open continues from the oldest loaded point, and at the
+    // start of the room there is no such point: this refusal is what stops a
+    // short room's non-scrollable view from asking again after every settle.
+    if (kind != HistoryFillKind::Open && m_prevBatchToken.isEmpty()) return std::nullopt;
+    m_historyFill.start(kind, static_cast<int>(m_messages.size()), firstPageLimit);
+    m_historyFillPages.clear();
+    m_historyFillRowIds.clear();
+    m_historyFillFrom = kind == HistoryFillKind::Open ? QString() : m_prevBatchToken;
+    setLoadingHistory(true);
+    return HistoryRequest{m_historyFillFrom, m_historyFill.nextPageLimit()};
+}
+
+MessageModel::HistoryPageResult
+MessageModel::absorbHistoryPage(const QString& requestedFrom,
+                                const QVector<bsfchat::RoomEvent>& chronological,
+                                const QString& endToken,
+                                const QString& ownUserId)
+{
+    HistoryPageResult result;
+    // Only the page the running fill is waiting for. A room re-opened before
+    // its first answer landed issues a second from="" request; whichever
+    // answer arrives second no longer matches and is dropped instead of being
+    // counted as a further page.
+    if (!m_historyFill.active() || requestedFrom != m_historyFillFrom) return result;
+
+    // Count what this page would ADD to the timeline: rows, not events —
+    // which is the entire fix. Dedupe against the loaded rows and against
+    // earlier pages of this fill, exactly as prependEvents will.
+    int newRows = 0;
+    for (const auto& event : chronological) {
+        if (!rendersAsRow(event)) continue;
+        const QString id = QString::fromStdString(event.event_id);
+        if (m_indexByEventId.contains(id) || m_historyFillRowIds.contains(id)) continue;
+        m_historyFillRowIds.insert(id);
+        ++newRows;
+    }
+    m_historyFillPages.append(chronological);
+
+    // The server's token is authoritative on every page, the first included:
+    // an initial load's answer replaces whatever the model held.
+    setPrevBatchToken(endToken);
+
+    const bool wasSpent = m_historyFill.autoBudgetSpent();
+    if (m_historyFill.onPage(newRows, endToken.isEmpty())) {
+        m_historyFillFrom = endToken;
+        if (wasSpent != m_historyFill.autoBudgetSpent()) emit historyAutoFillSpentChanged();
+        result.outcome = HistoryPageOutcome::FetchMore;
+        result.next = HistoryRequest{endToken, m_historyFill.nextPageLimit()};
+        return result;
+    }
+    finishHistoryFill(ownUserId, wasSpent);
+    result.outcome = HistoryPageOutcome::Done;
+    return result;
+}
+
+bool MessageModel::failHistoryFill(const QString& requestedFrom, const QString& ownUserId)
+{
+    if (!m_historyFill.active() || requestedFrom != m_historyFillFrom) return false;
+    const bool wasSpent = m_historyFill.autoBudgetSpent();
+    m_historyFill.fail();
+    finishHistoryFill(ownUserId, wasSpent);
+    return true;
+}
+
+void MessageModel::finishHistoryFill(const QString& ownUserId, bool wasSpent)
+{
+    // Pages arrived newest first; the model wants oldest first.
+    QVector<bsfchat::RoomEvent> events;
+    for (auto p = m_historyFillPages.crbegin(); p != m_historyFillPages.crend(); ++p)
+        events += *p;
+    m_historyFillPages.clear();
+    m_historyFillRowIds.clear();
+    m_historyFillFrom.clear();
+
+    if (!events.isEmpty()) {
+        if (m_messages.isEmpty()) {
+            // Nothing loaded: replay the lot in order, so reactions,
+            // redactions and in-window edits all take the live path.
+            for (const auto& event : events) appendEvent(event, ownUserId);
+        } else {
+            // Rows already present — older history, or the cold-start race:
+            // /sync's long-poll can populate the model with the newest
+            // events before a room-open's /messages answer lands. Appending
+            // that answer would drop what /sync delivered as duplicates and
+            // put everything /sync DIDN'T deliver — older history — at the
+            // END of the timeline (the pre-v0.0.37 bug: week-old messages at
+            // the bottom, April/May above them). It is a prepend either way.
+            prependEvents(events, ownUserId);
+        }
+    }
+    setLoadingHistory(false);
+    if (wasSpent != m_historyFill.autoBudgetSpent()) emit historyAutoFillSpentChanged();
+}
+
 void MessageModel::clear()
 {
     beginResetModel();
@@ -1016,6 +1206,7 @@ void MessageModel::clear()
     m_indexByEventId.clear();
     m_threadReplyCounts.clear();
     m_pendingReactions.clear();
+    m_pendingEdits.clear();
     m_reactionIndex.clear();
     endResetModel();
     // A room switch invalidates the pagination state too — otherwise a
@@ -1024,6 +1215,15 @@ void MessageModel::clear()
     m_prevBatchToken.clear();
     if (hadMore) emit hasMoreHistoryChanged();
     if (m_loadingHistory) { m_loadingHistory = false; emit loadingHistoryChanged(); }
+    // A fill in flight belongs to the room being left: its pages are dropped
+    // (ServerConnection filters them by room id too) and the new visit gets a
+    // fresh automatic budget.
+    const bool wasSpent = m_historyFill.autoBudgetSpent();
+    m_historyFill.reset();
+    m_historyFillFrom.clear();
+    m_historyFillPages.clear();
+    m_historyFillRowIds.clear();
+    if (wasSpent) emit historyAutoFillSpentChanged();
     emit countChanged();
 }
 

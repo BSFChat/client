@@ -9,6 +9,7 @@
 #include <QString>
 #include <QTimer>
 
+#include "util/HistoryFill.h"
 #include "util/MentionRenderer.h"
 #include "net/SessionAuth.h"
 #include <QVector>
@@ -429,11 +430,20 @@ public:
     // the message model + RoomListModel.
     Q_INVOKABLE void forwardMessage(const QString& sourceEventId, const QString& destRoomId);
 
-    // Back-pagination. Issues GET /rooms/{id}/messages?from=<prev_batch>&dir=b.
-    // No-op if we've already reached the start of the room or a request is
-    // already in flight. MessageView binds hasMoreHistory/loadingHistory on
-    // MessageModel to drive the scroll-to-top trigger.
+    // Back-pagination. Issues GET /rooms/{id}/messages?from=<prev_batch>&dir=b
+    // — as many pages as it takes to add kHistoryMoreTargetRows VISIBLE rows,
+    // capped (util/HistoryFill.h), because a page can be nothing but edits.
+    // `limit` sizes the first page. No-op if we've already reached the start
+    // of the room or a fill is already running. MessageView binds
+    // hasMoreHistory/loadingHistory on MessageModel to drive the
+    // scroll-to-top trigger. This is the USER's request (scroll to top, reply
+    // jump, the load button) and is not charged to the automatic budget.
     Q_INVOKABLE void loadOlderMessages(int limit = 50);
+    // The same, asked by MessageView on its own when the loaded rows do not
+    // fill the viewport: a list that cannot scroll can never reach the
+    // scroll-to-top trigger. Charged to the per-visit automatic budget, and
+    // a no-op once it is spent.
+    Q_INVOKABLE void fillHistoryForViewport();
 
     // Emoji reactions (Matrix m.reaction / m.annotation). If the current
     // user already has a reaction with `emoji` on `targetEventId`, redact it
@@ -1205,6 +1215,9 @@ public:
     // the same key with the same meaning.
     void recordBotFlag(const QString& userId, bool isBot);
     void loadMembersForRoom(const QString& roomId);
+    // Start a history fill of `kind` in the active room and send its first
+    // request, if the model agrees to start one (see beginHistoryFill).
+    void requestHistoryFill(bsfchat::client::HistoryFillKind kind, int firstPageLimit);
 
     // Identity (OIDC)
     IdentityClient* m_identityClient = nullptr;

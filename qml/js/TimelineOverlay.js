@@ -33,24 +33,48 @@ function chevronVisible(atBottom, rowCount) {
     return atBottom !== true && (rowCount || 0) > 0;
 }
 
-// The empty state distinguishes three situations that need different
-// wording, and is shown for all three. Returns "", "no-server",
-// "no-channel" or "no-history".
-function emptyStateKind(hasServer, roomId, rowCount) {
+// The empty state distinguishes the situations that need different
+// wording. Returns "", "no-server", "no-channel", "no-history" or
+// "more-history".
+//
+// An empty list is NOT always an empty channel. #notifications (2026-09-22)
+// showed "It's quiet in here" over 46 real messages, because the newest
+// stretch of its history was nothing but edits of one bot board and edits
+// are never rows. So with no rows:
+//   * while history is loading, say nothing — the spinner is the answer;
+//   * with older history still on the server, say THAT, not "be the first";
+//   * only when the server has nothing older is the channel really empty.
+// `loadingHistory` / `hasMoreHistory` may be omitted (undefined), which
+// reads as false: the original three-way answer.
+function emptyStateKind(hasServer, roomId, rowCount, loadingHistory, hasMoreHistory) {
     if (!hasServer) return "no-server";
     if (!roomId || roomId.length === 0) return "no-channel";
-    if ((rowCount || 0) === 0) return "no-history";
+    if ((rowCount || 0) === 0) {
+        if (loadingHistory === true) return "";
+        if (hasMoreHistory === true) return "more-history";
+        return "no-history";
+    }
     return "";
 }
 
-function emptyStateVisible(hasServer, roomId, rowCount) {
-    return emptyStateKind(hasServer, roomId, rowCount) !== "";
+function emptyStateVisible(hasServer, roomId, rowCount, loadingHistory, hasMoreHistory) {
+    return emptyStateKind(hasServer, roomId, rowCount, loadingHistory, hasMoreHistory) !== "";
+}
+
+// The "Load older messages" button: only where the user has no other way to
+// ask. A list that scrolls reaches the scroll-to-top trigger; while the
+// client's own fills still have budget they will ask by themselves (showing
+// the button then would flash it between two automatic fills).
+function loadOlderVisible(hasMoreHistory, loadingHistory, scrollable, autoFillSpent) {
+    return hasMoreHistory === true && loadingHistory !== true
+        && scrollable !== true && autoFillSpent === true;
 }
 
 function emptyStateIcon(kind) {
     switch (kind) {
         case "no-server":  return "at";
         case "no-channel": return "hash";
+        case "more-history": return "inbox";
         default:           return "send";
     }
 }
@@ -59,6 +83,7 @@ function emptyStateTitle(kind) {
     switch (kind) {
         case "no-server":  return "No server selected";
         case "no-channel": return "Pick a channel";
+        case "more-history": return "Nothing recent to show";
         default:           return "It's quiet in here";
     }
 }
@@ -69,6 +94,8 @@ function emptyStateBody(kind) {
             return "Sign in to a BSFChat server to start chatting.";
         case "no-channel":
             return "Choose one from the sidebar to join the conversation.";
+        case "more-history":
+            return "The latest activity here is edits and other changes, not new messages. Older messages are further back.";
         default:
             return "Be the first to say something.";
     }
