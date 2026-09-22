@@ -185,11 +185,13 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
         target_sources(test_video_pipeline PRIVATE
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm
+            ${CMAKE_SOURCE_DIR}/src/voice/video/LatencyCriticalActivity.mm
         )
         target_compile_definitions(test_video_pipeline PRIVATE
             BSFCHAT_HAVE_VIDEOTOOLBOX)
         target_link_libraries(test_video_pipeline PRIVATE
-            "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo")
+            "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo"
+            "-framework Foundation")
     endif()
     if(BSFCHAT_HAVE_AOM)
         target_sources(test_video_pipeline PRIVATE
@@ -570,10 +572,12 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
     if(APPLE AND NOT IOS)
         target_sources(test_video_playout PRIVATE
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
-            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm)
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm
+            ${CMAKE_SOURCE_DIR}/src/voice/video/LatencyCriticalActivity.mm)
         target_compile_definitions(test_video_playout PRIVATE BSFCHAT_HAVE_VIDEOTOOLBOX)
         target_link_libraries(test_video_playout PRIVATE
-            "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo")
+            "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo"
+            "-framework Foundation")
     endif()
     add_test(NAME test_video_playout COMMAND test_video_playout)
     set_tests_properties(test_video_playout PROPERTIES

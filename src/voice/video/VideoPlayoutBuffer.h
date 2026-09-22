@@ -290,8 +290,11 @@ public:
             qint64 prevMedia = frontMedia;
             for (size_t k = 1; k < m_queue.size(); ++k) {
                 Entry& e = m_queue[k];
-                const qint64 want = std::min(prevDue + (e.mediaUs - prevMedia),
-                                             e.arrivalUs + m_maxDelayUs);
+                const qint64 cap = e.arrivalUs + m_maxDelayUs;
+                const qint64 gap = e.mediaUs - prevMedia;
+                // Saturating: setPlayoutMaxDelayMs(0) drains with
+                // popDue(INT64_MAX), where prevDue + gap would overflow.
+                const qint64 want = prevDue > cap - gap ? cap : prevDue + gap;
                 e.dueUs = std::max(e.dueUs, want);
                 prevDue = e.dueUs;
                 prevMedia = e.mediaUs;

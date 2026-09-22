@@ -234,6 +234,8 @@ if(BSFCHAT_ENABLE_VOICE)
         target_sources(bsfchat-app PRIVATE
             src/voice/video/MacVTEncoder.mm
             src/voice/video/MacVTDecoder.mm
+            # Every target that builds VideoReceivePipeline.cpp needs this.
+            src/voice/video/LatencyCriticalActivity.mm
         )
         target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_VIDEOTOOLBOX)
         target_link_libraries(bsfchat-app PRIVATE
