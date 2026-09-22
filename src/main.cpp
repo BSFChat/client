@@ -11,6 +11,10 @@
 #include "core/NotificationManager.h"
 #include "core/Settings.h"
 #include "core/UrlHandler.h"
+// Mobile routes an inbound URL through the sign-in before treating it as a
+// deep link; see the urlReceived connection below. The header decides whether
+// this platform does that (BSFCHAT_NATIVE_OIDC_REDIRECT).
+#include "identity/IdentityClient.h"
 #include "net/ServerManager.h"
 #include "net/ServerConnection.h"
 #include "core/TintedIconProvider.h"
@@ -135,6 +139,18 @@ int main(int argc, char *argv[])
     // window so the user sees the navigation happen.
     QObject::connect(&urlHandler, &UrlHandler::urlReceived,
                      &app, [&application](const QString& url) {
+#ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
+        // A `bsfchat://oauth/callback?…` is a sign-in reply, not a link to a
+        // message, and it must reach the sign-in rather than openMessageLink
+        // — which would go looking for a room called "oauth" and leave the
+        // login spinner running forever.
+        //
+        // On Android this IS the sign-in's delivery path. On iOS
+        // ASWebAuthenticationSession normally intercepts the redirect before
+        // the OS sees it, so this only fires if iOS routes it to us anyway.
+        // Either way, every other bsfchat:// URL falls through untouched.
+        if (IdentityClient::deliverCallbackUrl(url)) return;
+#endif
         application.serverManager()->openMessageLink(url);
         for (QWindow* w : QGuiApplication::topLevelWindows()) {
             w->raise();
@@ -195,14 +211,16 @@ int main(int argc, char *argv[])
     QQmlEngine::setObjectOwnership(&urlHandler, QQmlEngine::CppOwnership);
     engine.rootContext()->setContextProperty("urlHandler", &urlHandler);
 
-    // When the Android activity gets a fresh ACTION_SEND while
-    // already running (singleTop relaunch), BSFChatActivity.java's
+    // When the Android activity gets a fresh intent while already
+    // running (singleTop relaunch), BSFChatActivity.java's
     // onNewIntent() calls into nativeOnNewIntent() which surfaces
     // here as AndroidPermissions::newIntentReceived. Re-run the
-    // share-intent extraction so warm shares aren't lost.
+    // intent extraction so warm shares aren't lost — and, since the
+    // OIDC redirect comes back as an ACTION_VIEW intent on Android,
+    // so a sign-in returning from the browser is picked up at all.
     QObject::connect(&androidPerms, &AndroidPermissions::newIntentReceived,
         &urlHandler, [&urlHandler]() {
-            urlHandler.checkAndroidShareIntent();
+            urlHandler.checkAndroidLaunchIntent();
         });
 
     engine.rootContext()->setContextProperty("serverManager", application.serverManager());
@@ -339,12 +357,12 @@ int main(int argc, char *argv[])
         }, Qt::QueuedConnection);
     }
 
-    // Android share-intent pickup — if the app was launched by
-    // another app via "Share to BSFChat", fire the share signal
-    // after QML is loaded so a Connections block on the root can
-    // drop the payload into the active channel.
+    // Android launch-intent pickup — if the app was launched by another
+    // app via "Share to BSFChat", or by a bsfchat:// link, dispatch it
+    // after QML is loaded so a Connections block on the root can drop the
+    // payload into the active channel.
     QMetaObject::invokeMethod(&urlHandler, [&urlHandler]() {
-        urlHandler.checkAndroidShareIntent();
+        urlHandler.checkAndroidLaunchIntent();
     }, Qt::QueuedConnection);
 
     // Clean shutdown — make sure we drop any in-flight voice session

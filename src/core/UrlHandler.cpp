@@ -261,7 +261,7 @@ void UrlHandler::registerSchemeHandler()
 #endif
 }
 
-void UrlHandler::checkAndroidShareIntent()
+void UrlHandler::checkAndroidLaunchIntent()
 {
 #ifdef Q_OS_ANDROID
     QJniObject activity(QNativeInterface::QAndroidApplication::context());
@@ -270,10 +270,37 @@ void UrlHandler::checkAndroidShareIntent()
         "getIntent", "()Landroid/content/Intent;");
     if (!intent.isValid()) return;
 
+    // Clearing the action after handling, here as for ACTION_SEND below, is
+    // what stops a rotate or a resume replaying the same intent. It matters
+    // more for a sign-in callback than for a share: an authorization code is
+    // single-use at the provider, so a replay would fail the second exchange
+    // and report an error over a sign-in that had already succeeded.
+    const auto clearAction = [&intent]() {
+        intent.callObjectMethod("setAction",
+            "(Ljava/lang/String;)Landroid/content/Intent;",
+            QJniObject::fromString("").object<jstring>());
+    };
+
     QJniObject actionObj = intent.callObjectMethod(
         "getAction", "()Ljava/lang/String;");
     if (!actionObj.isValid()) return;
     QString action = actionObj.toString();
+
+    // A `bsfchat://…` deep link — and, since the OIDC redirect uses the same
+    // scheme on Android, the way a sign-in comes back. Android delivers no
+    // QFileOpenEvent, so the eventFilter that handles this on macOS and iOS
+    // never sees it; this is the equivalent.
+    if (action == QStringLiteral("android.intent.action.VIEW")) {
+        QJniObject dataObj = intent.callObjectMethod(
+            "getDataString", "()Ljava/lang/String;");
+        if (!dataObj.isValid()) return;
+        const QString url = dataObj.toString();
+        clearAction();
+        if (url.startsWith(QStringLiteral("bsfchat://")))
+            emit urlReceived(url);
+        return;
+    }
+
     if (action != QStringLiteral("android.intent.action.SEND")) return;
 
     // Grab the MIME type the source app declared so we can sniff
@@ -293,10 +320,7 @@ void UrlHandler::checkAndroidShareIntent()
         if (text.isValid()) {
             emit sharedPayloadReceived(text.toString(), mime, false);
         }
-        // Clear the action so a rotate/resume doesn't re-fire it.
-        intent.callObjectMethod("setAction",
-            "(Ljava/lang/String;)Landroid/content/Intent;",
-            QJniObject::fromString("").object<jstring>());
+        clearAction();
         return;
     }
 
@@ -313,8 +337,6 @@ void UrlHandler::checkAndroidShareIntent()
         "toString", "()Ljava/lang/String;").toString();
     if (uriStr.isEmpty()) return;
     emit sharedPayloadReceived(uriStr, mime, true);
-    intent.callObjectMethod("setAction",
-        "(Ljava/lang/String;)Landroid/content/Intent;",
-        QJniObject::fromString("").object<jstring>());
+    clearAction();
 #endif
 }

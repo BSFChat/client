@@ -138,6 +138,32 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- bsfchat:// deep links, and the OIDC sign-in callback.
+                 BROWSABLE is what lets a browser hand the URL back to
+                 us, which is the whole point here: the sign-in used to
+                 redirect to a loopback port this app listens on, and
+                 that can never arrive on Android — Qt's Android event
+                 dispatcher stops servicing socket notifiers the moment
+                 the activity pauses, so the browser's connection sits
+                 unaccepted in the backlog until the user comes back by
+                 hand. The provider now redirects to
+                 bsfchat://oauth/callback and the OS resolves it here.
+
+                 Host-scoped to "oauth" deliberately: this filter exists
+                 for the sign-in, and claiming the bare scheme would
+                 also claim every message deep link for an intent path
+                 that has no reason to handle them. The activity is
+                 already singleTop, so the redirect resumes the running
+                 instance rather than stacking a second copy, and
+                 onNewIntent -> nativeOnNewIntent -> UrlHandler
+                 ::checkAndroidLaunchIntent picks it up. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="bsfchat" android:host="oauth" />
+            </intent-filter>
+
             <!-- Share target: let other apps "Share to BSFChat" a
                  single file or snippet of text. We handle the intent
                  on the Qt side (UrlHandler) by reading the activity

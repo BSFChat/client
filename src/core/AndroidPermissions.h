@@ -41,7 +41,9 @@ signals:
     void microphoneResult(bool granted);
     void notificationsResult(bool granted);
     void cameraResult(bool granted);
-    // New SEND intent arrived while the app was already running.
-    // UrlHandler wires onto this and re-runs checkAndroidShareIntent.
+    // A new intent arrived while the app was already running: a SEND
+    // share, or a bsfchat:// VIEW — which is how an OIDC sign-in returns
+    // from the browser on Android. main.cpp wires this to
+    // UrlHandler::checkAndroidLaunchIntent, which dispatches either.
     void newIntentReceived();
 };

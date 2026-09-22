@@ -2,15 +2,35 @@
 #include "identity/OidcRequest.h"
 
 #include <QCryptographicHash>
+#include <QDebug>
 #include <QDesktopServices>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPointer>
 #include <QRandomGenerator>
-#include <QTcpSocket>
 #include <QUrl>
 #include <QUrlQuery>
+
+#ifdef Q_OS_IOS
+#  include "identity/IosAuthSession.h"
+#endif
+#ifndef BSFCHAT_NATIVE_OIDC_REDIRECT
+#  include <QTcpSocket>
+#endif
+
+#ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
+namespace {
+// The sign-in an OS-delivered `bsfchat://oauth/callback` belongs to.
+//
+// There is at most one at a time (both call sites — ServerConnection and
+// ServerManager — own a single IdentityClient and cancel() before reusing
+// it), and a QPointer so a deleted client cannot be called into. Cleared in
+// cancel(), which every terminal path runs through.
+QPointer<IdentityClient> g_awaitingCallback;
+} // namespace
+#endif
 
 IdentityClient::IdentityClient(QObject* parent)
     : QObject(parent)
@@ -29,7 +49,20 @@ IdentityClient::~IdentityClient()
 
 bool IdentityClient::isActive() const
 {
+#ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
+    return m_sessionActive;
+#else
     return m_server && m_server->isListening();
+#endif
+}
+
+QString IdentityClient::redirectUri() const
+{
+#ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
+    return QString::fromLatin1(oidc::kNativeRedirectUri);
+#else
+    return QString("http://localhost:%1/oauth/callback").arg(m_port);
+#endif
 }
 
 void IdentityClient::startLogin(const QString& providerUrl, const QString& resource)
@@ -48,6 +81,7 @@ void IdentityClient::startLogin(const QString& providerUrl, const QString& resou
     m_state = generateState();
     m_nonce = oidc::generateNonce();
 
+#ifndef BSFCHAT_NATIVE_OIDC_REDIRECT
     // Start local HTTP server
     m_server = new QTcpServer(this);
     if (!m_server->listen(QHostAddress::LocalHost, 0)) {
@@ -59,16 +93,61 @@ void IdentityClient::startLogin(const QString& providerUrl, const QString& resou
     m_port = m_server->serverPort();
 
     connect(m_server, &QTcpServer::newConnection, this, &IdentityClient::onNewConnection);
+#endif
 
     // Build authorization URL
-    QString redirectUri = QString("http://localhost:%1/oauth/callback").arg(m_port);
     // Names the chat server (resource) and this attempt (nonce) — C1; see
     // OidcRequest.h for why the resource must never come from a server.
-    QUrl authUrl = oidc::authorizeUrl(m_providerUrl, redirectUri, codeChallenge, m_state,
+    QUrl authUrl = oidc::authorizeUrl(m_providerUrl, redirectUri(), codeChallenge, m_state,
                                       m_nonce, m_resource);
 
-    // Open browser
+#ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
+    // Arm the callback route before the page is shown: on Android the OS can
+    // bring us back with the redirect intent, and there must be no window in
+    // which that arrives with nothing waiting for it.
+    g_awaitingCallback = this;
+    m_sessionActive = true;
+#endif
+
+#ifdef Q_OS_IOS
+    // Present in-process. QDesktopServices::openUrl here would hand off to
+    // Safari and suspend us, which is the bug this branch exists to fix.
+    const bool presented = ios_auth_session::start(
+        authUrl, QString::fromLatin1(oidc::kNativeCallbackScheme),
+        [this](ios_auth_session::Outcome outcome, const QUrl& callbackUrl,
+               const QString& error) {
+            switch (outcome) {
+            case ios_auth_session::Outcome::Callback:
+                handleCallback(callbackUrl);
+                return;
+            case ios_auth_session::Outcome::Cancelled:
+                cancel();
+                // Said out loud. The caller closes its spinner on
+                // loginFailed, and a cancel that emitted nothing would
+                // reproduce the exact "Waiting for browser login…" hang
+                // this change removes.
+                emit loginFailed(tr("Sign-in was cancelled"));
+                return;
+            case ios_auth_session::Outcome::Failed:
+                cancel();
+                emit loginFailed(error.isEmpty()
+                                     ? tr("The sign-in sheet could not be opened")
+                                     : error);
+                return;
+            }
+        });
+    if (!presented) {
+        cancel();
+        emit loginFailed(tr("The sign-in sheet could not be opened"));
+        return;
+    }
+#else
+    // Desktop and Android both open the system browser. On Android that maps
+    // to an ACTION_VIEW intent, and the redirect comes back the same way —
+    // see the intent-filter in android/AndroidManifest.xml and
+    // UrlHandler::checkAndroidLaunchIntent().
     QDesktopServices::openUrl(authUrl);
+#endif
 
     // Start 5-minute timeout
     m_timeout.start(5 * 60 * 1000);
@@ -77,13 +156,133 @@ void IdentityClient::startLogin(const QString& providerUrl, const QString& resou
 void IdentityClient::cancel()
 {
     m_timeout.stop();
+#ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
+    m_sessionActive = false;
+    // Only tear the sheet down if it is ours: the iOS session is a
+    // process-wide singleton, and a stale client's destructor must not
+    // dismiss a sign-in somebody else just started.
+    if (g_awaitingCallback == this) {
+        g_awaitingCallback = nullptr;
+#  ifdef Q_OS_IOS
+        ios_auth_session::cancel();
+#  endif
+    }
+#else
     if (m_server) {
         m_server->close();
         m_server->deleteLater();
         m_server = nullptr;
     }
+#endif
     m_port = 0;
+    // The CSRF guard for an attempt that is over. parseCallbackQuery refuses
+    // an empty expected state outright, so a callback that arrives late —
+    // after a timeout, a cancel, or a completed sign-in — cannot be replayed
+    // into a second token exchange.
+    m_state.clear();
 }
+
+#ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
+bool IdentityClient::deliverCallbackUrl(const QString& url)
+{
+    const QUrl parsed(url);
+    if (!oidc::isNativeCallbackUrl(parsed)) return false; // an ordinary deep link
+
+    if (!g_awaitingCallback) {
+        // A sign-in reply with no sign-in waiting for it. On Android this is
+        // what a cold start looks like: the process died while the browser
+        // had the foreground, so the PKCE verifier — which is deliberately
+        // memory-only — died with it and the code cannot be redeemed by
+        // anyone, us included. Consumed rather than returned: it is not a
+        // message link, and handing it to openMessageLink would send the user
+        // looking for a room called "oauth".
+        qWarning() << "[IdentityClient] a sign-in callback arrived with no "
+                      "attempt in flight; ignoring it";
+        return true;
+    }
+
+    g_awaitingCallback->handleCallback(parsed);
+    return true;
+}
+#endif
+
+void IdentityClient::handleCallback(const QUrl& callbackUrl)
+{
+    const oidc::CallbackParse parsed =
+        oidc::parseCallbackQuery(QUrlQuery(callbackUrl.query()), m_state);
+
+    if (parsed.status != oidc::CallbackStatus::Code) {
+        if (parsed.status == oidc::CallbackStatus::StateMismatch) {
+            qWarning().noquote()
+                << "[IdentityClient] refused a callback that is not this attempt's";
+        }
+        cancel();
+        emit loginFailed(parsed.error);
+        return;
+    }
+
+    // Shut the callback transport down before the token request: the attempt
+    // is no longer waiting on a browser, and a second callback must not be
+    // able to start a second exchange. NOT cancel() — that zeroes m_port, and
+    // the desktop /token call has to echo the identical loopback redirect_uri
+    // the authorization request carried.
+    m_timeout.stop();
+    m_state.clear();
+#ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
+    m_sessionActive = false;
+    if (g_awaitingCallback == this) g_awaitingCallback = nullptr;
+#else
+    if (m_server) {
+        m_server->close();
+        m_server->deleteLater();
+        m_server = nullptr;
+    }
+#endif
+
+    exchangeCodeForTokens(parsed.code);
+}
+
+#ifndef BSFCHAT_NATIVE_OIDC_REDIRECT
+namespace {
+
+// The pages the loopback callback shows in the user's browser. Byte for byte
+// what this flow has always served — only the decision about WHICH one is
+// shared with iOS now (oidc::parseCallbackQuery). MissingCode deliberately
+// renders nothing: that request never came from the provider.
+QByteArray loopbackPage(oidc::CallbackStatus status)
+{
+    static constexpr const char* kBody =
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
+        "<html><body style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; "
+        "display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; "
+        "background-color: #313338; color: #f2f3f5;\">"
+        "<div style=\"text-align: center;\">";
+
+    switch (status) {
+    case oidc::CallbackStatus::Code:
+        return QByteArray(kBody) +
+               "<h2 style=\"color: #57f287;\">Login Successful!</h2>"
+               "<p>You can close this tab and return to BSFChat.</p>"
+               "</div></body></html>";
+    case oidc::CallbackStatus::ProviderError:
+        return QByteArray(kBody) +
+               "<h2 style=\"color: #ed4245;\">Login Failed</h2>"
+               "<p>An error occurred during authentication.</p>"
+               "<p>You can close this tab and try again in BSFChat.</p>"
+               "</div></body></html>";
+    case oidc::CallbackStatus::StateMismatch:
+        return QByteArray(kBody) +
+               "<h2 style=\"color: #ed4245;\">Login Failed</h2>"
+               "<p>Security validation failed (state mismatch).</p>"
+               "<p>You can close this tab and try again in BSFChat.</p>"
+               "</div></body></html>";
+    case oidc::CallbackStatus::MissingCode:
+        break;
+    }
+    return {};
+}
+
+} // namespace
 
 void IdentityClient::onNewConnection()
 {
@@ -124,90 +323,33 @@ void IdentityClient::onNewConnection()
             return;
         }
 
-        QUrlQuery query(requestUrl.query());
-        QString code = query.queryItemValue("code");
-        QString state = query.queryItemValue("state");
-        QString error = query.queryItemValue("error");
-
-        // Check for error from provider
-        if (!error.isEmpty()) {
-            QString errorDesc = query.queryItemValue("error_description");
-            QByteArray response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
-                                  "<html><body style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; "
-                                  "display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; "
-                                  "background-color: #313338; color: #f2f3f5;\">"
-                                  "<div style=\"text-align: center;\">"
-                                  "<h2 style=\"color: #ed4245;\">Login Failed</h2>"
-                                  "<p>An error occurred during authentication.</p>"
-                                  "<p>You can close this tab and try again in BSFChat.</p>"
-                                  "</div></body></html>";
-            socket->write(response);
+        // Render the browser's page from the shared verdict, then let
+        // handleCallback() act on it — the same function, with the same
+        // checks in the same order, that the iOS session calls. The verdict
+        // is recomputed there from the same query and the same m_state, so
+        // the page the user is looking at and the decision the app takes
+        // cannot disagree.
+        const QByteArray page =
+            loopbackPage(oidc::parseCallbackQuery(QUrlQuery(requestUrl.query()), m_state).status);
+        if (!page.isEmpty()) {
+            socket->write(page);
             socket->flush();
-            socket->close();
-            socket->deleteLater();
-            cancel();
-            emit loginFailed(errorDesc.isEmpty() ? error : errorDesc);
-            return;
         }
-
-        // Verify state
-        if (state != m_state) {
-            QByteArray response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
-                                  "<html><body style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; "
-                                  "display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; "
-                                  "background-color: #313338; color: #f2f3f5;\">"
-                                  "<div style=\"text-align: center;\">"
-                                  "<h2 style=\"color: #ed4245;\">Login Failed</h2>"
-                                  "<p>Security validation failed (state mismatch).</p>"
-                                  "<p>You can close this tab and try again in BSFChat.</p>"
-                                  "</div></body></html>";
-            socket->write(response);
-            socket->flush();
-            socket->close();
-            socket->deleteLater();
-            cancel();
-            emit loginFailed("State mismatch - possible CSRF attack");
-            return;
-        }
-
-        if (code.isEmpty()) {
-            socket->close();
-            socket->deleteLater();
-            cancel();
-            emit loginFailed("No authorization code received");
-            return;
-        }
-
-        // Send success page
-        QByteArray response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
-                              "<html><body style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; "
-                              "display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; "
-                              "background-color: #313338; color: #f2f3f5;\">"
-                              "<div style=\"text-align: center;\">"
-                              "<h2 style=\"color: #57f287;\">Login Successful!</h2>"
-                              "<p>You can close this tab and return to BSFChat.</p>"
-                              "</div></body></html>";
-        socket->write(response);
-        socket->flush();
         socket->close();
         socket->deleteLater();
 
-        // Stop the server and timeout
-        m_timeout.stop();
-        if (m_server) {
-            m_server->close();
-            m_server->deleteLater();
-            m_server = nullptr;
-        }
-
-        // Exchange code for tokens
-        exchangeCodeForTokens(code);
+        handleCallback(requestUrl);
     });
 }
+#endif // !BSFCHAT_NATIVE_OIDC_REDIRECT
 
 void IdentityClient::exchangeCodeForTokens(const QString& code)
 {
-    QString redirectUri = QString("http://localhost:%1/oauth/callback").arg(m_port);
+    // Byte-identical to the one /authorize carried — the provider compares
+    // them exactly (RFC 6749 4.1.3) and refuses the grant otherwise. Both
+    // ends read redirectUri(), so the loopback port on desktop and the
+    // private-use scheme on iOS cannot drift apart.
+    const QString redirectUri = this->redirectUri();
 
     QUrl tokenUrl(m_providerUrl + "/token");
     QNetworkRequest request(tokenUrl);

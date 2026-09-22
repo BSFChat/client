@@ -43,6 +43,29 @@ namespace oidc {
 
 inline constexpr const char* kClientId = "bsfchat-desktop";
 
+// ---- Redirect URIs ------------------------------------------------------
+//
+// Desktop redirects to a loopback server the client owns for the duration of
+// the sign-in (RFC 8252 §7.3). iOS cannot: the moment the browser takes over,
+// the app is suspended, the listening socket stops being serviced, and the
+// callback connection is never accepted — sign-in hangs forever. iOS uses the
+// private-use URI scheme instead (RFC 8252 §7.1), delivered by
+// ASWebAuthenticationSession straight back into the still-running app.
+//
+// The scheme is the same `bsfchat` the app already claims for deep links
+// (CFBundleURLTypes / HKCU\Software\Classes\bsfchat / x-scheme-handler), so
+// nothing new is registered with the OS for this.
+//
+// A private-use scheme cannot be reserved by anyone, so it is worth being
+// explicit about what carries the security here: PKCE. Another app on the
+// device can claim `bsfchat://` and race us for the redirect, but the
+// authorization code it steals is useless without the S256 verifier that
+// never left this process. That is exactly why the provider MUST refuse a
+// token request from this client without a valid `code_verifier` — see the
+// identity provider's client registration.
+inline constexpr const char* kNativeCallbackScheme = "bsfchat";
+inline constexpr const char* kNativeRedirectUri = "bsfchat://oauth/callback";
+
 // The `resource` to request for a homeserver base URL: the canonical form
 // the provider and the server also compute (bsfchat::canonical_audience_url),
 // or empty when the URL cannot be an audience — in which case the caller must
@@ -82,6 +105,81 @@ inline QUrl authorizeUrl(const QString& providerUrl, const QString& redirectUri,
     if (!resource.isEmpty()) query.addQueryItem("resource", resource);
     url.setQuery(query);
     return url;
+}
+
+// ---- The authorization callback ----------------------------------------
+//
+// Two transports deliver it — a loopback HTTP request on desktop, an
+// ASWebAuthenticationSession completion (or a `bsfchat://` URL open) on iOS —
+// and BOTH funnel through the one function below, so the decisions that
+// matter are made in exactly one place and are the same on every platform.
+// Splitting them was how this sort of thing goes wrong: it takes one
+// transport that forgets to compare `state` for the CSRF guard to be gone on
+// that platform only, with nothing in the desktop tests to notice.
+
+enum class CallbackStatus {
+    Code,          // a usable authorization code; carry on to /token
+    ProviderError, // the provider said no (includes the user declining there)
+    StateMismatch, // CSRF guard tripped — the reply is not ours
+    MissingCode,   // a callback with neither an error nor a code
+};
+
+struct CallbackParse {
+    CallbackStatus status = CallbackStatus::MissingCode;
+    QString code;  // set iff status == Code
+    QString error; // user-facing reason, set for every other status
+};
+
+// Is `url` the private-use-scheme redirect this client asked for?
+// Case-insensitive on scheme and host because the OS and the browser both
+// feel free to normalise them; the query is left exactly as delivered.
+//
+// Deliberately strict about the path: `bsfchat://room/...` deep links share
+// this scheme, and a deep link must never be mistaken for a sign-in callback
+// (nor the reverse — see main.cpp, where a callback must not be handed to
+// openMessageLink).
+inline bool isNativeCallbackUrl(const QUrl& url)
+{
+    if (url.scheme().compare(QLatin1String(kNativeCallbackScheme),
+                             Qt::CaseInsensitive) != 0)
+        return false;
+    // "bsfchat://oauth/callback" parses as host=oauth, path=/callback.
+    QString path = url.path();
+    while (path.endsWith('/')) path.chop(1);
+    return url.host().compare(QLatin1String("oauth"), Qt::CaseInsensitive) == 0
+        && path.compare(QLatin1String("/callback"), Qt::CaseInsensitive) == 0;
+}
+
+// The one place that decides what a callback means.
+//
+// Order is load-bearing and matches what the loopback path has always done:
+// a provider-reported error is reported as such even when `state` is absent
+// (an error redirect may legitimately arrive without one), then the CSRF
+// guard, then the code. `expectedState` is the value generated for THIS
+// attempt; an empty one can never match, so a callback arriving when no
+// sign-in is in flight is refused rather than accepted.
+inline CallbackParse parseCallbackQuery(const QUrlQuery& query,
+                                        const QString& expectedState)
+{
+    const QString error = query.queryItemValue("error");
+    if (!error.isEmpty()) {
+        const QString desc = query.queryItemValue("error_description");
+        return {CallbackStatus::ProviderError, {}, desc.isEmpty() ? error : desc};
+    }
+
+    const QString state = query.queryItemValue("state");
+    if (expectedState.isEmpty() || state != expectedState) {
+        return {CallbackStatus::StateMismatch, {},
+                QStringLiteral("State mismatch - possible CSRF attack")};
+    }
+
+    const QString code = query.queryItemValue("code");
+    if (code.isEmpty()) {
+        return {CallbackStatus::MissingCode, {},
+                QStringLiteral("No authorization code received")};
+    }
+
+    return {CallbackStatus::Code, code, {}};
 }
 
 // Checks, before the id_token is handed to anybody, that it is the token

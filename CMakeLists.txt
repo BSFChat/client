@@ -105,6 +105,12 @@ qt_add_executable(bsfchat-app
     src/core/AndroidNotifier.cpp
     src/core/UrlHandler.cpp
     src/identity/IdentityClient.cpp
+    # iOS OIDC sign-in presents ASWebAuthenticationSession instead of handing
+    # off to Safari — the hand-off suspends the app, so the loopback callback
+    # the desktop flow waits on can never be accepted. Objective-C++, and iOS
+    # only: the generator expression keeps it out of the macOS bundle, which
+    # still uses the loopback path. See src/identity/IosAuthSession.h.
+    $<$<BOOL:${IOS}>:src/identity/IosAuthSession.mm>
     src/identity/IdentityApiClient.cpp
     src/net/MatrixClient.cpp
     src/net/MediaTicketCache.cpp
@@ -290,6 +296,15 @@ if(NOT DEFINED BSFCHAT_BUNDLE_ID)
     else()
         set(BSFCHAT_BUNDLE_ID "com.bsfchat.app.dev")
     endif()
+endif()
+
+# iOS: frameworks for the in-process sign-in sheet
+# (src/identity/IosAuthSession.mm). AuthenticationServices is
+# ASWebAuthenticationSession itself; UIKit is the presentation anchor it
+# refuses to present without.
+if(IOS)
+    target_link_libraries(bsfchat-app PRIVATE
+        "-framework AuthenticationServices" "-framework UIKit")
 endif()
 
 # Android: point Qt at our custom package source dir which carries a

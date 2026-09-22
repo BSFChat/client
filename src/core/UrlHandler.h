@@ -73,10 +73,23 @@ public:
     // HKCU registry entries. Linux writes a .desktop file. All are idempotent.
     void registerSchemeHandler();
 
-    // Android: read the Activity's launch intent and, if it's an
-    // ACTION_SEND, emit sharedPayloadReceived. Called once after
-    // engine.load() so QML listeners are wired. No-op off Android.
-    void checkAndroidShareIntent();
+    // Android: read the Activity's current intent and dispatch it.
+    //
+    //   ACTION_SEND — a "Share to BSFChat" payload; emits
+    //     sharedPayloadReceived.
+    //   ACTION_VIEW — a `bsfchat://…` deep link, which on Android is also
+    //     how an OIDC sign-in comes back. Android has no equivalent of the
+    //     macOS/iOS QFileOpenEvent the eventFilter above catches, and Qt's
+    //     own VIEW-intent relay goes to QDesktopServices::setUrlHandler,
+    //     which nothing in this app registers. So the intent is read here
+    //     and emitted as urlReceived, which main.cpp already routes —
+    //     offering it to the sign-in first, then treating it as a message
+    //     link.
+    //
+    // Called once after engine.load() so QML listeners are wired, and again
+    // on every onNewIntent for a singleTop relaunch. Clears the action it
+    // handled so a rotate or resume cannot re-fire it. No-op off Android.
+    void checkAndroidLaunchIntent();
 
 signals:
     void urlReceived(const QString& url);
