@@ -958,6 +958,15 @@ add_test(NAME test_token_rejection COMMAND test_token_rejection)
 
 # 401 classification: the client had no dead-token handling at all, so an
 # expired access token showed as a permanent "Reconnecting…".
+# Which server a BSFChat ID sign-in is for (identity audit 2026-09, C1): the
+# RFC 8707 resource derived from the homeserver, the nonce, and the check
+# that refuses to post an id_token audienced to anybody else. Header-only
+# (src/identity/OidcRequest.h) — no browser, no socket, no GUI.
+qt_add_executable(test_oidc_request test_oidc_request.cpp)
+target_include_directories(test_oidc_request PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_oidc_request PRIVATE bsfchat_protocol Qt6::Core Qt6::Test)
+add_test(NAME test_oidc_request COMMAND test_oidc_request)
+
 qt_add_executable(test_auth_error
     test_auth_error.cpp
     ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp

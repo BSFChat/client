@@ -1,4 +1,5 @@
 #include "identity/IdentityClient.h"
+#include "identity/OidcRequest.h"
 
 #include <QCryptographicHash>
 #include <QDesktopServices>
@@ -31,7 +32,7 @@ bool IdentityClient::isActive() const
     return m_server && m_server->isListening();
 }
 
-void IdentityClient::startLogin(const QString& providerUrl)
+void IdentityClient::startLogin(const QString& providerUrl, const QString& resource)
 {
     // Clean up any previous attempt
     cancel();
@@ -39,11 +40,13 @@ void IdentityClient::startLogin(const QString& providerUrl)
     m_providerUrl = providerUrl;
     while (m_providerUrl.endsWith('/'))
         m_providerUrl.chop(1);
+    m_resource = resource;
 
     // Generate PKCE parameters
     m_codeVerifier = generateCodeVerifier();
     QString codeChallenge = computeCodeChallenge(m_codeVerifier);
     m_state = generateState();
+    m_nonce = oidc::generateNonce();
 
     // Start local HTTP server
     m_server = new QTcpServer(this);
@@ -59,16 +62,10 @@ void IdentityClient::startLogin(const QString& providerUrl)
 
     // Build authorization URL
     QString redirectUri = QString("http://localhost:%1/oauth/callback").arg(m_port);
-    QUrl authUrl(m_providerUrl + "/authorize");
-    QUrlQuery query;
-    query.addQueryItem("client_id", "bsfchat-desktop");
-    query.addQueryItem("redirect_uri", redirectUri);
-    query.addQueryItem("response_type", "code");
-    query.addQueryItem("scope", "openid profile");
-    query.addQueryItem("code_challenge", codeChallenge);
-    query.addQueryItem("code_challenge_method", "S256");
-    query.addQueryItem("state", m_state);
-    authUrl.setQuery(query);
+    // Names the chat server (resource) and this attempt (nonce) — C1; see
+    // OidcRequest.h for why the resource must never come from a server.
+    QUrl authUrl = oidc::authorizeUrl(m_providerUrl, redirectUri, codeChallenge, m_state,
+                                      m_nonce, m_resource);
 
     // Open browser
     QDesktopServices::openUrl(authUrl);
@@ -222,6 +219,10 @@ void IdentityClient::exchangeCodeForTokens(const QString& code)
     body.addQueryItem("redirect_uri", redirectUri);
     body.addQueryItem("client_id", "bsfchat-desktop");
     body.addQueryItem("code_verifier", m_codeVerifier);
+    // RFC 8707 2.2: repeated at the token endpoint; the provider refuses it
+    // unless it matches the grant, so a mixed-up code cannot be redeemed for
+    // a different server's token.
+    if (!m_resource.isEmpty()) body.addQueryItem("resource", m_resource);
 
     auto* reply = m_nam.post(request, body.toString(QUrl::FullyEncoded).toUtf8());
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
@@ -259,6 +260,24 @@ void IdentityClient::exchangeCodeForTokens(const QString& code)
             if (error.isEmpty()) error = "No tokens in response";
             emit loginFailed(error);
             return;
+        }
+
+        // A sign-in for a chat server needs an id_token, and it must be the
+        // one this attempt asked for before it goes anywhere. The server-list
+        // sync (no resource) uses only the access token and never posts the
+        // id_token, so it is not held to this — which also keeps it working
+        // against an identity provider from before nonce support.
+        if (!m_resource.isEmpty()) {
+            if (idToken.isEmpty()) {
+                emit loginFailed("The identity provider returned no identity token");
+                return;
+            }
+            const QString why = oidc::checkIdToken(idToken, m_resource, m_nonce);
+            if (!why.isEmpty()) {
+                qWarning().noquote() << "[IdentityClient] refused id_token:" << why;
+                emit loginFailed(why);
+                return;
+            }
         }
 
         emit loginCompleted(idToken, accessToken, refreshToken);
