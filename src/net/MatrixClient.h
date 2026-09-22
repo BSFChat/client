@@ -10,6 +10,7 @@
 
 #include <bsfchat/MatrixTypes.h>
 
+#include "net/MatrixFailure.h"
 #include "net/MediaTicketCache.h"
 #include "util/SearchParser.h"
 
@@ -207,6 +208,73 @@ public:
     // a round trip and nothing else.
     void addSelfRole(const QString& roleId);
     void removeSelfRole(const QString& roleId);
+
+    // ── Account data, and the block list it carries ───────────────────────
+    //
+    // GET/PUT /_matrix/client/v3/user/{userId}/account_data/{type}. `userId`
+    // must be us — the server answers 403 for anybody else's, and there is no
+    // permission that unlocks it, because the one document this client stores
+    // there is the block list and its whole value is that its subjects cannot
+    // read it.
+    //
+    // THE PUT IS A FULL REPLACEMENT. There is no add/remove verb; the body is
+    // the complete new document and anything left out is gone. Callers must
+    // build it from the last document the server gave them — see
+    // net/IgnoredUsers.h, which is the only thing that should be constructing
+    // one.
+    //
+    // A 404 is not an error: it is how the server says this account has never
+    // written this document, and it arrives as accountDataAbsent rather than
+    // accountDataError so a caller cannot mistake "no block list" for "the
+    // request failed" and leave the UI empty for the wrong reason.
+    //
+    // There is NO account_data section in /sync on this server, so nothing
+    // here ever arrives unasked. A change made on another device is invisible
+    // until the next explicit GET.
+    void getAccountData(const QString& userId, const QString& type);
+    void putAccountData(const QString& requestId, const QString& userId,
+                        const QString& type, const QJsonObject& content);
+
+    // ── Reporting ─────────────────────────────────────────────────────────
+    //
+    // POST /rooms/{roomId}/report/{eventId} and POST /users/{userId}/report.
+    // Both answer 200 {} and change NOTHING: server-side a report is one row
+    // and one audit record for an administrator to act on later, by hand. It
+    // does not redact, mute, hide or notify. Copy next to these calls must not
+    // promise otherwise.
+    //
+    // `requestId` correlates the call with its reply, as it does for invites:
+    // the dialog that is waiting is one of several things that can be on
+    // screen, and a reply that lands after it was closed and reopened for a
+    // different target must not be attributed to the new one.
+    //
+    // Both are rate limited per account (SendLimiter::Bucket::kReport), so a
+    // 429 here is ordinary rather than exceptional and reportFailed carries
+    // the wait the server asked for.
+    void reportEvent(const QString& requestId, const QString& roomId,
+                     const QString& eventId, const QString& reason);
+    void reportUser(const QString& requestId, const QString& userId,
+                    const QString& reason);
+
+    // ── Account deletion ──────────────────────────────────────────────────
+    //
+    // POST /account/deactivate. Matrix user-interactive auth: the first call
+    // sends no `auth` and the server answers either 200 (an account with no
+    // password — one signed in through the identity provider) or 401 carrying
+    // the m.login.password flows, which is answered by repeating the request
+    // with `auth`.
+    //
+    // THE FIRST CALL IS NOT A PROBE. For an OIDC account it deletes the
+    // account outright, so the user's confirmation must be complete before it
+    // is made; the password prompt is a second gate that only some accounts
+    // see, never the confirmation itself. net/DeactivateFlow.h owns that
+    // distinction and is what should be driving these two.
+    //
+    // Pass an empty `auth` for the first call. The 401 is delivered as
+    // deactivateResponse like any other status — deliberately NOT as an error
+    // — because telling a UIA challenge apart from a dead access token is a
+    // decision about the body, not the status, and it belongs in one place.
+    void deactivateAccount(const QJsonObject& auth);
 
     void setDisplayName(const QString& userId, const QString& displayName);
     void setAvatarUrl(const QString& userId, const QString& avatarUrl);
@@ -491,6 +559,44 @@ signals:
     // are no longer a subset of @everyone's.
     void selfRoleFailed(const QString& roleId, int status, const QString& error);
 
+    // ── Account-data replies ──────────────────────────────────────────────
+    //
+    // `content` is the document verbatim. Nothing here interprets it: the one
+    // type this client writes is parsed by net/IgnoredUsers.h, and a type it
+    // does not know about must still round-trip byte-for-byte.
+    void accountDataResult(const QString& type, const QJsonObject& content);
+    // 404 — never written. See getAccountData for why this is not an error.
+    void accountDataAbsent(const QString& type);
+    void accountDataError(const QString& type,
+                          const bsfchat::net::MatrixFailure& failure);
+    // A PUT landed. `content` echoes what was STORED, so the caller adopts the
+    // document the server now holds rather than its own idea of it.
+    void accountDataStored(const QString& requestId, const QString& type,
+                           const QJsonObject& content);
+    void accountDataStoreError(const QString& requestId, const QString& type,
+                               const bsfchat::net::MatrixFailure& failure);
+
+    // ── Report replies ────────────────────────────────────────────────────
+    //
+    // Success carries nothing but the token: the server answers {} and there
+    // is no report id to show, on purpose — a reference number would imply a
+    // ticket the reporter can follow, and there is no such thing here.
+    void reportFiled(const QString& requestId);
+    // `failure` carries the wait for the 429 case, which is the ordinary
+    // refusal on these two endpoints.
+    void reportFailed(const QString& requestId,
+                      const bsfchat::net::MatrixFailure& failure);
+
+    // ── Deactivation reply ────────────────────────────────────────────────
+    //
+    // EVERY status the server answers arrives here, 401 included, with the
+    // parsed body. net/DeactivateFlow decides what each one means; splitting
+    // that decision across a success and an error signal is how a UIA
+    // challenge and a dead session would eventually be confused for each
+    // other. `body` is an empty object when the response did not parse.
+    void deactivateResponse(int status, const QJsonObject& body);
+    void deactivateTransportFailure(const QString& error);
+
     // Per-server nickname read-back. `nickname` is empty when the user has none —
     // the endpoint omits the key entirely rather than returning "", so empty here
     // unambiguously means "no nickname set".
@@ -557,6 +663,9 @@ private:
     // POST /_matrix/media/v3/ticket for one object, feeding the reply back
     // into m_mediaTickets. Driven by MediaTicketCache::mintRequested.
     void requestMediaTicket(const QString& mxcUri);
+    // The one reply handler both report endpoints share. See the definition
+    // for why it is one function and not two.
+    void wireReportReply(QNetworkReply* reply, const QString& requestId);
 
     QNetworkAccessManager m_nam;
     bsfchat::client::MediaTicketCache m_mediaTickets;

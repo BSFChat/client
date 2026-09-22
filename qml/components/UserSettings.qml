@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
+import QtQuick.Window
 import BSFChat
 
 Popup {
@@ -260,6 +261,65 @@ Popup {
 
         Item { Layout.fillHeight: true }
 
+        // ── Privacy and safety ──
+        //
+        // Both live here rather than in ClientSettings because both are
+        // per-ACCOUNT facts held by one server: the block list is account data
+        // on this homeserver, and deleting the account deletes it on this
+        // homeserver. ClientSettings is device preferences and neither of
+        // these is one. (See the header comments on both files.)
+        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
+
+        Button {
+            id: blockedUsersBtn
+            Layout.fillWidth: true
+            Layout.preferredHeight: 40
+            contentItem: RowLayout {
+                spacing: Theme.sp.s3
+                Icon {
+                    name: "lock"
+                    size: 14
+                    color: blockedUsersBtn.hovered ? Theme.fg0 : Theme.fg2
+                    Layout.leftMargin: Theme.sp.s4
+                }
+                Text {
+                    text: "Blocked accounts"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    font.weight: Theme.fontWeight.medium
+                    color: Theme.fg0
+                    Layout.fillWidth: true
+                    verticalAlignment: Text.AlignVCenter
+                }
+                Text {
+                    // Only once the list has been read. A "0" printed before
+                    // anything was fetched would be a claim, not a count —
+                    // there is no account_data in /sync, so an unfetched list
+                    // is unknown rather than empty.
+                    visible: serverManager.activeServer !== null
+                        && serverManager.activeServer.blockedUsersModel.loaded
+                    text: serverManager.activeServer
+                        ? serverManager.activeServer.blockedUsersModel.count : ""
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.sm
+                    color: Theme.fg3
+                    Layout.rightMargin: Theme.sp.s4
+                    verticalAlignment: Text.AlignVCenter
+                }
+            }
+            background: Rectangle {
+                color: blockedUsersBtn.hovered ? Theme.bg3 : Theme.bg2
+                radius: Theme.r2
+                border.color: Theme.line
+                border.width: 1
+                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+            }
+            onClicked: {
+                userSettings.close();
+                Window.window.openBlockedUsers();
+            }
+        }
+
         // Log Out — ghost danger pattern (matches role-delete button in
         // ServerSettings). Transparent on rest, fills danger on hover.
         Button {
@@ -293,6 +353,35 @@ Popup {
                 var idx = serverManager.activeServerIndex;
                 userSettings.close();
                 if (idx >= 0) serverManager.removeServer(idx);
+            }
+        }
+
+        // Delete account — App Store guideline 5.1.1(v). Quieter than Log out
+        // on purpose: it sits below it, in fg3 until hovered, because the
+        // control a user reaches for most often should not be the one next to
+        // the irreversible one shouting for attention. The confirmation, the
+        // list of what goes, and the fact that messages stay all live in
+        // DeleteAccountDialog — nothing is deleted by this click.
+        Button {
+            id: deleteAccountBtn
+            Layout.fillWidth: true
+            Layout.preferredHeight: 32
+            contentItem: Text {
+                text: "Delete account"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                font.weight: Theme.fontWeight.medium
+                color: deleteAccountBtn.hovered ? Theme.danger : Theme.fg3
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+            }
+            background: Rectangle {
+                color: "transparent"
+                radius: Theme.r2
+            }
+            onClicked: {
+                userSettings.close();
+                Window.window.openDeleteAccount();
             }
         }
     }

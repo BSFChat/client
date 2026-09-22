@@ -76,6 +76,17 @@ ApplicationWindow {
             // expectation when there's no active conversation.
             close.accepted = false;
             serverManager.setViewingDms(false);
+        } else if (reportDialogGlobal.opened) {
+            close.accepted = false;
+            reportDialogGlobal.close();
+        } else if (deleteAccountGlobal.opened) {
+            // Back cancels it, which also abandons any UIA challenge — see
+            // DeleteAccountDialog.onClosed. Nothing is deleted by leaving.
+            close.accepted = false;
+            deleteAccountGlobal.close();
+        } else if (blockedUsersGlobal.opened) {
+            close.accepted = false;
+            blockedUsersGlobal.close();
         } else if (clientSettingsGlobal.opened) {
             close.accepted = false;
             clientSettingsGlobal.close();
@@ -519,6 +530,17 @@ ApplicationWindow {
         parent: Overlay.overlay
     }
 
+    // ── Safety surfaces: block, report, delete account ──
+    //
+    // Mirrored from main.qml, name for name. These are the App Store gates
+    // (guideline 1.2 user-generated content, 5.1.1(v) account deletion) and
+    // this is the shell the stores actually review, so a helper that exists
+    // only on the desktop side would be a TypeError exactly where it matters
+    // most (U-C2).
+    ReportDialog        { id: reportDialogGlobal; parent: Overlay.overlay }
+    BlockedUsersDialog  { id: blockedUsersGlobal; parent: Overlay.overlay }
+    DeleteAccountDialog { id: deleteAccountGlobal; parent: Overlay.overlay }
+
     function openUserSettings()   { userSettingsGlobal.open(); }
     function openClientSettings() { clientSettingsGlobal.open(); }
     function openSearch()         { searchPopupGlobal.open(); }
@@ -534,6 +556,13 @@ ApplicationWindow {
     function openRoleAssignment(userId, displayName) {
         roleAssignGlobal.openFor(userId, displayName);
     }
+    // `kind` is "message" or "user". Kept name-for-name with main.qml so a
+    // call site written against one shell works in the other.
+    function openReportDialog(kind, userId, displayName, roomId, eventId, preview) {
+        reportDialogGlobal.openFor(kind, userId, displayName, roomId, eventId, preview);
+    }
+    function openBlockedUsers() { blockedUsersGlobal.open(); }
+    function openDeleteAccount() { deleteAccountGlobal.open(); }
 
     // showMemberList on mobile is always "the right drawer"; shim
     // the desktop-level property for components that peek at it.

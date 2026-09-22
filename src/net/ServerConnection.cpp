@@ -4,10 +4,12 @@
 #include "net/AuthError.h"
 #include "net/TokenedReply.h"
 #include "net/SnapshotGate.h"
+#include "net/IgnoredUsers.h"
 #include "net/MemberJson.h"
 #include "model/RoomListModel.h"
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
+#include "model/BlockedUsersModel.h"
 #include "model/BotAdminModel.h"
 #include "model/ChannelInviteModel.h"
 #include "model/SelfRoleModel.h"
@@ -347,6 +349,110 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             ++m_botFlagsGeneration;
             emit botFlagsChanged();
         }
+    });
+
+    // ── blocking ──────────────────────────────────────────────────────────
+    //
+    // The block list is a single account-data document. Everything about the
+    // round trip — building the full replacement, adopting what came back,
+    // rolling a refusal back — lives in the model; this wires it to the wire.
+    m_blockedUsersModel = new BlockedUsersModel(this);
+    m_blockedUsersModel->hooks.fetch = [this]() {
+        if (m_userId.isEmpty()) return;
+        m_client->getAccountData(m_userId,
+                                 QString(bsfchat::net::kIgnoredUserListType));
+    };
+    m_blockedUsersModel->hooks.store = [this](const QString& requestId,
+                                              const QJsonObject& document) {
+        if (m_userId.isEmpty()) return;
+        m_client->putAccountData(requestId, m_userId,
+                                 QString(bsfchat::net::kIgnoredUserListType),
+                                 document);
+    };
+    m_blockedUsersModel->setDisplayNameResolver([this](const QString& userId) {
+        // Empty for "nothing known", which is the common case here: the server
+        // filters a blocked account out of sync, so the name this client last
+        // saw may be months stale and the id is the honest thing to render.
+        const QString dn = m_userDisplayNames.value(userId);
+        return dn == userId ? QString() : dn;
+    });
+
+    connect(m_client, &MatrixClient::accountDataResult, this,
+            [this](const QString& type, const QJsonObject& content) {
+        if (type != bsfchat::net::kIgnoredUserListType) return;
+        m_blockedUsersModel->onDocument(content);
+    });
+    connect(m_client, &MatrixClient::accountDataAbsent, this,
+            [this](const QString& type) {
+        if (type != bsfchat::net::kIgnoredUserListType) return;
+        m_blockedUsersModel->onDocumentAbsent();
+    });
+    connect(m_client, &MatrixClient::accountDataError, this,
+            [this](const QString& type, const bsfchat::net::MatrixFailure& failure) {
+        if (type != bsfchat::net::kIgnoredUserListType) return;
+        m_blockedUsersModel->onFetchFailed(failure);
+    });
+    connect(m_client, &MatrixClient::accountDataStored, this,
+            [this](const QString& requestId, const QString& type,
+                   const QJsonObject& content) {
+        if (type != bsfchat::net::kIgnoredUserListType) return;
+        m_blockedUsersModel->onWriteStored(requestId, content);
+    });
+    connect(m_client, &MatrixClient::accountDataStoreError, this,
+            [this](const QString& requestId, const QString& type,
+                   const bsfchat::net::MatrixFailure& failure) {
+        if (type != bsfchat::net::kIgnoredUserListType) return;
+        m_blockedUsersModel->onWriteFailed(requestId, failure);
+    });
+    connect(m_blockedUsersModel, &BlockedUsersModel::blockChanged, this,
+            [this](const QString& userId, bool blocked) {
+        const QString name = displayNameForSender(userId);
+        emitFeedback(blocked
+                         ? tr("Blocked %1. You will not see their messages.").arg(name)
+                         : tr("Unblocked %1.").arg(name),
+                     QStringLiteral("success"));
+        // The server stops delivering a blocked account's events, but it does
+        // not retract the ones already in this client's models — an unblock
+        // likewise brings nothing back on its own. A full re-sync is far too
+        // blunt a hammer for a menu click, so the timeline is left alone and
+        // the toast says only what is true right now. The next initial sync
+        // (relaunch, or a switch away and back) is what reconciles it.
+    });
+
+    // ── reporting ─────────────────────────────────────────────────────────
+    connect(m_client, &MatrixClient::reportFiled, this,
+            &ServerConnection::reportFiled);
+    connect(m_client, &MatrixClient::reportFailed, this,
+            [this](const QString& requestId,
+                   const bsfchat::net::MatrixFailure& failure) {
+        // The 429 is the ordinary refusal on this endpoint, not an exception:
+        // it is per-account and it is what stops reporting being turned into a
+        // way to flood an administrator. It has to say the wait, or the user
+        // simply presses the button again and is refused again.
+        QString msg;
+        if (failure.isRateLimited()) {
+            msg = failure.retrySeconds() > 0
+                      ? tr("You have sent several reports just now — you can "
+                           "send another in %n second(s).", nullptr,
+                           failure.retrySeconds())
+                      : tr("You have sent several reports just now — try again "
+                           "shortly.");
+        } else if (m_auth.shouldSuppressSubsystemError()) {
+            msg = tr("Your session has expired. Sign in again to reconnect.");
+        } else {
+            msg = failure.message;
+        }
+        emit reportRejected(requestId, msg);
+    });
+
+    // ── account deletion ──────────────────────────────────────────────────
+    connect(m_client, &MatrixClient::deactivateResponse, this,
+            &ServerConnection::onDeactivateResponse);
+    connect(m_client, &MatrixClient::deactivateTransportFailure, this,
+            [this](const QString& error) {
+        m_deactivatePassword.clear();
+        m_deactivate.onTransportFailure(error);
+        emit accountDeletionChanged();
     });
 
     // Connect sync signals
@@ -840,6 +946,13 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
     emit connectionStatusChanged();
     startSync();
 
+    // The block list, once, here. It is the ONLY moment a session is
+    // guaranteed to learn it — /sync carries no account_data on this server,
+    // so nothing else will bring a block made on another device, or on this
+    // one before the app was last closed. Cheap: one GET of a document that
+    // is usually empty, on a path the session has just authenticated.
+    refreshBlockedUsers();
+
     // Persisted ids can be stale or corrupt (a doubled "@" once shipped
     // via a registration bug), and every self-identity comparison —
     // sync self-event filtering, voice mesh reconciliation, the member
@@ -884,6 +997,12 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
 #endif
             emit userIdChanged();
             emit identityCorrected();
+            // The block list is stored per user id and the GET above went out
+            // with the stale one, which the server answers 403 (account data
+            // is readable only by its owner). Ask again now that we know who
+            // we are, or this session shows an empty block list for the whole
+            // of its life.
+            refreshBlockedUsers();
         }, Qt::SingleShotConnection);
     m_client->whoami();
 }
@@ -1198,6 +1317,10 @@ void ServerConnection::disconnectFromServer()
     m_botUserIds.clear();
     m_botAdminModel->reset();
     m_selfRoleModel->reset();
+    // A block list belongs to one account on one server. A reconnect may be as
+    // a different account, and carrying the old list over would show one
+    // person's blocks under another person's name.
+    m_blockedUsersModel->reset();
     m_messageModel->refreshBotFlags();
 
     m_connected = false;
@@ -5036,6 +5159,130 @@ QString ServerConnection::membershipInRoom(const QString& roomId,
 QString ServerConnection::roomNameFor(const QString& roomId) const {
     if (roomId.isEmpty() || !m_roomListModel) return {};
     return m_roomListModel->roomDisplayName(roomId);
+}
+
+// ── Blocking ─────────────────────────────────────────────────────────────
+
+bool ServerConnection::isUserBlocked(const QString& userId) const
+{
+    return m_blockedUsersModel && m_blockedUsersModel->isBlocked(userId);
+}
+
+void ServerConnection::blockUser(const QString& userId)
+{
+    if (!m_blockedUsersModel) return;
+    // Re-stated on every call rather than once: whoami can correct our id
+    // after the connection is up, and a self-block check against the old one
+    // would be checking the wrong name.
+    m_blockedUsersModel->setSelfUserId(m_userId);
+    // The cold-start case — a block before the list has been read — is the
+    // model's to handle, and it defers rather than sends: a full-replacement
+    // PUT built from a list nobody has read would erase every block this
+    // account already had. See BlockedUsersModel::block.
+    m_blockedUsersModel->block(userId);
+}
+
+void ServerConnection::unblockUser(const QString& userId)
+{
+    if (!m_blockedUsersModel) return;
+    // No cold-start dance here: an unblock is only ever offered for a row the
+    // pane is already showing, so the list is loaded by construction.
+    m_blockedUsersModel->unblock(userId);
+}
+
+void ServerConnection::refreshBlockedUsers()
+{
+    if (!m_blockedUsersModel) return;
+    if (m_userId.isEmpty()) return;
+    m_blockedUsersModel->setSelfUserId(m_userId);
+    m_blockedUsersModel->refresh();
+}
+
+// ── Reporting ────────────────────────────────────────────────────────────
+
+void ServerConnection::reportMessage(const QString& requestId, const QString& roomId,
+                                     const QString& eventId, const QString& reason)
+{
+    if (roomId.isEmpty() || eventId.isEmpty()) {
+        emit reportRejected(requestId, tr("That message is no longer available."));
+        return;
+    }
+    m_client->reportEvent(requestId, roomId, eventId, reason);
+}
+
+void ServerConnection::reportUser(const QString& requestId, const QString& userId,
+                                  const QString& reason)
+{
+    if (userId.isEmpty()) {
+        emit reportRejected(requestId, tr("No account was named."));
+        return;
+    }
+    m_client->reportUser(requestId, userId, reason);
+}
+
+// ── Account deletion ─────────────────────────────────────────────────────
+
+void ServerConnection::beginAccountDeletion()
+{
+    // The caller has already confirmed. For an identity-provider account this
+    // request IS the deletion — there is no second gate. See the header.
+    if (!m_deactivate.begin()) return;
+    emit accountDeletionChanged();
+    m_client->deactivateAccount(QJsonObject());
+}
+
+void ServerConnection::submitAccountDeletionPassword(const QString& password)
+{
+    if (!m_deactivate.submitPassword()) return;
+    m_deactivatePassword = password;
+    emit accountDeletionChanged();
+    m_client->deactivateAccount(m_deactivate.authObject(password));
+}
+
+void ServerConnection::cancelAccountDeletion()
+{
+    m_deactivatePassword.clear();
+    m_deactivate.reset();
+    emit accountDeletionChanged();
+}
+
+void ServerConnection::onDeactivateResponse(int status, const QJsonObject& body)
+{
+    const auto outcome = m_deactivate.onReply(status, body);
+    switch (outcome) {
+    case bsfchat::net::DeactivateOutcome::Ignored:
+        return;
+
+    case bsfchat::net::DeactivateOutcome::PasswordRequired:
+        emit accountDeletionChanged();
+        emit accountDeletionPasswordRequired();
+        return;
+
+    case bsfchat::net::DeactivateOutcome::PasswordRejected:
+    case bsfchat::net::DeactivateOutcome::Failed:
+        // The credential does not outlive the request it was typed for, on
+        // either branch. A rejected password is still a password.
+        m_deactivatePassword.clear();
+        emit accountDeletionChanged();
+        return;
+
+    case bsfchat::net::DeactivateOutcome::Succeeded:
+        break;
+    }
+
+    m_deactivatePassword.clear();
+
+    // The account no longer exists, so every one of these is now pointing at
+    // nothing: the token has been revoked server-side, sync would 401 on its
+    // next poll, and the models describe rooms this account has been removed
+    // from. Torn down HERE rather than left to ServerManager's removal so a
+    // slow removal cannot leave a poll in flight against a dead account.
+    disconnectFromServer();
+    m_accessToken.clear();
+    m_client->setAccessToken(QString());
+
+    emit accountDeletionChanged();
+    emit accountDeactivated(m_serverUrl);
 }
 
 void ServerConnection::kickFromServer(const QString& userId, const QString& reason) {

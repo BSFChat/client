@@ -561,6 +561,22 @@ void ServerManager::wireConnection(ServerConnection* conn)
             m_settings->updateServer(idx, entry);
         });
 
+    // The account this connection was for no longer exists. Nothing is left to
+    // reconnect to, so the entry goes — credential and all. Wired here rather
+    // than left to the dialog because a sidebar entry for a deleted account is
+    // a login prompt that can never be satisfied, and because the CONNECTION
+    // does not know its own index.
+    connect(conn, &ServerConnection::accountDeactivated, this,
+        [this, conn](const QString&) {
+            const int idx = m_roster.indexOf(conn);
+            if (idx < 0) return;
+            // remove() retires the connection, so nothing below may touch
+            // `conn`. m_roster.remove is also what clears the persisted entry
+            // (see ServerRoster::remove and its hooks) — the same path the
+            // user's own "remove server" takes, which is what this now is.
+            m_roster.remove(idx);
+        });
+
     // Re-auth needs a sidebar index to be actionable from QML; the
     // connection does not know its own.
     connect(conn, &ServerConnection::reauthPasswordRequired, this,
