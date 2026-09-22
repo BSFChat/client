@@ -882,6 +882,383 @@ jobs:
         # test_media_loopback: non-gating on hosted runners, see the Test step above.
         run: ctest --test-dir build-asan --output-on-failure -j4 -E test_media_loopback
 
+  # === iOS: device archive → .ipa → TestFlight ===
+  #
+  # A separate job rather than a fourth entry in the `build` matrix: it
+  # shares almost none of that job's steps. It needs TWO Qt installs
+  # (target + host), the Xcode generator instead of Ninja, no ctest (the
+  # test targets are host binaries), and a signing/packaging path with
+  # nothing in common with .dmg or NSIS.
+  #
+  # This job used to carry continue-on-error: true, on the grounds that
+  # brand-new iOS CI going red should not block a desktop release. That
+  # was not what it did. continue-on-error at JOB level does not mark
+  # the job as a warning — it makes the whole WORKFLOW RUN conclude
+  # "success" while the job shows a red X, so run 35764752126 reported
+  # green with the iOS build failing outright. A release gated on "main's
+  # CI is green" would have sailed straight past it, which is worse than
+  # the problem it was there to avoid. Removed now that the job passes;
+  # do not put it back — if iOS needs to stop gating, drop the job from
+  # the required set instead, where it is visible.
+  ios:
+    name: iOS (archive + TestFlight)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Same grammar as the build job's "Derive version", plus one extra
+      # output. CFBundleVersion must STRICTLY INCREASE across uploads
+      # for a given CFBundleShortVersionString, and a number is burned
+      # permanently even by an upload that is later rejected — so M.N.P
+      # cannot serve as the build number (re-cutting v0.0.52 after a
+      # rejected upload would collide). github.run_number is monotonic
+      # per repository and never reused.
+      - name: Derive version
+        id: version
+        shell: bash
+        run: |
+          REF="${GITHUB_REF_NAME:-}"
+          if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            VER="${REF#v}"
+          else
+            LAST=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+            LAST="${LAST#v}"
+            VER="${LAST}-dev.$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "build_number=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "BSFChat iOS: $VER (CFBundleVersion=${GITHUB_RUN_NUMBER})"
+
+      # Qt for iOS cannot build alone: everything that runs at BUILD
+      # time (moc, rcc, qmlimportscanner, qmlcachegen) is host code, and
+      # the iOS package ships target libraries only. So the macOS
+      # desktop package goes in first and is handed over as QT_HOST_PATH.
+      # set-env: false keeps it out of QT_ROOT_DIR so the iOS install
+      # below wins that variable.
+      - name: Install Qt (host, macOS)
+        uses: jurplel/install-qt-action@v4
+        with:
+          # Lockstep with the build job's pin — see the long note there
+          # for why 6.10.3 and not 6.8 LTS or 6.11. scripts/build-ios.sh
+          # is pinned to the same version for the same reason.
+          version: '6.10.3'
+          host: mac
+          target: desktop
+          arch: clang_64
+          modules: 'qtmultimedia'
+          cache: true
+          set-env: false
+          dir: ${{ runner.temp }}/qt-host
+
+      - name: Install Qt (target, iOS)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.10.3'
+          host: mac
+          target: ios
+          modules: 'qtmultimedia'
+          cache: true
+          dir: ${{ runner.temp }}/qt-ios
+
+      - name: Install build dependencies
+        run: |
+          # Same CMake pin as the macOS job — libdatachannel's vendored
+          # deps still trip CMake 4's cmake_minimum_required floor, and
+          # the pin costs nothing here.
+          pip3 install --break-system-packages cmake==3.30.5
+
+      # OpenSSL for iOS is NOT optional, whatever BSFCHAT_ENABLE_VOICE
+      # says. bsfchat_protocol's cmake/Dependencies.cmake opens with an
+      # unconditional find_package(OpenSSL REQUIRED) — jwt-cpp needs it —
+      # and the client always pulls the protocol library in. So the
+      # configure died at "Could NOT find OpenSSL" long before any
+      # voice-gated code was reached. (scripts/build-ios.sh had the same
+      # wrong assumption and has been corrected to match.)
+      #
+      # Cached on the script's own contents: it pins the OpenSSL version,
+      # so a bump changes the hash and a rebuild happens automatically,
+      # while an unchanged script costs ~10s instead of ~10 minutes of
+      # cross-compiling on every run.
+      # restore + save rather than actions/cache, because that action's
+      # implicit save runs as a POST step and is skipped when the job
+      # fails — so a run that spent ten minutes cross-compiling OpenSSL
+      # and then failed at the compile step threw it away and paid for
+      # it again next time. Saving inline, right after a successful
+      # build, keeps it whatever the rest of the job does.
+      - name: Restore vendored OpenSSL for iOS
+        id: openssl_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: deps/openssl-ios-device
+          key: openssl-ios-device-${{ hashFiles('scripts/build-openssl-ios.sh') }}
+
+      - name: Build vendored OpenSSL for iOS
+        if: steps.openssl_cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-openssl-ios.sh device
+
+      - name: Save vendored OpenSSL for iOS
+        if: steps.openssl_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: deps/openssl-ios-device
+          key: openssl-ios-device-${{ hashFiles('scripts/build-openssl-ios.sh') }}
+
+      # === iOS: Import the Apple Distribution certificate ===
+      #
+      # Same hand-rolled temporary-keychain pattern as the macOS step
+      # above, with two differences. The identity must be "Apple
+      # Distribution" — a Developer ID certificate signs software
+      # distributed OUTSIDE the store and cannot sign an App Store
+      # build, so reusing MACOS_CERTIFICATE here will not work. And the
+      # whole thing soft-fails: without the secrets the job still
+      # compiles the iOS binary, which is the part that regresses, and
+      # skips archive/export/upload.
+      - name: Import iOS signing certificate
+        id: signing
+        env:
+          IOS_DIST_CERTIFICATE: ${{ secrets.IOS_DIST_CERTIFICATE }}
+          IOS_DIST_CERTIFICATE_PWD: ${{ secrets.IOS_DIST_CERTIFICATE_PWD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$IOS_DIST_CERTIFICATE" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "::notice::IOS_DIST_CERTIFICATE / APPLE_TEAM_ID not set —" \
+                 "compiling unsigned, skipping archive and TestFlight upload."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          KEYCHAIN_PATH=$RUNNER_TEMP/ios-signing.keychain-db
+          KEYCHAIN_PWD=$(openssl rand -hex 16)
+          security create-keychain -p "$KEYCHAIN_PWD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PWD" $KEYCHAIN_PATH
+          echo "$IOS_DIST_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/ios_dist.p12
+          security import $RUNNER_TEMP/ios_dist.p12 -P "$IOS_DIST_CERTIFICATE_PWD" \
+            -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PWD" $KEYCHAIN_PATH
+          security list-keychains -d user -s $KEYCHAIN_PATH login.keychain-db
+          rm -f $RUNNER_TEMP/ios_dist.p12
+          IDENTITY=$(security find-identity -v -p codesigning $KEYCHAIN_PATH \
+            | grep "Apple Distribution" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No 'Apple Distribution' identity in IOS_DIST_CERTIFICATE." \
+                 "A Developer ID or Apple Development certificate cannot sign an App Store build."
+            exit 1
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
+          echo "Signing identity: $IDENTITY"
+
+      # === iOS: Materialise the App Store Connect API key ===
+      #
+      # One key does two jobs. xcodebuild -allowProvisioningUpdates uses
+      # it to create and download the App Store provisioning profile on
+      # the fly, so there is NO .mobileprovision secret to rotate every
+      # twelve months; and iTMSTransporter uses it to authenticate the
+      # upload. It lands in ~/.appstoreconnect/private_keys, which is
+      # where Transporter looks for it by convention, under the exact
+      # AuthKey_<KEYID>.p8 name both tools require.
+      #
+      # The .p8 can only be downloaded once from App Store Connect, so
+      # it lives in the secret base64-encoded.
+      - name: Prepare App Store Connect API key
+        id: asc
+        if: steps.signing.outputs.available == 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY_BASE64: ${{ secrets.ASC_PRIVATE_KEY_BASE64 }}
+        run: |
+          if [ -z "$ASC_KEY_ID" ] || [ -z "$ASC_ISSUER_ID" ] \
+             || [ -z "$ASC_PRIVATE_KEY_BASE64" ]; then
+            echo "::notice::App Store Connect API key secrets not set —" \
+                 "archive will need a manually-installed profile, no TestFlight upload."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          echo "$ASC_PRIVATE_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          echo "ASC_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      # -G Xcode, not Ninja: `xcodebuild archive` needs a real Xcode
+      # project and the whole codesign/export path is driven through
+      # xcodebuild. This mirrors scripts/build-ios.sh, which is the
+      # hand-driven version of the same configure.
+      #
+      # BSFCHAT_ENABLE_VOICE defaults OFF on iOS (CMakeLists.txt) — the
+      # libdatachannel/opus/capture plumbing is not ported — so this
+      # configure needs no openh264 and no libaom. It DOES need OpenSSL
+      # regardless: bsfchat_protocol requires it unconditionally for
+      # jwt-cpp (see the vendoring step above). Turning voice on for iOS
+      # is therefore only a matter of the capture plumbing AND
+      # revisiting UIBackgroundModes in ios/Info.plist.in.
+      #
+      # The OPENSSL_* triple is passed explicitly rather than relying on
+      # OPENSSL_ROOT_DIR alone: under the iOS toolchain CMake's
+      # find_library is confined to the sysroot, so a root hint pointing
+      # at deps/ would be searched and skipped.
+      #
+      # CMAKE_XCODE_GENERATE_SCHEME=ON because every xcodebuild call
+      # below drives the project by `-scheme bsfchat-app`, and CMake's
+      # Xcode generator writes no .xcscheme files unless asked.
+      - name: Configure (iOS device)
+        run: |
+          export PATH="$HOME/Library/Python/3.12/bin:$HOME/Library/Python/3.13/bin:$PATH"
+          OPENSSL_IOS="$GITHUB_WORKSPACE/deps/openssl-ios-device"
+          "$QT_ROOT_DIR/bin/qt-cmake" -B build-ios -G Xcode -Wno-dev \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DGAMECHAT_CLIENT_BUILD_TESTS=OFF \
+            -DBSFCHAT_VERSION="${{ steps.version.outputs.version }}" \
+            -DBSFCHAT_BUNDLE_ID=com.bsfchat.app \
+            -DBSFCHAT_BUILD_NUMBER="${{ steps.version.outputs.build_number }}" \
+            -DQT_HOST_PATH="${{ runner.temp }}/qt-host/Qt/6.10.3/macos" \
+            -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
+            -DCMAKE_XCODE_GENERATE_SCHEME=ON \
+            -DOPENSSL_ROOT_DIR="$OPENSSL_IOS" \
+            -DOPENSSL_INCLUDE_DIR="$OPENSSL_IOS/include" \
+            -DOPENSSL_CRYPTO_LIBRARY="$OPENSSL_IOS/lib/libcrypto.a" \
+            -DOPENSSL_SSL_LIBRARY="$OPENSSL_IOS/lib/libssl.a"
+
+      # We deliberately pass no -DCMAKE_OSX_DEPLOYMENT_TARGET: Qt's own
+      # toolchain picks it, so the floor we declare always matches what
+      # Qt's objects were actually built for. That does mean a Qt
+      # upgrade can move the minimum iOS version under us — and raising
+      # it drops devices — so print it here, where a diff in the log
+      # makes the change visible instead of silent.
+      - name: Report iOS deployment target
+        run: |
+          TARGET=$(grep -m1 '^CMAKE_OSX_DEPLOYMENT_TARGET:' build-ios/CMakeCache.txt | cut -d= -f2)
+          echo "Minimum iOS version (chosen by the Qt toolchain): ${TARGET:-<unset>}"
+          echo "iOS deployment target: ${TARGET:-<unset>}" >> "$GITHUB_STEP_SUMMARY"
+
+      # Compile-only gate. Runs on fork PRs where no secrets exist, so
+      # it must not need an identity — CODE_SIGNING_ALLOWED=NO turns the
+      # signing phase off entirely. This is the step that catches
+      # "someone added a macOS-only source file to the shared target
+      # again", which is the failure this whole job exists to prevent.
+      - name: Build (unsigned compile check)
+        if: steps.signing.outputs.available != 'true'
+        run: |
+          xcodebuild build -quiet \
+            -project build-ios/bsfchat-client.xcodeproj \
+            -scheme bsfchat-app \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Archive
+        if: steps.signing.outputs.available == 'true'
+        run: |
+          AUTH=()
+          if [ "${{ steps.asc.outputs.available }}" = "true" ]; then
+            AUTH=(-allowProvisioningUpdates
+                  -authenticationKeyPath "$ASC_KEY_PATH"
+                  -authenticationKeyID "${{ secrets.ASC_KEY_ID }}"
+                  -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}")
+          fi
+          xcodebuild archive -quiet \
+            -project build-ios/bsfchat-client.xcodeproj \
+            -scheme bsfchat-app \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/BSFChat.xcarchive" \
+            DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
+            CODE_SIGN_STYLE=Automatic \
+            "${AUTH[@]}"
+
+      # Check the artefact, not the source — same reasoning as the
+      # macOS bundle's PlistBuddy guard in CMakeLists.txt. These two
+      # keys fail LATE and expensively: a missing export-compliance
+      # declaration turns every upload into a manual questionnaire, and
+      # a bundle id that fell back to the .dev default uploads to an app
+      # record that does not exist, after the archive has already cost
+      # twenty minutes.
+      - name: Verify archived Info.plist
+        if: steps.signing.outputs.available == 'true'
+        run: |
+          APP="$RUNNER_TEMP/BSFChat.xcarchive/Products/Applications/bsfchat-app.app"
+          /usr/libexec/PlistBuddy -c "print ITSAppUsesNonExemptEncryption" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "print NSMicrophoneUsageDescription" "$APP/Info.plist" > /dev/null
+          /usr/libexec/PlistBuddy -c "print NSLocalNetworkUsageDescription" "$APP/Info.plist" > /dev/null
+          ID=$(/usr/libexec/PlistBuddy -c "print CFBundleIdentifier" "$APP/Info.plist")
+          test "$ID" = "com.bsfchat.app" \
+            || { echo "::error::bundle id is '$ID', expected com.bsfchat.app"; exit 1; }
+          # The asset catalog has to have COMPILED, not merely been
+          # listed as a source: an iOS bundle with no CFBundleIconName
+          # is rejected by the upload validator (ITMS-90713) with no
+          # other symptom.
+          /usr/libexec/PlistBuddy -c "print CFBundleIconName" "$APP/Info.plist"
+
+      - name: Export .ipa
+        if: steps.signing.outputs.available == 'true'
+        run: |
+          # ExportOptions is templated rather than committed complete:
+          # the team id is the one account-specific value in it.
+          sed "s/@APPLE_TEAM_ID@/${{ secrets.APPLE_TEAM_ID }}/" \
+            ios/ExportOptions.plist.in > "$RUNNER_TEMP/ExportOptions.plist"
+          AUTH=()
+          if [ "${{ steps.asc.outputs.available }}" = "true" ]; then
+            AUTH=(-allowProvisioningUpdates
+                  -authenticationKeyPath "$ASC_KEY_PATH"
+                  -authenticationKeyID "${{ secrets.ASC_KEY_ID }}"
+                  -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}")
+          fi
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/BSFChat.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            "${AUTH[@]}"
+          # The .ipa is named after the product, not the scheme; resolve
+          # it rather than guessing, and fail loudly if export produced
+          # nothing (exportArchive can exit 0 having written only logs).
+          IPA=$(find "$RUNNER_TEMP/export" -name '*.ipa' | head -1)
+          test -n "$IPA" || { echo "::error::no .ipa produced by exportArchive"; exit 1; }
+          echo "IPA_PATH=$IPA" >> "$GITHUB_ENV"
+          ls -la "$RUNNER_TEMP/export"
+
+      - name: Upload .ipa artifact
+        if: steps.signing.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BSFChat-iOS
+          path: ${{ runner.temp }}/export/*.ipa
+
+      # Tags only. A TestFlight build number is consumed permanently on
+      # upload, so uploading from every main push would burn the numbers
+      # and fill the tester-facing build list with noise.
+      #
+      # iTMSTransporter, not `xcrun altool --upload-app`: altool's
+      # upload path is deprecated and has regressed in recent Xcode
+      # (it fails to open the package), while Transporter ships with
+      # Xcode, is Apple's supported route, and reads the same
+      # ~/.appstoreconnect/private_keys/AuthKey_<ID>.p8 that the
+      # archive step already uses. No third-party action, one secret.
+      - name: Upload to TestFlight
+        if: >-
+          startsWith(github.ref, 'refs/tags/v')
+          && steps.signing.outputs.available == 'true'
+          && steps.asc.outputs.available == 'true'
+        run: |
+          xcrun iTMSTransporter -m upload \
+            -assetFile "$IPA_PATH" \
+            -apiKey "${{ secrets.ASC_KEY_ID }}" \
+            -apiIssuer "${{ secrets.ASC_ISSUER_ID }}" \
+            -v informational
+
+      # Runs even when an earlier step failed: the decoded .p8 is a
+      # long-lived App Store Connect credential and must not survive on
+      # a runner, however the job ended.
+      - name: Remove App Store Connect API key
+        if: always()
+        run: rm -rf "$HOME/.appstoreconnect/private_keys"
+
   # Create GitHub Release on tag push
   release:
     needs: build

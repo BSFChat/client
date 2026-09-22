@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for `xcodebuild -exportArchive`, consumed by the `ios` job in
+  .github/workflows/ci.yml. @APPLE_TEAM_ID@ is substituted from the
+  APPLE_TEAM_ID secret — the one account-specific value in here, which
+  is why this is a .in rather than a finished file.
+
+  A local export can use it the same way:
+    sed "s/@APPLE_TEAM_ID@/ABCDE12345/" ios/ExportOptions.plist.in > /tmp/eo.plist
+-->
+<plist version="1.0">
+<dict>
+	<!-- "app-store-connect" is the current spelling; Xcode 15.3 and
+	     earlier called it "app-store". Xcode still accepts the old name
+	     but warns, and only this method produces an .ipa that App Store
+	     Connect will take — "development" or "ad-hoc" archives are
+	     signed with the wrong profile type and are rejected on upload. -->
+	<key>method</key>
+	<string>app-store-connect</string>
+
+	<key>teamID</key>
+	<string>@APPLE_TEAM_ID@</string>
+
+	<!-- Automatic: Xcode mints/downloads the App Store provisioning
+	     profile itself, using the App Store Connect API key that the CI
+	     job passes via -authenticationKeyPath. The alternative is a
+	     base64 .mobileprovision secret that silently expires once a
+	     year; this has nothing to rotate. -->
+	<key>signingStyle</key>
+	<string>automatic</string>
+
+	<!-- Bitcode has been dead since Xcode 14 and an archive that still
+	     carries it is rejected. Explicit rather than relying on the
+	     default so a future Xcode cannot change it under us. -->
+	<key>uploadBitcode</key>
+	<false/>
+
+	<!-- Upload the dSYMs so App Store Connect can symbolicate crash
+	     reports from testers. This is the ONLY diagnostic channel the
+	     client has — there is no crash reporter and no telemetry in the
+	     app (deliberately), so a TestFlight crash log is all anyone
+	     will ever get. It is also not "data collection" for privacy
+	     nutrition-label purposes: Apple gathers it, we never do. -->
+	<key>uploadSymbols</key>
+	<true/>
+
+	<!-- Keep the app thinned for all device variants rather than
+	     producing a single fat binary. -->
+	<key>thinning</key>
+	<string>&lt;thin-for-all-variants&gt;</string>
+
+	<!-- Do not let Xcode silently downgrade the bundle id or strip
+	     entitlements it does not recognise. -->
+	<key>manageAppVersionAndBuildNumber</key>
+	<false/>
+</dict>
+</plist>

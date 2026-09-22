@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  BSFChat's iOS launch screen.
+
+  Committed rather than left to Qt's generated default, because
+  UILaunchStoryboardName in ios/Info.plist.in names it and a bundle that
+  names a storyboard it does not contain launches letterboxed at a
+  legacy screen size — which is both visibly broken and, on a modern
+  iPhone, the first thing an App Review screenshot catches.
+
+  Deliberately just a flat fill in Theme.bg1 (#121417, the dark-theme
+  window background from qml/theme/Theme.qml:66). A launch screen is a
+  static image of the app's first frame, not a splash screen: Apple's
+  HIG is explicit that it must not carry a logo, a title, a spinner or
+  any text, and QML has not started rendering yet when it is shown. The
+  colour is fixed rather than light/dark-aware on purpose — the app
+  itself does not follow the system appearance either (Theme.isDark).
+-->
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="22505" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
+    <dependencies>
+        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="22504"/>
+        <capability name="Safe area layout guides" minToolsVersion="9.0"/>
+        <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
+    </dependencies>
+    <scenes>
+        <scene sceneID="EHf-IW-A2E">
+            <objects>
+                <viewController id="01J-lp-oVM" sceneMemberID="viewController">
+                    <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
+                        <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+                        <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                        <color key="backgroundColor" red="0.07058823529411765" green="0.07843137254901961" blue="0.09019607843137255" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                        <viewLayoutGuide key="safeArea" id="6Tk-OE-BBY"/>
+                    </view>
+                </viewController>
+                <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" userLabel="First Responder" sceneMemberID="firstResponder"/>
+            </objects>
+            <point key="canvasLocation" x="53" y="375"/>
+        </scene>
+    </scenes>
+</document>

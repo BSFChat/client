@@ -28,6 +28,16 @@ deps/
 *.aab
 *.keystore
 
+# iOS signing material and archives. The .p8 App Store Connect key in
+# particular is downloadable exactly once and grants upload rights to
+# the whole team — it lives in a GitHub secret (see docs/ios-release.md),
+# never on disk here. Archives and .ipas are build output.
+*.ipa
+*.xcarchive/
+*.p12
+*.p8
+*.mobileprovision
+
 # macOS iconset is an intermediate dir consumed by iconutil to produce
 # branding/BSFChat.icns — regenerate with branding/generate_icons.py.
 branding/BSFChat.iconset/

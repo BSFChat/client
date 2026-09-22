@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The iOS bundle's Info.plist, as a SOURCE file.
+
+  It replaces the old ios/Info.plist, which was never actually used:
+  scripts/build-ios.sh passed it as -DMACOSX_BUNDLE_INFO_PLIST=..., a
+  cache variable, while CMakeLists.txt set the same name as a TARGET
+  PROPERTY inside a bare `if(APPLE)` — and a target property beats a
+  cache variable. Every iOS build therefore shipped macos/Info.plist.in:
+  NSPrincipalClass=NSApplication, NSScreenCaptureUsageDescription, an
+  .icns reference, and none of LSRequiresIPhoneOS /
+  UILaunchStoryboardName / UISupportedInterfaceOrientations. That plist
+  cannot be uploaded to App Store Connect.
+
+  The same V-H4 rule as macOS applies here and is the reason this is a
+  file and not a POST_BUILD edit: Qt decides at CONFIGURE time whether
+  to link the static QDarwinMicrophonePermission / QDarwinCameraPermission
+  backends, by running PlistBuddy over the file named by
+  MACOSX_BUNDLE_INFO_PLIST. No usage-description key in this file at
+  configure time means no plugin, which means every permission query
+  answers Denied with no iOS prompt — and on iOS, unlike macOS, there is
+  not even a Settings pane entry for the user to flip, because the app
+  never asked. Nothing may go back to injecting these afterwards.
+
+  @VAR@ placeholders are substituted by CMakeLists.txt's own
+  configure_file(... @ONLY), from same-named variables.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>BSFChat</string>
+	<key>CFBundleExecutable</key>
+	<string>@MACOSX_BUNDLE_EXECUTABLE_NAME@</string>
+	<key>CFBundleIdentifier</key>
+	<string>@MACOSX_BUNDLE_GUI_IDENTIFIER@</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>BSFChat</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+
+	<!-- Marketing version: what testers and the store listing show.
+	     Must be M.N.P with no -rc suffix; Apple rejects anything else. -->
+	<key>CFBundleShortVersionString</key>
+	<string>@MACOSX_BUNDLE_SHORT_VERSION_STRING@</string>
+	<!-- Build number. Must strictly increase for every upload against a
+	     given CFBundleShortVersionString, and a number is burned even by
+	     an upload that is later rejected — so CI overrides this with the
+	     workflow run number (-DBSFCHAT_BUILD_NUMBER=). Locally it falls
+	     back to the version, which is fine because local builds never
+	     reach App Store Connect. -->
+	<key>CFBundleVersion</key>
+	<string>@BSFCHAT_IOS_BUNDLE_VERSION@</string>
+
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<!-- The chat layout has no upside-down variant worth having and
+	     iPhone never auto-rotates to it anyway; listing it would only
+	     matter on iPad, which we do not target (TARGETED_DEVICE_FAMILY=1
+	     in CMakeLists.txt). -->
+
+	<!-- ===== TCC usage descriptions =====
+	     Apple rejects boilerplate here ("needs microphone access"): the
+	     string has to name the feature and why it needs the hardware.
+	     Each one is also the switch that makes Qt link the matching
+	     permission plugin; see the note at the top of this file. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>BSFChat uses your microphone so other people in a voice channel can hear you speak. Your microphone is only active while you are connected to a voice channel, and muting stops it.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>BSFChat uses your camera so you can turn your video on in a voice channel. The camera is only active while you choose to share video.</string>
+
+	<!-- Local network. BSFChat is self-hosted: people routinely point it
+	     at a server on their own LAN ("192.168.1.10:8448", a hostname
+	     ending in .local, or a box running on the same machine). Since
+	     iOS 14 any direct connection to a local-network address raises
+	     the local-network prompt, and without this key iOS shows a
+	     generic one and the connection is refused outright on the
+	     stricter releases.
+
+	     This becomes MANDATORY rather than merely correct as soon as
+	     BSFCHAT_ENABLE_VOICE is turned on for iOS: voice is a
+	     peer-to-peer mesh (src/voice/IVoiceTransport.h) whose ICE agent
+	     gathers host candidates — the device's own LAN address — and
+	     connects to peers directly unless the relay-only policy is in
+	     force (src/voice/VoiceEngine.cpp buildRtcConfig).
+
+	     Deliberately NOT declared: NSBonjourServices. There is no mDNS,
+	     Bonjour, multicast or broadcast discovery anywhere in the client
+	     — no QUdpSocket at all — so listing a service type would be a
+	     declaration we do not use. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>BSFChat connects to the chat server you choose. Allow local network access if your server runs on this network — for example a server on your home or office LAN — so BSFChat can reach it.</string>
+
+	<!-- App Transport Security.
+	     NSAllowsLocalNetworking permits plain http:// ONLY to
+	     local-network destinations (private IPv4 ranges, link-local,
+	     .local names and unqualified hostnames). Public hosts still
+	     require HTTPS. This is the key Apple explicitly does not ask you
+	     to justify, unlike NSAllowsArbitraryLoads — which must never be
+	     added here.
+
+	     It is needed because a self-hosted server on a LAN commonly has
+	     no publicly-trusted certificate, and the login field accepts
+	     http:// exactly and only for that case (see normaliseServerUrl
+	     in src/net/ServerDiscovery.cpp, and the "http://localhost:8448"
+	     placeholder in qml/components/LoginDialog.qml). Without this,
+	     every LAN server is unreachable from the iOS build with an
+	     error that looks like the server being down. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+
+	<!-- ===== Export compliance =====
+	     Set explicitly so App Store Connect stops asking the encryption
+	     questionnaire on EVERY upload, which is what turns a five-minute
+	     TestFlight push into a manual gate.
+
+	     YES, not NO, and the reasoning matters because a wrong answer
+	     here is a declaration to the US government, not just to Apple:
+
+	     Apple's exemption is for apps whose encryption is the operating
+	     system's own (URLSession/Network.framework doing HTTPS). BSFChat
+	     does not stay inside that line. The voice/video path is DTLS-SRTP
+	     from libdatachannel with its vendored libsrtp, built against the
+	     OpenSSL we cross-compile ourselves into deps/openssl-ios-* (see
+	     cmake/Dependencies.cmake and scripts/build-openssl-ios.sh). That
+	     is "industry-standard algorithms, not provided by Apple's OS",
+	     which is the non-exempt column in Apple's own table — not the
+	     proprietary column, so no CCATS is required, only the French
+	     encryption declaration and only for distribution in France.
+
+	     Note that BSFCHAT_ENABLE_VOICE is currently OFF for iOS, so the
+	     FIRST submitted build genuinely links no crypto but Apple's.
+	     The declaration is still YES on purpose: the day voice is turned
+	     on for iOS the answer changes, and an export-compliance answer
+	     that silently goes stale between releases is precisely the
+	     failure mode this key exists to prevent. YES is never a false
+	     statement; NO would become one without anyone editing this file.
+
+	     Once Apple has reviewed the uploaded documentation it issues a
+	     code — add it here as ITSEncryptionExportComplianceCode and the
+	     questionnaire disappears for good. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<true/>
+
+	<!-- Invite links. bsfchat://invite/... is delivered to the same
+	     QFileOpenEvent filter as on macOS (src/core/UrlHandler.cpp);
+	     without this the OS has nothing to route the scheme to and every
+	     invite link a tester taps does nothing. Mirrors the
+	     CFBundleURLTypes block in macos/Info.plist.in. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.bsfchat.url</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>bsfchat</string>
+			</array>
+		</dict>
+	</array>
+
+	<!-- ===== Deliberately absent, with reasons =====
+
+	     UIBackgroundModes: NOT declared, and this is a considered "no",
+	     not an oversight.
+	       * "voip" is rejected on sight for an app that never registers
+	         a PKPushRegistry. There is no PushKit, no CallKit and no APNs
+	         anywhere in the client; notifications are local-only
+	         (src/core/NotificationManager.h).
+	       * "audio" is only legitimate for an app that actually keeps
+	         playing or capturing while backgrounded. Voice is compiled
+	         out of the iOS target today (BSFCHAT_ENABLE_VOICE=OFF in
+	         CMakeLists.txt), so declaring it would be an unused
+	         background mode — itself a rejection reason.
+	     When voice is enabled for iOS, add exactly <array><string>audio
+	     </string></array> here, together with an AVAudioSession category
+	     of playAndRecord — nothing in the tree configures AVAudioSession
+	     today, so a backgrounded call would be silenced by the OS. Only
+	     add "voip" alongside a real PushKit + CallKit integration.
+
+	     NSPhotoLibraryUsageDescription / NSPhotoLibraryAddUsageDescription:
+	     not declared because nothing touches the photo library. Both
+	     attachment and avatar pickers are FileDialog
+	     (qml/components/MessageInput.qml, UserSettings.qml), which maps
+	     to UIDocumentPickerViewController — the Files app, no usage
+	     string needed — and downloaded media is only ever written to the
+	     app's own cache directory (src/core/MediaDownloader.cpp), never
+	     to the camera roll. Adding a photo-library picker later means
+	     adding the key AND the code path; iOS users will expect it.
+
+	     NSScreenCaptureUsageDescription: macOS-only key. Screen sharing
+	     on iOS needs ReplayKit and a Broadcast Upload Extension, which
+	     is a separate target we have not built; the UI hides the control
+	     rather than offering it (see qml/components/VoiceDock.qml).
+
+	     NSFaceIDUsageDescription, NSContactsUsageDescription,
+	     NSLocationWhenInUseUsageDescription: no such features exist.
+	-->
+</dict>
+</plist>
