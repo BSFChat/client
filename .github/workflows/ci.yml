@@ -967,6 +967,29 @@ jobs:
           # the pin costs nothing here.
           pip3 install --break-system-packages cmake==3.30.5
 
+      # OpenSSL for iOS is NOT optional, whatever BSFCHAT_ENABLE_VOICE
+      # says. bsfchat_protocol's cmake/Dependencies.cmake opens with an
+      # unconditional find_package(OpenSSL REQUIRED) — jwt-cpp needs it —
+      # and the client always pulls the protocol library in. So the
+      # configure died at "Could NOT find OpenSSL" long before any
+      # voice-gated code was reached. (scripts/build-ios.sh had the same
+      # wrong assumption and has been corrected to match.)
+      #
+      # Cached on the script's own contents: it pins the OpenSSL version,
+      # so a bump changes the hash and a rebuild happens automatically,
+      # while an unchanged script costs ~10s instead of ~10 minutes of
+      # cross-compiling on every run.
+      - name: Cache vendored OpenSSL for iOS
+        id: openssl_cache
+        uses: actions/cache@v4
+        with:
+          path: deps/openssl-ios-device
+          key: openssl-ios-device-${{ hashFiles('scripts/build-openssl-ios.sh') }}
+
+      - name: Build vendored OpenSSL for iOS
+        if: steps.openssl_cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-openssl-ios.sh device
+
       # === iOS: Import the Apple Distribution certificate ===
       #
       # Same hand-rolled temporary-keychain pattern as the macOS step
@@ -1052,14 +1075,24 @@ jobs:
       #
       # BSFCHAT_ENABLE_VOICE defaults OFF on iOS (CMakeLists.txt) — the
       # libdatachannel/opus/capture plumbing is not ported — so this
-      # configure deliberately needs neither the vendored iOS OpenSSL
-      # nor openh264 that scripts/build-ios.sh builds. Turning voice on
-      # for iOS means adding scripts/build-openssl-ios.sh and the
-      # OPENSSL_* flags back in, exactly as that script has them, AND
+      # configure needs no openh264 and no libaom. It DOES need OpenSSL
+      # regardless: bsfchat_protocol requires it unconditionally for
+      # jwt-cpp (see the vendoring step above). Turning voice on for iOS
+      # is therefore only a matter of the capture plumbing AND
       # revisiting UIBackgroundModes in ios/Info.plist.in.
+      #
+      # The OPENSSL_* triple is passed explicitly rather than relying on
+      # OPENSSL_ROOT_DIR alone: under the iOS toolchain CMake's
+      # find_library is confined to the sysroot, so a root hint pointing
+      # at deps/ would be searched and skipped.
+      #
+      # CMAKE_XCODE_GENERATE_SCHEME=ON because every xcodebuild call
+      # below drives the project by `-scheme bsfchat-app`, and CMake's
+      # Xcode generator writes no .xcscheme files unless asked.
       - name: Configure (iOS device)
         run: |
           export PATH="$HOME/Library/Python/3.12/bin:$HOME/Library/Python/3.13/bin:$PATH"
+          OPENSSL_IOS="$GITHUB_WORKSPACE/deps/openssl-ios-device"
           "$QT_ROOT_DIR/bin/qt-cmake" -B build-ios -G Xcode -Wno-dev \
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
@@ -1072,7 +1105,12 @@ jobs:
             -DBSFCHAT_BUNDLE_ID=com.bsfchat.app \
             -DBSFCHAT_BUILD_NUMBER="${{ steps.version.outputs.build_number }}" \
             -DQT_HOST_PATH="${{ runner.temp }}/qt-host/Qt/6.10.3/macos" \
-            -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}"
+            -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
+            -DCMAKE_XCODE_GENERATE_SCHEME=ON \
+            -DOPENSSL_ROOT_DIR="$OPENSSL_IOS" \
+            -DOPENSSL_INCLUDE_DIR="$OPENSSL_IOS/include" \
+            -DOPENSSL_CRYPTO_LIBRARY="$OPENSSL_IOS/lib/libcrypto.a" \
+            -DOPENSSL_SSL_LIBRARY="$OPENSSL_IOS/lib/libssl.a"
 
       # Compile-only gate. Runs on fork PRs where no secrets exist, so
       # it must not need an identity — CODE_SIGNING_ALLOWED=NO turns the

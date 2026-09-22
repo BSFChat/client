@@ -22,8 +22,14 @@ OPENSSL_DIR="$(pwd)/deps/openssl-ios-${TARGET}"
 
 # Voice is OFF by default on iOS (CMakeLists.txt): libdatachannel, opus
 # and the capture paths are not ported. Pass BSFCHAT_ENABLE_VOICE=ON to
-# work on that port — which is also the only case that needs the
-# cross-built OpenSSL, since nothing else in the client links it.
+# work on that port.
+#
+# The cross-built OpenSSL is NOT voice-gated, contrary to what this
+# script used to claim. bsfchat_protocol's cmake/Dependencies.cmake
+# opens with an unconditional find_package(OpenSSL REQUIRED) for
+# jwt-cpp, and the client always links the protocol library — so a
+# voice=OFF configure died at "Could NOT find OpenSSL" too. CI hit
+# exactly that on the ios job's first run.
 ENABLE_VOICE=${BSFCHAT_ENABLE_VOICE:-OFF}
 
 if [ ! -d "$QT_IOS" ]; then
@@ -48,18 +54,19 @@ COMMON_ARGS=(
     -Wno-dev
 )
 
-if [ "$ENABLE_VOICE" = "ON" ]; then
-    if [ ! -f "$OPENSSL_DIR/lib/libcrypto.a" ]; then
-        echo "Building OpenSSL for iOS ($TARGET)..."
-        ./scripts/build-openssl-ios.sh "$TARGET"
-    fi
-    COMMON_ARGS+=(
-        -DOPENSSL_ROOT_DIR="$OPENSSL_DIR"
-        -DOPENSSL_INCLUDE_DIR="$OPENSSL_DIR/include"
-        -DOPENSSL_CRYPTO_LIBRARY="$OPENSSL_DIR/lib/libcrypto.a"
-        -DOPENSSL_SSL_LIBRARY="$OPENSSL_DIR/lib/libssl.a"
-    )
+if [ ! -f "$OPENSSL_DIR/lib/libcrypto.a" ]; then
+    echo "Building OpenSSL for iOS ($TARGET)..."
+    ./scripts/build-openssl-ios.sh "$TARGET"
 fi
+# All four, not just the root hint: under the iOS toolchain CMake's
+# find_library is confined to the sysroot, so FindOpenSSL would search
+# $OPENSSL_DIR and still come up empty.
+COMMON_ARGS+=(
+    -DOPENSSL_ROOT_DIR="$OPENSSL_DIR"
+    -DOPENSSL_INCLUDE_DIR="$OPENSSL_DIR/include"
+    -DOPENSSL_CRYPTO_LIBRARY="$OPENSSL_DIR/lib/libcrypto.a"
+    -DOPENSSL_SSL_LIBRARY="$OPENSSL_DIR/lib/libssl.a"
+)
 
 # NOTE: no -DMACOSX_BUNDLE_INFO_PLIST here any more. It never worked —
 # it is a cache variable, and CMakeLists.txt sets the same name as a
@@ -85,6 +92,6 @@ echo ""
 echo "Xcode project generated at: $BUILD_DIR/"
 echo ""
 echo "To open in Xcode:"
-echo "  open $BUILD_DIR/bsfchat-app.xcodeproj"
+echo "  open $BUILD_DIR/bsfchat-client.xcodeproj"
 echo ""
 echo "In Xcode: select an iOS Simulator target and press Run (Cmd+R)"
