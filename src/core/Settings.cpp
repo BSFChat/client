@@ -569,10 +569,14 @@ void Settings::setLastReadTs(const QString& roomId, qint64 tsMs)
 {
     if (roomId.isEmpty()) return;
     const QString key = QStringLiteral("unread/") + roomId;
-    // Only notify on a real move. Writers call this on every room switch,
-    // frequently with the value already stored, and a signal per no-op write
-    // would reintroduce exactly the churn the 800 ms poll was replaced to fix.
-    if (m_settings.value(key, 0).toLongLong() == tsMs) return;
+    // Forward only — bsfchat::client::readMarkerAdvances has the why.
+    //
+    // This also subsumes the equality check it replaced: writers call this on
+    // every room switch, frequently with the value already stored, and a
+    // signal per no-op write would reintroduce exactly the churn the 800 ms
+    // poll was replaced to fix.
+    if (!bsfchat::client::readMarkerAdvances(
+            m_settings.value(key, 0).toLongLong(), tsMs)) return;
     m_settings.setValue(key, tsMs);
     emit lastReadTsChanged(roomId);
 }
@@ -583,6 +587,11 @@ bool Settings::seedLastReadTs(const QString& roomId, qint64 seedTs)
     if (lastReadTs(roomId) > 0) return false;
     setLastReadTs(roomId, seedTs);
     return true;
+}
+
+void Settings::flush()
+{
+    m_settings.sync();
 }
 
 bool Settings::isRoomUnread(const QString& roomId, qint64 lastMessageTs) const

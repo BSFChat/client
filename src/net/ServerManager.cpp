@@ -376,6 +376,13 @@ void ServerManager::resyncAll()
     }
 }
 
+void ServerManager::markActiveRoomsRead()
+{
+    for (auto* conn : m_roster.connections()) {
+        if (conn) conn->markActiveRoomRead();
+    }
+}
+
 void ServerManager::removeServer(int index)
 {
     // All of the ordering — clear the active pointer before anything can

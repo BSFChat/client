@@ -345,10 +345,18 @@ QString MessageModel::firstUnreadEventIdAfterTs(qint64 tsMs) const
     return {};
 }
 
-qint64 MessageModel::newestTimestampMs() const
+qint64 MessageModel::newestServerTimestampMs() const
 {
-    if (m_messages.isEmpty()) return 0;
-    return m_messages.last().timestamp;
+    // `serverTimestamp`, never `timestamp`: for a row this device authored
+    // the latter is the local send time and is deliberately never rewritten
+    // (it is the sort key and the time in the bubble). A row that has not
+    // been named by the server yet carries 0 and is skipped — the newest row
+    // the SERVER has timestamped is the newest thing it makes sense to claim
+    // to have read. See the header.
+    for (auto it = m_messages.crbegin(); it != m_messages.crend(); ++it) {
+        if (it->serverTimestamp > 0) return it->serverTimestamp;
+    }
+    return 0;
 }
 
 int MessageModel::restoreIndexForDivider(const QString& dividerEventId) const
@@ -476,7 +484,7 @@ int MessageModel::indexOfEchoMatching(const bsfchat::RoomEvent& event) const
     return -1;
 }
 
-void MessageModel::adoptEventId(int row, const QString& eventId)
+void MessageModel::adoptEventId(int row, const QString& eventId, qint64 serverTsMs)
 {
     if (row < 0 || row >= m_messages.size()) return;
     if (!m_messages[row].localId.isEmpty() && m_messages[row].eventId.isEmpty()
@@ -485,6 +493,11 @@ void MessageModel::adoptEventId(int row, const QString& eventId)
     }
     m_messages[row].eventId = eventId;
     m_messages[row].delivery = DeliveryConfirmed;
+    // `timestamp` is deliberately NOT touched: it is the sort key and the
+    // time in the bubble, and re-sorting a row under the user's cursor at
+    // the moment it is confirmed would be worse than a few ms of skew. The
+    // server's own clock lands beside it instead, for the read marker.
+    if (serverTsMs > 0) m_messages[row].serverTimestamp = serverTsMs;
     if (!eventId.isEmpty()) m_indexByEventId.insert(eventId, row);
 
     // An edit or a reaction can reach us for an event whose row existed the
@@ -598,6 +611,7 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
     entry.senderDisplayName = resolveDisplayName(entry.sender);
     entry.senderIsBot = resolveIsBot(entry.sender);
     entry.timestamp = event.origin_server_ts;
+    entry.serverTimestamp = static_cast<qint64>(event.origin_server_ts);
     entry.isOwnMessage = (entry.sender == ownUserId);
 
     entry.msgtype = QString::fromStdString(event.content.data.value("msgtype", ""));
@@ -1086,7 +1100,24 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
     // the dedupe: sync replays the same event id often enough that this was
     // a full scan per inbound message.
     QString eventId = QString::fromStdString(event.event_id);
-    if (m_indexByEventId.contains(eventId)) return;
+    if (const auto known = m_indexByEventId.constFind(eventId);
+        known != m_indexByEventId.constEnd()) {
+        // Already on screen — but if it got here as a local echo that the PUT
+        // reply named (confirmLocalEcho has no timestamp to give), this replay
+        // is the ONLY time the server's origin_server_ts for the user's own
+        // message passes through the client. Take it before dropping the copy,
+        // or the read marker can never advance past a message you sent
+        // yourself: `timestamp` on that row is the moment we hit send, which
+        // is always earlier than the ts the server stamped on receipt, so the
+        // channel's own dot stays lit on your own words.
+        const int row = known.value();
+        if (row >= 0 && row < m_messages.size()
+            && m_messages[row].serverTimestamp <= 0) {
+            m_messages[row].serverTimestamp =
+                static_cast<qint64>(event.origin_server_ts);
+        }
+        return;
+    }
 
     // Our own local echo, coming back from the server. Normally the PUT
     // reply has already adopted this id (confirmLocalEcho) and the dedupe
@@ -1095,7 +1126,7 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
     // existing row rather than appending a second copy of the user's own
     // message next to the one they are already looking at.
     if (const int echo = indexOfEchoMatching(event); echo >= 0) {
-        adoptEventId(echo, eventId);
+        adoptEventId(echo, eventId, static_cast<qint64>(event.origin_server_ts));
         return;
     }
 

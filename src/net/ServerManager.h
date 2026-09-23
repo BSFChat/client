@@ -57,6 +57,11 @@ public:
     // Nudge every connection's long poll. Wired to the application coming
     // back to the foreground; see ServerConnection::resyncNow().
     void resyncAll();
+    // Mark every connection's open room read, if its timeline was parked at
+    // the end. Driven by the application leaving the foreground — see
+    // ServerConnection::markActiveRoomRead for why a phone needs this and a
+    // desktop never did.
+    void markActiveRoomsRead();
     Q_INVOKABLE void checkLoginFlows(const QString& url);
     Q_INVOKABLE void registerServer(const QString& url, const QString& username, const QString& password);
 

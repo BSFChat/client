@@ -269,6 +269,22 @@ public:
     Q_INVOKABLE void setLastTextRoomFor(const QString& serverUrl,
                                         const QString& roomId);
 
+    // Push everything written so far out to the backing store.
+    //
+    // QSettings buffers: on the conf-file backend (Linux, Windows, and the
+    // INI file an Android build gets) a setValue() only reaches disk on
+    // sync() or in the destructor. A desktop app quits through
+    // QCoreApplication::exec() returning, so the destructor runs and the
+    // buffer lands. A PHONE app does not: iOS and Android terminate a
+    // suspended process outright, exec() never returns, and no destructor
+    // anywhere in this program is called. Anything written since the last
+    // flush — a read marker above all, which is written and then immediately
+    // followed by the user leaving the app — is simply gone.
+    //
+    // Called when the application leaves the foreground (main.cpp), which is
+    // the last moment on a phone at which we are still running.
+    void flush();
+
     // Legacy screen-share quality preset (0=Low..3=Ultra). Retained
     // for migration only — readers should use the explicit fps /
     // maxWidth / jpegQuality fields below. We translate the preset

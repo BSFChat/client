@@ -1521,9 +1521,20 @@ void MatrixClient::sendReadMarker(const QString& roomId)
 
     // Empty body — server marks current max position as read for this user.
     auto* reply = makeRequest("POST", path, "{}");
-    connect(reply, &QNetworkReply::finished, this, [reply]() {
+    connect(reply, &QNetworkReply::finished, this, [reply, roomId]() {
         reply->deleteLater();
-        // Fire and forget — server pushes new count via sync
+        // The result is not acted on — the server pushes the new count via
+        // sync and there is nothing useful to retry here — but it IS logged.
+        // This was previously a silent fire-and-forget, which meant a read
+        // marker that the server refused (403 from the VIEW_CHANNEL check on
+        // handle_read_marker) or that never left a suspending phone looked
+        // exactly like one that worked, from both ends. "Unread never
+        // clears" is then unfalsifiable from a log.
+        if (reply->error() == QNetworkReply::NoError) return;
+        const int status =
+            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        qWarning().noquote() << "[readMarker] FAIL" << status << roomId
+                             << "-" << reply->errorString();
     });
 }
 
