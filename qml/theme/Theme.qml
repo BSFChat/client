@@ -375,6 +375,16 @@ QtObject {
     }
     readonly property ControlHeights controlHeight: ControlHeights {}
 
+    // ─── Minimum touch target ────────────────────────────────
+    // Apple's HIG asks for 44×44 pt and Material for 48×48 dp; 44 is the
+    // number an App Store reviewer measures against, so it is the floor
+    // every `Theme.isMobile ? … : …` branch in the tree uses for anything
+    // a finger has to hit. It is deliberately a separate token from
+    // controlHeight.xl (which happens to be 44 too): that one is a
+    // typographic choice about how tall a button looks, this one is a
+    // hard accessibility minimum, and they must be free to diverge.
+    readonly property int touchTarget: 44
+
     // ─── Accessibility borders (our extension) ───────────────
     // Accessibility mode draws thick, accent-colored borders between panels
     // so the major regions are unambiguous. Driven from AppSettings.

@@ -986,6 +986,201 @@ private slots:
                      + offenders.join(QStringLiteral(", "))));
     }
 
+    // ──────────── the phone shell ────────────
+    //
+    // Everything below is a source scan for the same reason the scans above
+    // are: the BSFChat QML module is compiled into the app binary, and the
+    // one platform these rules are about is the one no test target can
+    // instantiate. What they replace is "someone remembered to check on a
+    // phone", which is exactly what did not happen for any of them.
+
+    void theMobileShellReadsRealSafeAreaMargins()
+    {
+        // topInset was a hardcoded 0 with a comment explaining that Android
+        // reserves the status bar for us. True on Android; on iOS the 48pt
+        // header therefore drew under the notch / Dynamic Island, taking the
+        // channel name and all three header buttons with it. Qt 6.9 gives us
+        // the real numbers through the SafeArea attached property.
+        const QString src = withoutComments(readQml(QStringLiteral("/mobile/MobileMain.qml")));
+
+        QVERIFY2(src.contains(QStringLiteral("SafeArea.margins")),
+                 "MobileMain does not read SafeArea.margins; the insets are "
+                 "guesses again");
+
+        // A literal inset is the bug, whatever number it is: it cannot be
+        // right on both a notched phone and a flat one.
+        static const QRegularExpression literalInset(
+            QStringLiteral(R"(property\s+int\s+(top|bottom|left|right)Inset\s*:\s*-?\d+\s*$)"),
+            QRegularExpression::MultilineOption);
+        const auto m = literalInset.match(src);
+        QVERIFY2(!m.hasMatch(),
+                 qPrintable(QStringLiteral("hardcoded safe-area inset: %1")
+                                .arg(m.captured(0).trimmed())));
+
+        // The header has to consume the top inset, or reading it changes
+        // nothing.
+        QVERIFY2(src.contains(QStringLiteral("48 + root.topInset")),
+                 "the mobile header does not reserve the top safe-area inset");
+    }
+
+    void theSoftwareKeyboardActuallyMovesSomething()
+    {
+        // keyboardHeight was computed and then read by nothing: the comment
+        // promised "a Binding below" that did not exist, and the real
+        // strategy was Android's adjustResize, which has no iOS equivalent.
+        // On iOS the keyboard is simply drawn over the composer — in a chat
+        // app, the first thing a reviewer does.
+        const QString src = withoutComments(readQml(QStringLiteral("/mobile/MobileMain.qml")));
+
+        QVERIFY2(src.contains(QStringLiteral("Qt.inputMethod.keyboardRectangle")),
+                 "MobileMain no longer measures the keyboard");
+
+        // Two consumers, and they are the two that matter: the content area
+        // (the message composer and the thread composer live in it) and the
+        // surface the modal dialogs position against (the sign-in dialog's
+        // password field lives in that one).
+        static const QRegularExpression consumer(
+            QStringLiteral(R"(anchors\.bottomMargin\s*:\s*root\.bottomGap)"));
+        int consumers = 0;
+        for (auto it = consumer.globalMatch(src); it.hasNext(); it.next()) ++consumers;
+        QCOMPARE(consumers, 2);
+
+        // Android resizes the window for us (windowSoftInputMode=adjustResize);
+        // adding our own push on top of that would lift the composer a whole
+        // keyboard's height above the keyboard.
+        QVERIFY2(src.contains(QStringLiteral("keyboardPush")),
+                 "no platform gate on the manual keyboard push");
+    }
+
+    void everyLongPressSurfaceOnAPhoneHasALongPress()
+    {
+        // A context menu opened only by Qt.RightButton is a context menu that
+        // does not exist on a phone. MemberList set the precedent (block and
+        // report are in its menu, and those are store gates); these are the
+        // rest of the menus MobileMain puts on screen.
+        struct Surface { const char* file; const char* what; };
+        const Surface surfaces[] = {
+            {"/components/MemberList.qml",    "block and report a member"},
+            {"/components/MessageBubble.qml", "reply, edit, delete, report a message"},
+            {"/components/ChannelList.qml",   "mute, mark read, delete a channel"},
+            {"/components/ServerSidebar.qml", "edit or remove a server"},
+        };
+        for (const auto& s : surfaces) {
+            const QString src = withoutComments(readQml(QString::fromUtf8(s.file)));
+            QVERIFY2(!src.isEmpty(), s.file);
+            QVERIFY2(src.contains(QStringLiteral("Qt.RightButton")),
+                     qPrintable(QStringLiteral("%1 no longer has the right-click "
+                                               "menu this rule is about")
+                                    .arg(QString::fromUtf8(s.file))));
+            QVERIFY2(src.contains(QStringLiteral("onPressAndHold"))
+                         || src.contains(QStringLiteral("onLongPressed")),
+                     qPrintable(QStringLiteral("no long-press path in %1, so "
+                                               "touch cannot reach: %2")
+                                    .arg(QString::fromUtf8(s.file),
+                                         QString::fromUtf8(s.what))));
+        }
+    }
+
+    void aMobileSizeBranchIsNeverBelowTheTouchMinimum()
+    {
+        // `Theme.isMobile ? N : M` on a width or a height is, by definition,
+        // somebody sizing a touch target. Apple's minimum is 44pt and it is
+        // the number a reviewer measures, so N below 44 is a defect even
+        // though it looks like a considered choice.
+        // Anchored at the start of a line so `border.width: Theme.isMobile
+        // ? 2 : 1` — a hairline, not a target — is not read as a 2pt button.
+        static const QRegularExpression branch(
+            QStringLiteral(R"(^\s*(?:Layout\.(?:preferred|minimum)(?:Width|Height)|implicit(?:Width|Height)|width|height)\s*:\s*Theme\.isMobile\s*\?\s*(\d+))"),
+            QRegularExpression::MultilineOption);
+        QStringList offenders;
+        for (const QString& path : filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
+                                              QStringLiteral("*.qml"))) {
+            const QString src = withoutComments(readAll(path));
+            for (auto it = branch.globalMatch(src); it.hasNext();) {
+                const auto m = it.next();
+                if (m.captured(1).toInt() < 44) {
+                    offenders << QStringLiteral("%1: %2")
+                                     .arg(QFileInfo(path).fileName(), m.captured(0));
+                }
+            }
+        }
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral("touch targets under 44pt:\n  ")
+                                + offenders.join(QStringLiteral("\n  "))));
+    }
+
+    void revealOnHoverControlsThatMatterHaveATouchPath()
+    {
+        // A control at opacity 0 until hovered is, on a touch screen, a
+        // control that is not there — the tap still works, but nothing ever
+        // tells the user it exists. Each of these was the ONLY way to do the
+        // thing it does, on a surface MobileMain actually shows.
+        struct Gate { const char* file; const char* marker; const char* what; };
+        const Gate gates[] = {
+            {"/components/MessageView.qml",    "pinRowHover.containsMouse",
+             "unpin a pinned message"},
+            {"/components/UserSettings.qml",   "avatarMouse.containsMouse",
+             "change your avatar"},
+            {"/components/ChannelList.qml",    "catHeaderMouse.containsMouse",
+             "add a channel to a category"},
+            {"/components/ServerSettings.qml", "chSettingsMouse.containsMouse",
+             "edit or delete a channel"},
+            {"/components/ServerSettings.qml", "catHeaderHover.containsMouse",
+             "add a channel from server settings"},
+        };
+        for (const auto& g : gates) {
+            const QString src = withoutComments(readQml(QString::fromUtf8(g.file)));
+            const QStringList bindings = visibleBindings(src) + opacityBindings(src);
+            bool sawIt = false;
+            for (const QString& b : bindings) {
+                if (!b.contains(QString::fromUtf8(g.marker))) continue;
+                sawIt = true;
+                QVERIFY2(b.contains(QStringLiteral("Theme.isMobile")),
+                         qPrintable(QStringLiteral("%1: reveal-on-hover with no "
+                                                   "touch path, so a phone cannot "
+                                                   "%2\n    %3")
+                                        .arg(QString::fromUtf8(g.file),
+                                             QString::fromUtf8(g.what), b)));
+            }
+            QVERIFY2(sawIt,
+                     qPrintable(QStringLiteral("%1: no binding mentions %2 any "
+                                               "more — retarget this rule rather "
+                                               "than deleting it")
+                                    .arg(QString::fromUtf8(g.file),
+                                         QString::fromUtf8(g.marker))));
+        }
+    }
+
+    void thePinnedListHasAWayInOnAPhone()
+    {
+        // The pin button lives in MessageView's chat header, and that whole
+        // header is `visible: !Theme.isMobile` — so the pinned list, and the
+        // unpin control that is the previous rule's whole subject, had no
+        // entry point on a phone at all.
+        const QString view = withoutComments(readQml(QStringLiteral("/components/MessageView.qml")));
+        const QString mobile = withoutComments(readQml(QStringLiteral("/mobile/MobileMain.qml")));
+        QVERIFY2(view.contains(QStringLiteral("function openPinnedMessages")),
+                 "MessageView exposes no way for the shell to open the pinned list");
+        QVERIFY2(mobile.contains(QStringLiteral("openPinnedMessages()")),
+                 "the mobile shell never opens the pinned list");
+    }
+
+    void hapticsAreNotAndroidOnly()
+    {
+        // Haptics.cpp was #ifdef Q_OS_ANDROID throughout, so every
+        // haptics.longPress() the QML fires was a no-op on iOS — the one
+        // platform whose users read the absence of a tap as "the long press
+        // did not register" and try again.
+        QFile f(QStringLiteral(BSFCHAT_SRC_DIR "/core/Haptics.cpp"));
+        QVERIFY2(f.open(QIODevice::ReadOnly | QIODevice::Text), "Haptics.cpp not found");
+        const QString src = QString::fromUtf8(f.readAll());
+        QVERIFY2(src.contains(QStringLiteral("Q_OS_IOS")),
+                 "Haptics has no iOS branch; long-press feedback is silent there");
+        QVERIFY2(QFile::exists(QStringLiteral(BSFCHAT_SRC_DIR "/core/HapticsIos.mm")),
+                 "HapticsIos.mm is missing");
+    }
+
+
 private:
     // The text between the braces of the first block whose opening matches
     // `opener` (which must end at that block's `{`). Null when there is none.
@@ -1047,6 +1242,28 @@ private:
             for (int j = i + 1; j < lines.size(); ++j) {
                 const QString next = lines[j].trimmed();
                 if (!next.startsWith(QLatin1String("&&")) && !next.startsWith(QLatin1String("||")))
+                    break;
+                binding += QLatin1Char(' ') + next;
+            }
+            out << binding;
+        }
+        return out;
+    }
+
+    // Same folding, for `opacity:`. Reveal-on-hover is written as an opacity
+    // ramp about as often as it is written as a visibility flip, and the
+    // touch-path rule has to see both.
+    static QStringList opacityBindings(const QString& src)
+    {
+        QStringList out;
+        const QStringList lines = src.split(QLatin1Char('\n'));
+        for (int i = 0; i < lines.size(); ++i) {
+            if (!lines[i].trimmed().startsWith(QLatin1String("opacity:"))) continue;
+            QString binding = lines[i].trimmed();
+            for (int j = i + 1; j < lines.size(); ++j) {
+                const QString next = lines[j].trimmed();
+                if (!next.startsWith(QLatin1String("&&")) && !next.startsWith(QLatin1String("||"))
+                    && !next.startsWith(QLatin1Char('?')) && !next.startsWith(QLatin1Char(':')))
                     break;
                 binding += QLatin1Char(' ') + next;
             }

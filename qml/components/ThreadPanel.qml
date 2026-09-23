@@ -112,7 +112,7 @@ Item {
             // Header — title + close button.
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 48
+                Layout.preferredHeight: Theme.isMobile ? 52 : 48
                 color: Theme.bg1
 
                 RowLayout {
@@ -132,8 +132,11 @@ Item {
                         Layout.fillWidth: true
                     }
                     Rectangle {
-                        Layout.preferredWidth: 28
-                        Layout.preferredHeight: 28
+                        // The panel is full-screen on mobile, so this is
+                        // the only way out of it; at 28 px it was well
+                        // under the 44 pt minimum.
+                        Layout.preferredWidth: Theme.isMobile ? Theme.touchTarget : 28
+                        Layout.preferredHeight: Theme.isMobile ? Theme.touchTarget : 28
                         radius: Theme.r1
                         color: closeMouse.containsMouse ? Theme.bg3 : "transparent"
                         Icon {

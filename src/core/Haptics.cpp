@@ -6,6 +6,10 @@
 #include <QJniObject>
 #endif
 
+#ifdef Q_OS_IOS
+#include "HapticsIos.h"
+#endif
+
 namespace {
 
 #ifdef Q_OS_ANDROID
@@ -40,14 +44,18 @@ Haptics::Haptics(QObject* parent) : QObject(parent) {}
 
 void Haptics::longPress()
 {
-#ifdef Q_OS_ANDROID
+#if defined(Q_OS_ANDROID)
     performHapticFeedback(kLongPress);
+#elif defined(Q_OS_IOS)
+    bsfchat::iosHapticImpact();
 #endif
 }
 
 void Haptics::tick()
 {
-#ifdef Q_OS_ANDROID
+#if defined(Q_OS_ANDROID)
     performHapticFeedback(kKeyboardTap);
+#elif defined(Q_OS_IOS)
+    bsfchat::iosHapticSelection();
 #endif
 }

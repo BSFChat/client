@@ -120,11 +120,18 @@ Popup {
                 // Hover overlay — black scrim + small edit icon instead
                 // of the old "Change" text label. Icon reads at any
                 // avatar content, text would collide with tall initials.
+                //
+                // On mobile it is not a hover overlay at all: it is on
+                // permanently, at a lighter scrim so the avatar is still
+                // readable underneath. Reveal-on-hover meant a phone had
+                // no visible way to change its avatar — the tap worked,
+                // but nothing ever said so.
                 Rectangle {
                     anchors.fill: parent
                     radius: parent.radius
-                    color: Qt.rgba(0, 0, 0, 0.55)
-                    opacity: avatarMouse.containsMouse ? 1.0 : 0.0
+                    color: Qt.rgba(0, 0, 0,
+                        (Theme.isMobile && !avatarMouse.containsMouse) ? 0.35 : 0.55)
+                    opacity: (Theme.isMobile || avatarMouse.containsMouse) ? 1.0 : 0.0
                     Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
 
                     Icon {
