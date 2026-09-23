@@ -136,6 +136,23 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             emitFeedback(msg, kind);
         });
 
+    // Reconcile the local echo with whatever the server said about it.
+    //
+    // Accepted: the row adopts the server's event id, which also registers
+    // it in the model's dedupe index — so the copy that arrives over /sync a
+    // moment later is dropped instead of rendering the message twice.
+    connect(m_client, &MatrixClient::messageSendAccepted, this,
+        [this](const QString& localId, const QString& eventId) {
+            m_messageModel->confirmLocalEcho(localId, eventId);
+        });
+    // Failed: the row stays, marked failed. Previously a failed send left a
+    // toast and an empty composer — the text was gone and the user could not
+    // see WHICH message had not made it.
+    connect(m_client, &MatrixClient::messageSendFailed, this,
+        [this](const QString& localId, const QString&) {
+            m_messageModel->failLocalEcho(localId);
+        });
+
     connect(m_client, &MatrixClient::mediaUploadProgress,
             this, &ServerConnection::mediaUploadProgress);
 
@@ -1520,6 +1537,11 @@ void ServerConnection::markRoomRead(const QString& roomId, qint64 tsMs)
     if (m_hasUnread != hadUnread) emit hasUnreadChanged();
 }
 
+void ServerConnection::resyncNow()
+{
+    if (m_syncLoop && m_syncLoop->isRunning()) m_syncLoop->refreshNow();
+}
+
 void ServerConnection::sendMessage(const QString& body)
 {
     if (m_activeRoomId.isEmpty() || body.trimmed().isEmpty()) return;
@@ -1529,7 +1551,12 @@ void ServerConnection::sendMessage(const QString& body)
     m_typingStopTimer->stop();
     m_client->setTyping(m_activeRoomId, m_userId, false);
 
-    m_client->sendMessage(m_activeRoomId, body);
+    // Local echo FIRST, then the request. The row has to exist before the
+    // network is touched, because the whole point of it is that the user
+    // sees their message the moment they send it rather than one PUT plus
+    // one /sync round trip later. See MessageModel::DeliveryState.
+    const QString localId = m_client->sendMessage(m_activeRoomId, body);
+    m_messageModel->appendLocalEcho(localId, body, QString(), m_userId);
 }
 
 void ServerConnection::sendEmote(const QString& body)
@@ -1559,7 +1586,9 @@ void ServerConnection::sendRichMessage(const QString& body,
     m_typingTimer->stop();
     m_typingStopTimer->stop();
     m_client->setTyping(m_activeRoomId, m_userId, false);
-    m_client->sendRichMessage(m_activeRoomId, body, formattedBody, mentionedUserIds);
+    const QString localId =
+        m_client->sendRichMessage(m_activeRoomId, body, formattedBody, mentionedUserIds);
+    m_messageModel->appendLocalEcho(localId, body, formattedBody, m_userId);
 }
 
 void ServerConnection::editMessage(const QString& eventId, const QString& newBody,

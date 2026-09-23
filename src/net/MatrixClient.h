@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QPointer>
 #include <QString>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -33,7 +34,23 @@ public:
     void registerUser(const QString& username, const QString& password);
 
     // Sync
+    //
+    // At most ONE /sync may be outstanding on a client at a time, and this
+    // enforces it: a call made while a poll is still in flight abandons the
+    // old one first. Two concurrent polls on one credential is never a thing
+    // anybody wants — they each hold a socket (and, on the server, an httplib
+    // worker for the socket's whole life), they answer into the same models,
+    // and the slower one writes back a stream position the faster one has
+    // already passed.
     void sync(const QString& since = {}, int timeout = 30000);
+
+    // Abandon the outstanding /sync, if any, without reporting it as an
+    // error. SyncLoop::stop() needs this: leaving the poll running meant a
+    // stop()/start() pair inside the 30s window left the reply from before
+    // the stop still in the air, and it arrived to find the loop running
+    // again and scheduled a successor. That is a second, permanent poll
+    // chain on one SyncLoop — see tests/test_sync_single_flight.cpp.
+    void abortSync();
 
     // Rooms
     // `requestId` correlates the call with its createRoomSuccess/
@@ -56,7 +73,13 @@ public:
     void getRoomMembers(const QString& roomId);
 
     // Messages
-    void sendMessage(const QString& roomId, const QString& body);
+    // Returns the transaction id the send was issued under. That id is the
+    // handle for the local echo: the caller puts a row on screen with it
+    // immediately, and messageSendAccepted/messageSendFailed name it when
+    // the server answers. It used to be a local variable that was minted,
+    // used in the URL and thrown away, which is why nothing could correlate
+    // a send with its outcome.
+    QString sendMessage(const QString& roomId, const QString& body);
     // Rich message with explicit HTML formatting and @mention targeting.
     // `formattedBody` is the `format: org.matrix.custom.html` payload
     // (sender-generated — the composer adds <a> anchors for @Name and
@@ -69,7 +92,7 @@ public:
     // the composer reaches this through ServerConnection::sendRichMessage and
     // that file is being edited concurrently.
     static constexpr QLatin1StringView kRoomMentionSentinel{"@room"};
-    void sendRichMessage(const QString& roomId, const QString& body,
+    QString sendRichMessage(const QString& roomId, const QString& body,
                           const QString& formattedBody,
                           const QStringList& mentionedUserIds);
     void sendRoomEvent(const QString& roomId, const QString& eventType, const QByteArray& content);
@@ -417,6 +440,16 @@ signals:
 
     void messageSent(const QString& eventId);
     void sendMessageError(const QString& error);
+    // The same two outcomes, but naming WHICH send they belong to.
+    //
+    // messageSent/sendMessageError are connection-wide and anonymous: with
+    // two sends in flight there is no way to tell which one a reply is
+    // about, which is why nothing was ever connected to messageSent and why
+    // sendMessageError could only ever raise a generic toast. These carry
+    // the transaction id returned by sendMessage/sendRichMessage, so a
+    // local echo can be reconciled or marked failed individually.
+    void messageSendAccepted(const QString& localId, const QString& eventId);
+    void messageSendFailed(const QString& localId, const QString& error);
 
     // roomId is carried alongside the response so the receiver can
     // filter to the currently-active room. The server doesn't echo
@@ -671,4 +704,10 @@ private:
     bsfchat::client::MediaTicketCache m_mediaTickets;
     QString m_homeserver;
     QString m_accessToken;
+    // The outstanding /sync, or null. Identity, not ownership: it is the
+    // token a finished handler compares itself against to find out whether
+    // it is still the current poll. Cleared before the reply is abandoned,
+    // so a superseded handler answers "not me" and returns silently instead
+    // of emitting syncError for a cancellation nobody asked about.
+    QPointer<QNetworkReply> m_syncReply;
 };

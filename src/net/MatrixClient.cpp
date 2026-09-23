@@ -254,8 +254,28 @@ void MatrixClient::registerUser(const QString& username, const QString& password
     });
 }
 
+void MatrixClient::abortSync()
+{
+    if (!m_syncReply) return;
+    QNetworkReply* reply = m_syncReply;
+    // Cleared FIRST. abort() delivers finished() synchronously on some
+    // backends, and the handler's first act is to compare itself against
+    // this member — it has to already read "not the current poll" by then,
+    // or the cancellation is reported as a sync error and the loop answers
+    // a deliberate abandonment with a backoff.
+    m_syncReply = nullptr;
+    reply->abort();
+    reply->deleteLater();
+}
+
 void MatrixClient::sync(const QString& since, int timeout)
 {
+    // One poll per client. Without this, every caller that issued a sync
+    // while one was already outstanding simply added a socket: the old
+    // reply was still connected, still counted, and still scheduled its own
+    // successor when it landed.
+    abortSync();
+
     QString path = QString::fromUtf8(bsfchat::api_path::kSync);
     QUrlQuery query;
     query.addQueryItem("timeout", QString::number(timeout));
@@ -275,9 +295,16 @@ void MatrixClient::sync(const QString& since, int timeout)
     request.setTransferTimeout((timeout + 30000));
 
     auto* reply = m_nam.get(request);
+    m_syncReply = reply;
     watchForTokenRejection(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
+        // A poll that is no longer the current one was abandoned on purpose
+        // (abortSync, or a second sync() superseding it). It must not report
+        // anything: neither an error for its own cancellation, nor a success
+        // that would advance a stream position the live poll has moved past.
+        if (m_syncReply != reply) return;
+        m_syncReply = nullptr;
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             emit syncError(QString::fromUtf8(data));
@@ -466,7 +493,7 @@ void MatrixClient::getJoinedRooms()
     });
 }
 
-void MatrixClient::sendMessage(const QString& roomId, const QString& body)
+QString MatrixClient::sendMessage(const QString& roomId, const QString& body)
 {
     // Generate a transaction ID
     static int txnCounter = 0;
@@ -483,20 +510,25 @@ void MatrixClient::sendMessage(const QString& roomId, const QString& body)
     QByteArray reqBody = QByteArray::fromStdString(content.dump());
 
     auto* reply = makeRequest("PUT", path, reqBody);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, txnId]() {
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             emit sendMessageError(QString::fromUtf8(data));
+            emit messageSendFailed(txnId, QString::fromUtf8(data));
             return;
         }
         try {
             auto j = json::parse(data.toStdString());
-            emit messageSent(QString::fromStdString(j.value("event_id", "")));
+            const QString eventId = QString::fromStdString(j.value("event_id", ""));
+            emit messageSent(eventId);
+            emit messageSendAccepted(txnId, eventId);
         } catch (const std::exception& e) {
             emit sendMessageError(QString::fromStdString(e.what()));
+            emit messageSendFailed(txnId, QString::fromStdString(e.what()));
         }
     });
+    return txnId;
 }
 
 // Attach the MSC3952 `m.mentions` block to `content`, in place.
@@ -529,7 +561,7 @@ void MatrixClient::applyMentions(json& content, const QStringList& mentionedUser
     if (!mentions.empty()) content["m.mentions"] = mentions;
 }
 
-void MatrixClient::sendRichMessage(const QString& roomId, const QString& body,
+QString MatrixClient::sendRichMessage(const QString& roomId, const QString& body,
                                     const QString& formattedBody,
                                     const QStringList& mentionedUserIds)
 {
@@ -551,20 +583,25 @@ void MatrixClient::sendRichMessage(const QString& roomId, const QString& body,
 
     QByteArray reqBody = QByteArray::fromStdString(content.dump());
     auto* reply = makeRequest("PUT", path, reqBody);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, txnId]() {
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             emit sendMessageError(QString::fromUtf8(data));
+            emit messageSendFailed(txnId, QString::fromUtf8(data));
             return;
         }
         try {
             auto j = json::parse(data.toStdString());
-            emit messageSent(QString::fromStdString(j.value("event_id", "")));
+            const QString eventId = QString::fromStdString(j.value("event_id", ""));
+            emit messageSent(eventId);
+            emit messageSendAccepted(txnId, eventId);
         } catch (const std::exception& e) {
             emit sendMessageError(QString::fromStdString(e.what()));
+            emit messageSendFailed(txnId, QString::fromStdString(e.what()));
         }
     });
+    return txnId;
 }
 
 void MatrixClient::editMessage(const QString& roomId, const QString& targetEventId,

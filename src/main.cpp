@@ -382,5 +382,29 @@ int main(int argc, char *argv[])
     // service anchored by VoiceService.java keeps the process
     // alive across backgrounding, so `aboutToQuit` is enough.
 
+    // Coming BACK to the foreground is a different matter, and until now
+    // nothing was wired to it at all.
+    //
+    // A /sync long poll holds a socket open for 30 seconds. When iOS
+    // suspends the process — the screen locks, or another app comes
+    // forward — that socket is routinely dead by the time we are resumed,
+    // and nothing tells us: Qt finds out when the transfer timeout expires,
+    // which MatrixClient::sync sets to the poll timeout plus 30s. So a
+    // resumed app could sit for up to a minute with a poll that will never
+    // answer, no request in flight, and therefore no way for a message to
+    // arrive — including the one the user just sent, because this client
+    // now shows that as a local echo but still needs the sync to confirm it.
+    //
+    // That is the reported symptom exactly: "it only showed up after I
+    // locked and unlocked the phone". Locking again tore the dead socket
+    // down hard enough for Qt to notice, the loop errored and retried, and
+    // the retry brought everything at once. Re-polling on Active makes the
+    // resume itself do that, immediately.
+    QObject::connect(&app, &QGuiApplication::applicationStateChanged, &app,
+        [sm = application.serverManager()](Qt::ApplicationState state) {
+            if (state != Qt::ApplicationActive) return;
+            if (sm) sm->resyncAll();
+        });
+
     return app.exec();
 }

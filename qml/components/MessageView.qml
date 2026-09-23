@@ -1501,6 +1501,7 @@ Rectangle {
                         replyToSender: model.replyToSender || ""
                         replyPreview: model.replyPreview || ""
                         reactions: model.reactions || []
+                        deliveryState: model.deliveryState || 0
                         threadRootId: model.threadRootId || ""
                         threadReplyCount: model.threadReplyCount || 0
                         // Row-level mention highlight, so a message naming you is
