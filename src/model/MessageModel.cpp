@@ -1187,6 +1187,52 @@ bool MessageModel::failHistoryFill(const QString& requestedFrom, const QString& 
     return true;
 }
 
+void MessageModel::ingestCachedWindow(const QVector<bsfchat::RoomEvent>& chronological,
+                                      const QString& ownUserId)
+{
+    if (chronological.isEmpty()) return;
+    m_ownUserId = ownUserId;
+
+    // ONE insertion for the whole window, not one per event.
+    //
+    // appendEvent emits beginInsertRows/endInsertRows/countChanged per event,
+    // and MessageView answers every countChanged with _recomputeUnreadDivider(),
+    // which scans the timeline — so replaying a 400-event window through it
+    // would be quadratic, and would cost 400 round trips into QML at the exact
+    // moment the user is waiting to see the channel. The point of the cache is
+    // that a switch is instant; a batched insert is what makes the local work
+    // small enough for that to be true on a phone.
+    QVector<MessageEntry> rows;
+    QSet<QString> queued;
+    rows.reserve(chronological.size());
+    for (const auto& event : chronological) {
+        if (!rendersAsRow(event)) continue;
+        const QString eventId = QString::fromStdString(event.event_id);
+        if (m_indexByEventId.contains(eventId) || queued.contains(eventId)) continue;
+        queued.insert(eventId);
+        MessageEntry entry = eventToEntry(event, ownUserId);
+        drainPendingEdit(entry);
+        rows.append(std::move(entry));
+    }
+
+    if (!rows.isEmpty()) {
+        const int first = static_cast<int>(m_messages.size());
+        beginInsertRows(QModelIndex(), first, first + static_cast<int>(rows.size()) - 1);
+        for (auto& row : rows) m_messages.append(std::move(row));
+        rebuildIndices();
+        endInsertRows();
+        emit countChanged();
+    }
+
+    // The window's relations, for ingestHistoryEvents' reason: a reaction, a
+    // redaction or an edit sitting in the cached events is not a row and has
+    // to be folded into one.
+    for (const auto& event : chronological) {
+        if (rendersAsRow(event)) continue;
+        appendEvent(event, ownUserId);
+    }
+}
+
 void MessageModel::ingestHistoryEvents(const QVector<bsfchat::RoomEvent>& chronological,
                                        const QString& ownUserId)
 {

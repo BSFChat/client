@@ -8,6 +8,7 @@
 #include <QSignalSpy>
 
 #include "model/MessageModel.h"
+#include "store/RoomTimelineCache.h"
 #include "net/MediaTicketCache.h"
 #include "model/ThreadFilterModel.h"
 #include "model/RoomListModel.h"
@@ -1772,6 +1773,157 @@ private slots:
         // 2026-09-23 held 164 m.call.member against 51 m.room.message, and
         // one room's newest 50 events contained ZERO renderable rows.
         QVERIFY(!MessageModel::rendersAsRow(hist::callMember("@bob:server", 3)));
+    }
+
+    // --- The per-room timeline cache ------------------------------------
+    //
+    // store/RoomTimelineCache.h. What makes a channel switch instant, and the
+    // freshness rule that stops it making the timeline wrong.
+
+    void testTimelineCacheKeepsTheNewestSliceOfEveryRoom()
+    {
+        bsfchat::client::RoomTimelineCache cache;
+        QVERIFY(cache.window("!a") == nullptr);
+
+        for (const auto& e : hist::messagePage(3, "$a", 1000))
+            cache.appendLive("!a", e);
+        for (const auto& e : hist::messagePage(2, "$b", 1000))
+            cache.appendLive("!b", e);
+
+        QCOMPARE(cache.eventCount("!a"), 3);
+        QCOMPARE(cache.eventCount("!b"), 2);
+        // Rooms are independent, and a room the user has never opened is
+        // cached too — that is the point, it makes the FIRST switch fast.
+        QCOMPARE(cache.window("!a")->first().event_id, std::string("$a0"));
+
+        // Replaying the same event is a no-op, which matters because /sync
+        // repeats event ids freely.
+        cache.appendLive("!a", hist::message("$a0", 1000));
+        QCOMPARE(cache.eventCount("!a"), 3);
+    }
+
+    void testTimelineCacheDropsTheOldestAtItsCap()
+    {
+        bsfchat::client::RoomTimelineCache cache;
+        const int cap = bsfchat::client::RoomTimelineCache::kMaxEventsPerRoom;
+        for (const auto& e : hist::messagePage(cap + 25, "$e", 1000))
+            cache.appendLive("!a", e);
+
+        QCOMPARE(cache.eventCount("!a"), cap);
+        // The OLDEST go. A window is only ever replayed as "the newest
+        // slice", and head-currency is the property everything rests on.
+        QCOMPARE(cache.window("!a")->first().event_id, std::string("$e25"));
+        QCOMPARE(cache.window("!a")->last().event_id,
+                 "$e" + std::to_string(cap + 24));
+    }
+
+    void testTimelineCacheIsStaleUntilASyncVouchesForIt()
+    {
+        // The freshness rule. A window may only be replayed when the client
+        // knows nothing newer is missing, because the fill's first page is
+        // PREPENDED under whatever is loaded — replay a stale window and the
+        // newest messages land above week-old ones.
+        bsfchat::client::RoomTimelineCache cache;
+        QVERIFY(!cache.isFresh());
+
+        cache.appendLive("!a", hist::message("$a0", 1000));
+        QVERIFY2(!cache.isFresh(),
+                 "holding events is not the same as vouching for them");
+
+        cache.markFresh();
+        QVERIFY(cache.isFresh());
+
+        // A token the server rejects breaks the chain of syncs that made the
+        // window current, so it must stop being replayed — but not be thrown
+        // away, because the next full sync makes it good again.
+        cache.markStale();
+        QVERIFY(!cache.isFresh());
+        QCOMPARE(cache.eventCount("!a"), 1);
+    }
+
+    void testTimelineCacheRebuildsAStaleWindowFromFetchedHistory()
+    {
+        bsfchat::client::RoomTimelineCache cache;
+        cache.adopt("!a", hist::messagePage(3, "$disk", 1000));
+        QCOMPARE(cache.eventCount("!a"), 3);
+        QVERIFY(!cache.isFresh());
+
+        // While stale, a fetched page cannot be ordered against what is held
+        // — the page may contain messages NEWER than all of it. The window
+        // starts over from the page rather than interleaving wrongly.
+        cache.prependHistory("!a", hist::messagePage(2, "$net", 9000));
+        QCOMPARE(cache.eventCount("!a"), 2);
+        QCOMPARE(cache.window("!a")->first().event_id, std::string("$net0"));
+
+        // Once fresh, pages go in FRONT of what is held: a fill walks
+        // backwards, so each page is older than the last.
+        cache.markFresh();
+        cache.prependHistory("!a", hist::messagePage(2, "$older", 100));
+        QCOMPARE(cache.eventCount("!a"), 4);
+        QCOMPARE(cache.window("!a")->first().event_id, std::string("$older0"));
+        QCOMPARE(cache.window("!a")->last().event_id, std::string("$net1"));
+    }
+
+    void testCachedWindowReplaysAsOneInsertionWithItsRelations()
+    {
+        // The replay path a room switch takes. Two things matter: the model
+        // ends up with the right rows, and it gets there in ONE insertion —
+        // MessageView answers every countChanged with a timeline scan, so a
+        // per-event replay of a 400-event window would be quadratic at the
+        // exact moment the user is waiting to see the channel.
+        MessageModel model;
+        QSignalSpy inserted(&model, &QAbstractItemModel::rowsInserted);
+
+        QVector<bsfchat::RoomEvent> window = hist::messagePage(5, "$m", 1000);
+        window.append(hist::reaction("$react", "$m1"));
+        window.append(hist::edit("$ed", "$m2", 2000, "edited"));
+        window.append(makeRedactionEvent("$red", "@alice:server", "$m3"));
+        window.append(hist::callMember("@bob:server", 1500));
+
+        model.ingestCachedWindow(window, "@me:server");
+
+        QCOMPARE(inserted.count(), 1);
+        // $m3 redacted away, the voice-membership event never a row.
+        QCOMPARE(model.rowCount(), 4);
+        QCOMPARE(model.ownReactionEventId("$m1", "+1", "@bob:server"), "$react");
+        QCOMPARE(model.data(model.index(2), MessageModel::BodyRole).toString(),
+                 QString("edited"));
+        QCOMPARE(model.data(model.index(0), MessageModel::EventIdRole).toString(),
+                 QString("$m0"));
+        QCOMPARE(model.data(model.index(3), MessageModel::EventIdRole).toString(),
+                 QString("$m4"));
+    }
+
+    void testOpenFillPrependsUnderACachedWindow()
+    {
+        // The switch, end to end: a warm channel paints from cache, and the
+        // background fill's first page — older history — lands ABOVE it
+        // without disturbing the rows the user is already reading.
+        MessageModel model;
+        model.ingestCachedWindow(hist::messagePage(4, "$cached", 900000000),
+                                 "@me:server");
+        QCOMPARE(model.rowCount(), 4);
+
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open,
+                                       bsfchat::client::kHistoryFirstPageLimit)
+                    .has_value());
+        // The page overlaps the cached window (the server returns the newest
+        // events, which the cache already had) and carries two older ones.
+        QVector<bsfchat::RoomEvent> page = hist::messagePage(2, "$older", 800000000);
+        page += hist::messagePage(4, "$cached", 900000000);
+        const auto res = model.absorbHistoryPage(QString(), page, "t1", "@me:server");
+
+        // The overlap deduplicated, the older two on top, nothing reordered.
+        QCOMPARE(model.rowCount(), 6);
+        QCOMPARE(model.data(model.index(0), MessageModel::EventIdRole).toString(),
+                 QString("$older0"));
+        QCOMPARE(model.data(model.index(2), MessageModel::EventIdRole).toString(),
+                 QString("$cached0"));
+        QCOMPARE(model.data(model.index(5), MessageModel::EventIdRole).toString(),
+                 QString("$cached3"));
+        // And the cursor is live, so the user can still scroll back.
+        QVERIFY(model.hasMoreHistory());
+        Q_UNUSED(res);
     }
 
     void testOpenFillShowsPageOneBeforeTheFillEnds()

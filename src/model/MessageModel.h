@@ -314,6 +314,11 @@ public:
     // because it is also how a cached window is replayed on a room switch.
     void ingestHistoryEvents(const QVector<bsfchat::RoomEvent>& chronological,
                              const QString& ownUserId);
+    // A whole cached window into an empty (or newer-only) model, as ONE
+    // insertion rather than one per event. Used by the room switch, where the
+    // per-event path's cost is paid at the moment the user is waiting.
+    void ingestCachedWindow(const QVector<bsfchat::RoomEvent>& chronological,
+                            const QString& ownUserId);
     void clear();
 
     // Take a message out of the timeline (U-H5). Returns true if a row was

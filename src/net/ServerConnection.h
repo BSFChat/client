@@ -10,6 +10,7 @@
 #include <QString>
 #include <QTimer>
 
+#include "store/RoomTimelineCache.h"
 #include "util/HistoryFill.h"
 #include "util/MentionRenderer.h"
 #include "net/SessionAuth.h"
@@ -1374,6 +1375,18 @@ public:
     // someone is typing. Set entries are user IDs minus self.
     QMap<QString, QStringList> m_roomTyping;
     int m_typingGeneration = 0;
+
+    // roomId → when /members was last fetched for it, and how long that
+    // answer is trusted. See loadMembersForRoom: the fetch is a repair for
+    // members older than our sync window, not the source of the list, so it
+    // does not need to run on every switch.
+    QHash<QString, qint64> m_membersFetchedAt;
+    static constexpr qint64 kMembersRefetchMs = 10 * 60 * 1000;
+
+    // The newest slice of each room's timeline, so a channel switch can paint
+    // from memory instead of from the network. See store/RoomTimelineCache.h
+    // for the freshness rule that decides when a window may be replayed.
+    bsfchat::client::RoomTimelineCache m_timelines;
 
     // ── Channel-switch timing (util/TimelineTrace.h) ──────────────────────
     //

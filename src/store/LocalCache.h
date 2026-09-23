@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QHash>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -91,6 +92,34 @@ public:
     // Returns false when the snapshot is empty or unreadable.
     bool buildHydrationSync(bsfchat::SyncResponse& out) const;
 
+    // ── room timeline ────────────────────────────────────────────────
+    //
+    // The newest slice of one room's timeline, oldest first. This is the
+    // ONLY timeline storage in the client that survives a restart, and it
+    // exists for one case: a phone, which iOS kills on nearly every
+    // backgrounding, coming back with its channels already populated
+    // instead of paying a /messages round trip for the first open of each.
+    //
+    // Written whole — see recordTimeline — and read back by ordinal, because
+    // event ids carry no order and origin_server_ts is a clock the client
+    // does not control.
+    //
+    // What comes back out is NOT safe to display on its own. It is a
+    // snapshot of a moment that has passed, and RoomTimelineCache will not
+    // replay it until a sync has vouched for it being current at the head of
+    // its room; see the freshness rule in store/RoomTimelineCache.h.
+    void recordTimeline(const QString& roomId,
+                        const QVector<bsfchat::RoomEvent>& chronological);
+    // Every stored window, room id → events oldest-first. Read once at
+    // startup; there is no per-room read because the caller wants them all.
+    QHash<QString, QVector<bsfchat::RoomEvent>> timelines() const;
+
+    // Events kept per room on disk. Smaller than the in-memory window: this
+    // is "enough to fill a phone screen and scroll a little" on the first
+    // open after a launch, not an archive, and it is multiplied by every
+    // room the user has visited.
+    static constexpr int kPersistedEventsPerRoom = 150;
+
     // Drop every cached row (token included). Used when the cache turns out
     // to be unusable or belongs to somebody else.
     void clearAll();
@@ -98,7 +127,12 @@ public:
     // Schema revision written into PRAGMA user_version. Bump to invalidate
     // every existing cache file; a mismatch wipes rather than migrates,
     // which is safe because this is a cache and never the source of truth.
-    static constexpr int kSchemaVersion = 1;
+    //
+    // v2 adds the `timeline` table. Every existing cache file is therefore
+    // WIPED on first run of this version — including its sync token, so the
+    // upgrade costs each client exactly one full initial sync and then
+    // behaves better than it did before.
+    static constexpr int kSchemaVersion = 2;
 
 private:
     bool openAt(const QString& path);

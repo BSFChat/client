@@ -700,6 +700,18 @@ Rectangle {
                     _jumpAttemptsLeft = 10;
                     settleTimer.stop();
                     scrollTimer.restart();
+
+                    // The model may ALREADY hold rows. ServerConnection
+                    // replays the room's cached window synchronously inside
+                    // setActiveRoom (store/RoomTimelineCache.h), so a warm
+                    // channel is populated before this handler runs and there
+                    // is no later countChanged to trigger the first
+                    // positioning — without this the list would sit at
+                    // opacity 0 until the 2-second fallback timer, which is
+                    // the opposite of what the cache is for. `_scrollToEndSoon`
+                    // is a guarded callLater, so doing it here as well as from
+                    // onCountChanged is harmless whichever order they run in.
+                    if (count > 0) _scrollToEndSoon();
                 }
 
                 // Initial-load: pick up whichever room is already active
