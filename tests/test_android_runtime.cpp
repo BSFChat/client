@@ -75,6 +75,18 @@ QString methodBody(const QString& src, const QString& signatureFragment)
     return src.mid(open, close - open);
 }
 
+// Same idea for a free C++ function, whose closing brace is at column 0.
+QString cppFunctionBody(const QString& src, const QString& signatureFragment)
+{
+    const qsizetype start = src.indexOf(signatureFragment);
+    if (start < 0) return QString();
+    const qsizetype open = src.indexOf('{', start);
+    if (open < 0) return QString();
+    const qsizetype close = src.indexOf(QStringLiteral("\n}"), open);
+    if (close < 0) return src.mid(open);
+    return src.mid(open, close - open);
+}
+
 } // namespace
 
 class TestAndroidRuntime : public QObject {
@@ -108,6 +120,7 @@ private slots:
 
     // --- no sensor permission prompts at launch --------------------------
     void noMediaBackendIsBroughtUpInAConstructor();
+    void audioInputEnumerationIsGatedOnTheMicPermission();
 };
 
 void TestAndroidRuntime::initTestCase()
@@ -524,6 +537,45 @@ void TestAndroidRuntime::noMediaBackendIsBroughtUpInAConstructor()
                  "an eager ensureCaptureSession() in the constructor must be "
                  "excluded on Android and iOS");
     }
+}
+
+void TestAndroidRuntime::audioInputEnumerationIsGatedOnTheMicPermission()
+{
+    // The second half of the launch-prompt problem, and the one that
+    // survived the first fix. Listing audio INPUTS on Android asks for the
+    // microphone all by itself: QOpenSLESDeviceInfo's constructor probes
+    // thirteen sample rates by opening a real AudioRecorder, and
+    // inputFormatIsSupported() calls requestPermission(RECORD_AUDIO) to do
+    // it. So the enumeration itself has to be gated, not just its callers
+    // — MobileMain builds ClientSettings eagerly and the input combo's
+    // model binding evaluated at QML load.
+    const QString settings = code(readAll(srcDir() + "/core/Settings.cpp"));
+    const QString body = cppFunctionBody(
+        settings, QStringLiteral("QVariantList Settings::audioInputDevices() const"));
+    QVERIFY2(!body.isEmpty(), "Settings::audioInputDevices() not found");
+
+    const qsizetype guard = body.indexOf(QStringLiteral("QMicrophonePermission"));
+    const qsizetype enumerate = body.indexOf(QStringLiteral("QMediaDevices::audioInputs()"));
+    QVERIFY2(guard >= 0,
+             "Settings::audioInputDevices() must check the microphone "
+             "permission before enumerating: the enumeration itself prompts "
+             "on Android");
+    QVERIFY2(enumerate > guard,
+             "the permission check has to come before the enumeration");
+    QVERIFY(body.contains(QStringLiteral("Q_OS_ANDROID")));
+
+    // Outputs are NOT gated, and must not be: QOpenSLESDeviceInfo only
+    // probes for Mode::Input, so listing outputs prompts for nothing and a
+    // user with no microphone permission should still get a speaker list.
+    const QString outBody = cppFunctionBody(
+        settings, QStringLiteral("QVariantList Settings::audioOutputDevices() const"));
+    QVERIFY(!outBody.contains(QStringLiteral("QMicrophonePermission")));
+    QVERIFY(outBody.contains(QStringLiteral("QMediaDevices::audioOutputs()")));
+
+    // And nothing else enumerates inputs outside the voice path, which
+    // only runs once the permission has been asked for properly.
+    const QString engine = code(readAll(srcDir() + "/voice/AudioEngine.cpp"));
+    QVERIFY(engine.contains(QStringLiteral("QMediaDevices::audioInputs()")));
 }
 
 QTEST_GUILESS_MAIN(TestAndroidRuntime)

@@ -294,13 +294,44 @@ works on a device.
    ever happened at runtime.
 6. **Sensor permission prompts at launch.** Observed on a device: camera
    and microphone prompts fired on the sign-in screen, before the user
-   touched anything. Bringing Qt Multimedia up is enough to provoke them
-   on Android, and two constructors did it at startup —
-   `Settings` (`new QMediaDevices`) and `CameraController`
-   (`new QCamera` + `QMediaCaptureSession::setCamera`). Both are lazy on
-   Android and iOS now; desktop is unchanged. Play treats an unprompted
-   sensitive-permission request as a policy problem, so this was a
-   submission blocker as well as a bad first run.
+   touched anything. Two separate causes, both fixed; the target is iOS,
+   where the mic prompt correctly appears at first voice join. Play
+   treats an unprompted sensitive-permission request as a policy
+   problem, so this was a submission blocker as well as a bad first run.
+
+   *Camera*: `CameraController`'s constructor built
+   `QCamera` + `QMediaCaptureSession`, which brings the platform camera
+   up. Now lazy on Android/iOS, created at the first `startForCamera()`
+   — after VoiceDock has asked for CAMERA. (`Settings` likewise no
+   longer constructs `QMediaDevices` eagerly, though that turned out not
+   to be the prompt: `QMediaDevices`' constructor only connects signals.)
+
+   *Microphone*: listing audio inputs asks for the microphone by
+   construction, which is worth spelling out because it is not
+   obvious —
+
+   ```
+   QMediaDevices::audioInputs()
+     -> QOpenSLESEngine::availableDevices(Input)
+        -> QOpenSLESDeviceInfo(..., Input)      [the CONSTRUCTOR]
+           -> supportedSampleRates(Input)
+              -> checkSupportedInputFormats()
+                 -> inputFormatIsSupported()
+                    -> requestPermission(RECORD_AUDIO)
+   ```
+
+   Qt probes thirteen sample rates by opening a real AudioRecorder, and
+   it cannot do that unasked. The caller was
+   `ClientSettings.qml`'s input combo — `MobileMain` instantiates that
+   Popup eagerly, so `model: appSettings.audioInputDevices` evaluated at
+   QML load, ~450ms into a cold start. The guard went into
+   `Settings::audioInputDevices()` rather than the QML, so any future
+   binding or caller is covered too: with no microphone permission the
+   list is just "System default" (you cannot pick an input you may not
+   open), and the real devices appear once a voice join has asked
+   properly. `checkPermission()` does not prompt. Audio OUTPUTS are
+   deliberately NOT gated — `QOpenSLESDeviceInfo` only probes for
+   `Mode::Input`.
 7. **OIDC redirect `launchMode`.** Was `singleTop`, now `singleTask`.
    `singleTop` only routes to `onNewIntent` when the instance is already
    on top of the *same* task; a browser redirect carries
