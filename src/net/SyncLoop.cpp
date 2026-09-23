@@ -1,6 +1,7 @@
 #include "net/SyncLoop.h"
 #include "net/MatrixClient.h"
 
+#include <QDateTime>
 #include <QDebug>
 #include <QLoggingCategory>
 #include <QNetworkInformation>
@@ -156,10 +157,31 @@ void SyncLoop::onSyncSuccess(const bsfchat::SyncResponse& response)
     // apart from one answering 200 unconditionally. See isNoProgressReply().
     int events = 0;
     int ephemeral = 0;
+    // Age of the OLDEST timeline event in this reply, by the server's own
+    // origin_server_ts. This is the one number that tells a poll answered
+    // late apart from a poll answered on time about a late event, and its
+    // absence is why "25% of the polls that carried events came back at the
+    // 30-second deadline" could be measured but not explained:
+    //
+    //   age ~= rt   the event existed for the whole poll and the wake was
+    //               missed — the server had it and did not say so.
+    //   age ~= 0    the event genuinely arrived as the poll expired. A
+    //               coincidence, and at this sample size an unremarkable one.
+    //
+    // Signed, and clamped only at the log site: a negative age is clock skew
+    // between this machine and the server, which is worth seeing rather than
+    // hiding, because it would also invalidate the number next to it.
+    qint64 oldestAgeMs = -1;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     for (const auto& [roomId, room] : response.rooms.join) {
         Q_UNUSED(roomId)
         events += static_cast<int>(room.timeline.events.size());
         if (room.ephemeral) ephemeral += static_cast<int>(room.ephemeral->events.size());
+        for (const auto& e : room.timeline.events) {
+            if (e.origin_server_ts <= 0) continue;
+            const qint64 age = nowMs - e.origin_server_ts;
+            if (oldestAgeMs < 0 || age > oldestAgeMs) oldestAgeMs = age;
+        }
     }
     const int presence = response.presence
         ? static_cast<int>(response.presence->events.size()) : 0;
@@ -176,6 +198,8 @@ void SyncLoop::onSyncSuccess(const bsfchat::SyncResponse& response)
             << " events=" << events << " ephemeral=" << ephemeral
             << " presence=" << presence
             << " progressed=" << progressed
+            << (oldestAgeMs >= 0 ? QStringLiteral(" oldestAge=%1ms").arg(oldestAgeMs)
+                                 : QString())
             << (noProgress
                     ? QStringLiteral(" NO-PROGRESS (backoff #%1)").arg(m_noProgressReplies)
                     : QString());
