@@ -254,10 +254,23 @@ void MatrixClient::registerUser(const QString& username, const QString& password
     });
 }
 
+MatrixClient::~MatrixClient()
+{
+    // While the object is still whole. Left to ~QNetworkAccessManager, the
+    // same teardown happens during member destruction instead, with the
+    // finished handler running against members that have already gone.
+    abortSync();
+}
+
 void MatrixClient::abortSync()
 {
     if (!m_syncReply) return;
     QNetworkReply* reply = m_syncReply;
+    // Belt as well as braces: the handler below already refuses to act for
+    // a reply that is not the current one, but severing it means an
+    // abandoned poll cannot run our code at all — including during
+    // teardown, when "our code" would be touching a half-destroyed object.
+    reply->disconnect(this);
     // Cleared FIRST. abort() delivers finished() synchronously on some
     // backends, and the handler's first act is to compare itself against
     // this member — it has to already read "not the current poll" by then,

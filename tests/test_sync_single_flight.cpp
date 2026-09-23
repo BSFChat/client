@@ -51,6 +51,19 @@ public:
         Q_ASSERT(ok);
     }
 
+    ~ParkingHomeserver() override
+    {
+        // ~QTcpServer deletes the sockets it parented, and each one emits
+        // disconnected() on its way out. Those handlers touch m_parked,
+        // m_buffers and m_seen — plain members declared AFTER m_server, so
+        // destroyed BEFORE it. Without this the teardown of every test in
+        // this file is a heap-use-after-free on a destroyed QList.
+        for (QTcpSocket* s : m_server.findChildren<QTcpSocket*>()) s->disconnect(this);
+        m_parked.clear();
+        m_buffers.clear();
+        m_seen.clear();
+    }
+
     QString url() const
     {
         return QStringLiteral("http://127.0.0.1:%1").arg(m_server.serverPort());

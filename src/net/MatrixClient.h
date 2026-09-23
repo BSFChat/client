@@ -20,6 +20,10 @@ class MatrixClient : public QObject {
 
 public:
     explicit MatrixClient(QObject* parent = nullptr);
+    // Tears the outstanding /sync down while this object is still whole,
+    // rather than leaving it for ~QNetworkAccessManager to finish during
+    // member destruction. See m_syncReply.
+    ~MatrixClient() override;
 
     void setHomeserver(const QString& url);
     QString homeserver() const { return m_homeserver; }
@@ -700,14 +704,22 @@ private:
     // for why it is one function and not two.
     void wireReportReply(QNetworkReply* reply, const QString& requestId);
 
-    QNetworkAccessManager m_nam;
-    bsfchat::client::MediaTicketCache m_mediaTickets;
-    QString m_homeserver;
-    QString m_accessToken;
     // The outstanding /sync, or null. Identity, not ownership: it is the
     // token a finished handler compares itself against to find out whether
     // it is still the current poll. Cleared before the reply is abandoned,
     // so a superseded handler answers "not me" and returns silently instead
     // of emitting syncError for a cancellation nobody asked about.
+    //
+    // DECLARED BEFORE m_nam, so that it outlives the network manager:
+    // members are destroyed in reverse declaration order, and a reply that
+    // ~QNetworkAccessManager finishes on its way out would otherwise run
+    // the handler below against a member that has already gone. The
+    // destructor aborts the poll before any of that can happen, so this is
+    // the second of two guards rather than the load-bearing one — but the
+    // ordering costs nothing and the failure it prevents is silent.
     QPointer<QNetworkReply> m_syncReply;
+    QNetworkAccessManager m_nam;
+    bsfchat::client::MediaTicketCache m_mediaTickets;
+    QString m_homeserver;
+    QString m_accessToken;
 };
