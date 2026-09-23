@@ -17,12 +17,21 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(GAMECHAT_CLIENT_BUILD_TESTS "Build client tests" ON)
-# Voice defaults OFF on iOS. It now COMPILES — the whole stack
-# (libdatachannel, opus, usrsctp, the RTP/pacing layer, VideoToolbox)
-# cross-compiles for arm64-iphoneos and links into a 70 MB .app, built
-# 2026-09-23 with -DBSFCHAT_ENABLE_VOICE=ON. The default stays OFF
-# because compiling is not working: nothing on this path has been RUN
-# on a device, and the gaps below are runtime gaps.
+# Voice is ON for iOS as of 2026-09-23, when it was built, installed and
+# USED on a real iPhone 16 Pro Max: a voice channel carried audio both
+# ways, and the microphone prompt appeared at first join, which is the
+# behaviour Apple wants. It was OFF before that only because nothing on
+# the path had ever been compiled, let alone run.
+#
+# It is ON rather than passed by CI because the product decision is that
+# voice ships in the first iOS release: a default that disagrees with
+# the shipping configuration means the thing under test is not the thing
+# released, and the first TestFlight build would have been a text-only
+# client while the listing described a voice app.
+#
+# Known and NOT fixed by turning this on:
+#   * Echo cancellation. Confirmed echoey on speakerphone on a real
+#     device. Tracked separately; see docs/ios-voice.md.
 #
 # What is still genuinely missing rather than merely unbuilt, in the
 # order it bites — full analysis and estimates in docs/ios-voice.md:
@@ -39,7 +48,7 @@ option(GAMECHAT_CLIENT_BUILD_TESTS "Build client tests" ON)
 #      advertises no codecs at all and peers fall back to the legacy
 #      JPEG path.
 if(IOS)
-    option(BSFCHAT_ENABLE_VOICE "Enable voice chat (requires libdatachannel + opus)" OFF)
+    option(BSFCHAT_ENABLE_VOICE "Enable voice chat (requires libdatachannel + opus)" ON)
 else()
     # Android: voice builds against our NDK-compiled OpenSSL (see
     # deps/openssl-android-arm64). libdatachannel + opus are pulled
@@ -85,6 +94,21 @@ endif()
 #
 # Static .a here, where Android uses .so — iOS forbids loading a
 # dylib the app did not embed, and the script configures `no-shared`.
+#
+# Unconditional for iOS, deliberately OUTSIDE the vendored-OpenSSL
+# branch below: the caller supplying its own OPENSSL_ROOT_DIR (which CI
+# does) needs this just as much, and getting it only by the accident of
+# NOT passing a root is how the first voice configure in CI would have
+# failed. libdatachannel has an Apple branch that FORCEs
+# OPENSSL_{SSL,CRYPTO}_LIBRARY to .dylib paths unless this is set, and
+# an iOS OpenSSL is `no-shared`, so those dylibs do not exist.
+# find_package then creates no OpenSSL::SSL target and
+# datachannel-static fails against a target "not found" — an error that
+# names OpenSSL without naming the reason.
+if(IOS)
+    set(OPENSSL_USE_STATIC_LIBS ON CACHE BOOL "iOS: no shared OpenSSL" FORCE)
+endif()
+
 if(IOS AND NOT DEFINED OPENSSL_ROOT_DIR)
     if(CMAKE_OSX_SYSROOT MATCHES "iphonesimulator")
         set(_bsfchat_ios_ssl_target "simulator")
@@ -95,14 +119,6 @@ if(IOS AND NOT DEFINED OPENSSL_ROOT_DIR)
         "${CMAKE_CURRENT_SOURCE_DIR}/deps/openssl-ios-${_bsfchat_ios_ssl_target}")
     if(EXISTS "${_bsfchat_ios_ssl}/lib/libcrypto.a")
         set(OPENSSL_ROOT_DIR    "${_bsfchat_ios_ssl}" CACHE PATH "iOS OpenSSL root")
-        # REQUIRED on iOS, and the reason the first voice configure failed.
-        # libdatachannel has an Apple branch that FORCEs
-        # OPENSSL_{SSL,CRYPTO}_LIBRARY to .dylib paths unless this is set
-        # — and build-openssl-ios.sh configures `no-shared`, so those
-        # dylibs do not exist. find_package then creates no OpenSSL::SSL
-        # target and datachannel/datachannel-static fail to link against
-        # a target "not found", naming OpenSSL but not the reason.
-        set(OPENSSL_USE_STATIC_LIBS ON CACHE BOOL "iOS: no shared OpenSSL" FORCE)
         set(OPENSSL_INCLUDE_DIR "${_bsfchat_ios_ssl}/include" CACHE PATH "")
         set(OPENSSL_CRYPTO_LIBRARY
             "${_bsfchat_ios_ssl}/lib/libcrypto.a" CACHE FILEPATH "")
