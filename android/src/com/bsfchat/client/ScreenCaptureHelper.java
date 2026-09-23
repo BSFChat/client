@@ -11,11 +11,49 @@ package com.bsfchat.client;
 // that won't saturate a mobile uplink. Tunable later via a quality
 // preset if we add one on mobile.
 //
-// Threading: ImageReader delivers frames on a dedicated Handler
-// thread so the UI thread isn't touched; the JNI callback jumps
-// back onto the Qt event loop on the C++ side.
+// ── Ordering, and why this class no longer opens the projection ──
+//
+// From Android 14 (API 34) MediaProjectionManager.getMediaProjection()
+// throws SecurityException unless a foreground service of type
+// `mediaProjection` is ALREADY in the foreground state at the moment
+// of the call. Context.startForegroundService() does not satisfy that
+// synchronously: it only enqueues onStartCommand on the main looper,
+// so the service's startForeground() necessarily runs AFTER the
+// message that called it has returned. The previous shape here —
+//
+//     activity.startForegroundService(svcIntent);
+//     mProjection = mgr.getMediaProjection(resultCode, data);
+//
+// therefore always ran the two in the forbidden order and could only
+// ever have worked on API <= 33.
+//
+// So the consent RESULT is handed to MediaProjectionService as intent
+// extras, and the service calls back into onServiceForegrounded()
+// from inside onStartCommand, after startForeground() has returned.
+// That is the only point at which getMediaProjection() is legal.
+//
+// The consent itself is single-use from Android 14: a result Intent
+// that has already been converted into a projection cannot be
+// converted again. Nothing here caches one — every start goes through
+// requestPermission() and a fresh createScreenCaptureIntent() — and
+// the pending result is cleared the moment it is consumed so a retry
+// cannot pick up a stale token.
+//
+// ── Threading ──
+//
+// Three threads reach this class:
+//   * the Qt main thread, via JNI (configure/requestPermission/
+//     stopCapture) — this is NOT the Android UI thread;
+//   * the Android main (UI) thread, via onActivityResult and the
+//     service callback;
+//   * a dedicated capture HandlerThread, via ImageReader.
+// Every mutation of the projection/display/reader state is therefore
+// posted to the main looper, and the fields the capture thread reads
+// are volatile. The JNI callbacks jump back onto the Qt event loop on
+// the C++ side.
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.ImageFormat;
@@ -29,6 +67,7 @@ import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Display;
@@ -46,13 +85,16 @@ public final class ScreenCaptureHelper {
     // so user/server settings (Settings.screenShare{Fps,MaxWidth,
     // JpegQuality} clamped against the server policy) take effect
     // here without needing a Java rebuild for every tweak.
-    private static int sMaxLongEdge = 1280;
-    private static int sTargetFps   = 5;
-    private static int sJpegQuality = 60;
+    //
+    // volatile: written from the Qt thread, read from the capture
+    // HandlerThread.
+    private static volatile int sMaxLongEdge = 1280;
+    private static volatile int sTargetFps   = 5;
+    private static volatile int sJpegQuality = 60;
 
-    public static synchronized void configure(int maxLongEdge,
-                                              int targetFps,
-                                              int jpegQuality) {
+    public static void configure(int maxLongEdge,
+                                 int targetFps,
+                                 int jpegQuality) {
         sMaxLongEdge = Math.max(480, Math.min(3840, maxLongEdge));
         sTargetFps   = Math.max(1,   Math.min(60,   targetFps));
         sJpegQuality = Math.max(1,   Math.min(100,  jpegQuality));
@@ -66,7 +108,13 @@ public final class ScreenCaptureHelper {
     private HandlerThread mThread;
     private Handler mHandler;
     private long mLastFrameMs = 0;
-    private int mCapWidth, mCapHeight;
+    // Read from the capture HandlerThread in handleFrame().
+    private volatile int mCapWidth, mCapHeight;
+
+    // Guards against the reentrant teardown that MediaProjection.stop()
+    // provokes: stop() synchronously invokes our registered onStop(),
+    // which would otherwise call straight back into releasePipeline().
+    private boolean mTearingDown = false;
 
     // Application context, captured from the Activity when a capture
     // session starts. stopCapture() needs a Context to stop the
@@ -80,70 +128,117 @@ public final class ScreenCaptureHelper {
     // package"), which broke the Java compile outright. Every entry
     // point into this class already receives the Activity, so there
     // was never a reason to ask Qt for one.
-    private android.content.Context mAppContext;
+    private volatile Context mAppContext;
+
+    private static final Handler sMain = new Handler(Looper.getMainLooper());
 
     public static synchronized ScreenCaptureHelper instance() {
         if (sInstance == null) sInstance = new ScreenCaptureHelper();
         return sInstance;
     }
 
-    // Called from JNI: kicks off the consent intent through the
-    // currently-foregrounded BSFChatActivity. The actual capture
-    // starts in onActivityResult → startCapture().
-    public void requestPermission(Activity activity) {
+    // Called from JNI on the Qt thread: kicks off the consent intent
+    // through the currently-foregrounded BSFChatActivity. Posted to the
+    // main looper because startActivityForResult is an Activity call and
+    // the Qt thread is not the Android UI thread. The actual capture
+    // starts once the user answers, in onActivityResult.
+    public void requestPermission(final Activity activity) {
         if (activity == null) return;
-        MediaProjectionManager mgr = (MediaProjectionManager)
-            activity.getSystemService(Activity.MEDIA_PROJECTION_SERVICE);
-        if (mgr == null) return;
-        Intent intent = mgr.createScreenCaptureIntent();
-        activity.startActivityForResult(intent, REQUEST_CODE);
+        sMain.post(new Runnable() {
+            @Override
+            public void run() {
+                MediaProjectionManager mgr = (MediaProjectionManager)
+                    activity.getSystemService(Activity.MEDIA_PROJECTION_SERVICE);
+                if (mgr == null) {
+                    nativeOnError("Screen capture is not available on this device");
+                    return;
+                }
+                try {
+                    // ALWAYS a fresh intent. From Android 14 a consent
+                    // result is single-use; reusing one throws
+                    // SecurityException at getMediaProjection().
+                    Intent intent = mgr.createScreenCaptureIntent();
+                    activity.startActivityForResult(intent, REQUEST_CODE);
+                } catch (Throwable t) {
+                    Log.w(TAG, "consent intent failed: " + t);
+                    nativeOnError("Could not ask for screen-capture permission");
+                }
+            }
+        });
     }
 
-    // Called from BSFChatActivity.onActivityResult. Forwards to
-    // startCapture which actually opens the projection.
+    // Called from BSFChatActivity.onActivityResult, on the UI thread.
+    // Does NOT open the projection: it starts the foreground service and
+    // hands it the consent result, and the service calls us back at
+    // onServiceForegrounded() once startForeground() has returned. See
+    // the ordering note at the top of this file.
     public void onActivityResult(Activity activity,
                                   int resultCode, Intent data) {
         if (data == null || resultCode != Activity.RESULT_OK) {
             nativeOnPermissionDenied();
             return;
         }
-        startCapture(activity, resultCode, data);
-    }
 
-    private void startCapture(Activity activity, int resultCode, Intent data) {
-        stopCapture();  // clean any previous session
+        // Drop any previous session's pipeline, but leave the service
+        // alone: we are about to (re)start it, and a stopService here
+        // would race the startForegroundService below.
+        releasePipeline();
 
-        // Remember the application context for the teardown path (see
-        // the field's comment) before anything can fail below.
         mAppContext = activity.getApplicationContext();
 
-        // Start the foreground service BEFORE acquiring the
-        // projection — Android 10+ requires the FGS to be alive
-        // when getMediaProjection() is called, else the system
-        // throws a SecurityException.
         Intent svcIntent = new Intent(activity, MediaProjectionService.class);
-        if (android.os.Build.VERSION.SDK_INT
-            >= android.os.Build.VERSION_CODES.O) {
+        svcIntent.putExtra(MediaProjectionService.EXTRA_RESULT_CODE, resultCode);
+        svcIntent.putExtra(MediaProjectionService.EXTRA_RESULT_DATA, data);
+        try {
+            // API >= 26 always: minSdk is 28.
             activity.startForegroundService(svcIntent);
-        } else {
-            activity.startService(svcIntent);
+        } catch (Throwable t) {
+            // ForegroundServiceStartNotAllowedException on 12+ if we
+            // somehow got here while backgrounded. Cannot happen from a
+            // consent result (the consent dialog is ours and we are
+            // resumed behind it), but a thrown exception here would
+            // otherwise take the process with it.
+            Log.w(TAG, "screen-share service start refused: " + t);
+            nativeOnError("Screen sharing could not start in the background");
         }
+    }
+
+    // Called by MediaProjectionService from inside onStartCommand, AFTER
+    // startForeground() has returned. This is the only point at which
+    // getMediaProjection() is legal on Android 14+.
+    void onServiceForegrounded(Context serviceContext,
+                               int resultCode, Intent data) {
+        if (mAppContext == null && serviceContext != null)
+            mAppContext = serviceContext.getApplicationContext();
 
         MediaProjectionManager mgr = (MediaProjectionManager)
-            activity.getSystemService(Activity.MEDIA_PROJECTION_SERVICE);
-        if (mgr == null) return;
-
-        // Stop callback — fires if the user revokes from the
-        // notification, screen locks, etc. We propagate so C++ can
-        // clear the toggled-on UI state.
-        mProjection = mgr.getMediaProjection(resultCode, data);
-        if (mProjection == null) {
-            nativeOnPermissionDenied();
+            serviceContext.getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+        if (mgr == null) {
+            nativeOnError("Screen capture is not available on this device");
+            stopCapture();
             return;
         }
+
+        try {
+            mProjection = mgr.getMediaProjection(resultCode, data);
+        } catch (Throwable t) {
+            // SecurityException on 14+ for a reused/stale consent token,
+            // or if the FGS type check still did not pass. Report rather
+            // than let it unwind into the platform.
+            Log.w(TAG, "getMediaProjection failed: " + t);
+            mProjection = null;
+        }
+        if (mProjection == null) {
+            nativeOnError("Screen-share permission was not accepted");
+            stopCapture();
+            return;
+        }
+
         // Android 14 requires a stop-callback registered before
         // we create the VirtualDisplay; earlier APIs treat it as
-        // optional but it doesn't hurt.
+        // optional but it doesn't hurt. Explicit main-looper handler:
+        // a null handler would use the calling thread's looper, and
+        // this can be reached from a thread that has none.
         mProjection.registerCallback(new MediaProjection.Callback() {
             @Override
             public void onStop() {
@@ -151,20 +246,25 @@ public final class ScreenCaptureHelper {
                 stopCapture();
                 nativeOnStopped();
             }
-        }, null);
+        }, sMain);
 
         // Resolution: scale display metrics so the long edge hits
         // sMaxLongEdge. Keeps aspect.
         DisplayMetrics dm = new DisplayMetrics();
         WindowManager wm = (WindowManager)
-            activity.getSystemService(Activity.WINDOW_SERVICE);
+            serviceContext.getSystemService(Context.WINDOW_SERVICE);
+        if (wm == null) {
+            nativeOnError("Could not read the display size");
+            stopCapture();
+            return;
+        }
         wm.getDefaultDisplay().getRealMetrics(dm);
         int srcW = dm.widthPixels, srcH = dm.heightPixels;
         int longEdge = Math.max(srcW, srcH);
         float scale = longEdge > sMaxLongEdge
             ? (float) sMaxLongEdge / longEdge : 1.0f;
-        mCapWidth = Math.round(srcW * scale) & ~1;    // even
-        mCapHeight = Math.round(srcH * scale) & ~1;
+        mCapWidth = Math.max(2, Math.round(srcW * scale) & ~1);    // even
+        mCapHeight = Math.max(2, Math.round(srcH * scale) & ~1);
 
         mImageReader = ImageReader.newInstance(
             mCapWidth, mCapHeight,
@@ -182,16 +282,71 @@ public final class ScreenCaptureHelper {
                 }
             }, mHandler);
 
-        mVirtualDisplay = mProjection.createVirtualDisplay(
-            "bsfchat-screencap",
-            mCapWidth, mCapHeight, dm.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            mImageReader.getSurface(), null, mHandler);
+        try {
+            mVirtualDisplay = mProjection.createVirtualDisplay(
+                "bsfchat-screencap",
+                mCapWidth, mCapHeight, dm.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                mImageReader.getSurface(), null, mHandler);
+        } catch (Throwable t) {
+            Log.w(TAG, "createVirtualDisplay failed: " + t);
+            mVirtualDisplay = null;
+        }
+        if (mVirtualDisplay == null) {
+            nativeOnError("Screen capture could not be started");
+            stopCapture();
+            return;
+        }
 
         nativeOnStarted(mCapWidth, mCapHeight);
     }
 
+    // Called by the service when it could not reach the foreground at
+    // all (notification blocked in a way that kills the start, or a
+    // start-not-allowed refusal). The consent result dies with it.
+    void onServiceFailed(String reason) {
+        Log.w(TAG, "screen-share service failed: " + reason);
+        nativeOnError(reason);
+        stopCapture();
+    }
+
+    // Full teardown, including the foreground service. Reachable from
+    // the Qt thread (JNI stop()), the main thread (projection onStop)
+    // and our own failure paths, so it marshals onto the main looper.
     public void stopCapture() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            stopCaptureOnMain();
+        } else {
+            sMain.post(new Runnable() {
+                @Override public void run() { stopCaptureOnMain(); }
+            });
+        }
+    }
+
+    private void stopCaptureOnMain() {
+        if (mTearingDown) return;
+        mTearingDown = true;
+        try {
+            releasePipeline();
+            // Stop the foreground service. Calling context for the
+            // stopService is the application context — the activity
+            // may have been destroyed by the time we get here.
+            try {
+                Context ctx = mAppContext;
+                if (ctx != null) {
+                    ctx.stopService(
+                        new Intent(ctx, MediaProjectionService.class));
+                }
+            } catch (Throwable ignored) { /* best effort */ }
+        } finally {
+            mTearingDown = false;
+        }
+    }
+
+    // Everything except the foreground service, so a restart can reuse
+    // the already-running service rather than racing a stop against a
+    // start.
+    private void releasePipeline() {
         if (mVirtualDisplay != null) {
             mVirtualDisplay.release();
             mVirtualDisplay = null;
@@ -202,24 +357,18 @@ public final class ScreenCaptureHelper {
             mImageReader = null;
         }
         if (mProjection != null) {
-            mProjection.stop();
+            MediaProjection p = mProjection;
+            // Null the field first: stop() invokes our onStop callback
+            // synchronously, and that calls back in here.
             mProjection = null;
+            try { p.stop(); } catch (Throwable ignored) { }
         }
         if (mThread != null) {
             mThread.quitSafely();
             mThread = null;
             mHandler = null;
         }
-        // Stop the foreground service. Calling context for the
-        // stopService is the application context — the activity
-        // may have been destroyed by the time we get here.
-        try {
-            android.content.Context ctx = mAppContext;
-            if (ctx != null) {
-                ctx.stopService(
-                    new Intent(ctx, MediaProjectionService.class));
-            }
-        } catch (Throwable ignored) { /* best effort */ }
+        mLastFrameMs = 0;
     }
 
     // Frame-rate gate + JPEG-encode + JNI callback.
@@ -243,20 +392,21 @@ public final class ScreenCaptureHelper {
             ByteBuffer buf = plane.getBuffer();
             int rowStride = plane.getRowStride();
             int pixelStride = plane.getPixelStride();
-            int rowPadding = rowStride - pixelStride * mCapWidth;
+            int w = mCapWidth, h = mCapHeight;
+            if (w <= 0 || h <= 0 || pixelStride <= 0) return;
+            int rowPadding = rowStride - pixelStride * w;
 
             Bitmap bmp = Bitmap.createBitmap(
-                mCapWidth + rowPadding / pixelStride,
-                mCapHeight, Bitmap.Config.ARGB_8888);
+                w + rowPadding / pixelStride,
+                h, Bitmap.Config.ARGB_8888);
             bmp.copyPixelsFromBuffer(buf);
 
             // Crop row-padding columns off the right edge.
             Bitmap tight = (rowPadding == 0)
                 ? bmp
-                : Bitmap.createBitmap(bmp, 0, 0, mCapWidth, mCapHeight);
+                : Bitmap.createBitmap(bmp, 0, 0, w, h);
 
-            ByteArrayOutputStream baos = new ByteArrayOutputStream(
-                mCapWidth * mCapHeight);
+            ByteArrayOutputStream baos = new ByteArrayOutputStream(w * h);
             tight.compress(Bitmap.CompressFormat.JPEG, sJpegQuality, baos);
 
             byte[] jpeg = baos.toByteArray();
@@ -279,4 +429,9 @@ public final class ScreenCaptureHelper {
     private static native void nativeOnStopped();
     private static native void nativeOnPermissionDenied();
     private static native void nativeOnFrame(byte[] jpeg);
+    // A failure with something to say. Surfaces as
+    // AndroidScreenShareController::lastError, which VoiceDock already
+    // binds, so a refused projection reports itself instead of leaving
+    // a share button that does nothing.
+    private static native void nativeOnError(String message);
 }

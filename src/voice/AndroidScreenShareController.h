@@ -62,6 +62,11 @@ public:
     void onStarted(int width, int height);
     void onStopped();
     void onPermissionDenied();
+    // A projection that failed for a reason worth telling the user — the
+    // foreground service being refused, a consent token the platform would
+    // not convert, a VirtualDisplay that would not open. Lands in
+    // lastError, which VoiceDock already toasts.
+    void onError(const QString& message);
     void onFrame(const QByteArray& jpeg);
 
 signals:

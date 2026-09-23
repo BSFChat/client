@@ -10,6 +10,10 @@
 #include "net/ServerConnection.h"
 #include "core/Settings.h"
 
+#ifdef Q_OS_ANDROID
+#include "voice/AndroidAudioRouting.h"
+#endif
+
 #ifdef Q_OS_MACOS
 #include "voice/MacCameraPermission.h"
 #include "voice/MacCameraCapturer.h"
@@ -70,23 +74,13 @@ CameraController::CameraController(QObject* parent)
             emit lastErrorChanged();
         });
 #else
-    m_camera = new QCamera(this);
-    m_session = new QMediaCaptureSession(this);
-    m_session->setCamera(m_camera);
-    m_session->setVideoSink(m_sink);
-
-    connect(m_camera, &QCamera::activeChanged, this, [this](bool a) {
-        setActiveState(a);
-    });
-    connect(m_camera, &QCamera::errorOccurred, this, [this](QCamera::Error err,
-                                                             const QString& d) {
-        Q_UNUSED(err);
-        if (d.isEmpty()) return;
-        m_lastError = d;
-        emit lastErrorChanged();
-    });
     connect(m_sink, &QVideoSink::videoFrameChanged, this,
         [this](const QVideoFrame& f) { m_pendingFrame = f; });
+#  if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    // Desktop: build the capture objects up front, exactly as before.
+    // On mobile this is deferred — see ensureCaptureSession().
+    ensureCaptureSession();
+#  endif
 #endif
 
     m_throttle->setInterval(kFrameIntervalMs);
@@ -115,6 +109,46 @@ CameraController::CameraController(QObject* parent)
                                   QDateTime::currentMSecsSinceEpoch(),
                                   askedFps, /*capturePolled=*/false);
     });
+}
+
+// Create QCamera + QMediaCaptureSession, once.
+//
+// This used to run in the constructor on every non-macOS target, and on
+// Android that is early enough to matter: constructing a QCamera resolves
+// the default video input, and handing it to a QMediaCaptureSession brings
+// up the platform camera object. Qt's Android backend asks for the CAMERA
+// runtime permission along the way, so a user who had only just installed
+// the app was shown a camera prompt on the sign-in screen, before any
+// camera feature had been touched. (Play treats an unprompted sensitive
+// permission request as a policy problem, and it is a bad first run
+// besides.) iOS has the same shape — the startup log carried two "Access to
+// camera not granted" lines for the same reason.
+//
+// So on mobile the objects are built at the first startForCamera(), which
+// is reached only after VoiceDock has asked for CAMERA explicitly. Desktop
+// still builds them in the constructor: there is no prompt to provoke
+// there, and nothing should change for it.
+void CameraController::ensureCaptureSession()
+{
+#if !defined(Q_OS_MACOS)
+    if (m_camera) return;
+
+    m_camera = new QCamera(this);
+    m_session = new QMediaCaptureSession(this);
+    m_session->setCamera(m_camera);
+    m_session->setVideoSink(m_sink);
+
+    connect(m_camera, &QCamera::activeChanged, this, [this](bool a) {
+        setActiveState(a);
+    });
+    connect(m_camera, &QCamera::errorOccurred, this, [this](QCamera::Error err,
+                                                             const QString& d) {
+        Q_UNUSED(err);
+        if (d.isEmpty()) return;
+        m_lastError = d;
+        emit lastErrorChanged();
+    });
+#endif
 }
 
 QVariantList CameraController::availableCameras() const
@@ -228,6 +262,15 @@ void CameraController::startForCamera(int index)
     emit cameraDescriptionChanged();
     m_throttle->start();
 #else
+    // First use on mobile is where the capture objects come into
+    // existence — and the first point at which touching the camera stack
+    // is legitimate, because the CAMERA permission has just been granted.
+    ensureCaptureSession();
+    if (!m_camera) {
+        m_lastError = "Camera is unavailable on this device.";
+        emit lastErrorChanged();
+        return;
+    }
     const auto cams = QMediaDevices::videoInputs();
     if (cams.isEmpty()) {
         m_lastError = "No camera detected.";
@@ -268,6 +311,14 @@ void CameraController::setActiveState(bool active)
 {
     if (m_active == active) return;
     m_active = active;
+#ifdef Q_OS_ANDROID
+    // The call's foreground service claimed only `microphone` at join
+    // time, because Android 14+ refuses a `camera` type unless the CAMERA
+    // permission is already held — which it is not until VoiceDock asks
+    // for it, just before this. Tell the service to re-evaluate, or the
+    // camera is cut the first time the user leaves the app.
+    if (active) bsfchat::audio_routing::refreshVoiceService();
+#endif
     // S-11: the encode session outlives a stop/start, so the first
     // frame of a restarted camera would reference a picture no viewer
     // holds. Start clean.

@@ -1170,3 +1170,30 @@ target_link_libraries(test_ugc_safety PRIVATE
     Qt6::Core Qt6::Test
 )
 add_test(NAME test_ugc_safety COMMAND test_ugc_safety)
+
+# Android runtime-correctness guards. Everything they protect runs on a
+# phone against a platform this machine does not have, so the checks are
+# structural: the MediaProjection start ordering, the foreground-service
+# start window, the Android 15 dataSync timeout handler, the API-30 gate on
+# the mic/camera FGS types, the manifest's launchMode and intent filters,
+# and the two constructors that were bringing Qt Multimedia up (and with it
+# the camera/microphone prompts) on the sign-in screen.
+#
+# Structural, in the spirit of test_qml_hygiene: each case fails on the
+# commit before its fix. They are NOT a substitute for hardware
+# verification and do not claim any of this works on a device.
+#
+# AndroidNotifier.cpp is linked rather than only scanned so the
+# degradation state machine (backgroundSyncActive / the timeout path) is
+# actually executed; off Android every JNI body compiles out and the
+# policy logic is what is left.
+qt_add_executable(test_android_runtime
+    test_android_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AndroidNotifier.cpp
+)
+target_include_directories(test_android_runtime PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_android_runtime PRIVATE
+    BSFCHAT_ANDROID_DIR="${CMAKE_SOURCE_DIR}/android"
+    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_android_runtime PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_android_runtime COMMAND test_android_runtime)

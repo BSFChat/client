@@ -52,11 +52,18 @@ Settings::Settings(QObject* parent)
     // Live device lists. Re-enumerating only on dialog open was one open
     // too late for the case that prompted this: a Bluetooth headset that
     // connects while the dialog is already open never appeared at all.
-    m_mediaDevices = new QMediaDevices(this);
-    connect(m_mediaDevices, &QMediaDevices::audioInputsChanged,
-            this, &Settings::audioDevicesChanged);
-    connect(m_mediaDevices, &QMediaDevices::audioOutputsChanged,
-            this, &Settings::audioDevicesChanged);
+    //
+    // Mobile is the exception: constructing QMediaDevices brings up Qt's
+    // multimedia device backend, and on Android that is enough to have the
+    // platform ask for the microphone (and, through the same backend
+    // bring-up, camera) runtime permission — on the sign-in screen, before
+    // the user has touched a single media feature. So on Android and iOS
+    // the instance is created on first use instead, which is the audio
+    // settings pane opening: hot-plug while THAT is open still works,
+    // which is all this instance was ever for.
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    ensureMediaDevices();
+#endif
     // On macOS these also fire when the system DEFAULT moves, so the
     // "System default (…)" entry relabels itself as the user switches
     // output in Control Centre.
@@ -513,11 +520,26 @@ QVariantList devicesToList(const QList<QAudioDevice>& devices,
 }
 } // namespace
 
+// Create the live QMediaDevices instance, once. Deliberately not called
+// from the constructor on mobile — see the note there.
+void Settings::ensureMediaDevices() const
+{
+    if (m_mediaDevices) return;
+    auto* self = const_cast<Settings*>(this);
+    m_mediaDevices = new QMediaDevices(self);
+    connect(m_mediaDevices, &QMediaDevices::audioInputsChanged,
+            self, &Settings::audioDevicesChanged);
+    connect(m_mediaDevices, &QMediaDevices::audioOutputsChanged,
+            self, &Settings::audioDevicesChanged);
+}
+
 QVariantList Settings::audioInputDevices() const {
+    ensureMediaDevices();
     return devicesToList(QMediaDevices::audioInputs(),
                          QMediaDevices::defaultAudioInput());
 }
 QVariantList Settings::audioOutputDevices() const {
+    ensureMediaDevices();
     return devicesToList(QMediaDevices::audioOutputs(),
                          QMediaDevices::defaultAudioOutput());
 }
@@ -546,6 +568,11 @@ void Settings::selectAudioOutputDevice(const QString& description,
 
 void Settings::refreshAudioDevices()
 {
+    // Also the point at which the live instance appears on mobile: the
+    // settings pane calls this in onAboutToShow, which is a user opening
+    // the audio settings and therefore a fair moment to touch the
+    // multimedia backend.
+    ensureMediaDevices();
     emit audioDevicesChanged();
 }
 
