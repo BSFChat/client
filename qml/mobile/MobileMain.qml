@@ -153,8 +153,12 @@ ApplicationWindow {
         RowLayout {
             anchors.fill: parent
             anchors.topMargin: root.topInset
-            anchors.leftMargin: Theme.sp.s4
-            anchors.rightMargin: Theme.sp.s4
+            // Theme.mobileGutter, not s4 — the header, the timeline and
+            // the composer are all full-width surfaces on a phone and all
+            // three now keep the same margin clear of the display's
+            // rounded corners. See the token's comment for the arithmetic.
+            anchors.leftMargin: Theme.mobileGutter
+            anchors.rightMargin: Theme.mobileGutter
             spacing: Theme.sp.s3
 
             // Burger → left drawer

@@ -46,6 +46,23 @@ ScrollBar {
     // lands the thumb at exactly 1.0.
     policy: size < 0.999 ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
 
+    // On a touch screen this is an INDICATOR, not a control.
+    //
+    // Qt's ScrollBar defaults to interactive: true, which means the strip
+    // it occupies — the bar plus its padding, ~10 px hard against the
+    // right edge of whatever it is attached to — swallows presses and
+    // turns them into thumb drags. On a phone that strip lies exactly
+    // where a thumb lands when you flick the timeline near the bezel, and
+    // exactly where MessageBubble's swipe-to-reply drag starts. The
+    // symptom is a flick that doesn't scroll, or scrolls miles, at
+    // seemingly random times near the edge of the screen.
+    //
+    // Neither iOS nor Android has a draggable scrollbar; both draw a
+    // passive position indicator over the content and scroll by flicking
+    // it. Matching that costs nothing — every scrolling surface in this
+    // app is a Flickable, so the content itself is already the handle.
+    interactive: !Theme.isMobile
+
     contentItem: Rectangle {
         implicitWidth: bar.hovered || bar.pressed ? 8 : 4
         radius: width / 2

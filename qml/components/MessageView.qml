@@ -455,8 +455,12 @@ Rectangle {
             id: timelineArea
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.leftMargin: Theme.sp.s7
-            Layout.rightMargin: Theme.sp.s7
+            // On a phone this is the same number the composer and the
+            // shell's header row use — see Theme.mobileGutter. It happens
+            // to equal the desktop s7, and is written as the token anyway
+            // so the three of them stay locked together.
+            Layout.leftMargin: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7
+            Layout.rightMargin: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7
 
             ListView {
                 id: messageListView
@@ -708,6 +712,81 @@ Rectangle {
                 Component.onCompleted: {
                     _ready = true;
                     _enterRoomContext();
+                }
+
+                // ── Resume from the background is the end of one visit
+                //    and the start of another ────────────────────────────
+                //
+                // `unreadBoundaryMs` is snapshotted exactly once per visit,
+                // in `_enterRoomContext`, and that entry is keyed on the
+                // (server, room, model) triple. A phone comes back from the
+                // background into the SAME triple — same connection, same
+                // room, same model object — so nothing above re-ran and the
+                // frozen boundary, and the "New messages" divider drawn from
+                // it, survived from the previous visit. Not for a moment:
+                // until the user switched rooms and came back, which on a
+                // one-channel server may be never. The divider sat parked
+                // above messages the user had read hours ago.
+                //
+                // Freezing the boundary FOR a visit is right and stays. What
+                // was missing is that backgrounding ends a visit. So:
+                //
+                //   suspended → persist what was read, exactly as leaving a
+                //               room does (no-op unless the user was parked
+                //               at the bottom — `_persistLastReadForCurrent`
+                //               owns that rule, and it is the same rule here)
+                //   activated → re-read the marker and recompute the anchor,
+                //               so the divider means "arrived while I was
+                //               away" again.
+                //
+                // Deliberately NOT a re-entry: no scroll, no initialLoad, no
+                // followEnd/atBottom reset. The user's viewport is theirs;
+                // coming back to your phone should not yank you somewhere
+                // else in the history. Only the divider moves.
+                //
+                // Suspended/Hidden ONLY, never Inactive. Inactive is a
+                // transient loss of focus — the notification shade, an
+                // incoming-call banner, a permission sheet, and on the
+                // desktop every single click on another window. Re-reading
+                // the marker on those would clear the divider every time the
+                // user alt-tabbed, which is the opposite of what the divider
+                // is for. iOS reports Inactive on the way out AND on the way
+                // back in (resignActive → background → foreground →
+                // becomeActive), so the flag is what tells the two apart.
+                property bool _wasBackgrounded: false
+                function _onApplicationStateChanged(appState) {
+                    if (!_ready) return;
+                    if (appState === Qt.ApplicationSuspended
+                        || appState === Qt.ApplicationHidden) {
+                        _wasBackgrounded = true;
+                        _persistLastReadForCurrent();
+                    } else if (appState === Qt.ApplicationActive
+                               && _wasBackgrounded) {
+                        _wasBackgrounded = false;
+                        _resnapshotUnreadBoundary();
+                    }
+                }
+                function _resnapshotUnreadBoundary() {
+                    unreadBoundaryMs = _currentRoomId
+                        ? appSettings.lastReadTs(_currentRoomId) : 0;
+                    // The model has not changed, so nothing will fire
+                    // onCountChanged for us — recompute here or the new
+                    // boundary sits unread until the next message lands.
+                    _recomputeUnreadDivider();
+                }
+                // `Application`, QtQuick's singleton, rather than
+                // `Qt.application`. The two are the same object at runtime,
+                // but the JS handle is typed as QQmlApplication by the
+                // linter while `state` is declared on the QtQuick subclass,
+                // so the working form reports as a missing property. (Do not
+                // start a comment line in this file with the linter's own
+                // name, either — it reads that as a directive.)
+                Connections {
+                    target: Application
+                    function onStateChanged() {
+                        messageListView._onApplicationStateChanged(
+                            Application.state);
+                    }
                 }
 
                 // ── TWO FLAGS, DELIBERATELY. DO NOT MERGE THEM AGAIN. ─────
@@ -1852,10 +1931,18 @@ Rectangle {
         MessageInput {
             id: messageInput
             Layout.fillWidth: true
-            // Tighter left/right margins on mobile so the composer
-            // gets the full viewport width minus a small gutter.
-            Layout.leftMargin: Theme.isMobile ? Theme.sp.s3 : Theme.sp.s7
-            Layout.rightMargin: Theme.isMobile ? Theme.sp.s3 : Theme.sp.s7
+            // The composer used to take a TIGHTER gutter than the timeline
+            // above it (s3 = 8 against s7 = 16) on the theory that it
+            // should have "the full viewport width minus a small gutter".
+            // That made its rounded border the outermost thing on the
+            // screen, and at 8 pt in — with the keyboard up, so its bottom
+            // margin is small — the bottom-right corner of that border
+            // falls inside the display's own corner radius and is cut off.
+            // The arithmetic is in Theme.mobileGutter. Same number as the
+            // timeline and the shell header now; the chat column reads as
+            // one column instead of three ragged ones.
+            Layout.leftMargin: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7
+            Layout.rightMargin: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7
             Layout.topMargin: Theme.sp.s3
             // Extra bottom margin on mobile for the home-indicator /
             // gesture bar so the composer isn't hugging the edge.

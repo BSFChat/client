@@ -60,16 +60,43 @@
 	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
+	<!-- PORTRAIT ONLY, deliberately, for the first release.
+	     ==================================================
+	     This used to list LandscapeLeft and LandscapeRight as well, which
+	     meant the app rotated — into a layout nobody had ever drawn.
+
+	     There is no orientation-aware code anywhere in qml/: not one
+	     binding reads Screen.orientation, primaryOrientation or compares
+	     width against height. Every phone surface is a single vertical
+	     stack sized for a portrait viewport, and the arithmetic in
+	     landscape does not work out:
+
+	       iPhone 15 landscape viewport        393 pt tall
+	       − header                             48
+	       − composer (56 min + its margins)    ~76
+	       − software keyboard                 ~200
+	       = message list                       ~69 pt — one row, or none.
+
+	     Even with the keyboard down it is ~270 pt, and the drawers,
+	     every Popup that clamps to `parent.height * 0.85`, and the
+	     voice room's participant grid are all sized against a viewport
+	     more than twice that tall. A reviewer who rotates the device is
+	     doing something entirely ordinary, and what they would see is
+	     a chat app with no chat in it.
+
+	     Portrait-only is a normal shipping answer for a phone chat app,
+	     it is honest about what has actually been laid out, and it is
+	     reversible in this one array the day a landscape layout exists.
+	     Android's half of this decision is android/AndroidManifest.xml's
+	     screenOrientation.
+
+	     Upside-down is still not listed: iPhone never auto-rotates to it,
+	     and it would only matter on iPad, which we do not target
+	     (TARGETED_DEVICE_FAMILY=1 in CMakeLists.txt). -->
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<!-- The chat layout has no upside-down variant worth having and
-	     iPhone never auto-rotates to it anyway; listing it would only
-	     matter on iPad, which we do not target (TARGETED_DEVICE_FAMILY=1
-	     in CMakeLists.txt). -->
 
 	<!-- ===== TCC usage descriptions =====
 	     Apple rejects boilerplate here ("needs microphone access"): the

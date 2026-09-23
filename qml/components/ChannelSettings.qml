@@ -9,8 +9,16 @@ import BSFChat
 Popup {
     id: channelSettings
     anchors.centerIn: Overlay.overlay
-    width: Math.min(parent ? parent.width * 0.9 : 780, 780)
-    height: Math.min(parent ? parent.height * 0.88 : 720, 720)
+    // Full viewport on a phone: 0.9 × 0.88 of a 390 pt screen is a box
+    // barely smaller than the screen, drawn as a floating dialog with an
+    // apologetic margin — and the permission grid inside it needs every
+    // point it can get. See Theme.mobileGutter.
+    width: Theme.isMobile
+        ? (parent ? parent.width - 2 * Theme.mobileGutter : 360)
+        : Math.min(parent ? parent.width * 0.9 : 780, 780)
+    height: Theme.isMobile
+        ? (parent ? parent.height - 2 * Theme.mobileGutter : 600)
+        : Math.min(parent ? parent.height * 0.88 : 720, 720)
     modal: true
     focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -153,12 +161,19 @@ Popup {
     // Row with a title/description on the left and an arbitrary control slot
     // (default property) on the right. Used for the slowmode and private
     // channel rows.
-    component SettingRow: RowLayout {
+    // A GridLayout rather than a RowLayout so the same declaration is a row
+    // on a desktop and a STACK on a phone: `columns: 1` puts the control
+    // underneath its title instead of beside it, which is the only way a
+    // desktop-width control fits a phone pane. Same change, same reasoning,
+    // as ClientSettings.qml's SettingRow.
+    component SettingRow: GridLayout {
         property string title: ""
         property string description: ""
         default property alias rightControl: rightContainer.children
         Layout.fillWidth: true
-        spacing: Theme.sp.s7
+        columns: Theme.isMobile ? 1 : 2
+        columnSpacing: Theme.sp.s7
+        rowSpacing: Theme.sp.s3
 
         ColumnLayout {
             Layout.fillWidth: true
@@ -182,7 +197,9 @@ Popup {
         }
         Item {
             id: rightContainer
-            Layout.alignment: Qt.AlignVCenter
+            // Stacked on a phone, so it starts at the left margin under the
+            // title rather than floating in the middle of its own row.
+            Layout.alignment: Theme.isMobile ? Qt.AlignLeft : Qt.AlignVCenter
             implicitWidth: childrenRect.width
             implicitHeight: childrenRect.height
         }
@@ -284,8 +301,12 @@ Popup {
                 // Close X as a proper icon button rather than a unicode glyph.
                 Rectangle {
                     Layout.alignment: Qt.AlignVCenter
-                    Layout.preferredWidth: 28
-                    Layout.preferredHeight: 28
+                    // 44 pt on a phone. These panes take the whole screen
+                    // there, Esc does not exist and click-outside has nowhere
+                    // to land, so this X is the ONLY way back out — at 28 it
+                    // was well under the touch minimum.
+                    Layout.preferredWidth: Theme.isMobile ? 44 : 28
+                    Layout.preferredHeight: Theme.isMobile ? 44 : 28
                     radius: Theme.r1
                     color: closeXMouse.containsMouse ? Theme.bg3 : "transparent"
                     Icon {

@@ -986,6 +986,265 @@ private slots:
                      + offenders.join(QStringLiteral(", "))));
     }
 
+    // ── Phone form factor ────────────────────────────────────────────────
+    //
+    // The five rules below all came out of one round of looking at this app
+    // on an actual phone. Each is a source scan for the same reason the rest
+    // of this file is: the QML module is compiled into the app binary, so no
+    // test target can instantiate any of it.
+
+    // The app ships portrait-only, and the two places that say so agree.
+    //
+    // Both platforms used to rotate — iOS listed LandscapeLeft/Right and
+    // Android's activity was screenOrientation="unspecified" — into a layout
+    // that does not exist. There is no orientation-aware binding anywhere in
+    // qml/ (the second half of this test), every phone surface is a vertical
+    // stack sized for a portrait viewport, and on a landscape phone with the
+    // keyboard up the message list comes out under a hundred points tall.
+    //
+    // This guard is not "landscape is forbidden forever". It is "the day
+    // landscape comes back, it comes back WITH a layout" — the second half
+    // fails the moment somebody writes one, which is the signal to revisit
+    // the first half rather than a reason to work around it.
+    void thePhoneShipsPortraitOnly()
+    {
+        const QString plist = readAll(QStringLiteral(BSFCHAT_ROOT_DIR
+                                                     "/ios/Info.plist.in"));
+        QVERIFY2(!plist.isEmpty(), "ios/Info.plist.in not found");
+        QVERIFY2(plist.contains(QStringLiteral("UISupportedInterfaceOrientations")),
+                 "Info.plist.in no longer declares UISupportedInterfaceOrientations "
+                 "— without it iOS allows every orientation the device supports");
+        // The <string> entries only. The rationale comment above them says
+        // the word "landscape" a dozen times and must be allowed to.
+        static const QRegularExpression landscapeEntry(
+            QStringLiteral(R"(<string>\s*UIInterfaceOrientationLandscape\w*\s*</string>)"));
+        QVERIFY2(!landscapeEntry.match(plist).hasMatch(),
+                 "ios/Info.plist.in lists a landscape orientation again. Nothing "
+                 "in qml/ lays out for it; see the comment on that key.");
+
+        const QString manifest = readAll(QStringLiteral(BSFCHAT_ROOT_DIR
+                                                        "/android/AndroidManifest.xml"));
+        QVERIFY2(!manifest.isEmpty(), "android/AndroidManifest.xml not found");
+        QVERIFY2(manifest.contains(QStringLiteral("android:screenOrientation=\x22portrait\x22")),
+                 "the Android activity is not locked to portrait — iOS and "
+                 "Android must make the same choice here or the two builds "
+                 "disagree about what has been laid out");
+
+        // And the reason the lock is right: nothing reads the orientation.
+        static const QRegularExpression orientationAware(
+            QStringLiteral(R"(Screen\.orientation|primaryOrientation|Qt\.LandscapeOrientation)"));
+        QStringList aware;
+        for (const QString& path : filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
+                                              QStringLiteral("*.qml"))) {
+            if (orientationAware.match(withoutComments(readAll(path))).hasMatch())
+                aware << QFileInfo(path).fileName();
+        }
+        QVERIFY2(aware.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "QML now reacts to device orientation (%1) — if a landscape "
+                     "layout exists, the two manifests above should stop "
+                     "refusing to rotate into it")
+                     .arg(aware.join(QStringLiteral(", ")))));
+    }
+
+    // One horizontal gutter for every full-width surface on a phone.
+    //
+    // There were three. The shell header kept 10 px clear, the timeline 16
+    // and the composer 8 — so the composer's rounded border was the outermost
+    // thing on the screen, and at 8 px in, with the software keyboard up and
+    // its bottom margin correspondingly small, the bottom-right of that
+    // border falls inside the display's own ~55 pt corner radius and is cut
+    // off. That is a clipping bug no safe-area inset describes: iOS reports
+    // 0/0/0/0 horizontally in portrait even on a Dynamic Island device,
+    // because the window IS inside the safe area. Theme.mobileGutter carries
+    // the arithmetic.
+    void onePhoneGutterForEveryFullWidthSurface()
+    {
+        const QString theme = withoutComments(
+            readQml(QStringLiteral("/theme/Theme.qml")));
+        QVERIFY2(theme.contains(QStringLiteral("property int mobileGutter")),
+                 "Theme.mobileGutter is gone — the three surfaces below have "
+                 "nothing left to agree on");
+
+        struct Surface { const char* file; const char* what; };
+        const Surface surfaces[] = {
+            {"/mobile/MobileMain.qml",       "the shell header row"},
+            {"/components/MessageView.qml",  "the timeline and the composer"},
+        };
+        for (const auto& s : surfaces) {
+            const QString src = withoutComments(readQml(QString::fromUtf8(s.file)));
+            QVERIFY2(src.contains(QStringLiteral("Theme.mobileGutter")),
+                     qPrintable(QStringLiteral("%1 no longer keeps the phone "
+                                               "gutter (%2)")
+                                    .arg(QString::fromUtf8(s.file),
+                                         QString::fromUtf8(s.what))));
+        }
+
+        // And specifically: no full-width surface may take a SMALLER margin
+        // on a phone than it does on a desktop. That inversion — "the phone
+        // is narrow, so give the content more of it" — is exactly what put
+        // the composer's border in the corner of the glass.
+        static const QRegularExpression tighterOnMobile(
+            QStringLiteral(R"(Layout\.(?:left|right)Margin\s*:\s*Theme\.isMobile\s*\?\s*Theme\.sp\.s([1-6])\b)"));
+        const QString view = withoutComments(
+            readQml(QStringLiteral("/components/MessageView.qml")));
+        QStringList offenders;
+        for (auto it = tighterOnMobile.globalMatch(view); it.hasNext();)
+            offenders << it.next().captured(0).simplified();
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "MessageView gives a phone a tighter horizontal margin "
+                     "than a desktop; use Theme.mobileGutter: ")
+                     + offenders.join(QStringLiteral(" | "))));
+    }
+
+    // A scrollbar on a touch screen is an indicator, not a handle.
+    //
+    // Qt's ScrollBar defaults to interactive: true, so the ~10 px strip it
+    // occupies along the right edge of a Flickable eats presses and turns
+    // them into thumb drags. On a phone that strip is where a thumb lands
+    // when you flick the timeline near the bezel, and where MessageBubble's
+    // swipe-to-reply begins. Neither iOS nor Android has a draggable
+    // scrollbar; both flick the content.
+    void touchScrollbarsAreIndicatorsNotHandles()
+    {
+        const QString src = withoutComments(
+            readQml(QStringLiteral("/components/ThemedScrollBar.qml")));
+        static const QRegularExpression guarded(
+            QStringLiteral(R"(interactive\s*:\s*!\s*Theme\.isMobile)"));
+        QVERIFY2(guarded.match(src).hasMatch(),
+                 "ThemedScrollBar is interactive on touch again — it will "
+                 "swallow flicks along the right edge of every list in the app");
+    }
+
+    // The unread divider is re-evaluated when the app comes back.
+    //
+    // `unreadBoundaryMs` is snapshotted once per visit by _enterRoomContext,
+    // which keys on the (server, room, model) triple. A phone resumes into
+    // the SAME triple, so nothing re-ran and the "New messages" divider stayed
+    // parked where it had been when the app went away — until the user
+    // switched rooms and came back, which on a one-channel server is never.
+    //
+    // Two halves, and the second is the one that gets lost in a refactor:
+    // Suspended/Hidden only, never Inactive. Inactive is a transient focus
+    // loss — a notification shade, a permission sheet, and on a desktop every
+    // click on another window — and re-snapshotting on those would clear the
+    // divider every time the user alt-tabbed away from the app.
+    void theUnreadDividerIsReEvaluatedWhenTheAppComesBack()
+    {
+        const QString src = withoutComments(
+            readQml(QStringLiteral("/components/MessageView.qml")));
+
+        QVERIFY2(src.contains(QStringLiteral("Qt.ApplicationActive")),
+                 "MessageView does not watch the application state, so the "
+                 "unread divider still survives a background/foreground cycle "
+                 "unchanged");
+        QVERIFY2(src.contains(QStringLiteral("Qt.ApplicationSuspended")),
+                 "the resume path is not gated on having actually been "
+                 "suspended");
+        QVERIFY2(!src.contains(QStringLiteral("Qt.ApplicationInactive")),
+                 "MessageView reacts to Qt.ApplicationInactive — that fires on "
+                 "a notification shade and on every desktop focus change, and "
+                 "re-snapshotting there clears the divider under the user");
+
+        // The boundary has to be re-read from settings on resume, not merely
+        // recomputed against the frozen one: `_recomputeUnreadDivider` alone
+        // resolves the SAME stale timestamp and moves nothing.
+        static const QRegularExpression snapshot(
+            QStringLiteral(R"(unreadBoundaryMs\s*=\s*_currentRoomId)"));
+        int snapshots = 0;
+        for (auto it = snapshot.globalMatch(src); it.hasNext();) { it.next(); ++snapshots; }
+        QVERIFY2(snapshots >= 2,
+                 qPrintable(QStringLiteral(
+                     "the read marker is re-snapshotted in %1 place(s); room "
+                     "entry and resume are two distinct ones")
+                     .arg(snapshots)));
+    }
+
+    // Every composer has a send control you can see and tap.
+    //
+    // ThreadPanel's had none: the entire send path was Keys.onReturnPressed.
+    // That is survivable on a desktop, where the main composer has taught you
+    // that Return sends and shows a button beside it anyway. On a phone it is
+    // a dead end — the software keyboard's return key is a newline glyph, the
+    // field is single-line so pressing it does something invisible, and
+    // nothing on screen says "post this".
+    //
+    // Checked as a named list rather than a pattern: "a text field that sends
+    // on Return" also describes a dozen dialogs that have an explicit Save or
+    // Add button three lines below, and those are fine.
+    void everyComposerHasAVisibleSendControl()
+    {
+        struct Composer { const char* file; const char* sendCall; };
+        const Composer composers[] = {
+            {"/components/MessageInput.qml", "sendCurrentMessage()"},
+            {"/components/ThreadPanel.qml",  "threadPanel._send()"},
+        };
+        for (const auto& c : composers) {
+            const QString file = QString::fromUtf8(c.file);
+            const QString call = QString::fromUtf8(c.sendCall);
+            const QString src = withoutComments(readQml(file));
+            QVERIFY2(src.contains(call),
+                     qPrintable(QStringLiteral("%1 no longer calls %2 — retarget "
+                                               "this rule rather than dropping it")
+                                    .arg(file, call)));
+            // A screen reader has to be told what it is…
+            QVERIFY2(src.contains(QStringLiteral("Accessible.name: \x22Send")),
+                     qPrintable(QStringLiteral("%1 has no control named \x22Send…\x22")
+                                    .arg(file)));
+            // …and a finger has to be able to reach it. An Accessible
+            // annotation on nothing is worse than none.
+            static const QRegularExpression tapToSend(
+                QStringLiteral(R"(onClicked\s*:[^\n]*_?[Ss]end)"));
+            QVERIFY2(tapToSend.match(src).hasMatch(),
+                     qPrintable(QStringLiteral("%1 sends on Return but nothing "
+                                               "in it sends on a tap")
+                                    .arg(file)));
+        }
+    }
+
+    // No dialog is sized in bare pixels.
+    //
+    // AddMemberDialog was `width: 460`, opens from the member list and from a
+    // channel row — both of which are inside a drawer on a phone — and 460 is
+    // wider than every iPhone in portrait, so it hung ~35 pt off each side
+    // with its title and its Cancel/Add buttons cut in half. The house form
+    // is Math.min(design width, parent.width − gutters); a bare number is a
+    // dialog that has only ever been opened on the machine it was written on.
+    void dialogsAreNeverWiderThanTheScreenTheyOpenOn()
+    {
+        static const QRegularExpression rootIsDialog(
+            QStringLiteral(R"(^(?:Popup|Dialog)\s*\{)"),
+            QRegularExpression::MultilineOption);
+        // Column 0 `width:`/`height:` on a dialog root is the dialog's own
+        // size; anything indented belongs to something inside it.
+        static const QRegularExpression bareSize(
+            QStringLiteral(R"(^    (width|height)\s*:\s*\d+\s*$)"),
+            QRegularExpression::MultilineOption);
+
+        QStringList offenders;
+        int checked = 0;
+        for (const QString& path : filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
+                                              QStringLiteral("*.qml"))) {
+            const QString src = withoutComments(readAll(path));
+            if (!rootIsDialog.match(src).hasMatch()) continue;
+            ++checked;
+            for (auto it = bareSize.globalMatch(src); it.hasNext();) {
+                offenders << QStringLiteral("%1: %2")
+                                 .arg(QFileInfo(path).fileName(),
+                                      it.next().captured(0).simplified());
+            }
+        }
+        QVERIFY2(checked > 0,
+                 "no Popup/Dialog-rooted QML found — has the pattern changed? "
+                 "This guard is only meaningful while one exists.");
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "dialog sized in bare pixels, so it does not fit a screen "
+                     "narrower than the number: ")
+                     + offenders.join(QStringLiteral(" | "))));
+    }
+
 private:
     // The text between the braces of the first block whose opening matches
     // `opener` (which must end at that block's `{`). Null when there is none.

@@ -14,13 +14,27 @@ Popup {
     // badge (~400 px) NEXT TO the title/description column — at the old
     // 760 cap the controls clipped off the dialog's right edge on every
     // row. 0.9 keeps it inside small windows.
-    width: Math.min(parent ? parent.width * 0.9 : 720, 900)
-    height: Math.min(parent ? parent.height * 0.85 : 600, 640)
+    // On a phone this is a full-screen pane, not a dialog. 0.9 × 0.85 of a
+    // 390 pt viewport left a 351 pt box that then spent 180 of it on a
+    // fixed-width nav rail and 64 more on page margins — 107 pt for rows
+    // whose controls are 220 to 260 wide. Every one of them ran off the
+    // right edge. Phones give settings the whole screen; so do we.
+    width: Theme.isMobile
+        ? (parent ? parent.width - 2 * Theme.mobileGutter : 360)
+        : Math.min(parent ? parent.width * 0.9 : 720, 900)
+    height: Theme.isMobile
+        ? (parent ? parent.height - 2 * Theme.mobileGutter : 600)
+        : Math.min(parent ? parent.height * 0.85 : 600, 640)
     modal: true
     focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     property int section: 0
+    // One list, read by the desktop nav rail and by the phone's section
+    // dropdown. Two copies of it is how a section gets added to one and
+    // not the other.
+    readonly property var sections: ["Appearance", "Audio", "Screen Share",
+                                     "Notifications", "Updates", "Advanced"]
 
     // D-C1's rule, applied here. This popup is created once with the window and
     // reused, so anything a control wrote over its own binding — or resolved
@@ -62,7 +76,12 @@ Popup {
             anchors.right: parent.right
             anchors.topMargin: Theme.sp.s5
             anchors.rightMargin: Theme.sp.s5
-            width: 28; height: 28
+            // 44 pt on a phone. This pane takes the whole screen there,
+            // Esc does not exist and click-outside has nowhere to land,
+            // so this X is the ONLY way back out — at 28 it was well
+            // under the touch minimum.
+            width: Theme.isMobile ? 44 : 28
+            height: Theme.isMobile ? 44 : 28
             radius: Theme.r1
             color: closeXMouse.containsMouse ? Theme.bg3 : "transparent"
             z: 10
@@ -100,12 +119,26 @@ Popup {
 
     // Row with title + description on the left and an arbitrary control on
     // the right. Reused across all settings rows.
-    component SettingRow: RowLayout {
+    // A GridLayout rather than a RowLayout so the same declaration is a
+    // row on a desktop and a STACK on a phone: `columns: 1` puts the
+    // control underneath its title instead of beside it.
+    //
+    // Side by side is wrong on a phone whatever the pane is doing. The
+    // controls handed to these rows are 220–260 pt wide combos and
+    // sliders, sized for a desktop dialog, and a phone pane simply does
+    // not have that much width LEFT once a title column has taken its
+    // share — so the row's implicit minimum exceeded the viewport and the
+    // right-hand control hung off the edge of the dialog. Stacked, the
+    // control gets the full width of the pane and the title gets its own
+    // line, which is also what every phone settings screen does.
+    component SettingRow: GridLayout {
         property string title: ""
         property string description: ""
         default property alias rightControl: rightContainer.children
         Layout.fillWidth: true
-        spacing: Theme.sp.s7
+        columns: Theme.isMobile ? 1 : 2
+        columnSpacing: Theme.sp.s7
+        rowSpacing: Theme.sp.s3
 
         ColumnLayout {
             Layout.fillWidth: true
@@ -135,19 +168,33 @@ Popup {
         }
         Item {
             id: rightContainer
-            Layout.alignment: Qt.AlignVCenter
+            // Stacked on a phone, so it starts at the left margin under
+            // the title rather than floating in the middle of its own row.
+            Layout.alignment: Theme.isMobile ? Qt.AlignLeft : Qt.AlignVCenter
             implicitWidth: childrenRect.width
             implicitHeight: childrenRect.height
         }
     }
 
-    contentItem: RowLayout {
-        spacing: 0
+    // GridLayout, not RowLayout, so this is a row on a desktop and a stack
+    // on a phone without the tree being written twice. `columns: 1` on
+    // mobile, and the two children that do not belong to that form factor
+    // are `visible: false` — which a layout skips entirely, so each form
+    // factor sees exactly two children in the order it wants them.
+    contentItem: GridLayout {
+        columns: Theme.isMobile ? 1 : 2
+        rowSpacing: 0
+        columnSpacing: 0
 
-        // Left nav
+        // Left nav.
+        //
+        // Gone on a phone, where 180 pt of fixed rail out of a ~360 pt
+        // viewport is half the screen spent on navigation. The phone gets
+        // the dropdown below instead, and this whole column collapses.
         Rectangle {
+            visible: !Theme.isMobile
             Layout.fillHeight: true
-            Layout.preferredWidth: 180
+            Layout.preferredWidth: Theme.isMobile ? 0 : 180
             color: Theme.bg0
             radius: Theme.r2
             Rectangle { // right-edge clip
@@ -175,8 +222,7 @@ Popup {
                 }
 
                 Repeater {
-                    model: ["Appearance", "Audio", "Screen Share",
-                            "Notifications", "Updates", "Advanced"]
+                    model: clientSettingsPopup.sections
                     delegate: Rectangle {
                         Layout.fillWidth: true
                         height: 36
@@ -218,6 +264,36 @@ Popup {
             }
         }
 
+        // Phone section picker — the replacement for the nav rail, and the
+        // reason the container above is a GridLayout. On a phone the rail
+        // is `visible: false`, a layout skips invisible children, and
+        // `columns: 1` stacks what is left: picker on top, pages below. On
+        // a desktop this one is the invisible child and the rail and the
+        // pages sit side by side exactly as before.
+        //
+        // A dropdown rather than a row of chips: six section names do not
+        // fit across a phone without either scrolling sideways (which
+        // nothing else in this app does, so nobody would think to try) or
+        // shrinking the labels past the point where they can be hit.
+        ThemedComboBox {
+            id: mobileSectionPicker
+            visible: Theme.isMobile
+            Layout.fillWidth: true
+            Layout.margins: Theme.mobileGutter
+            Layout.bottomMargin: 0
+            // The pane's close X floats over the top-right corner of the
+            // background at z:10 and does not participate in this layout, so
+            // the picker has to step around it by hand: 12 (its margin) + 44
+            // (its size) + a gap.
+            Layout.rightMargin: Theme.sp.s5 + 44 + Theme.sp.s3
+            // 44 pt: Apple's HIG / Material touch minimum. This is the one
+            // control on the pane that every other one is reached through.
+            implicitHeight: 44
+            model: clientSettingsPopup.sections
+            currentIndex: clientSettingsPopup.section
+            onActivated: clientSettingsPopup.section = currentIndex
+        }
+
         // Right content
         StackLayout {
             Layout.fillWidth: true
@@ -228,7 +304,9 @@ Popup {
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.sp.s7 * 2
+                    // 32 pt of gutter on each side is a desktop dialog margin; on a
+                    // phone it is a sixth of the screen. See Theme.mobileGutter.
+                    anchors.margins: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7 * 2
                     spacing: Theme.sp.s7
 
                     SectionHeader { text: "Appearance" }
@@ -409,7 +487,9 @@ Popup {
                 Flickable {
                     id: audioColFlick
                     anchors.fill: parent
-                    anchors.margins: Theme.sp.s7 * 2
+                    // 32 pt of gutter on each side is a desktop dialog margin; on a
+                    // phone it is a sixth of the screen. See Theme.mobileGutter.
+                    anchors.margins: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7 * 2
                     contentHeight: audioCol.implicitHeight
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
@@ -522,7 +602,8 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: inputVolSlider
-                                implicitWidth: 220
+                                // Narrower on a phone — see the screen-share sliders below.
+                                implicitWidth: Theme.isMobile ? 180 : 220
                                 from: 0; to: 200; stepSize: 5
                                 value: appSettings.inputVolume
                                 // Moving the slider writes `value` itself,
@@ -619,7 +700,8 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: outputVolSlider
-                                implicitWidth: 220
+                                // Narrower on a phone — see the screen-share sliders below.
+                                implicitWidth: Theme.isMobile ? 180 : 220
                                 from: 0; to: 200; stepSize: 5
                                 value: appSettings.outputVolume
                                 onMoved: {
@@ -806,7 +888,9 @@ Popup {
                 Flickable {
                     id: screenShareFlick
                     anchors.fill: parent
-                    anchors.margins: Theme.sp.s7 * 2
+                    // 32 pt of gutter on each side is a desktop dialog margin; on a
+                    // phone it is a sixth of the screen. See Theme.mobileGutter.
+                    anchors.margins: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7 * 2
                     contentHeight: screenShareCol.implicitHeight
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
@@ -854,7 +938,10 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: fpsSlider
-                                implicitWidth: 200
+                                // Narrower on a phone. Stacked under its title the slider has the
+                                // whole pane, but it shares that row with a value readout and a
+                                // server-cap badge, and at 200 the badge ran off the edge.
+                                implicitWidth: Theme.isMobile ? 132 : 200
                                 from: 1; to: 60; stepSize: 1
                                 value: appSettings.screenShareFps
                                 onMoved: appSettings.screenShareFps = Math.round(value)
@@ -885,7 +972,10 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: widthSlider
-                                implicitWidth: 200
+                                // Narrower on a phone. Stacked under its title the slider has the
+                                // whole pane, but it shares that row with a value readout and a
+                                // server-cap badge, and at 200 the badge ran off the edge.
+                                implicitWidth: Theme.isMobile ? 132 : 200
                                 from: 480; to: 3840; stepSize: 80
                                 value: appSettings.screenShareMaxWidth
                                 onMoved: appSettings.screenShareMaxWidth = Math.round(value)
@@ -918,7 +1008,10 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: bitrateSlider
-                                implicitWidth: 200
+                                // Narrower on a phone. Stacked under its title the slider has the
+                                // whole pane, but it shares that row with a value readout and a
+                                // server-cap badge, and at 200 the badge ran off the edge.
+                                implicitWidth: Theme.isMobile ? 132 : 200
                                 from: 250; to: 50000; stepSize: 250
                                 value: appSettings.screenShareTargetKbps
                                 onMoved: appSettings.screenShareTargetKbps = Math.round(value)
@@ -950,7 +1043,10 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: gopSlider
-                                implicitWidth: 200
+                                // Narrower on a phone. Stacked under its title the slider has the
+                                // whole pane, but it shares that row with a value readout and a
+                                // server-cap badge, and at 200 the badge ran off the edge.
+                                implicitWidth: Theme.isMobile ? 132 : 200
                                 from: 1; to: 30; stepSize: 1
                                 value: appSettings.screenShareKeyframeSec
                                 onMoved: appSettings.screenShareKeyframeSec = Math.round(value)
@@ -1049,7 +1145,10 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: qSlider
-                                implicitWidth: 200
+                                // Narrower on a phone. Stacked under its title the slider has the
+                                // whole pane, but it shares that row with a value readout and a
+                                // server-cap badge, and at 200 the badge ran off the edge.
+                                implicitWidth: Theme.isMobile ? 132 : 200
                                 from: 1; to: 100; stepSize: 1
                                 value: appSettings.screenShareJpegQuality
                                 onMoved: appSettings.screenShareJpegQuality = Math.round(value)
@@ -1091,7 +1190,10 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: smoothingSlider
-                                implicitWidth: 200
+                                // Narrower on a phone. Stacked under its title the slider has the
+                                // whole pane, but it shares that row with a value readout and a
+                                // server-cap badge, and at 200 the badge ran off the edge.
+                                implicitWidth: Theme.isMobile ? 132 : 200
                                 from: 0; to: 400; stepSize: 10
                                 value: appSettings.videoSmoothingMs
                                 onMoved: appSettings.videoSmoothingMs = Math.round(value)
@@ -1126,7 +1228,9 @@ Popup {
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.sp.s7 * 2
+                    // 32 pt of gutter on each side is a desktop dialog margin; on a
+                    // phone it is a sixth of the screen. See Theme.mobileGutter.
+                    anchors.margins: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7 * 2
                     spacing: Theme.sp.s7
 
                     SectionHeader { text: "Notifications" }
@@ -1195,7 +1299,9 @@ Popup {
                 Flickable {
                     id: updatesColFlick
                     anchors.fill: parent
-                    anchors.margins: Theme.sp.s7 * 2
+                    // 32 pt of gutter on each side is a desktop dialog margin; on a
+                    // phone it is a sixth of the screen. See Theme.mobileGutter.
+                    anchors.margins: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7 * 2
                     contentHeight: updatesCol.implicitHeight
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
@@ -1285,7 +1391,9 @@ Popup {
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.sp.s7 * 2
+                    // 32 pt of gutter on each side is a desktop dialog margin; on a
+                    // phone it is a sixth of the screen. See Theme.mobileGutter.
+                    anchors.margins: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7 * 2
                     spacing: Theme.sp.s7
 
                     SectionHeader { text: "Advanced" }
