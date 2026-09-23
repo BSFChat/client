@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QJsonArray>
 #include <QMap>
@@ -396,6 +397,13 @@ public:
     // user was caught up when they left.
     Q_INVOKABLE void markRoomRead(const QString& roomId, qint64 tsMs);
     Q_INVOKABLE void setTimelineAtBottom(bool atBottom);
+
+    // "The channel is on screen." Called by MessageView the moment it stops
+    // hiding the list behind its `opacity: initialLoad ? 0 : 1` fade, which
+    // is the first instant the user can actually read anything. It closes the
+    // one span no C++ timer can see: the gap between the model receiving its
+    // rows and QML having laid them out. See util/TimelineTrace.h.
+    Q_INVOKABLE void noteTimelineVisible(int rows);
 
     // Open the channel the user last had open on THIS server, falling back to
     // its first text channel. No-op if a channel is already open, so it is
@@ -1366,6 +1374,38 @@ public:
     // someone is typing. Set entries are user IDs minus self.
     QMap<QString, QStringList> m_roomTyping;
     int m_typingGeneration = 0;
+
+    // ── Channel-switch timing (util/TimelineTrace.h) ──────────────────────
+    //
+    // All three clocks are restarted by setActiveRoom(), so every line of a
+    // switch is stamped against the same t=0: the tap.
+    //
+    // `m_roomOpenTimer` is that t=0. `m_historyPageTimer` is restarted every
+    // time a /messages request goes out, so its elapsed() is that ONE page's
+    // round trip rather than the whole fill's — the distinction the whole
+    // exercise turns on, because an open fill is allowed to make up to
+    // kHistoryMaxPagesPerFill serial requests before the model, and therefore
+    // the view, has anything to show. `m_membersTimer` does the same for the
+    // /members request the switch also fires.
+    //
+    // Timing lives here rather than in MatrixClient because this object is
+    // what issues every /messages request of a fill (the continuation is the
+    // FetchMore branch of the messagesResult handler), so it can time them
+    // without the client growing a diagnostics parameter on a signal.
+    QElapsedTimer m_roomOpenTimer;
+    QElapsedTimer m_historyPageTimer;
+    QElapsedTimer m_membersTimer;
+    // One "visible" line per switch. Cleared by setActiveRoom().
+    bool m_timelineVisibleLogged = false;
+    // Milliseconds since the switch that is being traced, or -1 outside one.
+    qint64 sinceRoomOpenMs() const;
+    // Raw events the current fill has been handed, across all its pages —
+    // "how much did the server send to produce N rows?", which is the ratio
+    // that decides whether a room costs one request or ten.
+    int m_fillRawEvents = 0;
+    // Milliseconds this fill has spent WAITING, summed over its pages. The
+    // rest of `sinceOpen` at the end of a fill is local work.
+    qint64 m_fillNetMs = 0;
 
     // In-flight search state. `m_searchTerm` is the most recently REQUESTED
     // term; a response naming anything else is stale and dropped (the search box

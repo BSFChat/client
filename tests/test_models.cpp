@@ -93,6 +93,19 @@ inline bsfchat::RoomEvent reaction(const std::string& id, const std::string& tar
     return e;
 }
 
+// One m.call.member state event — voice presence, not room content.
+inline bsfchat::RoomEvent callMember(const std::string& userId, int64_t ts)
+{
+    bsfchat::RoomEvent e;
+    e.event_id = "$call" + userId;
+    e.sender = userId;
+    e.type = std::string(bsfchat::event_type::kCallMember);
+    e.state_key = userId;
+    e.origin_server_ts = ts;
+    e.content.data = {{"active", true}};
+    return e;
+}
+
 using Kind = bsfchat::client::HistoryFillKind;
 using Stop = bsfchat::client::HistoryFillStop;
 using Outcome = MessageModel::HistoryPageOutcome;
@@ -1750,6 +1763,15 @@ private slots:
             makeRedactionEvent("$x", "@alice:server", "$m")));
         QVERIFY(!MessageModel::rendersAsRow(
             makeMemberEvent("@bob:server", "Bob", "join")));
+        // Voice membership. Named explicitly because on THIS server it is
+        // the biggest producer of invisible timeline events, and the one
+        // most likely to turn a channel open into a multi-page fill: the
+        // server writes an m.call.member row on every join, leave and reap
+        // sweep (see VoiceSession.cpp), so a channel anyone talks in
+        // accumulates them far faster than messages. A dev database taken
+        // 2026-09-23 held 164 m.call.member against 51 m.room.message, and
+        // one room's newest 50 events contained ZERO renderable rows.
+        QVERIFY(!MessageModel::rendersAsRow(hist::callMember("@bob:server", 3)));
     }
 
     void testOpenFillPaginatesPastAPageOfEdits()

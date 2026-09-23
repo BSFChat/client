@@ -745,6 +745,20 @@ Rectangle {
                 property bool followEnd: true
                 property bool atBottom: true
                 property bool initialLoad: true
+
+                // First paint, reported to C++ for the channel-switch trace
+                // (util/TimelineTrace.h). `initialLoad` going false is the
+                // exact instant the `opacity: initialLoad ? 0 : 1` fade above
+                // starts — i.e. the first moment the user can read anything —
+                // and it is cleared from three places (the deferred first
+                // positioning, the 2 s fallback timer, and a user gesture), so
+                // the one handler on the property is the only way to catch all
+                // three. The connection latches it to one line per switch.
+                onInitialLoadChanged: {
+                    if (initialLoad) return;
+                    var s = serverManager.activeServer;
+                    if (s && s.noteTimelineVisible) s.noteTimelineVisible(count);
+                }
                 // Tolerance for "near the bottom" — wider on mobile so a
                 // touch flick's kinetic overshoot doesn't flap `atBottom`
                 // false and flicker the jump-to-latest button.
