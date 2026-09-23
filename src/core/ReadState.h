@@ -51,4 +51,22 @@ inline bool isUnread(qint64 lastMessageTs, qint64 lastReadTs)
     return lastMessageTs > lastReadTs;
 }
 
+// A READ MARKER ONLY EVER GOES FORWARD.
+//
+// The server already works this way — SqliteStore::set_read_marker resolves
+// its upsert conflict with MAX — and the client did not, which let the two
+// disagree about a room in the one direction a user notices.
+//
+// Several writers hand over a timestamp that is only the newest thing THEY
+// can see, not the newest thing the user has read: the /sync handler passes
+// the newest message in one batch, the room-switch persist passes the newest
+// LOADED row, the view's at-bottom persist passes the newest row in a model
+// that may still be filling. Any of those arriving after a further-on marker
+// would re-light a dot the user had already cleared. Nothing in this client
+// means "mark as unread", so there is no writer this rule can wrong.
+inline bool readMarkerAdvances(qint64 storedTs, qint64 candidateTs)
+{
+    return candidateTs > storedTs;
+}
+
 } // namespace bsfchat::client

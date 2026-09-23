@@ -397,6 +397,22 @@ public:
     Q_INVOKABLE void markRoomRead(const QString& roomId, qint64 tsMs);
     Q_INVOKABLE void setTimelineAtBottom(bool atBottom);
 
+    // "The room on screen has been read", asked at a moment the VIEW cannot
+    // see — specifically the application leaving the foreground.
+    //
+    // Every other read-marker trigger in this client is a desktop shape: a
+    // row arriving while the list happens to be parked at its end, or a
+    // right-click menu item. A phone spends most of its life suspended and
+    // the user's last act before that is to swipe away, which produces no
+    // row, no scroll and no click — so on a phone the marker had no reliable
+    // way forward at all. main.cpp calls this from
+    // applicationStateChanged, the same hook the foreground re-poll uses.
+    //
+    // Honours the view's last at-bottom sample for the same reason
+    // setActiveRoom does (U-M3): somebody reading halfway up their history
+    // when the phone locks has not read what is below them.
+    void markActiveRoomRead();
+
     // Open the channel the user last had open on THIS server, falling back to
     // its first text channel. No-op if a channel is already open, so it is
     // safe to call from every "this server came to the foreground" path.

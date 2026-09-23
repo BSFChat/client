@@ -3485,6 +3485,114 @@ private slots:
         QVERIFY(isPinnedToEnd(120, 0, 200, 80));
     }
 
+    // ── The read marker's clock (the iOS "never marked as read" report) ──
+    //
+    // A local echo is stamped with THIS DEVICE's clock, because the bubble
+    // has to show a time before any round trip has happened, and
+    // confirmation deliberately never rewrites it (it is the sort key). The
+    // read marker is compared against origin_server_ts. So the moment the
+    // client grew a local echo, the newest row in a channel the user had
+    // just posted in carried a number from the wrong clock — and the one
+    // caller that matters, the at-bottom persist in MessageView, wrote it
+    // straight into the marker.
+    //
+    // It is not even a skew problem: the send time is BEFORE the server
+    // stamps origin_server_ts, always, by at least the round trip. So the
+    // marker lands behind the room's own newest message, isUnread() says
+    // true, and the channel's dot stays lit on the user's own words with no
+    // way to clear it — every further persist writes the same send time
+    // again. On a phone, where the pattern is "open, read, reply, swipe
+    // away", the user is the last speaker nearly every time.
+    void testLocalEchoClockNeverReachesTheReadMarker()
+    {
+        MessageModel model;
+        const QString me = "@josh:server";
+        model.appendEvent(makeMessageEvent("$theirs", "@alice:server", "hi",
+                                           1'700'000'000'000), me);
+        QCOMPARE(model.newestServerTimestampMs(), qint64(1'700'000'000'000));
+
+        // The user sends. The echo is the newest ROW, and its timestamp is
+        // this machine's clock — deliberately ahead here so a test that
+        // simply read the last row would pass for the wrong reason.
+        model.appendLocalEcho("local-1", "reply", QString(), me);
+        QCOMPARE(model.rowCount(), 2);
+        QCOMPARE(model.newestServerTimestampMs(), qint64(1'700'000'000'000));
+    }
+
+    void testConfirmedEchoAdvancesTheMarkerOnlyOnTheServersTimestamp()
+    {
+        MessageModel model;
+        const QString me = "@josh:server";
+        model.appendEvent(makeMessageEvent("$theirs", "@alice:server", "hi",
+                                           1'700'000'000'000), me);
+        model.appendLocalEcho("local-1", "reply", QString(), me);
+
+        // The PUT reply names the event. It does NOT date it — the response
+        // is an event_id and nothing else — so the marker must not move yet.
+        model.confirmLocalEcho("local-1", "$mine");
+        QCOMPARE(model.newestServerTimestampMs(), qint64(1'700'000'000'000));
+
+        // /sync replays the same event. The row is already on screen and the
+        // copy is dropped, but this is the ONE time the server's timestamp
+        // for the user's own message passes through the client, so it is
+        // taken on the way past. Without that the marker could never get
+        // past a message you sent yourself.
+        model.appendEvent(makeMessageEvent("$mine", me.toStdString(), "reply",
+                                           1'700'000'000'900), me);
+        QCOMPARE(model.rowCount(), 2);                 // still deduped
+        QCOMPARE(model.newestServerTimestampMs(), qint64(1'700'000'000'900));
+    }
+
+    void testEchoAdoptedFromSyncCarriesTheServersTimestamp()
+    {
+        // The other ordering: /sync beats the PUT reply, so the echo still
+        // has no event id and is matched by sender+body instead. Same
+        // requirement — the adopted row has to bring the server's clock with
+        // it, or this path strands the marker where the other one does not.
+        MessageModel model;
+        const QString me = "@josh:server";
+        model.appendEvent(makeMessageEvent("$theirs", "@alice:server", "hi",
+                                           1'700'000'000'000), me);
+        model.appendLocalEcho("local-1", "reply", QString(), me);
+
+        model.appendEvent(makeMessageEvent("$mine", me.toStdString(), "reply",
+                                           1'700'000'000'900), me);
+        QCOMPARE(model.rowCount(), 2);
+        QCOMPARE(model.newestServerTimestampMs(), qint64(1'700'000'000'900));
+    }
+
+    void testUnsentEchoAloneLeavesNothingToMarkRead()
+    {
+        // A room whose only loaded row is an echo that has not landed. 0 is
+        // the answer every caller already treats as "nothing to mark", which
+        // is right: claiming to have read a message the server has never
+        // heard of would move the marker on a timestamp no other client can
+        // agree with.
+        MessageModel model;
+        model.appendLocalEcho("local-1", "first words", QString(),
+                              QStringLiteral("@josh:server"));
+        QCOMPARE(model.newestServerTimestampMs(), qint64(0));
+    }
+
+    void testPinnedToEndIsMeasuredFromTheContentOrigin()
+    {
+        using bsfchat::client::isPinnedToEnd;
+        // MessageView._jumpToEnd() assigns `originY + contentHeight - height`
+        // — that IS the end of the content. So the pinned test has to be
+        // handed `contentY - originY`, and the view now does.
+        //
+        // originY is 0 until a back-pagination prepends rows, at which point
+        // Qt moves it by the height of everything it inserted. Feeding the
+        // raw contentY then reports "not at the end" at the exact position
+        // the jump just produced — and since the read marker rides on that
+        // answer, a channel the user has scrolled back through stops being
+        // marked read at all.
+        const double contentHeight = 5000, viewport = 700, originY = -3200;
+        const double atEnd = originY + contentHeight - viewport;
+        QVERIFY(isPinnedToEnd(contentHeight, atEnd - originY, viewport, 160));
+        QVERIFY(!isPinnedToEnd(contentHeight, atEnd, viewport, 160));
+    }
+
     void testContentYPastTheEndIsNotPinned()
     {
         using bsfchat::client::isPinnedToEnd;
@@ -3626,7 +3734,7 @@ private slots:
 
         // Fresh marker: the view rolled it forward while parked at the
         // bottom, so re-entry re-reads it and there is nothing after it.
-        const qint64 fresh = model.newestTimestampMs();
+        const qint64 fresh = model.newestServerTimestampMs();
         QCOMPARE(fresh, static_cast<qint64>(2110));
         QVERIFY(model.firstUnreadEventIdAfterTs(fresh).isEmpty());
         QCOMPARE(model.restoreIndexForDivider(

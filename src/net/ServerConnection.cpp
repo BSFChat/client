@@ -1449,7 +1449,7 @@ void ServerConnection::setActiveRoom(const QString& roomId)
     // they would have come back to.
     if (!m_activeRoomId.isEmpty() && m_messageModel && m_settings
         && m_timelineAtBottom) {
-        qint64 newestTs = m_messageModel->newestTimestampMs();
+        qint64 newestTs = m_messageModel->newestServerTimestampMs();
         if (newestTs > 0) {
             m_settings->setLastReadTs(m_activeRoomId, newestTs);
         }
@@ -1535,6 +1535,16 @@ void ServerConnection::markRoomRead(const QString& roomId, qint64 tsMs)
     const bool hadUnread = m_hasUnread;
     m_hasUnread = m_roomListModel && m_roomListModel->totalUnreadCount() > 0;
     if (m_hasUnread != hadUnread) emit hasUnreadChanged();
+}
+
+void ServerConnection::markActiveRoomRead()
+{
+    if (m_activeRoomId.isEmpty()) return;
+    if (!m_timelineAtBottom) return;
+    if (!m_messageModel) return;
+    const qint64 ts = m_messageModel->newestServerTimestampMs();
+    if (ts <= 0) return;
+    markRoomRead(m_activeRoomId, ts);
 }
 
 void ServerConnection::resyncNow()

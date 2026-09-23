@@ -410,10 +410,37 @@ int main(int argc, char *argv[])
     // down hard enough for Qt to notice, the loop errored and retried, and
     // the retry brought everything at once. Re-polling on Active makes the
     // resume itself do that, immediately.
+    //
+    // LEAVING the foreground is the other half, and it is the only read
+    // signal a phone reliably produces.
+    //
+    // Every other read-marker trigger in this client is shaped like a
+    // desktop: a row arriving while the message list is parked at its end
+    // (MessageView), or a context-menu item (ChannelList). A phone user
+    // opens the app, reads what is on screen, and swipes away — no new row,
+    // no scroll, no click — and the process is suspended, and then killed,
+    // without `aboutToQuit`. So the last thing on screen was never recorded
+    // as read, and the buffered QSettings write that a moment like this
+    // produces never reached disk either.
+    //
+    // Both are done here, on the same hook, in that order: mark first so the
+    // marker is part of what the flush persists. `markActiveRoomsRead` is
+    // gated on the view's at-bottom sample, so this cannot mark a history
+    // the user was reading halfway up (U-M3).
+    //
+    // Not guarded by #ifdef: on a desktop `ApplicationInactive` means the
+    // window lost focus, where marking the room you were just reading is
+    // both correct and — because the foreground path has already marked it —
+    // very nearly always a no-op that markRoomRead's own dedupe swallows.
     QObject::connect(&app, &QGuiApplication::applicationStateChanged, &app,
-        [sm = application.serverManager()](Qt::ApplicationState state) {
-            if (state != Qt::ApplicationActive) return;
-            if (sm) sm->resyncAll();
+        [sm = application.serverManager(),
+         settings = application.settings()](Qt::ApplicationState state) {
+            if (state == Qt::ApplicationActive) {
+                if (sm) sm->resyncAll();
+                return;
+            }
+            if (sm) sm->markActiveRoomsRead();
+            if (settings) settings->flush();
         });
 
     return app.exec();

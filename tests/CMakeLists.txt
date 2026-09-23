@@ -907,7 +907,13 @@ add_test(NAME test_snapshot_gate COMMAND test_snapshot_gate)
 qt_add_executable(test_read_state test_read_state.cpp)
 target_include_directories(test_read_state PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_definitions(test_read_state PRIVATE
-    BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml")
+    BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml"
+    # The read marker has a C++ half as well as a QML one, and the half a
+    # phone depends on lives in main.cpp's application-state handler. Scanned
+    # rather than linked: pulling ServerConnection in here would drag the
+    # whole app — multimedia, identity, voice — into a test about two
+    # integers.
+    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test_read_state PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_read_state COMMAND test_read_state)
 

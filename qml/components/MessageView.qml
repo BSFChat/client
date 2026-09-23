@@ -578,7 +578,7 @@ Rectangle {
                     // up its history stamped the newest LOADED message as
                     // read and the unread divider never came back.
                     if (!atBottom) return;
-                    var ts = mm.newestTimestampMs();
+                    var ts = mm.newestServerTimestampMs();
                     if (ts > 0) _markRead(ts);
                 }
 
@@ -609,7 +609,7 @@ Rectangle {
                     var mm = messageModelRef;   // never the view's `model`
                     if (!mm) return;
                     if (mm !== _currentModel) return;   // see above
-                    var ts = mm.newestTimestampMs();
+                    var ts = mm.newestServerTimestampMs();
                     if (ts > 0) _markRead(ts);
                 }
 
@@ -902,7 +902,19 @@ Rectangle {
                 function _isAtEnd() {
                     var mm = messageModelRef;   // never the view's `model`
                     if (!mm) return true;
-                    return mm.isPinnedToEnd(contentHeight, contentY,
+                    // `contentY - originY`, not `contentY`. The end of the
+                    // content is at `originY + contentHeight - height` —
+                    // that is literally what `_jumpToEnd()` assigns — so a
+                    // test written against a bare contentY is off by
+                    // originY, and answers "no" at the exact position the
+                    // jump just put us in. originY is 0 until a
+                    // back-pagination prepends rows, at which point Qt moves
+                    // it by the height of everything it inserted: hundreds
+                    // or thousands of pixels, i.e. far outside the tolerance
+                    // band either way. The read marker rides on this answer,
+                    // so getting it wrong means a channel the user has
+                    // scrolled back through is never marked read again.
+                    return mm.isPinnedToEnd(contentHeight, contentY - originY,
                                             height, bottomTolerance);
                 }
 
