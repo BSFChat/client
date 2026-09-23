@@ -1802,6 +1802,35 @@ private slots:
         QCOMPARE(cache.eventCount("!a"), 3);
     }
 
+    void testTimelineCacheKeepsOnlyWhatCanEverBeDisplayed()
+    {
+        // Production, 2026-09-23: 791 m.call.member against 1182
+        // m.room.message in the newest 2000 events server-wide, because the
+        // server writes one on every voice join, leave and reap sweep. An
+        // unfiltered window in a channel people both talk in and sit in
+        // voice in would be flushed of messages by a single busy call — and
+        // none of those events can ever put a row on screen.
+        using bsfchat::client::RoomTimelineCache;
+        QVERIFY(RoomTimelineCache::cacheable(hist::message("$m", 1)));
+        QVERIFY(RoomTimelineCache::cacheable(hist::edit("$e", "$m", 2, "x")));
+        QVERIFY(RoomTimelineCache::cacheable(hist::reaction("$r", "$m")));
+        QVERIFY(RoomTimelineCache::cacheable(
+            makeRedactionEvent("$x", "@alice:server", "$m")));
+        QVERIFY(!RoomTimelineCache::cacheable(hist::callMember("@bob:server", 3)));
+        QVERIFY(!RoomTimelineCache::cacheable(
+            makeMemberEvent("@bob:server", "Bob", "join")));
+
+        RoomTimelineCache cache;
+        cache.appendLive("!a", hist::message("$keep", 1000));
+        for (int i = 0; i < 50; ++i)
+            cache.appendLive("!a", hist::callMember("@u" + std::to_string(i), 1001 + i));
+        cache.appendLive("!a", hist::reaction("$react", "$keep"));
+
+        QCOMPARE(cache.eventCount("!a"), 2);
+        QCOMPARE(cache.window("!a")->first().event_id, std::string("$keep"));
+        QCOMPARE(cache.window("!a")->last().event_id, std::string("$react"));
+    }
+
     void testTimelineCacheDropsTheOldestAtItsCap()
     {
         bsfchat::client::RoomTimelineCache cache;

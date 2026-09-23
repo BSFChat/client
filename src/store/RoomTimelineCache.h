@@ -6,6 +6,7 @@
 #include <QStringList>
 #include <QVector>
 
+#include <bsfchat/Constants.h>
 #include <bsfchat/MatrixTypes.h>
 
 namespace bsfchat::client {
@@ -56,16 +57,46 @@ namespace bsfchat::client {
 class RoomTimelineCache {
 public:
     // Events kept per room. A screenful is ~20 rows and the open fill targets
-    // 30, so this is several screens of scroll-back for a normal channel —
-    // and for a channel that is mostly voice-membership churn it is the raw
-    // events, most of which render nothing, which is exactly the case the
-    // cache is most valuable in.
-    static constexpr int kMaxEventsPerRoom = 400;
+    // 30, so this is a dozen screens of scroll-back — and because only
+    // cacheable() events are kept (below), they are a dozen screens of REAL
+    // ones. Multiplied by every room the user has, on a phone, which is why
+    // it is 250 and not the 400 that "more is better" would suggest: a
+    // RoomEvent carries an nlohmann::json content object and is not small.
+    static constexpr int kMaxEventsPerRoom = 250;
+
+    // Is this event worth a slot?
+    //
+    // Only three types survive a replay: MessageModel::ingestCachedWindow
+    // turns m.room.message into rows and hands everything else to
+    // appendEvent, whose only branches are reaction, redaction and
+    // m.replace. A member event, a voice-membership event, a call signal,
+    // room state — none is ever consulted, so caching them would spend the
+    // window on events that can never put anything on screen.
+    //
+    // That is not a micro-optimisation on this server. In production
+    // (2026-09-23) the newest 2000 events held 791 m.call.member against
+    // 1182 m.room.message, and two channels of 1300+ events had ZERO
+    // renderable rows in their newest 150 — the server writes an
+    // m.call.member on every voice join, leave and reap sweep. An unfiltered
+    // window in a channel that people talk in AND sit in voice in would be
+    // flushed of messages by a single busy call.
+    //
+    // Redactions matter as much as messages here: drop them and a deleted
+    // message comes back from cache. Trimming takes the OLDEST first, and a
+    // redaction is always newer than what it redacts, so a message that is
+    // still in the window still has its redaction with it.
+    static bool cacheable(const bsfchat::RoomEvent& event)
+    {
+        return event.type == std::string(bsfchat::event_type::kRoomMessage)
+            || event.type == std::string(bsfchat::event_type::kRoomRedaction)
+            || event.type == "m.reaction";
+    }
 
     // One event straight off a /sync timeline. Newest-last, deduplicated by
     // event id; the oldest are dropped once the room is at its cap.
     void appendLive(const QString& roomId, const bsfchat::RoomEvent& event)
     {
+        if (!cacheable(event)) return;
         Room& room = m_rooms[roomId];
         const QString id = QString::fromStdString(event.event_id);
         if (id.isEmpty() || room.ids.contains(id)) return;
@@ -92,6 +123,7 @@ public:
         QVector<bsfchat::RoomEvent> fresh;
         fresh.reserve(chronological.size());
         for (const auto& event : chronological) {
+            if (!cacheable(event)) continue;
             const QString id = QString::fromStdString(event.event_id);
             if (id.isEmpty() || room.ids.contains(id)) continue;
             room.ids.insert(id);
@@ -107,9 +139,13 @@ public:
     {
         if (chronological.isEmpty()) return;
         Room room;
-        room.events = std::move(chronological);
-        for (const auto& event : room.events)
+        room.events.reserve(chronological.size());
+        for (auto& event : chronological) {
+            if (!cacheable(event)) continue;
             room.ids.insert(QString::fromStdString(event.event_id));
+            room.events.append(std::move(event));
+        }
+        if (room.events.isEmpty()) return;
         trim(room);
         m_rooms.insert(roomId, std::move(room));
     }

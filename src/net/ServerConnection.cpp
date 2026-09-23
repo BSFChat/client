@@ -1396,6 +1396,15 @@ void ServerConnection::disconnectFromServer()
     // person's blocks under another person's name.
     m_blockedUsersModel->reset();
     m_messageModel->refreshBotFlags();
+    // Cached timelines are facts about THIS account on THIS server, and the
+    // comment above is the reason: a reconnect may be as a different user.
+    // Dropped rather than marked stale, because stale windows are still
+    // replayed once the next sync vouches for them, and one account must
+    // never be shown another's messages. The cost of being wrong about this
+    // is a privacy incident; the cost of clearing is one round trip per
+    // channel. The member fetch times go with them for the same reason.
+    m_timelines.clear();
+    m_membersFetchedAt.clear();
 
     m_connected = false;
     m_connectionStatus = 0;
