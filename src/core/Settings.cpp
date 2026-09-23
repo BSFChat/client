@@ -18,6 +18,13 @@
 #include <QAudioDevice>
 #include <QVariantMap>
 
+#ifdef Q_OS_ANDROID
+// Enumerating audio INPUTS on Android asks for the microphone. See
+// audioInputDevices(). QPermissions is Qt 6.5+, which Android already is.
+#  include <QCoreApplication>
+#  include <QPermissions>
+#endif
+
 namespace {
 // Enables the bsfchat.* info/debug categories (they default to
 // warnings-only so ordinary users' logs stay lean). Code-set rules
@@ -52,11 +59,18 @@ Settings::Settings(QObject* parent)
     // Live device lists. Re-enumerating only on dialog open was one open
     // too late for the case that prompted this: a Bluetooth headset that
     // connects while the dialog is already open never appeared at all.
-    m_mediaDevices = new QMediaDevices(this);
-    connect(m_mediaDevices, &QMediaDevices::audioInputsChanged,
-            this, &Settings::audioDevicesChanged);
-    connect(m_mediaDevices, &QMediaDevices::audioOutputsChanged,
-            this, &Settings::audioDevicesChanged);
+    //
+    // Mobile is the exception: constructing QMediaDevices brings up Qt's
+    // multimedia device backend, and on Android that is enough to have the
+    // platform ask for the microphone (and, through the same backend
+    // bring-up, camera) runtime permission — on the sign-in screen, before
+    // the user has touched a single media feature. So on Android and iOS
+    // the instance is created on first use instead, which is the audio
+    // settings pane opening: hot-plug while THAT is open still works,
+    // which is all this instance was ever for.
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    ensureMediaDevices();
+#endif
     // On macOS these also fire when the system DEFAULT moves, so the
     // "System default (…)" entry relabels itself as the user switches
     // output in Control Centre.
@@ -513,11 +527,66 @@ QVariantList devicesToList(const QList<QAudioDevice>& devices,
 }
 } // namespace
 
+// Create the live QMediaDevices instance, once. Deliberately not called
+// from the constructor on mobile — see the note there.
+void Settings::ensureMediaDevices() const
+{
+    if (m_mediaDevices) return;
+    auto* self = const_cast<Settings*>(this);
+    m_mediaDevices = new QMediaDevices(self);
+    connect(m_mediaDevices, &QMediaDevices::audioInputsChanged,
+            self, &Settings::audioDevicesChanged);
+    connect(m_mediaDevices, &QMediaDevices::audioOutputsChanged,
+            self, &Settings::audioDevicesChanged);
+}
+
 QVariantList Settings::audioInputDevices() const {
+#ifdef Q_OS_ANDROID
+    // Enumerating audio INPUTS on Android pops the microphone permission
+    // dialog. Not as a side effect of a bad call site — by construction:
+    //
+    //   QMediaDevices::audioInputs()
+    //     -> QOpenSLESEngine::availableDevices(Input)
+    //        -> QOpenSLESDeviceInfo(..., Input)      [the CONSTRUCTOR]
+    //           -> supportedSampleRates(Input)
+    //              -> checkSupportedInputFormats()
+    //                 -> inputFormatIsSupported()
+    //                    -> requestPermission(RECORD_AUDIO)
+    //
+    // Qt probes thirteen sample rates by opening a real AudioRecorder, and
+    // it cannot do that without the permission, so it asks. Merely listing
+    // the devices is enough; nothing has to be opened by us.
+    //
+    // That is how a microphone prompt landed on the sign-in screen ~450ms
+    // into a cold start: MobileMain instantiates ClientSettings eagerly
+    // (it is a Popup, so its contentItem is built with it), and the input
+    // combo's `model: appSettings.audioInputDevices` binding evaluates
+    // there and then. Play treats an unprompted sensitive-permission
+    // request as a policy problem, and iOS — where the prompt correctly
+    // appears at first voice join — is the behaviour to match.
+    //
+    // The guard is here rather than at the call site on purpose: any
+    // binding, any future caller, gets it. checkPermission() does not
+    // prompt. Until the permission is held there is nothing meaningful to
+    // offer anyway — you cannot pick an input you may not open — so the
+    // list is just "System default", and the real devices appear the next
+    // time the pane is opened after a voice join has asked for real.
+#  if QT_CONFIG(permissions)
+    if (!qApp
+        || qApp->checkPermission(QMicrophonePermission{})
+               != Qt::PermissionStatus::Granted) {
+        return devicesToList({}, QAudioDevice());
+    }
+#  else
+    return devicesToList({}, QAudioDevice());
+#  endif
+#endif
+    ensureMediaDevices();
     return devicesToList(QMediaDevices::audioInputs(),
                          QMediaDevices::defaultAudioInput());
 }
 QVariantList Settings::audioOutputDevices() const {
+    ensureMediaDevices();
     return devicesToList(QMediaDevices::audioOutputs(),
                          QMediaDevices::defaultAudioOutput());
 }
@@ -546,6 +615,11 @@ void Settings::selectAudioOutputDevice(const QString& description,
 
 void Settings::refreshAudioDevices()
 {
+    // Also the point at which the live instance appears on mobile: the
+    // settings pane calls this in onAboutToShow, which is a user opening
+    // the audio settings and therefore a fair moment to touch the
+    // multimedia backend.
+    ensureMediaDevices();
     emit audioDevicesChanged();
 }
 

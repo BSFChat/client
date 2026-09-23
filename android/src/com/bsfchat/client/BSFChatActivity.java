@@ -22,9 +22,12 @@ package com.bsfchat.client;
 // class instead of org.qtproject.qt.android.bindings.QtActivity.
 
 import android.content.Intent;
+import android.util.Log;
 import org.qtproject.qt.android.bindings.QtActivity;
 
 public class BSFChatActivity extends QtActivity {
+
+    private static final String TAG = "BSFChatActivity";
 
     // Broadcast tag used by the C++ side to listen for new-intents
     // without hooking into Android's package-wide broadcast system.
@@ -44,7 +47,22 @@ public class BSFChatActivity extends QtActivity {
         // load time so we can't call directly into Qt here. Native
         // side polls on applicationState change anyway, but we
         // bump a native hook registered by AndroidPermissions.
-        nativeOnNewIntent();
+        //
+        // Guarded: the bridge is registered from C++ when
+        // AndroidPermissions is constructed, which happens on the Qt
+        // thread inside main(). An intent that arrives before that —
+        // the window is small but it is exactly the one an OIDC
+        // redirect into a just-relaunched process lands in — would
+        // otherwise throw UnsatisfiedLinkError out of onNewIntent and
+        // take the process down. setIntent() above has already done
+        // the part that matters; main()'s own
+        // checkAndroidLaunchIntent() at startup reads it back.
+        try {
+            nativeOnNewIntent();
+        } catch (UnsatisfiedLinkError e) {
+            Log.w(TAG, "native new-intent hook not registered yet; "
+                       + "the startup intent scan will pick this up");
+        }
     }
 
     @Override
@@ -54,8 +72,15 @@ public class BSFChatActivity extends QtActivity {
         // MediaProjection consent — forwarded to the screen-capture
         // helper which owns the VirtualDisplay + ImageReader plumbing.
         if (requestCode == ScreenCaptureHelper.REQUEST_CODE) {
-            ScreenCaptureHelper.instance()
-                .onActivityResult(this, resultCode, data);
+            try {
+                ScreenCaptureHelper.instance()
+                    .onActivityResult(this, resultCode, data);
+            } catch (Throwable t) {
+                // A throw here unwinds into ActivityThread and kills the
+                // process. Losing a screen share is survivable; losing
+                // the app in the middle of a call is not.
+                Log.w(TAG, "screen-capture result handling failed: " + t);
+            }
         }
     }
 
@@ -68,9 +93,26 @@ public class BSFChatActivity extends QtActivity {
         // One JNI callback for every (perm, result) pair so the C++
         // side doesn't need to marshal an array. `result` is 0 for
         // PERMISSION_GRANTED, -1 for PERMISSION_DENIED.
-        for (int i = 0; i < permissions.length; ++i) {
-            nativeOnPermissionResult(
-                permissions[i], grantResults[i] == 0, requestCode);
+        // grantResults can come back EMPTY when a request is cancelled
+        // (the user swiped the dialog away, or another dialog stole it).
+        // Indexing it against permissions.length would then throw.
+        final int n = Math.min(permissions.length, grantResults.length);
+        try {
+            for (int i = 0; i < n; ++i) {
+                nativeOnPermissionResult(
+                    permissions[i], grantResults[i] == 0, requestCode);
+            }
+            // A cancelled request has to be answered too, or the QML
+            // continuation that is waiting on microphoneResult /
+            // cameraResult / notificationsResult never runs and the join
+            // button stays dead until the app is restarted.
+            if (n == 0) {
+                for (int i = 0; i < permissions.length; ++i) {
+                    nativeOnPermissionResult(permissions[i], false, requestCode);
+                }
+            }
+        } catch (UnsatisfiedLinkError e) {
+            Log.w(TAG, "native permission hook not registered: " + e);
         }
     }
 

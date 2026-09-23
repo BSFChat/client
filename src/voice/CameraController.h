@@ -109,6 +109,13 @@ private:
     // next join.
     void rewireVoiceLeaveWatch();
 
+    // Build QCamera + QMediaCaptureSession if they do not exist yet.
+    // Called from the constructor on desktop and from the first
+    // startForCamera() on Android / iOS, where constructing them early
+    // makes the platform ask for the CAMERA permission on the sign-in
+    // screen. No-op on macOS, which uses MacCameraCapturer instead.
+    void ensureCaptureSession();
+
 #ifdef Q_OS_MACOS
     MacCameraCapturer* m_mac = nullptr;
 #else

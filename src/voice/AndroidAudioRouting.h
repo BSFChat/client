@@ -26,4 +26,15 @@ void enterVoiceMode();
 // Must be called from the same thread as enterVoiceMode().
 void exitVoiceMode();
 
+// Re-deliver a start command to VoiceService so it recomputes which
+// foreground-service types it may claim.
+//
+// Needed because Android 14+ refuses startForeground() for a type whose
+// runtime permission the app does not hold, so a plain voice join can only
+// claim `microphone`. When the user later turns the camera on — having just
+// granted CAMERA — the service has to be told, or the call loses its camera
+// the moment the app is backgrounded. No-op if voice is not running, and on
+// every non-Android platform.
+void refreshVoiceService();
+
 } // namespace bsfchat::audio_routing

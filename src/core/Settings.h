@@ -446,5 +446,10 @@ private:
     // a QML singleton on the GUI thread and QMediaDevices wants a thread
     // with an event loop. Its only job is to keep audioDevicesChanged
     // firing while a dialog is open.
-    QMediaDevices* m_mediaDevices = nullptr;
+    // Mutable + created on demand: on Android and iOS bringing Qt's
+    // multimedia backend up is itself enough to trigger a runtime
+    // permission prompt, so it must not happen until a media feature is
+    // actually in use. See ensureMediaDevices().
+    mutable QMediaDevices* m_mediaDevices = nullptr;
+    void ensureMediaDevices() const;
 };

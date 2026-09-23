@@ -293,9 +293,12 @@ void UrlHandler::checkAndroidLaunchIntent()
     if (action == QStringLiteral("android.intent.action.VIEW")) {
         QJniObject dataObj = intent.callObjectMethod(
             "getDataString", "()Ljava/lang/String;");
+        // Cleared unconditionally, including for a VIEW with no data: an
+        // intent left with its action intact is re-read on every resume,
+        // so an odd one would be re-examined forever.
+        clearAction();
         if (!dataObj.isValid()) return;
         const QString url = dataObj.toString();
-        clearAction();
         if (url.startsWith(QStringLiteral("bsfchat://")))
             emit urlReceived(url);
         return;
