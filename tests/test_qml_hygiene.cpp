@@ -1052,6 +1052,63 @@ private slots:
                  "no platform gate on the manual keyboard push");
     }
 
+    void theKeyboardPushNetsOffWhatThePlatformAlreadyDid()
+    {
+        // The first cut of this pushed the layout up by the keyboard's
+        // height on iOS while QIOSInputContext was independently
+        // translating the whole Qt scene up by the same amount, and the
+        // two composed: on device the composer floated ~250pt above the
+        // keyboard over an empty void, and — because the platform moves
+        // the scene rather than the window — the header went off the top
+        // of the screen and a message row rendered under the status clock.
+        //
+        // Whatever the platform has already done has to come off our own
+        // push. src/core/MobileKeyboard.h has the full reasoning.
+        const QString src = withoutComments(readQml(QStringLiteral("/mobile/MobileMain.qml")));
+
+        static const QRegularExpression push(
+            QStringLiteral(R"(property\s+int\s+keyboardPush\s*:(?:[^\n]*\n){0,6}?[^\n]*platformScroll)"));
+        QVERIFY2(push.match(src).hasMatch(),
+                 "keyboardPush does not subtract mobileKeyboard.platformScroll, "
+                 "so on iOS the platform's scroll and ours will compose again");
+
+        // Netting off is only half of it: something has to ask the
+        // platform to recompute, or it keeps the scroll it decided on
+        // before our push existed and the subtraction just cancels us out.
+        QVERIFY2(src.contains(QStringLiteral("mobileKeyboard.settle(")),
+                 "nothing asks the platform to recompute its own scroll");
+    }
+
+    void theKeyboardGapIsNeverAnimated()
+    {
+        // An eased gap is actively harmful, not merely slower: the iOS
+        // plugin recomputes its scroll from where the cursor is at the
+        // instant it is asked, so a gap still travelling reads as a gap
+        // that is not there, and it scrolls the scene to make room that
+        // was about to appear anyway. Android's window resize has never
+        // been animated either.
+        const QString src = withoutComments(readQml(QStringLiteral("/mobile/MobileMain.qml")));
+        static const QRegularExpression animated(
+            QStringLiteral(R"(Behavior\s+on\s+(bottomGap|anchors\.bottomMargin|keyboardPush))"));
+        const auto m = animated.match(src);
+        QVERIFY2(!m.hasMatch(),
+                 qPrintable(QStringLiteral("the keyboard gap is animated (%1); the "
+                                           "platform measures it mid-flight")
+                                .arg(m.captured(0))));
+    }
+
+    void theMobileKeyboardBridgeIsReachableFromQml()
+    {
+        // MobileMain binds to `mobileKeyboard.platformScroll` on every
+        // layout pass. A context property that main.cpp forgot to set is
+        // a ReferenceError in the hottest binding in the shell.
+        QFile f(QStringLiteral(BSFCHAT_SRC_DIR "/main.cpp"));
+        QVERIFY2(f.open(QIODevice::ReadOnly | QIODevice::Text), "main.cpp not found");
+        const QString src = QString::fromUtf8(f.readAll());
+        QVERIFY2(src.contains(QStringLiteral("setContextProperty(\"mobileKeyboard\"")),
+                 "main.cpp never exposes the mobileKeyboard bridge to QML");
+    }
+
     void everyLongPressSurfaceOnAPhoneHasALongPress()
     {
         // A context menu opened only by Qt.RightButton is a context menu that

@@ -91,31 +91,88 @@ ApplicationWindow {
         return Math.ceil(Math.min(kr.height * scale, root.height * 0.7));
     }
 
-    // What the layout actually applies. Zero wherever the platform
-    // already resized the window under us — doing both would push the
-    // composer a whole keyboard's height above the keyboard.
+    // What the layout actually applies, and the subtraction that the
+    // first cut of this file got wrong.
+    //
+    // Two things move the composer out of the keyboard's way and only one
+    // of them is ours:
+    //
+    //   Android  windowSoftInputMode=adjustResize shrinks the window, so
+    //            the layout is already clear and our push must be 0.
+    //   iOS      QIOSInputContext translates the WHOLE Qt scene up — see
+    //            src/core/MobileKeyboard.h — so our push must be the
+    //            keyboard height minus however far it has already gone.
+    //
+    // Before the subtraction, iOS applied both: on an iPhone 16 Pro Max
+    // the composer floated ~250pt above the keyboard with a void beneath
+    // it, and because the platform moves the scene rather than the
+    // window, the header went off the top of the screen and the first
+    // message row rendered under the status clock.
+    //
+    // settle() below asks the platform to recompute, which makes it stand
+    // down to 0 once our push has landed (the cursor is then inside the
+    // area the keyboard does not cover, which is the plugin's own
+    // condition for scrolling back). The subtraction is what makes the
+    // in-between states, and any future Qt that stops standing down,
+    // merely imperfect instead of broken.
     readonly property int keyboardPush:
-        Qt.platform.os === "android" ? 0 : keyboardHeight
+        Qt.platform.os === "android"
+            ? 0
+            : Math.max(0, keyboardHeight - mobileKeyboard.platformScroll)
 
     // The gap between the bottom of the content and the bottom of the
     // window: the keyboard when it is up, the home indicator / gesture
     // bar when it is not. They are alternatives, never a sum — the
     // keyboard covers the home indicator.
-    readonly property int _bottomGapTarget:
-        keyboardPush > 0 ? keyboardPush
-                         : (Qt.inputMethod.visible ? 0 : bottomInset)
+    readonly property int bottomGap:
+        Qt.inputMethod.visible ? keyboardPush : bottomInset
 
-    // …and the value the layout binds to, which eases towards it. Not
-    // readonly, because the Behavior writes it. A short duration on
-    // purpose: the push should be finished BEFORE the keyboard has
-    // finished sliding in (~250ms on iOS), so the composer is already out
-    // of the way and Qt's own fallback — scrolling the entire root view,
-    // header and all, to keep the cursor visible — never triggers.
-    property int bottomGap: _bottomGapTarget
-    Behavior on bottomGap {
-        NumberAnimation { duration: Theme.motion.fastMs
-                          easing.type: Easing.BezierSpline
-                          easing.bezierCurve: Theme.motion.bezier }
+    // Deliberately NOT animated. An eased push looks nicer in isolation
+    // and is actively harmful here: the platform measures where the
+    // cursor is at the moment it is asked, so a gap that is still
+    // travelling reads as a gap that is not there yet, and the plugin
+    // scrolls the scene to compensate for a push that was about to
+    // happen anyway. Instant also matches Android, where the window
+    // resize has never been animated.
+    onBottomGapChanged: keyboardSettle.kick()
+
+    // The platform recomputes its scroll from whatever it sees when
+    // asked, so asking once — before the QML layout pass, before the
+    // scene graph sync that republishes the cursor rectangle, and long
+    // before the keyboard has finished its own ~250ms slide — proves
+    // nothing. Ask across that whole window instead and let it converge.
+    Timer {
+        id: keyboardSettle
+        interval: 50
+        repeat: true
+        property int ticksLeft: 0
+        function kick() { ticksLeft = 8; restart(); }
+        onTriggered: {
+            mobileKeyboard.settle(root._keyboardState());
+            if (--ticksLeft <= 0) stop();
+        }
+    }
+
+    // What gets logged next to the platform's own numbers under
+    // `bsfchat.mobile.keyboard`. This is the only place the real values
+    // can be seen: the keyboard rectangle's units differ per platform and
+    // the insets belong to the device, so neither can be checked by
+    // reading this file.
+    function _keyboardState() {
+        var kr = Qt.inputMethod.keyboardRectangle;
+        return {
+            "imVisible":  Qt.inputMethod.visible,
+            "kbRect":     Math.round(kr.x) + "," + Math.round(kr.y)
+                          + "," + Math.round(kr.width) + "x" + Math.round(kr.height),
+            "kbScale":    (kr.width > 0 ? (root.width / kr.width).toFixed(3) : "n/a"),
+            "kbHeight":   root.keyboardHeight,
+            "push":       root.keyboardPush,
+            "bottomGap":  root.bottomGap,
+            "insetsTRBL": root.topInset + "/" + root.rightInset + "/"
+                          + root.bottomInset + "/" + root.leftInset,
+            "window":     Math.round(root.width) + "x" + Math.round(root.height),
+            "dpr":        Screen.devicePixelRatio
+        };
     }
 
     // Android hardware-back should cascade through the UI: close the
