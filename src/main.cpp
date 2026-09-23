@@ -271,40 +271,58 @@ int main(int argc, char *argv[])
     camera.setServerManager(application.serverManager());
     camera.setSettings(application.settings());
 #endif
-#if defined(BSFCHAT_VOICE_ENABLED) && !defined(Q_OS_IOS)
+#if defined(BSFCHAT_VOICE_ENABLED)
     // Explicit media announcement — mirror screen-share / camera
     // activity into the voice server's member state (PUT voice/state
     // {screen_sharing, camera_on}) so remote clients learn about a
     // share up front instead of inferring it from arriving frames.
     // Wired here because main() is the only scope that sees both
-    // controllers at once. iOS is excluded until it grows a capture
-    // controller (voice is off there by default anyway).
+    // controllers at once.
+    //
+    // iOS used to be excluded from this whole block because it had no
+    // capture controller at all. It has a camera one now, and leaving it
+    // out would mean an iPhone's video tile never appears on anyone's
+    // roster until their first frame lands — the "frozen/absent share"
+    // shape that S-7 exists to prevent. There is still no iOS screen
+    // share (that needs ReplayKit and a Broadcast Upload Extension, and
+    // `screenShare` is not even declared there), so the screen half is
+    // reported as a literal false rather than read off a controller.
     {
         auto* mgr = application.serverManager();
-        auto announceMediaState = [mgr, &screenShare, &camera]() {
+        // The screen half of the pair, as a callable, so the rest of
+        // this block is identical on every platform. On iOS it is a
+        // compile-time false: `screenShare` does not exist there.
+#if defined(Q_OS_IOS)
+        auto screenActive = []() { return false; };
+#else
+        auto screenActive = [&screenShare]() { return screenShare.active(); };
+#endif
+        auto announceMediaState = [mgr, screenActive, &camera]() {
             if (auto* vs = mgr->voiceServer())
-                vs->setLocalMediaState(screenShare.active(), camera.active());
+                vs->setLocalMediaState(screenActive(), camera.active());
         };
         // Any active-state flip announces the new pair; no-op unless
         // some connection is in voice. Receiver is `camera` — declared
         // after screenShare, so it's destroyed first and both connects
         // auto-drop before either capture could dangle.
+#if !defined(Q_OS_IOS)
         QObject::connect(&screenShare, &decltype(screenShare)::activeChanged,
                          &camera, announceMediaState);
+#endif
         QObject::connect(&camera, &CameraController::activeChanged,
                          &camera, announceMediaState);
         // A voice join that happens while a controller is already live
         // announces once — the server starts every fresh membership
         // with both flags false, so without this the share would stay
         // invisible until the next toggle.
-        auto wireJoinAnnounce = [mgr, &screenShare, &camera,
+        auto wireJoinAnnounce = [mgr, screenActive, &camera,
                                  announceMediaState](int index) {
             auto* sc = mgr->connectionAt(index);
             if (!sc) return;
             auto announceIfCapturing =
-                [sc, &screenShare, &camera, announceMediaState]() {
+                [sc, screenActive, &camera, announceMediaState]() {
                 if (sc->inVoiceChannel()
-                    && (screenShare.active() || camera.active()))
+                    && (screenActive() || camera.active()))
                     announceMediaState();
             };
             QObject::connect(sc, &ServerConnection::activeVoiceRoomIdChanged,

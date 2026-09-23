@@ -7,12 +7,16 @@
 #include <QTimer>
 #include <QVariantList>
 
+#include "voice/CameraPermissionPolicy.h"
 #include "voice/video/VideoSendStats.h"
+
+#include <functional>
+
 #ifdef Q_OS_MACOS
 class MacCameraCapturer;
 #else
-#include <QCamera>
-#include <QMediaCaptureSession>
+class QCamera;
+class QMediaCaptureSession;
 #endif
 
 class IVoiceTransport;
@@ -28,6 +32,19 @@ class VideoRateController;
 //
 // Unlike QScreenCapture, QCamera works on Homebrew's Qt Multimedia
 // build — no native Objective-C++ wrapper needed.
+//
+// NOTHING IN THIS CLASS MAY TOUCH THE CAMERA BEFORE start().
+//
+// The instance is constructed in main() at launch on every platform, so
+// anything the constructor does happens on the splash screen. That rules
+// out constructing a QCamera there (iOS builds an AVCaptureSession
+// behind it), enumerating devices, and above all querying or requesting
+// a permission: a camera prompt with no user action behind it is an App
+// Store / Play rejection, and a worker fixed exactly that bug on Android
+// on 2026-09-22. The constructor therefore wires signals and nothing
+// else; ensureCaptureSession() builds the capture objects on the first
+// startForCamera(), which is only reachable from the dock's camera
+// button. See CameraPermissionPolicy.h.
 class CameraController : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool active READ active NOTIFY activeChanged)
@@ -108,6 +125,21 @@ private:
     // camera instead of letting it silently re-broadcast on the
     // next join.
     void rewireVoiceLeaveWatch();
+
+    // ---- Lazy capture + permission (never at launch) -----------------
+    //
+    // Build the platform capture objects. Idempotent, and called only
+    // from startForCamera() — see the class note above for why this is
+    // not the constructor's job.
+    void ensureCaptureSession();
+    // This platform's current camera permission, without prompting.
+    camperm::Status cameraPermission() const;
+    // Prompt. `done` runs on the main thread with the user's answer.
+    // Only called when cameraPermission() said Undetermined.
+    void requestCameraPermission(std::function<void(bool granted)> done);
+    // Set m_lastError and notify. One place so the refusal paths cannot
+    // forget the signal.
+    void failWith(const QString& message);
 
 #ifdef Q_OS_MACOS
     MacCameraCapturer* m_mac = nullptr;

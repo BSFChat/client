@@ -125,6 +125,8 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
     if(APPLE AND NOT IOS)
         target_sources(test_video_codec PRIVATE
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
+            # MacVTEncoder.mm fills its pixel buffers through this.
+            ${CMAKE_SOURCE_DIR}/src/voice/video/NV12Pack.cpp
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm
         )
         target_compile_definitions(test_video_codec PRIVATE BSFCHAT_HAVE_VIDEOTOOLBOX)
@@ -184,6 +186,8 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
     if(APPLE AND NOT IOS)
         target_sources(test_video_pipeline PRIVATE
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
+            # MacVTEncoder.mm fills its pixel buffers through this.
+            ${CMAKE_SOURCE_DIR}/src/voice/video/NV12Pack.cpp
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm
             ${CMAKE_SOURCE_DIR}/src/voice/video/LatencyCriticalActivity.mm
         )
@@ -246,6 +250,8 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
     if(APPLE AND NOT IOS)
         target_sources(test_video_send_rate PRIVATE
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
+            # MacVTEncoder.mm fills its pixel buffers through this.
+            ${CMAKE_SOURCE_DIR}/src/voice/video/NV12Pack.cpp
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm)
         target_compile_definitions(test_video_send_rate PRIVATE
             BSFCHAT_HAVE_VIDEOTOOLBOX)
@@ -586,6 +592,8 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
     if(APPLE AND NOT IOS)
         target_sources(test_video_playout PRIVATE
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
+            # MacVTEncoder.mm fills its pixel buffers through this.
+            ${CMAKE_SOURCE_DIR}/src/voice/video/NV12Pack.cpp
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm
             ${CMAKE_SOURCE_DIR}/src/voice/video/LatencyCriticalActivity.mm)
         target_compile_definitions(test_video_playout PRIVATE BSFCHAT_HAVE_VIDEOTOOLBOX)
@@ -624,6 +632,8 @@ if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
     if(APPLE AND NOT IOS)
         target_sources(probe_video_cadence PRIVATE
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
+            # MacVTEncoder.mm fills its pixel buffers through this.
+            ${CMAKE_SOURCE_DIR}/src/voice/video/NV12Pack.cpp
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm)
         target_compile_definitions(probe_video_cadence PRIVATE BSFCHAT_HAVE_VIDEOTOOLBOX)
         target_link_libraries(probe_video_cadence PRIVATE
@@ -1184,3 +1194,67 @@ target_link_libraries(test_ugc_safety PRIVATE
     Qt6::Core Qt6::Test
 )
 add_test(NAME test_ugc_safety COMMAND test_ugc_safety)
+
+# The iOS camera-video port, minus the hardware.
+#
+# Covers the orientation rule and its effect on FrameConverter, the
+# I420 -> NV12 packing the VideoToolbox encoder feeds its pixel buffers
+# with, the lazy camera-permission rule, and what this build actually
+# advertises and negotiates for video. Nothing here opens a camera, a
+# microphone, a screen or an encode session — it must stay that way, so
+# that it runs on the owner's Mac without a TCC prompt.
+#
+# Conditioned on voice ONLY (not on BSFCHAT_HAVE_OPENH264, unlike its
+# neighbours): the whole point of the advertising cases is to run on a
+# build that has no software H.264 — which is precisely the iOS shape —
+# and skipping them wherever openh264 is missing would skip them exactly
+# where they matter.
+if(BSFCHAT_ENABLE_VOICE)
+    qt_add_executable(test_mobile_video
+        test_mobile_video.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/VideoCodecFactory.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/FrameConverter.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/NV12Pack.cpp
+    )
+    # PeerCaps.h parses the caps JSON, so the negotiation cases need the
+    # same header-only json the app builds against.
+    target_include_directories(test_mobile_video PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${libyuv_SOURCE_DIR}/include
+        ${nlohmann_json_SOURCE_DIR}/include)
+    target_link_libraries(test_mobile_video PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test yuv)
+    if(BSFCHAT_HAVE_OPENH264)
+        target_sources(test_mobile_video PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/voice/video/OpenH264Encoder.cpp
+            ${CMAKE_SOURCE_DIR}/src/voice/video/OpenH264Decoder.cpp)
+        target_compile_definitions(test_mobile_video PRIVATE
+            BSFCHAT_HAVE_OPENH264)
+        target_link_libraries(test_mobile_video PRIVATE openh264::openh264)
+    endif()
+    # `APPLE`, matching the app's own gate — the iOS build takes this
+    # branch too, and the advertising cases exist to check exactly that.
+    if(APPLE)
+        target_sources(test_mobile_video PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
+            # MacVTEncoder.mm fills its pixel buffers through this.
+            ${CMAKE_SOURCE_DIR}/src/voice/video/NV12Pack.cpp
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm)
+        target_compile_definitions(test_mobile_video PRIVATE
+            BSFCHAT_HAVE_VIDEOTOOLBOX)
+        target_link_libraries(test_mobile_video PRIVATE
+            "-framework VideoToolbox" "-framework CoreMedia"
+            "-framework CoreVideo" "-framework Foundation")
+    endif()
+    if(BSFCHAT_HAVE_AOM)
+        target_sources(test_mobile_video PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/voice/video/AomLosslessEncoder.cpp
+            ${CMAKE_SOURCE_DIR}/src/voice/video/AomLosslessDecoder.cpp)
+        target_compile_definitions(test_mobile_video PRIVATE BSFCHAT_HAVE_AOM)
+        target_link_libraries(test_mobile_video PRIVATE aom)
+        target_include_directories(test_mobile_video PRIVATE
+            ${libaom_SOURCE_DIR} ${libaom_BINARY_DIR})
+    endif()
+    add_test(NAME test_mobile_video COMMAND test_mobile_video)
+    set_tests_properties(test_mobile_video PROPERTIES
+        TIMEOUT 60 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()

@@ -20,9 +20,17 @@ QT_HOST=~/Qt/${QT_VERSION}/macos
 BUILD_DIR=build-ios-${TARGET}
 OPENSSL_DIR="$(pwd)/deps/openssl-ios-${TARGET}"
 
-# Voice is OFF by default on iOS (CMakeLists.txt): libdatachannel, opus
-# and the capture paths are not ported. Pass BSFCHAT_ENABLE_VOICE=ON to
-# work on that port.
+# Voice — and, since 2026-09-23, camera video — follow the CMakeLists.txt
+# default, which is ON for iOS. This script deliberately does NOT pass
+# -DBSFCHAT_ENABLE_VOICE unless the caller asked for a specific value.
+#
+# It used to default the variable to OFF and pass it unconditionally,
+# which silently outranked the CMake default: the commit that turned
+# voice on for iOS flipped `option(BSFCHAT_ENABLE_VOICE ... ON)` but not
+# this line, so every build made through this script — which is the
+# script the device builds are made with — came out as a text-only
+# client. An explicit flag always beats an option() default, so the only
+# safe way to have a default is to not pass the flag.
 #
 # The cross-built OpenSSL is NOT voice-gated, contrary to what this
 # script used to claim. bsfchat_protocol's cmake/Dependencies.cmake
@@ -30,7 +38,7 @@ OPENSSL_DIR="$(pwd)/deps/openssl-ios-${TARGET}"
 # jwt-cpp, and the client always links the protocol library — so a
 # voice=OFF configure died at "Could NOT find OpenSSL" too. CI hit
 # exactly that on the ios job's first run.
-ENABLE_VOICE=${BSFCHAT_ENABLE_VOICE:-OFF}
+ENABLE_VOICE=${BSFCHAT_ENABLE_VOICE:-}
 
 if [ ! -d "$QT_IOS" ]; then
     echo "Qt for iOS not found at $QT_IOS"
@@ -49,7 +57,6 @@ COMMON_ARGS=(
     -DCMAKE_OSX_ARCHITECTURES=arm64
     -DCMAKE_BUILD_TYPE=Release
     -DGAMECHAT_CLIENT_BUILD_TESTS=OFF
-    -DBSFCHAT_ENABLE_VOICE="$ENABLE_VOICE"
     -DQT_HOST_PATH="$QT_HOST"
     -Wno-dev
 )
@@ -75,7 +82,11 @@ COMMON_ARGS+=(
 # plist. CMakeLists.txt now has a real `if(IOS)` branch that configures
 # ios/Info.plist.in; leave the plist to it.
 
-echo "Building BSFChat for iOS ($TARGET, voice=$ENABLE_VOICE)..."
+if [ -n "$ENABLE_VOICE" ]; then
+    COMMON_ARGS+=(-DBSFCHAT_ENABLE_VOICE="$ENABLE_VOICE")
+fi
+
+echo "Building BSFChat for iOS ($TARGET, voice=${ENABLE_VOICE:-default (ON)})..."
 
 if [ "$TARGET" = "simulator" ]; then
     OPENSSL_ROOT_DIR="$OPENSSL_DIR" \

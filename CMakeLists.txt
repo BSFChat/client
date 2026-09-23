@@ -48,12 +48,22 @@ option(GAMECHAT_CLIENT_BUILD_TESTS "Build client tests" ON)
 #      phone call mid-voice suspends and resumes instead of leaving the
 #      session dead. No notification has actually been observed firing:
 #      a simulator cannot take a phone call.
-#   3. Camera capture. CameraController's non-macOS branch lands on
-#      QCamera with no permission handling and no orientation handling.
-#   4. Video codecs. VideoToolbox is gated to `APPLE AND NOT IOS`
-#      below, and openh264/libaom are excluded on iOS, so an iOS build
-#      advertises no codecs at all and peers fall back to the legacy
-#      JPEG path.
+#   3. Camera capture — IMPLEMENTED 2026-09-23, NOT YET RUN ON A DEVICE.
+#      CameraController's QCamera branch now asks for the camera
+#      permission through QCameraPermission at FIRST VIDEO USE (never at
+#      launch — see CameraPermissionPolicy.h), builds its QCamera
+#      lazily for the same reason, and the capture orientation is baked
+#      into the pixels before encode so the far end sees an upright
+#      picture (src/voice/video/VideoFrameOrientation.h). What no build
+#      can answer: whether Qt's AVF backend stamps the rotation this
+#      relies on, and whether the prompt appears where it should.
+#   4. Video codecs — IMPLEMENTED 2026-09-23, NOT YET RUN ON A DEVICE.
+#      VideoToolbox is built for BOTH Apple platforms below, so an iOS
+#      build now advertises h264 (and h265 where the media engine
+#      allows) and can both send and receive hardware-encoded video
+#      instead of falling back to the legacy JPEG path. openh264 and
+#      libaom stay excluded on iOS on purpose — a software encoder on a
+#      phone is a thermal problem, not a fallback.
 if(IOS)
     option(BSFCHAT_ENABLE_VOICE "Enable voice chat (requires libdatachannel + opus)" ON)
 else()
@@ -428,16 +438,47 @@ if(BSFCHAT_ENABLE_VOICE)
         target_include_directories(bsfchat-app PRIVATE
             ${libaom_SOURCE_DIR} ${libaom_BINARY_DIR})
     endif()
-    # Hardware codec backends: VideoToolbox on desktop macOS, Media
-    # Foundation on Windows. Both preferred by the factory, with
+    # Hardware codec backends: VideoToolbox on BOTH Apple platforms,
+    # Media Foundation on Windows. Both preferred by the factory, with
     # openh264 / the MS software MFT as the automatic fallbacks.
-    if(APPLE AND NOT IOS)
+    #
+    # `APPLE`, not `APPLE AND NOT IOS`. The iOS exclusion was never a
+    # technical limit — VideoToolbox, CoreMedia and CoreVideo are all
+    # first-class iOS frameworks and the two .mm files reference no
+    # AppKit, no CGDisplay and no ScreenCaptureKit — it was just the
+    # state of a port nobody had done. Its cost was severe and silent:
+    # with openh264 and libaom both (correctly) excluded on mobile, an
+    # iOS build compiled NO video backend at all, so
+    # VideoEncoder::h264EncodeProfiles() and h264DecodeProfiles() both
+    # came back empty, VoiceEngine::localCapsJson() advertised
+    # video_codecs: [], and peerCanReceiveRtpVideo() put every peer in
+    # the mesh on the legacy JPEG stills path toward the phone — while
+    # the phone itself could not send video at all, because
+    # VideoEncoder::create() had nothing to return.
+    #
+    # Software H.264 (openh264) is NOT the alternative and must not be
+    # added here. It is a CPU encoder: on a phone that is battery, heat,
+    # and sustained thermal throttling that degrades the whole call
+    # including the audio. On iOS the hardware encoder is the only
+    # sensible encoder, and it is also the only one — see the
+    # BSFCHAT_VT_WANT_HW_SPEC note in MacVTEncoder.mm.
+    if(APPLE)
         target_sources(bsfchat-app PRIVATE
             src/voice/video/MacVTEncoder.mm
             src/voice/video/MacVTDecoder.mm
-            # Every target that builds VideoReceivePipeline.cpp needs this.
-            src/voice/video/LatencyCriticalActivity.mm
+            src/voice/video/NV12Pack.cpp
         )
+        if(NOT IOS)
+            # macOS ONLY, and not by oversight: LatencyCriticalActivity.h
+            # declares begin()/end() out-of-line under Q_OS_MACOS and
+            # defines them as inline no-ops everywhere else, so compiling
+            # the .mm on iOS is a redefinition. It is also pointless
+            # there — the thing it opts out of is App Nap and desktop
+            # timer coalescing for an unfocused window, and an iOS app is
+            # either foreground or suspended.
+            target_sources(bsfchat-app PRIVATE
+                src/voice/video/LatencyCriticalActivity.mm)
+        endif()
         target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_VIDEOTOOLBOX)
         target_link_libraries(bsfchat-app PRIVATE
             "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo")

@@ -1,5 +1,7 @@
 #include "voice/video/FrameConverter.h"
 
+#include "voice/video/VideoFrameOrientation.h"
+
 #include <QImage>
 #include <QLoggingCategory>
 #include <QVideoFrame>
@@ -110,6 +112,47 @@ PlanarFrame directToI420(const QVideoFrame& mapped, qint64 tsUs) {
     return {};
 }
 
+// Rotate an I420 frame clockwise by 90/180/270. 0 returns the input
+// untouched (by value — the QByteArray planes are implicitly shared, so
+// the no-op case costs a refcount, not a copy, which is what keeps this
+// free on the desktop screen-share path where the angle is always 0).
+PlanarFrame rotateI420(const PlanarFrame& in, int deg) {
+    const int d = videoorient::normalise(deg);
+    if (d == 0) return in;
+    const bool swap = videoorient::swapsAxes(d);
+    const int dstW = swap ? in.height : in.width;
+    const int dstH = swap ? in.width : in.height;
+    PlanarFrame out = makeI420(dstW, dstH, in.captureTimeUs);
+    const libyuv::RotationMode mode = d == 90  ? libyuv::kRotate90
+                                    : d == 180 ? libyuv::kRotate180
+                                               : libyuv::kRotate270;
+    // I420Rotate's w/h are the SOURCE dimensions; it writes the rotated
+    // result into the destination planes, whose strides already describe
+    // the swapped geometry.
+    if (libyuv::I420Rotate(
+            reinterpret_cast<const uint8_t*>(in.y.constData()), in.strideY,
+            reinterpret_cast<const uint8_t*>(in.u.constData()), in.strideU,
+            reinterpret_cast<const uint8_t*>(in.v.constData()), in.strideV,
+            reinterpret_cast<uint8_t*>(out.y.data()), out.strideY,
+            reinterpret_cast<uint8_t*>(out.u.data()), out.strideU,
+            reinterpret_cast<uint8_t*>(out.v.data()), out.strideV,
+            in.width, in.height, mode) != 0) {
+        return in;   // refuse to lose the frame over a rotation failure
+    }
+    return out;
+}
+
+// The presentation rotation Qt stamped on a captured frame, in degrees.
+// Zero on every desktop capture source; non-zero on a phone whenever the
+// device is not held in the sensor's native orientation.
+int presentationRotation(const QVideoFrame& f) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+    return int(f.rotation());
+#else
+    return int(f.surfaceFormat().rotationAngle());
+#endif
+}
+
 PlanarFrame scaleI420(const PlanarFrame& in, int dstW, int dstH) {
     PlanarFrame out = makeI420(dstW, dstH, in.captureTimeUs);
     libyuv::I420Scale(
@@ -163,13 +206,26 @@ PlanarFrame toI420(const QVideoFrame& in, int maxLongEdge, qint64 captureTimeUs)
             w, h);
     }
 
+    // Scale BEFORE rotating, not after. A 90° turn leaves the long edge
+    // unchanged, so both orders land on the same output size — but
+    // rotating the already-downscaled frame touches a fraction of the
+    // pixels. On a 4032-wide phone capture headed for a 640 encode that
+    // is the difference between rotating 12 MB and rotating 0.3 MB,
+    // every frame, on the encode worker.
     const int longEdge = qMax(full.width, full.height);
-    if (maxLongEdge <= 0 || longEdge <= maxLongEdge) return full;
+    if (maxLongEdge > 0 && longEdge > maxLongEdge) {
+        const double scale = double(maxLongEdge) / double(longEdge);
+        const int dstW = qMax(16, int(full.width * scale)) & ~1;
+        const int dstH = qMax(16, int(full.height * scale)) & ~1;
+        full = scaleI420(full, dstW, dstH);
+    }
 
-    const double scale = double(maxLongEdge) / double(longEdge);
-    const int dstW = qMax(16, int(full.width * scale)) & ~1;
-    const int dstH = qMax(16, int(full.height * scale)) & ~1;
-    return scaleI420(full, dstW, dstH);
+    // Bake the capture orientation into the pixels. See
+    // VideoFrameOrientation.h for why this is the sender's job and not
+    // the receiver's, and why the mirror flag is deliberately not
+    // applied. Zero on every desktop source, so this is a refcount on
+    // the screen-share path.
+    return rotateI420(full, videoorient::wireRotation(presentationRotation(in)));
 }
 
 PlanarFrame toI444Identity(const QVideoFrame& in, qint64 captureTimeUs) {

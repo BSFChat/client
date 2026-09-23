@@ -10,18 +10,28 @@
 #include "net/ServerConnection.h"
 #include "core/Settings.h"
 
+#include "voice/video/VideoFrameOrientation.h"
+
 #ifdef Q_OS_MACOS
 #include "voice/MacCameraPermission.h"
 #include "voice/MacCameraCapturer.h"
 #else
-#include <QMediaDevices>
+#include <QCamera>
 #include <QCameraDevice>
+#include <QMediaCaptureSession>
+#include <QMediaDevices>
+#endif
+
+#if defined(Q_OS_IOS)
+#include <QGuiApplication>
+#include <QPermissions>
 #endif
 
 #include <QDateTime>
 #include <QVariantMap>
 #include <QBuffer>
 #include <QImage>
+#include <QTransform>
 #include <QDebug>
 #include <QVideoFrameFormat>
 #include <algorithm>
@@ -47,6 +57,11 @@ CameraController::CameraController(QObject* parent)
     // AVFoundation-direct capture. Homebrew Qt lacks the
     // QCameraPermission plugin, so QCamera just silently refuses to
     // start even with TCC granted. Skip it entirely.
+    //
+    // Constructing it here is safe — MacCameraCapturer's constructor is
+    // empty and it opens no device until start(). The QCamera branch
+    // below is NOT safe to construct here, which is why it moved to
+    // ensureCaptureSession(); see the class note in the header.
     m_mac = new MacCameraCapturer(this);
     connect(m_mac, &MacCameraCapturer::frameReady, this,
         [this](const QImage& img) {
@@ -70,21 +85,10 @@ CameraController::CameraController(QObject* parent)
             emit lastErrorChanged();
         });
 #else
-    m_camera = new QCamera(this);
-    m_session = new QMediaCaptureSession(this);
-    m_session->setCamera(m_camera);
-    m_session->setVideoSink(m_sink);
-
-    connect(m_camera, &QCamera::activeChanged, this, [this](bool a) {
-        setActiveState(a);
-    });
-    connect(m_camera, &QCamera::errorOccurred, this, [this](QCamera::Error err,
-                                                             const QString& d) {
-        Q_UNUSED(err);
-        if (d.isEmpty()) return;
-        m_lastError = d;
-        emit lastErrorChanged();
-    });
+    // The QCamera / QMediaCaptureSession pair is built on first use in
+    // ensureCaptureSession(), NOT here. Only the sink wiring is safe at
+    // construction time — a QVideoSink is a frame destination and owns
+    // no device.
     connect(m_sink, &QVideoSink::videoFrameChanged, this,
         [this](const QVideoFrame& f) { m_pendingFrame = f; });
 #endif
@@ -115,6 +119,82 @@ CameraController::CameraController(QObject* parent)
                                   QDateTime::currentMSecsSinceEpoch(),
                                   askedFps, /*capturePolled=*/false);
     });
+}
+
+void CameraController::ensureCaptureSession()
+{
+#ifndef Q_OS_MACOS
+    if (m_camera) return;
+    m_camera = new QCamera(this);
+    m_session = new QMediaCaptureSession(this);
+    m_session->setCamera(m_camera);
+    m_session->setVideoSink(m_sink);
+
+    connect(m_camera, &QCamera::activeChanged, this, [this](bool a) {
+        setActiveState(a);
+    });
+    connect(m_camera, &QCamera::errorOccurred, this, [this](QCamera::Error err,
+                                                             const QString& d) {
+        Q_UNUSED(err);
+        if (d.isEmpty()) return;
+        failWith(d);
+    });
+#endif
+}
+
+camperm::Status CameraController::cameraPermission() const
+{
+#if defined(Q_OS_MACOS)
+    // AVFoundation directly — Homebrew Qt has no QCameraPermission
+    // plugin, and without it Qt answers Denied for everything.
+    const QString s = mac_camera_permission::status();
+    if (s == QLatin1String("granted"))    return camperm::Status::Granted;
+    if (s == QLatin1String("denied"))     return camperm::Status::Denied;
+    if (s == QLatin1String("restricted")) return camperm::Status::Restricted;
+    return camperm::Status::Undetermined;
+#elif defined(Q_OS_IOS) && QT_CONFIG(permissions)
+    // Qt's QDarwinCameraPermission backend IS linked on iOS — Qt decides
+    // that at configure time by finding NSCameraUsageDescription in
+    // ios/Info.plist.in (see the note at the top of that file), so unlike
+    // the Homebrew Mac the public API is the right one to use here.
+    //
+    // iOS has no separate "restricted" in Qt's enum; a restricted device
+    // reports Denied, and camperm::action() refuses both, so the only
+    // difference is which sentence the user reads.
+    switch (qApp->checkPermission(QCameraPermission{})) {
+    case Qt::PermissionStatus::Granted:      return camperm::Status::Granted;
+    case Qt::PermissionStatus::Denied:       return camperm::Status::Denied;
+    case Qt::PermissionStatus::Undetermined: return camperm::Status::Undetermined;
+    }
+    return camperm::Status::Unsupported;
+#else
+    // Windows / Linux / Android. Android asks through its own JNI bridge
+    // in QML before it ever calls start() (androidPerms.requestCamera),
+    // and the desktops either have no such concept or answer it inside
+    // the capture backend. Proceeding preserves exactly today's
+    // behaviour on all of them.
+    return camperm::Status::Unsupported;
+#endif
+}
+
+void CameraController::requestCameraPermission(std::function<void(bool)> done)
+{
+#if defined(Q_OS_MACOS)
+    mac_camera_permission::request(std::move(done));
+#elif defined(Q_OS_IOS) && QT_CONFIG(permissions)
+    qApp->requestPermission(QCameraPermission{}, this,
+        [done = std::move(done)](const QPermission& result) {
+            done(result.status() == Qt::PermissionStatus::Granted);
+        });
+#else
+    done(true);
+#endif
+}
+
+void CameraController::failWith(const QString& message)
+{
+    m_lastError = message;
+    emit lastErrorChanged();
 }
 
 QVariantList CameraController::availableCameras() const
@@ -189,8 +269,7 @@ void CameraController::startForCamera(int index)
     // did not hide the address it promised to hide — the one outcome this
     // whole feature exists to prevent. Refuse with a reason instead.
     if (m_hideIpForShare && !canHideIpWhileSharing()) {
-        m_lastError = voice::relayRefusalMessage(voice::RelaySource::ShareOption);
-        emit lastErrorChanged();
+        failWith(voice::relayRefusalMessage(voice::RelaySource::ShareOption));
         return;
     }
 
@@ -200,38 +279,56 @@ void CameraController::startForCamera(int index)
     m_throttle->setInterval(1000 / (m_settings ? m_settings->cameraFps()
                                                : kRtpFps));
 
-#ifdef Q_OS_MACOS
-    auto s = mac_camera_permission::status();
-    qInfo("[camera] macOS camera TCC status=%s", qUtf8Printable(s));
-    if (s == "denied" || s == "restricted") {
-        m_lastError = "Camera access denied. Grant it in System "
-                      "Settings → Privacy & Security → Camera, then "
-                      "restart BSFChat.";
-        emit lastErrorChanged();
+    // ---- Permission, asked HERE and nowhere earlier ------------------
+    //
+    // This is the first line of the first function that the camera
+    // button can reach, and it is the only place in the class that asks.
+    // macOS and iOS share the rule (camperm::action) and differ only in
+    // which API answers it; every other platform reports Unsupported and
+    // falls straight through to Proceed.
+    const camperm::Status perm = cameraPermission();
+    switch (camperm::action(perm)) {
+    case camperm::Action::Refuse:
+        qInfo("[camera] permission refuses the start (status=%d)", int(perm));
+        failWith(camperm::refusalMessage(perm));
         return;
-    }
-    if (s == "undetermined") {
-        mac_camera_permission::request([this, index](bool granted) {
+    case camperm::Action::RequestThenStart:
+        qInfo("[camera] requesting camera permission at first video use");
+        requestCameraPermission([this, index](bool granted) {
             if (!granted) {
-                m_lastError = "Camera access denied.";
-                emit lastErrorChanged();
+                // Deliberately re-read the status rather than assuming
+                // Denied: on iOS a prompt can also be dismissed by a
+                // restriction profile, and the two need different words.
+                failWith(camperm::refusalMessage(cameraPermission()));
                 return;
             }
+            // Re-enter with the decision on record; the status is now
+            // Granted, so this lands on Proceed.
             startForCamera(index);
         });
         return;
+    case camperm::Action::Proceed:
+        break;
     }
+
+    ensureCaptureSession();
     m_lastError.clear();
     emit lastErrorChanged();
+
+#ifdef Q_OS_MACOS
     m_mac->start(index);
     m_cameraDescription = m_mac->currentDescription();
     emit cameraDescriptionChanged();
     m_throttle->start();
 #else
+    // Enumeration happens here and not in the constructor. On iOS an
+    // AVCaptureDevice discovery does not itself raise the permission
+    // prompt, but it is still device work on the launch path, and the
+    // rule this class follows is the simple one: nothing before the
+    // button.
     const auto cams = QMediaDevices::videoInputs();
     if (cams.isEmpty()) {
-        m_lastError = "No camera detected.";
-        emit lastErrorChanged();
+        failWith(QStringLiteral("No camera detected."));
         return;
     }
     QCameraDevice target = (index >= 0 && index < cams.size())
@@ -239,8 +336,6 @@ void CameraController::startForCamera(int index)
     m_cameraDescription = target.description();
     emit cameraDescriptionChanged();
     m_camera->setCameraDevice(target);
-    m_lastError.clear();
-    emit lastErrorChanged();
     m_camera->start();
     m_throttle->start();
 #endif
@@ -259,6 +354,8 @@ void CameraController::stop()
     if (m_mac) m_mac->stop();
     if (m_active) setActiveState(false);
 #else
+    // Null until the first start — stopping a camera that was never
+    // built is a no-op, not a crash.
     // QCamera::activeChanged routes the flip through setActiveState().
     if (m_camera && m_camera->isActive()) m_camera->stop();
 #endif
@@ -438,6 +535,23 @@ void CameraController::pushFrameToPeers()
         && (m_tick % legacyDivisor) == 0) {
         QImage img = m_pendingFrame.toImage();
         if (img.isNull()) return;
+        // Same orientation fix the RTP path gets inside
+        // FrameConverter::toI420, applied here too because
+        // QVideoFrame::toImage() returns the raw pixels and drops the
+        // presentation rotation with them. Without this a phone's legacy
+        // peers — which is every peer for the first seconds of a call,
+        // before the RTP track opens — see a sideways picture.
+        // Zero-cost on desktop, where the angle is always 0.
+        const int deg = videoorient::wireRotation(
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+            int(m_pendingFrame.rotation())
+#else
+            int(m_pendingFrame.surfaceFormat().rotationAngle())
+#endif
+        );
+        if (deg != 0)
+            img = img.transformed(QTransform().rotate(deg),
+                                  Qt::SmoothTransformation);
         if (img.width() > kMaxWidth)
             img = img.scaledToWidth(kMaxWidth, Qt::SmoothTransformation);
 
