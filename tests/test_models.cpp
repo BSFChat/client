@@ -1774,6 +1774,154 @@ private slots:
         QVERIFY(!MessageModel::rendersAsRow(hist::callMember("@bob:server", 3)));
     }
 
+    void testOpenFillShowsPageOneBeforeTheFillEnds()
+    {
+        // The whole point of flushing: a room that needs three requests must
+        // not be blank for all three. The spinner is bound 1:1 to
+        // loadingHistory, so "rows before the fill ends" is literally "the
+        // user can read something while it is still spinning".
+        MessageModel model;
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open,
+                                       bsfchat::client::kHistoryFirstPageLimit)
+                    .has_value());
+
+        auto r1 = model.absorbHistoryPage(
+            QString(), hist::messagePage(8, "$a", 700000000), "t1", "@me:server");
+        QCOMPARE(r1.outcome, hist::Outcome::FetchMore);
+        // Eight rows, on screen, with two more requests still to come.
+        QCOMPARE(model.rowCount(), 8);
+        QVERIFY(model.loadingHistory());
+
+        // Page two is OLDER, so its rows land ABOVE the ones already shown.
+        auto r2 = model.absorbHistoryPage(
+            "t1", hist::messagePage(6, "$b", 600000000), "t2", "@me:server");
+        QCOMPARE(r2.outcome, hist::Outcome::FetchMore);
+        QCOMPARE(model.rowCount(), 14);
+        QCOMPARE(model.data(model.index(0), MessageModel::EventIdRole).toString(),
+                 QString("$b0"));
+        QCOMPARE(model.data(model.index(13), MessageModel::EventIdRole).toString(),
+                 QString("$a7"));
+    }
+
+    void testOpenFillAppliesRelationsCarriedByLaterPages()
+    {
+        // The regression this guards: flushing page by page sends every page
+        // after the first through prependEvents, which keeps rows and drops
+        // everything else. Without the relation routing in
+        // ingestHistoryEvents, the reaction, the edit and the redaction below
+        // are silently thrown away and this test fails on all three.
+        MessageModel model;
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open,
+                                       bsfchat::client::kHistoryFirstPageLimit)
+                    .has_value());
+
+        // Page 1: enough rows to put the model out of its "empty" branch, but
+        // short of the 30-row target so a second page is asked for.
+        auto r1 = model.absorbHistoryPage(
+            QString(), hist::messagePage(4, "$a", 700000000), "t1", "@me:server");
+        QCOMPARE(r1.outcome, hist::Outcome::FetchMore);
+        QCOMPARE(model.rowCount(), 4);
+
+        // Page 2: three older messages, plus a reaction on one of them, an
+        // edit of another, and a redaction of the third.
+        QVector<bsfchat::RoomEvent> page2 = hist::messagePage(3, "$b", 600000000);
+        page2.append(hist::reaction("$react", "$b0"));
+        page2.append(hist::edit("$ed", "$b1", 650000000, "edited body"));
+        page2.append(makeRedactionEvent("$red", "@alice:server", "$b2"));
+        auto r2 = model.absorbHistoryPage("t1", page2, "t2", "@me:server");
+        QCOMPARE(r2.outcome, hist::Outcome::FetchMore);
+
+        // $b2 was redacted away; $b0 and $b1 remain above page one's four.
+        QCOMPARE(model.rowCount(), 6);
+        QCOMPARE(model.data(model.index(0), MessageModel::EventIdRole).toString(),
+                 QString("$b0"));
+        QCOMPARE(model.data(model.index(1), MessageModel::EventIdRole).toString(),
+                 QString("$b1"));
+        // The reaction folded into its target's chips.
+        QCOMPARE(model.ownReactionEventId("$b0", "+1", "@bob:server"), "$react");
+        // The edit folded into its target's body.
+        QCOMPARE(model.data(model.index(1), MessageModel::BodyRole).toString(),
+                 QString("edited body"));
+        QCOMPARE(model.data(model.index(1), MessageModel::EditedRole).toBool(), true);
+        // And no relation became a row of its own.
+        for (int i = 0; i < model.rowCount(); ++i) {
+            const QString id =
+                model.data(model.index(i), MessageModel::EventIdRole).toString();
+            QVERIFY(id != "$react" && id != "$ed" && id != "$red");
+        }
+    }
+
+    void testScrollBackAppliesRelationsCarriedByTheFetchedPage()
+    {
+        // The same routing, on the path that had been losing relations since
+        // before any of this: a Gesture fill always lands in a populated
+        // model, so its page has ALWAYS gone through prependEvents. Scroll
+        // far enough back and the reaction chips stopped appearing.
+        MessageModel model;
+        model.appendEvents(hist::messagePage(3, "$new", 900000000), "@me:server");
+        model.setPrevBatchToken("t1");
+        QCOMPARE(model.rowCount(), 3);
+
+        auto g = model.beginHistoryFill(hist::Kind::Gesture, 50);
+        QVERIFY(g.has_value());
+        QCOMPARE(g->from, QString("t1"));
+
+        QVector<bsfchat::RoomEvent> page = hist::messagePage(2, "$old", 500000000);
+        page.append(hist::reaction("$react", "$old0"));
+        const auto res = model.absorbHistoryPage("t1", page, QString(), "@me:server");
+        QCOMPARE(res.outcome, hist::Outcome::Done);
+
+        QCOMPARE(model.rowCount(), 5);
+        QCOMPARE(model.ownReactionEventId("$old0", "+1", "@bob:server"), "$react");
+    }
+
+    void testOpenFillStopsAtTheOpenPageCapInAChannelWithNoMessages()
+    {
+        // Production, 2026-09-23: two voice channels of 1300+ events each with
+        // ZERO renderable rows in their newest 150. Before kHistoryOpenMaxPages
+        // this ran the open to ten pages and the viewport trigger spent ten
+        // more — twenty serial round trips to display nothing. It must now
+        // stop at three and admit it, so MessageView can show "Nothing recent
+        // to show" with a Load-older button instead of a spinner.
+        MessageModel model;
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open,
+                                       bsfchat::client::kHistoryFirstPageLimit)
+                    .has_value());
+
+        QString from;
+        int requests = 0;
+        for (int page = 0; page < 12; ++page) {
+            QVector<bsfchat::RoomEvent> voiceChurn;
+            for (int i = 0; i < 40; ++i)
+                voiceChurn.append(hist::callMember(
+                    "@u" + std::to_string(page) + "_" + std::to_string(i), 1000 + i));
+            ++requests;
+            const QString next = QStringLiteral("t%1").arg(page + 1);
+            const auto res = model.absorbHistoryPage(from, voiceChurn, next, "@me:server");
+            if (res.outcome != hist::Outcome::FetchMore) break;
+            from = res.next.from;
+        }
+
+        QCOMPARE(requests, bsfchat::client::kHistoryOpenMaxPages);
+        QCOMPARE(model.historyFill().pagesThisFill(),
+                 bsfchat::client::kHistoryOpenMaxPages);
+        QCOMPARE(model.historyFill().lastStop(), hist::Stop::PageCap);
+        QCOMPARE(model.rowCount(), 0);
+        QVERIFY(!model.loadingHistory());
+        // There IS more history — the empty state must say "nothing recent",
+        // not "no messages ever" (see qml/js/TimelineOverlay.js).
+        QVERIFY(model.hasMoreHistory());
+        // What the client must NOT do is keep asking: one viewport top-up is
+        // all the per-visit budget leaves after a three-page open, and then
+        // the decision is the user's. testRoomOfOnlyEditsStopsAtPageCaps
+        // walks that budget to its end.
+        QVERIFY(model.beginHistoryFill(hist::Kind::Viewport,
+                                       bsfchat::client::kHistoryFollowPageLimit)
+                    .has_value());
+        model.absorbHistoryPage("t3", {}, "t4", "@me:server");
+        QVERIFY(model.historyAutoFillSpent());
+    }
+
     void testOpenFillPaginatesPastAPageOfEdits()
     {
         MessageModel model;
@@ -1793,7 +1941,10 @@ private slots:
         QCOMPARE(r1.next.from, QString("t1"));
         QCOMPARE(r1.next.limit, bsfchat::client::kHistoryFollowPageLimit);
         QVERIFY(model.loadingHistory());
-        // Buffered: the view sees one insertion per request it made.
+        // An open fill puts each page in as it lands, so that a room needing
+        // three requests still shows its first rows after one. This page was
+        // all edits of an unloaded board, so it has no rows to show — but the
+        // model is no longer holding anything back.
         QCOMPARE(model.rowCount(), 0);
 
         // Page 2: more edits and 12 real messages — still short of 30.
@@ -1858,10 +2009,13 @@ private slots:
             ++requests;
             r = feed(r.next.from);
         }
-        // One open: exactly kHistoryMaxPagesPerFill requests, then it stops
-        // with nothing to show rather than crawling the whole room.
+        // One open: exactly kHistoryOpenMaxPages requests, then it stops with
+        // nothing to show rather than crawling the whole room. An open is
+        // capped far below a gesture's fill because it is on the critical
+        // path of a tap — see kHistoryOpenMaxPages for the production rooms
+        // that forced the number down from ten.
         QCOMPARE(r.outcome, hist::Outcome::Done);
-        QCOMPARE(requests, bsfchat::client::kHistoryMaxPagesPerFill);
+        QCOMPARE(requests, bsfchat::client::kHistoryOpenMaxPages);
         QCOMPARE(model.historyFill().lastStop(), hist::Stop::PageCap);
         QCOMPARE(model.rowCount(), 0);
         QVERIFY(model.hasMoreHistory());

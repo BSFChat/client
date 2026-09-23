@@ -308,6 +308,12 @@ public:
     void appendEvent(const bsfchat::RoomEvent& event, const QString& ownUserId);
     void appendEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);
     void prependEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);
+    // One /messages page (or a whole buffered fill) into the timeline: the
+    // rows through append or prepend as the model's state demands, and then
+    // the reactions, redactions and edits the same page carried. Public
+    // because it is also how a cached window is replayed on a room switch.
+    void ingestHistoryEvents(const QVector<bsfchat::RoomEvent>& chronological,
+                             const QString& ownUserId);
     void clear();
 
     // Take a message out of the timeline (U-H5). Returns true if a row was
