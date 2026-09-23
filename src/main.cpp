@@ -20,6 +20,7 @@
 #include "core/TintedIconProvider.h"
 #include "core/MediaDownloader.h"
 #include "core/Haptics.h"
+#include "core/MobileKeyboard.h"
 #include "core/Updater.h"
 #include "core/AndroidPermissions.h"
 #include "util/FileLogger.h"
@@ -181,6 +182,15 @@ int main(int argc, char *argv[])
     Haptics haptics;
     QQmlEngine::setObjectOwnership(&haptics, QQmlEngine::CppOwnership);
     engine.rootContext()->setContextProperty("haptics", &haptics);
+
+    // Software-keyboard bridge. The mobile shell pushes its own layout
+    // clear of the keyboard and needs to know what the platform did on
+    // its own account, so the two do not both move the composer. Exposed
+    // on every platform (it reads 0 and does nothing off iOS) so
+    // MobileMain does not have to guard every call site.
+    MobileKeyboard mobileKeyboard;
+    QQmlEngine::setObjectOwnership(&mobileKeyboard, QQmlEngine::CppOwnership);
+    engine.rootContext()->setContextProperty("mobileKeyboard", &mobileKeyboard);
 
     // Auto-update — desktop only. We don't ship the dialog into the
     // mobile QML on Android / iOS because (a) Play Store / TestFlight

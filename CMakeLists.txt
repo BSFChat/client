@@ -105,6 +105,10 @@ qt_add_executable(bsfchat-app
     # and iOS-only, same shape as IosAuthSession.mm below; UIKit is already
     # linked for the iOS target further down this file.
     $<$<BOOL:${IOS}>:src/core/HapticsIos.mm>
+    src/core/MobileKeyboard.cpp
+    # Reads back the iOS platform plugin's own keyboard scroll so the
+    # mobile shell does not push the composer twice. See MobileKeyboard.h.
+    $<$<BOOL:${IOS}>:src/core/MobileKeyboardIos.mm>
     src/core/AndroidPermissions.cpp
     src/core/AndroidNotifier.cpp
     src/core/UrlHandler.cpp
