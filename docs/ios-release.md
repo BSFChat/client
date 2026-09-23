@@ -124,10 +124,27 @@ Consequences, in order:
    additionally required. (It is the *exempt* path that can still owe
    one.)
 
-If voice is never enabled for iOS and the declaration is flipped to
-`false`, step 1 disappears — but the declaration then silently becomes
-untrue the day `BSFCHAT_ENABLE_VOICE` is turned on for iOS, which is
-exactly the trap this key exists to avoid. Leave it `true`.
+**Update 2026-09-23: this is no longer hypothetical.**
+`BSFCHAT_ENABLE_VOICE` now defaults **ON** for iOS
+(`CMakeLists.txt:57-59`) and voice has run on a real iPhone, so the
+shipped binary genuinely does link DTLS-SRTP against our own OpenSSL.
+The declaration was written to be true in advance of that day; it is now
+true in the ordinary way. Leave it `true`.
+
+Two things to be clear-eyed about before the first upload:
+
+- **`true` does not make the questionnaire go away — `false` is what
+  does that.** An earlier comment in `ios/Info.plist.in` had this
+  backwards and has been corrected. Expect to answer the export
+  questions once for the first version, and expect the build to sit in
+  "Missing Compliance" in App Store Connect until you do. That state
+  blocks external TestFlight testers; it does not block internal ones,
+  so you can start testing while you sort it out.
+- Point 3 above is the reading this project is going on, not a
+  certainty. If in doubt, the belt-and-braces move is to file the BIS
+  year-end self-classification report anyway — it is an email, it costs
+  nothing, and it is the cheapest possible resolution of an argument
+  with an export-control regulator.
 
 ---
 

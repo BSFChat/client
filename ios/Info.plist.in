@@ -149,17 +149,21 @@
 	     proprietary column, so no CCATS is required, only the French
 	     encryption declaration and only for distribution in France.
 
-	     Note that BSFCHAT_ENABLE_VOICE is currently OFF for iOS, so the
-	     FIRST submitted build genuinely links no crypto but Apple's.
-	     The declaration is still YES on purpose: the day voice is turned
-	     on for iOS the answer changes, and an export-compliance answer
-	     that silently goes stale between releases is precisely the
-	     failure mode this key exists to prevent. YES is never a false
-	     statement; NO would become one without anyone editing this file.
+	     (Historic note: this key was set to YES while
+	     BSFCHAT_ENABLE_VOICE was still OFF for iOS, on the reasoning
+	     that an answer which silently goes stale between releases is
+	     the failure mode the key exists to prevent. Voice turned on for
+	     iOS on 2026-09-23, so the reasoning above is no longer
+	     hypothetical — the shipped binary really does link DTLS-SRTP
+	     against our own OpenSSL.)
 
-	     Once Apple has reviewed the uploaded documentation it issues a
-	     code — add it here as ITSEncryptionExportComplianceCode and the
-	     questionnaire disappears for good. -->
+	     CORRECTION to what an earlier version of this comment claimed:
+	     setting this key YES does NOT stop App Store Connect asking.
+	     It is NO that skips the questionnaire. YES means App Store
+	     Connect will ask for export-compliance information — once per
+	     version, not per build — until an ITSEncryptionExportComplianceCode
+	     is pasted in here. Expect the questions; the honest answer is
+	     still YES. docs/ios-release.md §3 has the walkthrough. -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<true/>
 
