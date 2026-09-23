@@ -638,7 +638,7 @@ it is the most concrete expression of the privacy pitch.
 notification (there are none on iOS), or anything with real people's
 names or real message content in it.
 
-### 8.2 [ME, on request] Play — an emulator is acceptable
+### 8.2 Play — an emulator is acceptable, and can be driven for you
 
 Google accepts emulator captures. Requirements: 2–8 phone screenshots,
 PNG or JPEG, 16:9 or 9:16, each side between 320 px and 3840 px. A
@@ -698,11 +698,17 @@ unified:
 
 Eight is the maximum, so if something has to go, drop #7.
 
-**I can drive this** — say the word and I will start the emulator,
-install the APK and capture the set. The one thing I will not do is
-anything that touches your Mac's microphone, camera or screen, so the
-voice and screen-share shots (#2, #3) and all four demo videos need you
-or a device I am not driving.
+**Who runs this.** The recipe above is written so that an assistant can
+execute it unattended, and one has offered to. Note that it conflicts
+with the standing instruction that assistants never launch emulators or
+simulators on this machine — so either that instruction is relaxed for
+this task, or the captures are yours. Decide which; it is a two-word
+answer and nobody should guess it.
+
+Either way, shots **#2 (voice channel)** and **#3 (screen sharing)** and
+all four foreground-service demo videos in §5.3 need real audio and a
+real screen-capture consent flow. Those are yours regardless of who
+drives the emulator.
 
 ---
 
