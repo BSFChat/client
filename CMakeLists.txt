@@ -101,6 +101,10 @@ qt_add_executable(bsfchat-app
     src/core/MediaDownloader.cpp
     src/core/Updater.cpp
     src/core/Haptics.cpp
+    # UIKit feedback generators for the iOS half of Haptics. Objective-C++
+    # and iOS-only, same shape as IosAuthSession.mm below; UIKit is already
+    # linked for the iOS target further down this file.
+    $<$<BOOL:${IOS}>:src/core/HapticsIos.mm>
     src/core/AndroidPermissions.cpp
     src/core/AndroidNotifier.cpp
     src/core/UrlHandler.cpp

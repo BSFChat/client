@@ -48,6 +48,16 @@ Rectangle {
         if (threadPanel) threadPanel.closePanel();
     }
 
+    // Pinned messages, for the mobile shell's overflow menu. The only
+    // other way in is the pin button in the chat header, and that header
+    // is `visible: !Theme.isMobile` — so on a phone the pinned list, and
+    // with it the only unpin control in the app, could not be opened at
+    // all. Same forwarder shape as the two above: the shell asks this
+    // component for a behaviour, it does not reach into its children.
+    function openPinnedMessages() {
+        pinnedPopover.openCentred();
+    }
+
     // Drag-and-drop file uploads. Anchored over the whole MessageView
     // so dropping anywhere in the chat pane — message list, composer,
     // empty state — uploads the files into the current channel. Only
@@ -1857,17 +1867,14 @@ Rectangle {
             Layout.leftMargin: Theme.isMobile ? Theme.sp.s3 : Theme.sp.s7
             Layout.rightMargin: Theme.isMobile ? Theme.sp.s3 : Theme.sp.s7
             Layout.topMargin: Theme.sp.s3
-            // Extra bottom margin on mobile for the home-indicator /
-            // gesture bar so the composer isn't hugging the edge.
-            // When the software keyboard is up `adjustResize` has
-            // already shrunk the window — in that state the bar
-            // below us is the keyboard itself, not the gesture
-            // strip, so the home-indicator inset would waste space.
-            // Drop to a small gap so the send button doesn't sit
-            // flush against the top row of keys.
-            Layout.bottomMargin: Theme.isMobile
-                ? (Qt.inputMethod.visible ? Theme.sp.s2 : Theme.sp.s7 + 16)
-                : Theme.sp.s7
+            // On mobile this is only the gap between the composer and
+            // whatever is below it — a small constant. The home
+            // indicator / gesture bar and the software keyboard are both
+            // the shell's business now (MobileMain's bottomGap shrinks
+            // the whole content area), because they are also the thread
+            // composer's and the VoiceDock's business and this file
+            // cannot see either of them.
+            Layout.bottomMargin: Theme.isMobile ? Theme.sp.s3 : Theme.sp.s7
             Layout.minimumHeight: Theme.isMobile ? 56 : 48
             visible: serverManager.activeServer !== null && serverManager.activeServer.activeRoomId !== ""
             roomName: serverManager.activeServer ? serverManager.activeServer.activeRoomName : ""
@@ -1924,7 +1931,8 @@ Rectangle {
     Popup {
         id: pinnedPopover
         parent: Overlay.overlay
-        width: 380
+        // 380 overflows a phone; clamp to the viewport with a gutter.
+        width: Math.min(380, (parent ? parent.width : 380) - 2 * Theme.sp.s7)
         height: Math.min(420, contentColumn.implicitHeight + 24)
         padding: 0
         modal: false
@@ -1936,6 +1944,23 @@ Rectangle {
             x = Math.max(8, p.x - width);
             y = p.y;
             open();
+        }
+
+        // Mobile has no chat header to hang this off, so it opens as a
+        // plain centred sheet from the overflow menu instead. Centred
+        // twice: `height` is bound to the content column, which has not
+        // been laid out yet on the first open of a room with pins, so the
+        // first sum is against a stale height. The callLater runs after
+        // that layout pass.
+        function openCentred() {
+            open();
+            _recentre();
+            Qt.callLater(_recentre);
+        }
+        function _recentre() {
+            if (!parent) return;
+            x = Math.max(8, (parent.width - width) / 2);
+            y = Math.max(8, (parent.height - height) / 2);
         }
 
         // Reactive list of pinned ids, rebuilt when the server signals a
@@ -2045,18 +2070,27 @@ Rectangle {
                                 font.pixelSize: Theme.fontSize.xs
                                 color: Theme.fg3
                             }
-                            // Unpin — reveal on hover.
+                            // Unpin — reveal on hover on desktop, always
+                            // shown on mobile, where there is no hover and an
+                            // opacity-0 control is simply a missing one: the
+                            // pinned-messages popover was the only place to
+                            // unpin, so on a phone nothing could be unpinned.
                             Icon {
                                 name: "x"
                                 size: 12
                                 color: unpinMouse.containsMouse
                                     ? Theme.danger : Theme.fg3
-                                opacity: pinRowHover.containsMouse ? 1.0 : 0.0
+                                opacity: (Theme.isMobile || pinRowHover.containsMouse)
+                                    ? 1.0 : 0.0
                                 Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
                                 MouseArea {
                                     id: unpinMouse
                                     anchors.fill: parent
-                                    anchors.margins: -6
+                                    // Negative margins grow the hit area past
+                                    // the 12 px glyph: to the 44 pt minimum on
+                                    // touch, to a comfortable 24 on desktop.
+                                    anchors.margins: Theme.isMobile
+                                        ? -(Theme.touchTarget - 12) / 2 : -6
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: {

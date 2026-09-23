@@ -226,6 +226,17 @@ Rectangle {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    // The menu this opens is the only place the client
+                    // shows a server's address and connection state after
+                    // it has been added, and the only way to edit or
+                    // remove one — see the Menu below. Right-click-only
+                    // meant a phone could add servers and never remove
+                    // them. Long press is the touch equivalent, following
+                    // MemberList's precedent.
+                    onPressAndHold: {
+                        if (typeof haptics !== "undefined") haptics.longPress();
+                        serverContextMenu.openFor(index);
+                    }
                     onClicked: (mouse) => {
                         if (mouse.button === Qt.RightButton) {
                             serverContextMenu.openFor(index);

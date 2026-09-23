@@ -1,7 +1,12 @@
 // Lightweight haptic-feedback bridge. Exposed to QML as a
 // `haptics` context property. On Android we route to
-// View.performHapticFeedback(); on all other platforms the methods
-// are no-ops so callers don't need to gate on Theme.isMobile in QML.
+// View.performHapticFeedback(); on iOS to UIKit's feedback generators
+// (src/core/HapticsIos.mm); on every other platform the methods are
+// no-ops so callers don't need to gate on Theme.isMobile in QML.
+//
+// The whole file used to be #ifdef Q_OS_ANDROID, which made every
+// long-press on iOS a silent no-op — the one platform where the user
+// expects a tap back, since iOS long-press menus always give one.
 //
 // Why this is its own QObject instead of inlined JNI: QML can't call
 // static Java methods directly, and the JNI handle path is fiddly

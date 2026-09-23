@@ -2307,7 +2307,10 @@ Popup {
                                         font.family: Theme.fontMono
                                         font.pixelSize: Theme.fontSize.xs
                                         color: Theme.fg3
-                                        visible: !catHeaderHover.containsMouse
+                                        // On mobile the add buttons are always
+                                        // out (no hover to reveal them), so this
+                                        // always yields the space to them.
+                                        visible: !Theme.isMobile && !catHeaderHover.containsMouse
                                     }
 
                                     // Inline create buttons — only show on
@@ -2319,8 +2322,8 @@ Popup {
                                         property string iconName: ""
                                         property string tooltipText: ""
                                         property string createKind: ""
-                                        Layout.preferredWidth: 24
-                                        Layout.preferredHeight: 24
+                                        Layout.preferredWidth: Theme.isMobile ? Theme.touchTarget : 24
+                                        Layout.preferredHeight: Theme.isMobile ? Theme.touchTarget : 24
                                         radius: Theme.r1
                                         color: _cabMouse.containsMouse ? Theme.bg3 : "transparent"
                                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
@@ -2347,13 +2350,13 @@ Popup {
                                         iconName: "hash"
                                         tooltipText: "Add text channel"
                                         createKind: "text"
-                                        visible: catHeaderHover.containsMouse
+                                        visible: Theme.isMobile || catHeaderHover.containsMouse
                                     }
                                     CatAddBtn {
                                         iconName: "volume"
                                         tooltipText: "Add voice channel"
                                         createKind: "voice"
-                                        visible: catHeaderHover.containsMouse
+                                        visible: Theme.isMobile || catHeaderHover.containsMouse
                                     }
                                 }
 
@@ -2416,11 +2419,15 @@ Popup {
                                         // inside a parent MouseArea would
                                         // eat everything.
                                         Rectangle {
-                                            Layout.preferredWidth: 24
-                                            Layout.preferredHeight: 24
+                                            Layout.preferredWidth: Theme.isMobile ? Theme.touchTarget : 24
+                                            Layout.preferredHeight: Theme.isMobile ? Theme.touchTarget : 24
                                             radius: Theme.r1
                                             color: _settingsMouse.containsMouse ? Theme.bg2 : "transparent"
-                                            visible: chSettingsMouse.containsMouse
+                                            // Reveal-on-hover has no touch
+                                            // equivalent: on a phone these two
+                                            // were the whole of "edit or delete a
+                                            // channel", invisible and unreachable.
+                                            visible: (Theme.isMobile || chSettingsMouse.containsMouse)
                                                    && !parent.parent.rowIsVoice
                                             Icon {
                                                 anchors.centerIn: parent
@@ -2445,13 +2452,13 @@ Popup {
                                             ToolTip.delay: 500
                                         }
                                         Rectangle {
-                                            Layout.preferredWidth: 24
-                                            Layout.preferredHeight: 24
+                                            Layout.preferredWidth: Theme.isMobile ? Theme.touchTarget : 24
+                                            Layout.preferredHeight: Theme.isMobile ? Theme.touchTarget : 24
                                             radius: Theme.r1
                                             color: _deleteMouse.containsMouse
                                                    ? Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.16)
                                                    : "transparent"
-                                            visible: chSettingsMouse.containsMouse
+                                            visible: Theme.isMobile || chSettingsMouse.containsMouse
                                             Icon {
                                                 anchors.centerIn: parent
                                                 name: "x"
