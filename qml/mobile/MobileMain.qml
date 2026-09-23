@@ -515,6 +515,12 @@ ApplicationWindow {
     UserSettings   { id: userSettingsGlobal;   parent: Overlay.overlay }
     ClientSettings { id: clientSettingsGlobal; parent: Overlay.overlay }
     RoleAssignPopup { id: roleAssignGlobal;    parent: Overlay.overlay }
+    // Member-facing self-assignable role picker. Mirrored from main.qml for
+    // the U-C2 reason spelled out below: ChannelList's "Your Roles" entry is
+    // NOT gated on !Theme.isMobile — it is shown whenever the server
+    // publishes an opt-in role — so without this instance and its forwarder
+    // the entry is visible on a phone and tapping it throws.
+    SelfRolePicker  { id: selfRolePickerGlobal; parent: Overlay.overlay }
     SearchPopup {
         id: searchPopupGlobal
         parent: Overlay.overlay
@@ -542,6 +548,7 @@ ApplicationWindow {
     DeleteAccountDialog { id: deleteAccountGlobal; parent: Overlay.overlay }
 
     function openUserSettings()   { userSettingsGlobal.open(); }
+    function openSelfRoles()      { selfRolePickerGlobal.openPicker(); }
     function openClientSettings() { clientSettingsGlobal.open(); }
     function openSearch()         { searchPopupGlobal.open(); }
     function openStatusPicker()   { statusPickerGlobal.open(); }
