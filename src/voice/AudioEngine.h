@@ -84,6 +84,8 @@
 
 #include <memory>
 
+#include "voice/DarwinVoiceLifecycle.h"
+
 class AudioWorker;
 class QMediaDevices;
 class QThread;
@@ -116,6 +118,25 @@ public:
     // overtake them and resurrect the jitter buffer we just destroyed.
     void removePeer(const QString& peerId);
 
+    // ---- platform audio lifecycle (Apple) ----
+    //
+    // This class owns the AVAudioSession event handler, as
+    // docs/ios-voice.md §3 says it should, for one reason: the handler
+    // runs on the Qt main thread and everything it has to do touches
+    // AudioWorker, which is audio-thread-affine. This is the only object
+    // that already has the machinery to cross that boundary correctly,
+    // and duplicating it anywhere else would be duplicating the part
+    // that is easy to get subtly wrong.
+    //
+    // The handler is a plain function pointer (IosAudioSession.h), so it
+    // reaches us through a file-static instance pointer. Installed by
+    // start(), cleared by teardownThread(); only ever one voice session
+    // at a time.
+    void onPlatformAudioEvent(bsfchat::ios_audio::SessionEvent event);
+    // The user tapped the resume affordance. No-op unless the lifecycle
+    // is parked waiting for exactly that.
+    void requestAudioResume();
+
 signals:
     void audioFrameReady(const QByteArray& opusFrame);
     // 0..1 smoothed RMS of the most recent 20ms mic frame. Emits zero
@@ -132,6 +153,16 @@ private:
     // Joins the audio thread and disposes of the worker. Used by both
     // stop() and the failure path in start().
     void teardownThread();
+
+    // Performs one VoiceAudioAction against the worker, marshalling to
+    // the audio thread the way the rest of this class does.
+    void applyLifecycleAction(bsfchat::voice::VoiceAudioAction action);
+    // Pushes the lifecycle's current view to AudioDeviceStatus, which is
+    // what the UI reads.
+    void publishAudioState();
+    // Trampoline for IosAudioSession's plain-function-pointer handler.
+    static void platformAudioEventTrampoline(
+        bsfchat::ios_audio::SessionEvent event);
 
     // Pushes AudioGainSettings' input/output gain and AGC switch into the
     // worker. No-op when there is no worker; start() calls it on the new
@@ -170,4 +201,10 @@ private:
     // Shared with the worker so the queue's lifetime does not depend on
     // the teardown order of two objects on two different threads.
     std::shared_ptr<bsfchat::voice::AudioPacketQueue> m_queue;
+
+    // GUI thread only, like everything else in this class. Off Apple
+    // nothing ever feeds it an event and it stays in Running for the
+    // life of the session, which costs one enum's worth of memory and
+    // keeps the code free of a second #ifdef.
+    bsfchat::voice::DarwinVoiceLifecycle m_lifecycle;
 };

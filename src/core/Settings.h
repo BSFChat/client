@@ -46,6 +46,19 @@ class Settings : public QObject {
     Q_PROPERTY(int inputVolume READ inputVolume WRITE setInputVolume NOTIFY inputVolumeChanged)
     Q_PROPERTY(int outputVolume READ outputVolume WRITE setOutputVolume NOTIFY outputVolumeChanged)
     Q_PROPERTY(bool autoGainControl READ autoGainControl WRITE setAutoGainControl NOTIFY autoGainControlChanged)
+    // Echo cancellation, noise suppression and gain control applied by
+    // the OS instead of by us — macOS and iOS only, where it means the
+    // voice pipeline opens a kAudioUnitSubType_VoiceProcessingIO audio
+    // unit rather than QAudioSource/QAudioSink. On for new installs,
+    // because speakerphone echo is the worst audible defect this client
+    // has; off is for someone on a good microphone who would rather have
+    // their own signal untouched, and for getting back to the path that
+    // shipped before if the new one misbehaves. Read at voice join, so a
+    // change takes effect on the next one — same rule as the device
+    // selection above.
+    Q_PROPERTY(bool voiceProcessing READ voiceProcessing WRITE setVoiceProcessing NOTIFY voiceProcessingChanged)
+    // True on the platforms where the switch above does anything.
+    Q_PROPERTY(bool voiceProcessingAvailable READ voiceProcessingAvailable CONSTANT)
     // Notifications (placeholder — not yet routed through the OS; setting
     // persists so the UI keeps the user's choice across restarts.)
     Q_PROPERTY(bool notificationsEnabled READ notificationsEnabled WRITE setNotificationsEnabled NOTIFY notificationsEnabledChanged)
@@ -90,6 +103,13 @@ class Settings : public QObject {
     // See core/AudioDeviceStatus.h.
     Q_PROPERTY(QString audioInputInUse READ audioInputInUse NOTIFY audioInUseChanged)
     Q_PROPERTY(QString audioOutputInUse READ audioOutputInUse NOTIFY audioInUseChanged)
+    // The voice pipeline's devices are down for a reason outside the
+    // user's control — a phone call, Siri, headphones unplugged, a media
+    // services reset. The call is still up; only the audio is gone.
+    // See core/AudioDeviceStatus.h and voice/DarwinVoiceLifecycle.h.
+    Q_PROPERTY(bool voiceAudioSuspended READ voiceAudioSuspended NOTIFY voiceAudioStateChanged)
+    Q_PROPERTY(bool voiceAudioNeedsResume READ voiceAudioNeedsResume NOTIFY voiceAudioStateChanged)
+    Q_PROPERTY(QString voiceAudioReason READ voiceAudioReason NOTIFY voiceAudioStateChanged)
 
 public:
     // Re-publish the device lists. Cheap (a QMediaDevices enumeration).
@@ -176,6 +196,15 @@ public:
     void setOutputVolume(int v);
     bool autoGainControl() const;
     void setAutoGainControl(bool on);
+    bool voiceProcessing() const;
+    void setVoiceProcessing(bool on);
+    bool voiceProcessingAvailable() const;
+    bool voiceAudioSuspended() const;
+    bool voiceAudioNeedsResume() const;
+    QString voiceAudioReason() const;
+    // The UI's tap-to-resume after an interruption the OS did not grant
+    // resumption for. Does nothing when there is no voice session.
+    Q_INVOKABLE void resumeVoiceAudio();
     // Per-user playback volume, same 0..200 scale, keyed by user id.
     // Local to this device and never sent anywhere — it is how loud YOU
     // hear someone, not how loud they are.
@@ -417,6 +446,9 @@ signals:
     void audioDevicesChanged();
     // The device the voice pipeline is on has changed.
     void audioInUseChanged();
+    void voiceProcessingChanged();
+    // The pipeline was interrupted, or came back.
+    void voiceAudioStateChanged();
 
     void fontSizeChanged();
     void themeChanged();

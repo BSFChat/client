@@ -5,10 +5,14 @@
 #include "voice/IosAudioSession.h"
 #include "core/AppProfile.h"
 
+#include "voice/QtAudioBackend.h"
+#if defined(Q_OS_MACOS) || defined(Q_OS_IOS)
+#ifdef BSFCHAT_DARWIN_VPIO
+#include "voice/DarwinVpioBackend.h"
+#endif
+#endif
+
 #include <QAudioFormat>
-#include <QAudioSink>
-#include <QAudioSource>
-#include <QIODevice>
 #include <QAudioDevice>
 #include <QDateTime>
 #include <QSettings>
@@ -25,6 +29,15 @@
 // once at join. See the "Live device changes" note in AudioWorker.h.
 
 using bsfchat::voice::AudioPacketQueue;
+
+namespace {
+// Process-wide, deliberately. A VoiceProcessingIO unit that refuses to
+// start will refuse again on the next join, and retrying per join turns
+// one failure into an audible stutter every time the user rejoins. One
+// attempt per run, then the Qt path for the rest of it — which is also
+// what selectAudioBackend()'s `demotedThisRun` means.
+bool g_vpioDemoted = false;
+} // namespace
 
 AudioWorker::AudioWorker(std::shared_ptr<AudioPacketQueue> queue,
                          QObject* parent)
@@ -117,6 +130,12 @@ bool AudioWorker::startDevices() {
     m_outputInUseDesc.clear();
     m_inputDebounce.reset();
     m_outputDebounce.reset();
+
+    // Built BEFORE anything is resolved, because openSource()/openSink()
+    // go through it. On Apple this is where the choice between the OS's
+    // voice processing and the Qt path is made; everywhere else it is
+    // the Qt path and the call is a formality.
+    createBackend();
 
     // The same decision procedure every later change goes through, so a
     // device that was absent at join and appears a second afterwards is
@@ -217,6 +236,10 @@ void AudioWorker::stopDevices() {
     closeSink();
     setInUse(Direction::Input, QString(), QString());
     setInUse(Direction::Output, QString(), QString());
+    // After both directions are closed, and on this thread: a CoreAudio
+    // unit must be stopped before the buffers its callbacks read are
+    // freed, and closeSource()/closeSink() are what stop it.
+    m_backend.reset();
 
     if (m_encoder) {
         opus_encoder_destroy(m_encoder);
@@ -243,13 +266,25 @@ void AudioWorker::stopDevices() {
     bsfchat::ios_audio::exitVoiceMode();
 }
 
-void AudioWorker::onMicDataReady() {
-    if (!m_captureDevice || !m_encoder) return;
+void AudioWorker::drainCapture() {
+    if (!m_backend || !m_backend->captureOpen() || !m_encoder) return;
 
     const bool muted = m_muted.load(std::memory_order_relaxed);
 
-    QByteArray chunk = m_captureDevice->readAll();
-    m_captureBuffer.append(chunk);
+    // Pull until the backend says it has nothing. One readAll() is not
+    // enough for a polled backend: the pump runs every 10 ms and the
+    // ring may hold several callbacks' worth.
+    if (m_captureChunk.size() < kCaptureReadChunkBytes)
+        m_captureChunk.resize(kCaptureReadChunkBytes);
+    const int appendedFrom = int(m_captureBuffer.size());
+    for (;;) {
+        const qint64 got = m_backend->readCapture(m_captureChunk.data(),
+                                                  m_captureChunk.size());
+        if (got <= 0) break;
+        m_captureBuffer.append(m_captureChunk.constData(), int(got));
+        if (got < m_captureChunk.size()) break;
+    }
+    const int appended = int(m_captureBuffer.size()) - appendedFrom;
 
     // Log the first N frames so we can confirm captured data actually has
     // amplitude. macOS TCC-denied mic returns all zeros silently.
@@ -261,16 +296,17 @@ void AudioWorker::onMicDataReady() {
     // a non-GUI thread is a trap to leave lying around, and it also
     // meant the diagnostic only ever fired for the first voice join of
     // the process. Per-instance is both safer and more useful.
-    if (m_debugFrameCount < 5 && chunk.size() > 0) {
-        const int16_t* p = reinterpret_cast<const int16_t*>(chunk.constData());
-        int n = chunk.size() / 2;
+    if (m_debugFrameCount < 5 && appended > 0) {
+        const int16_t* p = reinterpret_cast<const int16_t*>(
+            m_captureBuffer.constData() + appendedFrom);
+        int n = appended / 2;
         int16_t mx = 0;
         for (int i = 0; i < n; ++i) {
             int16_t v = p[i] < 0 ? -p[i] : p[i];
             if (v > mx) mx = v;
         }
         qInfo("[voice] mic frame #%d: %d bytes, peak |sample|=%d (0=silent, 32767=clip)",
-              m_debugFrameCount, int(chunk.size()), int(mx));
+              m_debugFrameCount, appended, int(mx));
         m_debugFrameCount++;
     }
 
@@ -386,7 +422,7 @@ void AudioWorker::onMicDataReady() {
 void AudioWorker::processCaptureFrame() {
     float* buf = m_captureFloat.data();
 
-    const bool agcOn = !kPlatformVoiceProcessing
+    const bool agcOn = !m_platformVoiceProcessing
                        && m_autoGain.load(std::memory_order_relaxed);
     if (agcOn) {
         m_agc.processFrame(buf, kFrameSamples);
@@ -443,7 +479,7 @@ void AudioWorker::logLevelSummary(const char* when) {
           double(m_agc.rawSpeechPercentileDbfs(0.5f)),
           double(m_agc.rawSpeechPercentileDbfs(0.9f)),
           double(m_agc.noiseFloorDbfs()),
-          kPlatformVoiceProcessing ? "platform"
+          m_platformVoiceProcessing ? "platform"
               : (m_autoGain.load(std::memory_order_relaxed) ? "on" : "off"),
           double(m_agc.gainDb()), double(m_appliedInputGain), capLimited,
           double(m_appliedOutputGain), playLimited);
@@ -485,9 +521,9 @@ void AudioWorker::ingestQueuedPackets() {
 }
 
 bool AudioWorker::flushPendingPlayback() {
-    if (!m_playbackDevice) return false;
+    if (!m_backend || !m_backend->renderOpen()) return false;
     while (m_playbackPendingHead < m_playbackPending.size()) {
-        const qint64 written = m_playbackDevice->write(
+        const qint64 written = m_backend->writeRender(
             m_playbackPending.constData() + m_playbackPendingHead,
             m_playbackPending.size() - m_playbackPendingHead);
         if (written <= 0) return false;  // device full (or errored)
@@ -582,8 +618,13 @@ void AudioWorker::pumpPlayback() {
     // arrival is what keeps every JitterBuffer single-threaded.
     ingestQueuedPackets();
 
-    if (!m_audioSink || !m_playbackDevice) return;
-    if (m_audioSink->state() == QAudio::StoppedState) return;
+    // A polled backend has no readyRead to hang capture off — a
+    // CoreAudio input callback cannot call into a QObject — so the pump
+    // is what drains it. The Qt backend still pushes, and this is
+    // skipped for it, so its capture timing is exactly what it was.
+    if (m_backend && m_backend->capturePolled()) drainCapture();
+
+    if (!m_backend || !m_backend->renderOpen()) return;
 
     // Anything the device refused last time goes out first, otherwise
     // we'd reorder the stream.
@@ -592,14 +633,14 @@ void AudioWorker::pumpPlayback() {
     // The device tells us how much it wants. Writing exactly that —
     // rather than one frame per wall-clock tick — is what keeps us
     // locked to the sound card's clock instead of drifting against it.
-    qsizetype free = m_audioSink->bytesFree();
+    qint64 free = m_backend->bytesFree();
     int frames = 0;
     while (free >= kFrameBytes && frames < kMaxFramesPerPump) {
         renderMixedFrame(m_playbackFrame.data());
 
         const char* bytes =
             reinterpret_cast<const char*>(m_playbackFrame.data());
-        const qint64 written = m_playbackDevice->write(bytes, kFrameBytes);
+        const qint64 written = m_backend->writeRender(bytes, kFrameBytes);
         if (written < 0) return;  // device error; retry next pump
         if (written < kFrameBytes) {
             // Short write. The old code ignored write()'s return value
@@ -799,39 +840,26 @@ void AudioWorker::evaluateDevice(Direction dir) {
 }
 
 void AudioWorker::openSource(const QAudioDevice& device) {
-    if (device.isNull()) return;
-    // Parented to `this`, which lives on the audio thread, and
-    // constructed here — so the source and the QIODevice it hands
-    // back are both affine to the thread that will drive them.
+    if (device.isNull() || !m_backend) return;
     // A different microphone: its noise floor, level history and the
     // tail in the limiter's delay line all belonged to the old one. The
     // AGC re-learns within its 0.5 s warm-up, starting from unity.
     m_agc.reset();
     m_captureLimiter.reset();
-    m_audioSource = new QAudioSource(device, m_format, this);
-    m_captureDevice = m_audioSource->start();
-    if (m_captureDevice) {
-        // Both ends are audio-thread objects, so this is a direct
-        // connection and the encode happens inline on the device
-        // callback's thread — never a hop through the GUI.
-        connect(m_captureDevice, &QIODevice::readyRead,
-                this, &AudioWorker::onMicDataReady);
-    } else {
-        qWarning("[voice] QAudioSource::start() returned null — "
-                 "macOS likely still denying microphone access");
+
+    if (!m_backend->openCapture(device, m_format)
+        && demoteBackend(QStringLiteral("capture could not be opened"),
+                         Direction::Input)) {
+        m_backend->openCapture(device, m_format);
     }
-    // QAudioSource has a State enum we can peek at for a sanity check.
-    qInfo("[voice] QAudioSource initial state=%d error=%d",
-          int(m_audioSource->state()), int(m_audioSource->error()));
+    // Which backend actually opened decides whether our software AGC
+    // runs. Re-read every time, because a demotion changes the answer
+    // mid-session.
+    m_platformVoiceProcessing = m_backend->platformVoiceProcessing();
 }
 
 void AudioWorker::closeSource() {
-    if (m_audioSource) {
-        m_audioSource->stop();
-        delete m_audioSource;
-        m_audioSource = nullptr;
-        m_captureDevice = nullptr;
-    }
+    if (m_backend) m_backend->closeCapture();
     // Whatever the old device captured but we had not yet encoded. Its
     // sample stream has no relation to the next device's, and a partial
     // frame spliced onto the front of the new one is a click.
@@ -840,29 +868,189 @@ void AudioWorker::closeSource() {
 }
 
 void AudioWorker::openSink(const QAudioDevice& device) {
-    if (device.isNull()) return;
+    if (device.isNull() || !m_backend) return;
     m_mixer->resetLimiter();
-    m_audioSink = new QAudioSink(device, m_format, this);
-    // Must be set before start(). Bounds the amount of audio the
-    // device holds, and therefore the floor on output latency.
-    m_audioSink->setBufferSize(kFrameBytes * kSinkBufferFrames);
-    m_playbackDevice = m_audioSink->start();
-    if (!m_playbackDevice) {
-        qWarning("[voice] QAudioSink::start() returned null — no playback");
+    if (!m_backend->openRender(device, m_format, kFrameBytes * kSinkBufferFrames)
+        && demoteBackend(QStringLiteral("playback could not be opened"),
+                         Direction::Output)) {
+        m_backend->openRender(device, m_format, kFrameBytes * kSinkBufferFrames);
     }
+    m_platformVoiceProcessing = m_backend->platformVoiceProcessing();
 }
 
 void AudioWorker::closeSink() {
-    if (m_audioSink) {
-        m_audioSink->stop();
-        delete m_audioSink;
-        m_audioSink = nullptr;
-        m_playbackDevice = nullptr;
-    }
+    if (m_backend) m_backend->closeRender();
     // The tail of a short write to the device that just went away.
     // pumpPlayback() already tolerates the gap: it ingests into the
     // jitter buffers before it looks at the sink, so the few
     // milliseconds a restart takes cost nothing but the restart.
     m_playbackPending.clear();
     m_playbackPendingHead = 0;
+}
+
+// ---------------------------------------------------------------------
+// Backend selection
+// ---------------------------------------------------------------------
+
+void AudioWorker::createBackend() {
+    using bsfchat::voice::AudioBackendKind;
+
+    bool vpioCompiledIn = false;
+#if defined(BSFCHAT_DARWIN_VPIO)
+    // A component lookup, not a device open, so it raises no microphone
+    // permission prompt and is safe to call before the user has agreed
+    // to anything.
+    vpioCompiledIn = bsfchat::voice::DarwinVpioBackend::available();
+#endif
+
+    // Same store the device preference above came from, and the same
+    // profile-aware naming.
+    QSettings prefs(bsfchat::organizationName(), bsfchat::applicationName());
+    const bool userWants = prefs.value("audio/voiceProcessing", true).toBool();
+
+    const auto choice = bsfchat::voice::selectAudioBackend(
+        vpioCompiledIn, userWants, g_vpioDemoted);
+
+#if defined(BSFCHAT_DARWIN_VPIO)
+    if (choice.kind == AudioBackendKind::DarwinVpio)
+        m_backend = std::make_unique<bsfchat::voice::DarwinVpioBackend>();
+#endif
+    if (!m_backend) {
+        // No parent: the unique_ptr owns it, and a QObject with two
+        // owners is one delete too many. Constructed here, so it is
+        // affine to the audio thread either way.
+        m_backend = std::make_unique<bsfchat::voice::QtAudioBackend>(nullptr);
+    }
+    // Direct, on this thread. The Qt backend calls it from readyRead,
+    // which is already an audio-thread signal; the VPIO backend never
+    // calls it at all (it is polled).
+    m_backend->setCaptureReadyHandler([this]() { drainCapture(); });
+    m_platformVoiceProcessing = m_backend->platformVoiceProcessing();
+
+    qInfo("[voice] audio backend: %s — %s",
+          qPrintable(m_backend->describe()), choice.reason);
+}
+
+bool AudioWorker::demoteBackend(const QString& reason, Direction retrying) {
+    using bsfchat::voice::AudioBackendKind;
+    if (!m_backend || m_backend->kind() != AudioBackendKind::DarwinVpio)
+        return false;
+
+    qWarning("[voice] echo cancellation unavailable (%s) — falling back to the "
+             "Qt audio path for the rest of this run",
+             qPrintable(reason));
+    g_vpioDemoted = true;
+
+    // The direction the caller is NOT retrying has to be carried across
+    // by hand: destroying the backend closes it, and the caller only
+    // knows about its own half.
+    //
+    // "Was it open" is answered from OUR bookkeeping (the in-use id set
+    // by evaluateDevice) rather than by asking the backend. The backend
+    // we are demoting has just failed, and a VPIO unit that failed to
+    // start reports both directions closed whatever it was asked to
+    // open — so asking it would silently leave the other half shut.
+    const Direction other =
+        (retrying == Direction::Input) ? Direction::Output : Direction::Input;
+    const QString otherId =
+        (other == Direction::Input) ? m_inputInUseId : m_outputInUseId;
+    const bool otherWasOpen = !otherId.isEmpty();
+
+    m_backend.reset();
+    createBackend();
+
+    if (otherWasOpen) {
+        if (const QAudioDevice* d = snapshotDevice(other, otherId)) {
+            if (other == Direction::Input) {
+                m_backend->openCapture(*d, m_format);
+            } else {
+                m_backend->openRender(*d, m_format,
+                                      kFrameBytes * kSinkBufferFrames);
+            }
+        }
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------
+// Interruption recovery
+// ---------------------------------------------------------------------
+
+bool AudioWorker::devicesOpen() const {
+    return m_backend && (m_backend->captureOpen() || m_backend->renderOpen());
+}
+
+void AudioWorker::suspendDevices() {
+    if (!m_started) return;
+
+    // Cancel anything armed: a device-change restart that fires while we
+    // are suspended would reopen the microphone behind the user's back,
+    // which is exactly what the AwaitingUserResume state exists to
+    // prevent (DarwinVoiceLifecycle.h, rule 2).
+    for (QTimer* t : {m_inputRestartTimer, m_outputRestartTimer}) {
+        if (t) t->stop();
+    }
+    m_inputDebounce.reset();
+    m_outputDebounce.reset();
+
+    closeSource();
+    closeSink();
+    setInUse(Direction::Input, QString(), QString());
+    setInUse(Direction::Output, QString(), QString());
+
+    // Hand the platform session back. Not merely tidiness: enterVoiceMode()
+    // is idempotent on an "already active" flag, so without this the
+    // resume would find the flag still set, skip re-activation, and open
+    // devices onto a session the OS had already taken away — which is
+    // silence with no error anywhere.
+    //
+    // The pump timer, the encoder and every jitter buffer stay exactly
+    // where they are. An interruption is not a disconnect.
+    bsfchat::ios_audio::exitVoiceMode();
+}
+
+bool AudioWorker::resumeDevices() {
+    if (!m_started) return false;
+    if (devicesOpen()) return true;
+
+    if (!bsfchat::ios_audio::enterVoiceMode()) {
+        qWarning("[voice] could not re-activate the audio session on resume — "
+                 "staying down");
+        return false;
+    }
+
+    // Forget what was open so the policy resolves from scratch: the
+    // route we come back on is very often not the one we went down on
+    // (the user answered a call on a headset and kept it).
+    m_inputInUseId.clear();
+    m_outputInUseId.clear();
+    m_inputInUseDesc.clear();
+    m_outputInUseDesc.clear();
+
+    evaluateDevice(Direction::Input);
+    evaluateDevice(Direction::Output);
+    qInfo("[voice] audio resumed after an interruption");
+    return devicesOpen();
+}
+
+void AudioWorker::reevaluateDevices() {
+    if (!m_started) return;
+
+    // A VPIO unit is bound to the route it was built against, and on
+    // iOS Qt's device snapshot will NOT have changed (it reports one
+    // microphone whatever is plugged in), so evaluateDevice() below
+    // would answer Keep and nothing would happen. The backend is the
+    // only thing that knows it needs rebuilding.
+    if (m_backend && m_backend->restartForRouteChange()) {
+        m_mixer->resetLimiter();
+        m_agc.reset();
+        m_captureLimiter.reset();
+        m_captureBuffer.clear();
+        m_captureHead = 0;
+        m_playbackPending.clear();
+        m_playbackPendingHead = 0;
+    }
+
+    evaluateDevice(Direction::Input);
+    evaluateDevice(Direction::Output);
 }

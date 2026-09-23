@@ -49,14 +49,28 @@
 //     feature that justifies it.
 //
 // So: a small, deterministic, fully unit-tested AGC and limiter here,
-// and echo cancellation stays an open gap. Anyone on speakers without
-// headphones is still heard by the others with their own voice echoed
-// back. Closing that needs an AEC fed with the exact far-end signal
-// written to the sink (AudioWorker's mixed frame, before the device) and
-// time-aligned against the capture — which is the APM's
-// ProcessReverseStream()/ProcessStream() contract, and the reason to
-// revisit the dependency question, most likely together with the
-// LiveKit decision since libwebrtc brings AEC3 with it.
+// and echo cancellation handled by the platform where the platform has
+// it.
+//
+// CLOSED ON APPLE, 2026-09-23. The gap this paragraph used to describe —
+// "anyone on speakers without headphones is still heard by the others
+// with their own voice echoed back" — is now addressed on macOS and iOS
+// by voice/DarwinVpioBackend, which runs capture AND playback through
+// one kAudioUnitSubType_VoiceProcessingIO unit. The hard part named
+// below, feeding the canceller the exact far-end signal time-aligned
+// against the capture, does not arise there: the unit's own output bus
+// IS the reference, which is precisely why playback had to move into the
+// same unit rather than a VPIO capture path being bolted onto the
+// existing QAudioSink.
+//
+// STILL OPEN ON WINDOWS AND LINUX, and on Apple when the user turns
+// "Echo cancellation" off. Closing it there still needs an AEC fed with
+// the exact far-end signal written to the sink (AudioWorker's mixed
+// frame, before the device) and time-aligned against the capture —
+// which is the APM's ProcessReverseStream()/ProcessStream() contract,
+// and the reason to revisit the dependency question, most likely
+// together with the LiveKit decision since libwebrtc brings AEC3 with
+// it. Android is covered by the OS, as above.
 //
 // Real-time rules
 // ---------------

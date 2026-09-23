@@ -303,7 +303,15 @@ client.
 
 **Effort remaining: 0.25 days** to verify on a device.
 
-### 2.3 Echo cancellation — **the long pole**
+### 2.3 Echo cancellation — **the long pole (now built; see §9)**
+
+> **Status 2026-09-23.** Option (c) below is implemented on branch
+> `feat/darwin-aec`: `src/voice/DarwinVpioBackend.{h,mm}`, shared by
+> macOS and iOS, behind the `IAudioBackend` seam the diagram in this
+> section proposes. It compiles and links for both platforms. **Nobody
+> has heard it.** The rest of this section is left exactly as written,
+> because it is the reasoning the implementation followed and the record
+> of what was believed before a device tested it. §9 is what happened.
 
 **Verified, and this is the central technical finding of this document:**
 Qt's iOS `QAudioSource`/`QAudioSink` are built on
@@ -424,10 +432,17 @@ Android situation is weaker than it looks.
 
 ### What iOS must do
 
-`IosAudioSession.h` now defines the events. **Nothing consumes them
-yet** — `setEventHandler()` is unwired on purpose, because the recovery
-policy is a decision rather than a mechanism and should be made
-deliberately. The required behaviour:
+> **Status 2026-09-23.** The events are now consumed. The policy in the
+> table below is implemented as a pure state machine,
+> `src/voice/DarwinVoiceLifecycle.h`, unit-tested in
+> `tests/test_darwin_audio_backend.cpp`, and driven by `AudioEngine`
+> which owns the handler as this section recommends. One event was added
+> that this table implies but the enum did not have:
+> `RouteChangedDeviceLost`, for the `oldDeviceUnavailable` reason, so
+> that "unplugging headphones pauses" is a transition rather than a
+> comment. **No notification has been observed firing on a device.**
+
+`IosAudioSession.h` defines the events. The required behaviour:
 
 | Event | Cause | Required behaviour |
 |---|---|---|
@@ -744,8 +759,82 @@ the note is here because the same trap waits on any other static-only
 Apple target.
 
 **What this does NOT tell us.** Compiling is not working. Nothing on the
-iOS voice path has executed a single instruction. Every runtime item in
-this document — the audio session, interruption handling, echo
-cancellation, VideoToolbox, camera — is exactly as unverified as it was
-before. The estimate's error bars now sit almost entirely on AEC, which
-was always the second unknown and is now the first.
+iOS voice path had executed a single instruction at the time this was
+written. That changed the same day — see §9.
+
+---
+
+## 9. Device test, and the echo-cancellation backend (2026-09-23)
+
+### What a real iPhone proved
+
+Voice was run on an **iPhone 16 Pro Max**. It works:
+
+- calls connect and **carry audio in both directions**;
+- the **microphone permission prompt appears at first join**, which is
+  the correct lazy behaviour and means §2.1's session configuration is
+  doing its job;
+- **the one clear defect is echo.** On speakerphone the far end hears
+  themselves, exactly as §2.3 predicted from the `'rioc'` finding.
+
+So §2.3 stops being a prediction. It is an observed defect with a known
+cause.
+
+### What was built in response
+
+Option (c) of §2.3, as specified there: one native capture **and
+render** backend on `kAudioUnitSubType_VoiceProcessingIO`, shared by
+macOS and iOS, which closes the desktop AEC gap (`VoiceGain.h`) at the
+same time.
+
+| File | What it is |
+|---|---|
+| `src/voice/AudioBackend.h` | The `IAudioBackend` seam from §2.3's diagram |
+| `src/voice/QtAudioBackend.{h,cpp}` | Today's `QAudioSource`/`QAudioSink`, moved behind it unchanged |
+| `src/voice/DarwinVpioBackend.{h,mm}` | The VPIO unit, both directions, both Apple platforms |
+| `src/voice/AudioRingBuffer.h` | Lock-free SPSC ring: CoreAudio callback ↔ the 10 ms pump |
+| `src/voice/VpioFormat.h` | Format negotiation as a pure decision |
+| `src/voice/DarwinVoiceLifecycle.h` | §3's table as a pure state machine |
+| `src/voice/AudioBackendSelect.h` | Which backend, and why, as a pure decision |
+
+The crux is the one §2.3 names: **playback had to move into the same
+unit.** VPIO's canceller takes its far-end reference from its own output
+bus, so a VPIO capture path feeding a `QAudioSink` would have been all of
+the cost and none of the benefit.
+
+`AudioWorker`'s pump, frame arithmetic and device policy are untouched,
+which was the other requirement in §2.3. The only change to its shape is
+that a polled backend is drained from the pump rather than from
+`readyRead`, because a CoreAudio callback cannot call into a `QObject`.
+
+### Two off switches, deliberately
+
+`BSFCHAT_DARWIN_VPIO` (CMake, ON by default on Apple) compiles the
+backend out. **Settings → Audio → Echo cancellation** (`audio/voiceProcessing`,
+on by default) chooses at join time. A VPIO unit that fails to start
+demotes itself to the Qt path for the rest of the process.
+
+Both exist because the processing is a *preference* as well as a fix:
+noise suppression and AGC tuned for a phone will be heard chewing word
+tails by someone on a good microphone in a treated room.
+
+### What is verified, and what is not
+
+**Verified:** it compiles and links for arm64-iphoneos (70 MB .app) and
+for macOS; the full client test suite passes (48/48) with 30 new cases
+covering format negotiation, the ring, the lifecycle machine and the
+backend choice.
+
+**Not verified — all of it needs the phone:**
+
+1. **That the echo is gone.** The whole point, and entirely untested.
+2. That capture and playback flow through the unit at all. A silent call
+   is the failure mode if the rings or the callbacks are wrong.
+3. Format negotiation on real hardware. The code asks the unit for
+   48 kHz mono int16 and converts if refused; which branch iOS actually
+   takes is unknown.
+4. Every lifecycle event. A simulator cannot take a phone call.
+5. macOS per-element device selection. `kAudioOutputUnitProperty_CurrentDevice`
+   set per element is what Chromium does, but Apple documents the
+   property as global-scope; if VPIO ignores the element, the symptom is
+   the output device setting being ignored while AEC is on.

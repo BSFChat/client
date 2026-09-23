@@ -333,6 +333,20 @@ target_include_directories(test_audio_device_policy PRIVATE ${CMAKE_SOURCE_DIR}/
 target_link_libraries(test_audio_device_policy PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_audio_device_policy COMMAND test_audio_device_policy)
 
+# The decidable half of the Darwin echo-cancellation work: format
+# negotiation, the capture/playback ring, the AVAudioSession interruption
+# state machine and the backend choice. All four are pure headers with no
+# Qt Multimedia and no CoreAudio in them, so this runs on a headless CI
+# box on every platform — the point being that "does it come back after a
+# phone call" is exactly the case nobody will test by hand twice.
+#
+# The audio unit itself is NOT covered and cannot be: see the header
+# comment in test_darwin_audio_backend.cpp.
+qt_add_executable(test_darwin_audio_backend test_darwin_audio_backend.cpp)
+target_include_directories(test_darwin_audio_backend PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_darwin_audio_backend PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_darwin_audio_backend COMMAND test_darwin_audio_backend)
+
 # Mesh-vs-SFU transport selection. Pure logic — no transport instances,
 # no libdatachannel, no LiveKit SDK, no audio device, no network — so it
 # runs everywhere including builds configured without BSFCHAT_ENABLE_VOICE.
