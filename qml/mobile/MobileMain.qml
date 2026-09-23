@@ -24,11 +24,20 @@ ApplicationWindow {
     //
     // Read from Qt's own SafeArea attached property (QtQuick 6.9+), which
     // on iOS is UIKit's safeAreaInsets and on Android the window insets.
-    // Before this the top inset was a hardcoded 0 with a comment saying
-    // Android reserves the status bar for us — true on Android, and the
-    // reason nobody noticed that iOS does NOT: there the 48pt header drew
-    // underneath the notch / Dynamic Island, so the channel name and the
-    // three header buttons sat behind the cutout.
+    // It replaces a hardcoded `topInset: 0`.
+    //
+    // Honest note on what this did and did not fix. On the device these
+    // margins come back 0/0/0/0, and that is CORRECT rather than broken:
+    // the window is 440x860 on a 440x956 screen, so Qt has already laid
+    // it out inside the safe area and there is nothing left to inset. The
+    // header was never under the Dynamic Island, and the report of a
+    // message row under the status clock was the platform translating the
+    // whole scene for the keyboard, not a missing inset.
+    //
+    // It stays because it is right rather than because it repaid itself:
+    // Android does not inset for us the same way, a hardcoded zero cannot
+    // be right on both, and the day anything here goes edge-to-edge these
+    // are the numbers that keep the header out of the cutout.
     //
     // The margins are read off a probe Item rather than off the window,
     // because SafeArea reports the margins OF THE ITEM it is attached to:
@@ -109,12 +118,22 @@ ApplicationWindow {
     // window, the header went off the top of the screen and the first
     // message row rendered under the status clock.
     //
-    // settle() below asks the platform to recompute, which makes it stand
-    // down to 0 once our push has landed (the cursor is then inside the
-    // area the keyboard does not cover, which is the plugin's own
-    // condition for scrolling back). The subtraction is what makes the
-    // in-between states, and any future Qt that stops standing down,
-    // merely imperfect instead of broken.
+    // settle() below asks the platform to recompute. On the device it did
+    // not stand down — it scrolled the full keyboard height and kept it —
+    // so today this subtraction resolves to a push of zero and the
+    // platform owns keyboard avoidance. That is a deliberate, measured
+    // choice and not a silent one: src/core/MobileKeyboard.h sets out why
+    // the plugin's containment test cannot be satisfied from out here
+    // (it compares Qt window coordinates against UIKit screen
+    // coordinates, and the keyboard rectangle it uses has the scroll
+    // already baked into it).
+    //
+    // The subtraction stays because it is what makes that fallback
+    // automatic rather than hardcoded: if a future Qt stops scrolling,
+    // the samples go to zero and the shell takes the push back with no
+    // edit here. MobileKeyboard credits the platform with the scroll from
+    // the instant the keyboard appears, so there is no frame where both
+    // are applied — that frame was the composer floating over a void.
     readonly property int keyboardPush:
         Qt.platform.os === "android"
             ? 0
@@ -160,17 +179,32 @@ ApplicationWindow {
     // reading this file.
     function _keyboardState() {
         var kr = Qt.inputMethod.keyboardRectangle;
+        var cr = Qt.inputMethod.cursorRectangle;
         return {
             "imVisible":  Qt.inputMethod.visible,
+            // Position is NOT trustworthy — the platform converts this
+            // rectangle through its own translated layer, so the y moves
+            // with the scroll. Logged anyway precisely so that stays
+            // visible. Only the size is load-bearing.
             "kbRect":     Math.round(kr.x) + "," + Math.round(kr.y)
                           + "," + Math.round(kr.width) + "x" + Math.round(kr.height),
             "kbScale":    (kr.width > 0 ? (root.width / kr.width).toFixed(3) : "n/a"),
             "kbHeight":   root.keyboardHeight,
+            // The actual input to the platform's own decision, in Qt
+            // window coordinates. If this is above the keyboard's true
+            // top and it still scrolls, the containment test is comparing
+            // spaces that do not line up.
+            "curRect":    Math.round(cr.x) + "," + Math.round(cr.y)
+                          + "," + Math.round(cr.width) + "x" + Math.round(cr.height),
             "push":       root.keyboardPush,
             "bottomGap":  root.bottomGap,
             "insetsTRBL": root.topInset + "/" + root.rightInset + "/"
                           + root.bottomInset + "/" + root.leftInset,
             "window":     Math.round(root.width) + "x" + Math.round(root.height),
+            // Where the window sits on the screen, which is the offset
+            // between the two coordinate spaces above.
+            "winOrigin":  Math.round(root.x) + "," + Math.round(root.y),
+            "screen":     Math.round(Screen.width) + "x" + Math.round(Screen.height),
             "dpr":        Screen.devicePixelRatio
         };
     }
