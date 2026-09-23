@@ -454,6 +454,9 @@ int MessageModel::indexOfLocalEcho(const QString& localId) const
 
 int MessageModel::indexOfEchoMatching(const bsfchat::RoomEvent& event) const
 {
+    // The overwhelmingly common case: nothing of ours is in flight, so this
+    // costs one integer test per inbound event rather than a walk.
+    if (m_unreconciledEchoes <= 0) return -1;
     const QString sender = QString::fromStdString(event.sender);
     const QString body = QString::fromStdString(event.content.data.value("body", ""));
     // Newest first: if the user sent the same text twice in a row, the
@@ -476,6 +479,10 @@ int MessageModel::indexOfEchoMatching(const bsfchat::RoomEvent& event) const
 void MessageModel::adoptEventId(int row, const QString& eventId)
 {
     if (row < 0 || row >= m_messages.size()) return;
+    if (!m_messages[row].localId.isEmpty() && m_messages[row].eventId.isEmpty()
+        && m_unreconciledEchoes > 0) {
+        --m_unreconciledEchoes;
+    }
     m_messages[row].eventId = eventId;
     m_messages[row].delivery = DeliveryConfirmed;
     if (!eventId.isEmpty()) m_indexByEventId.insert(eventId, row);
@@ -534,6 +541,7 @@ void MessageModel::appendLocalEcho(const QString& localId, const QString& body,
 
     beginInsertRows(QModelIndex(), m_messages.size(), m_messages.size());
     m_messages.append(std::move(entry));
+    ++m_unreconciledEchoes;
     if (!threadRootId.isEmpty()) ++m_threadReplyCounts[threadRootId];
     endInsertRows();
     emit countChanged();
@@ -565,6 +573,9 @@ void MessageModel::discardLocalEcho(const QString& localId)
     const int row = indexOfLocalEcho(localId);
     if (row < 0) return;
     const QString threadRoot = m_messages[row].threadRootId;
+    if (m_messages[row].eventId.isEmpty() && m_unreconciledEchoes > 0) {
+        --m_unreconciledEchoes;
+    }
     beginRemoveRows(QModelIndex(), row, row);
     m_messages.remove(row);
     rebuildIndices();
@@ -1361,6 +1372,10 @@ void MessageModel::clear()
     m_pendingReactions.clear();
     m_pendingEdits.clear();
     m_reactionIndex.clear();
+    // The rows are gone, so no echo is awaiting reconciliation any more.
+    // Left set, it would make indexOfEchoMatching walk the new room's
+    // timeline on every inbound event for nothing.
+    m_unreconciledEchoes = 0;
     endResetModel();
     // A room switch invalidates the pagination state too — otherwise a
     // stale token from the previous room would drive the next scroll-up.

@@ -658,6 +658,11 @@ private:
     // Row index of the echo with this transaction id, or -1. Linear, over
     // the handful of rows that can be un-reconciled at once.
     int indexOfLocalEcho(const QString& localId) const;
+    // How many rows are echoes with no server event id yet. Kept so the
+    // match below can answer "none" without walking the timeline: it runs
+    // on EVERY inbound event, and the dedupe index exists precisely because
+    // a full scan per inbound message was worth removing once already.
+    int m_unreconciledEchoes = 0;
     // Row index of an echo that `event` is plainly the server's copy of:
     // same sender, same body, still carrying no event id. The fallback for
     // the race where /sync delivers the event before the PUT reply lands —
