@@ -709,3 +709,43 @@ written down.
   desktop-shaped and will not work on iOS") is stale: `IosAuthSession.mm`
   landed. Unrelated to voice, but it is in the file the next person will
   read alongside this one.
+
+## Build status: it compiles (2026-09-23)
+
+The iOS voice build was configured and compiled for the first time on
+2026-09-23, against Qt 6.10.3 for iOS and the iOS 26.5 SDK:
+
+    ./scripts/build-openssl-ios.sh device
+    qt-cmake -B build-ios-voice -G Xcode \
+        -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=iphoneos \
+        -DBSFCHAT_ENABLE_VOICE=ON -DOPENSSL_USE_STATIC_LIBS=ON \
+        -DQT_HOST_PATH=~/Qt/6.10.3/macos ...
+    xcodebuild build -scheme bsfchat-app -configuration Release \
+        -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO
+
+Result: **BUILD SUCCEEDED**, zero errors, arm64, 70 MB .app, with
+`UIBackgroundModes = (audio)` in the rendered Info.plist.
+
+This closes the largest open question in the estimate above.
+libdatachannel, opus and usrsctp were listed as the unknown that owned
+the error bars; they cross-compile through the iOS toolchain with no
+patching at all.
+
+**One fix was needed**, and it is not discoverable from the error
+message. libdatachannel's `CMakeLists.txt` has an Apple branch that
+FORCEs `OPENSSL_SSL_LIBRARY` / `OPENSSL_CRYPTO_LIBRARY` to `.dylib`
+paths unless `OPENSSL_USE_STATIC_LIBS` is set. `build-openssl-ios.sh`
+configures `no-shared`, so those dylibs do not exist, `find_package`
+creates no `OpenSSL::SSL` target, and the configure dies with
+"Target datachannel-static links to OpenSSL::SSL but the target was not
+found" — naming OpenSSL without naming the reason. `CMakeLists.txt` now
+sets `OPENSSL_USE_STATIC_LIBS` in the iOS block, so this is handled;
+the note is here because the same trap waits on any other static-only
+Apple target.
+
+**What this does NOT tell us.** Compiling is not working. Nothing on the
+iOS voice path has executed a single instruction. Every runtime item in
+this document — the audio session, interruption handling, echo
+cancellation, VideoToolbox, camera — is exactly as unverified as it was
+before. The estimate's error bars now sit almost entirely on AEC, which
+was always the second unknown and is now the first.

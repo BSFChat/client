@@ -17,11 +17,12 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(GAMECHAT_CLIENT_BUILD_TESTS "Build client tests" ON)
-# Voice defaults OFF on iOS. The dependency half of the port is now
-# structured (see the if(IOS AND BSFCHAT_ENABLE_VOICE) block below and
-# src/voice/IosAudioSession.*), but NOTHING on the iOS voice path has
-# ever been compiled, so the default stays OFF until someone has built
-# it: cmake -DBSFCHAT_ENABLE_VOICE=ON.
+# Voice defaults OFF on iOS. It now COMPILES — the whole stack
+# (libdatachannel, opus, usrsctp, the RTP/pacing layer, VideoToolbox)
+# cross-compiles for arm64-iphoneos and links into a 70 MB .app, built
+# 2026-09-23 with -DBSFCHAT_ENABLE_VOICE=ON. The default stays OFF
+# because compiling is not working: nothing on this path has been RUN
+# on a device, and the gaps below are runtime gaps.
 #
 # What is still genuinely missing rather than merely unbuilt, in the
 # order it bites — full analysis and estimates in docs/ios-voice.md:
@@ -94,6 +95,14 @@ if(IOS AND NOT DEFINED OPENSSL_ROOT_DIR)
         "${CMAKE_CURRENT_SOURCE_DIR}/deps/openssl-ios-${_bsfchat_ios_ssl_target}")
     if(EXISTS "${_bsfchat_ios_ssl}/lib/libcrypto.a")
         set(OPENSSL_ROOT_DIR    "${_bsfchat_ios_ssl}" CACHE PATH "iOS OpenSSL root")
+        # REQUIRED on iOS, and the reason the first voice configure failed.
+        # libdatachannel has an Apple branch that FORCEs
+        # OPENSSL_{SSL,CRYPTO}_LIBRARY to .dylib paths unless this is set
+        # — and build-openssl-ios.sh configures `no-shared`, so those
+        # dylibs do not exist. find_package then creates no OpenSSL::SSL
+        # target and datachannel/datachannel-static fail to link against
+        # a target "not found", naming OpenSSL but not the reason.
+        set(OPENSSL_USE_STATIC_LIBS ON CACHE BOOL "iOS: no shared OpenSSL" FORCE)
         set(OPENSSL_INCLUDE_DIR "${_bsfchat_ios_ssl}/include" CACHE PATH "")
         set(OPENSSL_CRYPTO_LIBRARY
             "${_bsfchat_ios_ssl}/lib/libcrypto.a" CACHE FILEPATH "")
