@@ -8,6 +8,13 @@ import "../js/PlaybackMath.js" as PlaybackMath
 Item {
     id: bubble
 
+    // A message still on its way to the server reads as slightly faded, and
+    // one that did not make it says so. Deliberately understated: the common
+    // case is a sub-second Sending state that the eye should barely catch,
+    // and a permanent badge on every message you send would be noise.
+    opacity: deliveryState === 1 ? 0.55 : 1.0
+    Behavior on opacity { NumberAnimation { duration: 120 } }
+
     property string eventId
     property string sender
     property string senderDisplayName
@@ -56,6 +63,11 @@ Item {
     // Aggregated reactions for this message. Each entry is
     // {emoji, count, reacted, eventIds}. Bound from model.reactions.
     property var reactions: []
+    // 0 = confirmed (the server has it), 1 = sending, 2 = failed.
+    // Mirrors MessageModel::DeliveryState. Only ever non-zero for a message
+    // this client sent in this session — everything that arrived over /sync
+    // is on the server by definition.
+    property int deliveryState: 0
 
     signal senderClicked(string userId, string displayName)
     // Emitted when the user clicks a reaction chip (toggle) or picks an
@@ -1624,5 +1636,28 @@ Item {
                 }
             }
         }
+    }
+
+    // The send failed. The row stays where it is — the text is not lost and
+    // it is obvious WHICH message did not go — with a quiet marker rather
+    // than a dialog.
+    Rectangle {
+        visible: bubble.deliveryState === 2
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: 2
+        color: Theme.danger
+    }
+
+    Text {
+        visible: bubble.deliveryState === 2
+        anchors.right: parent.right
+        anchors.rightMargin: Theme.sp.s3
+        anchors.top: parent.top
+        text: qsTr("Not sent")
+        color: Theme.danger
+        font.family: Theme.fontSans
+        font.pixelSize: Theme.fontSize.xs
     }
 }

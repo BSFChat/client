@@ -65,6 +65,7 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
     case SenderRole: return msg.sender;
     case SenderDisplayNameRole: return msg.senderDisplayName;
     case SenderIsBotRole: return msg.senderIsBot;
+    case DeliveryStateRole: return static_cast<int>(msg.delivery);
     case BodyRole: return msg.body;
     case FormattedBodyRole: return msg.formattedBody;
     case TimestampRole: return msg.timestamp;
@@ -132,7 +133,8 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {ThreadReplyCountRole, "threadReplyCount"},
         {MentionsMeRole, "mentionsMe"},
         {MentionsRoomRole, "mentionsRoom"},
-        {SenderIsBotRole, "senderIsBot"}
+        {SenderIsBotRole, "senderIsBot"},
+        {DeliveryStateRole, "deliveryState"}
     };
 }
 
@@ -207,7 +209,11 @@ void MessageModel::rebuildIndices()
     m_threadReplyCounts.clear();
     m_indexByEventId.reserve(m_messages.size());
     for (int i = 0; i < m_messages.size(); ++i) {
-        m_indexByEventId.insert(m_messages[i].eventId, i);
+        // An unreconciled local echo has no event id yet. Indexing it under
+        // the empty string would make rowForEventId("") resolve to a real
+        // row, and — worse — two pending echoes would collide on that key.
+        if (!m_messages[i].eventId.isEmpty())
+            m_indexByEventId.insert(m_messages[i].eventId, i);
         if (!m_messages[i].threadRootId.isEmpty())
             ++m_threadReplyCounts[m_messages[i].threadRootId];
     }
@@ -435,6 +441,153 @@ void MessageModel::onMediaTicketReady(const QString& mxcUri, const QString& url)
         const auto idx = index(row, 0);
         emit dataChanged(idx, idx, {MediaUrlRole});
     }
+}
+
+int MessageModel::indexOfLocalEcho(const QString& localId) const
+{
+    if (localId.isEmpty()) return -1;
+    for (int i = m_messages.size() - 1; i >= 0; --i) {
+        if (m_messages[i].localId == localId) return i;
+    }
+    return -1;
+}
+
+int MessageModel::indexOfEchoMatching(const bsfchat::RoomEvent& event) const
+{
+    // The overwhelmingly common case: nothing of ours is in flight, so this
+    // costs one integer test per inbound event rather than a walk.
+    if (m_unreconciledEchoes <= 0) return -1;
+    const QString sender = QString::fromStdString(event.sender);
+    const QString body = QString::fromStdString(event.content.data.value("body", ""));
+    // Newest first: if the user sent the same text twice in a row, the
+    // server's copies arrive in send order, so the OLDEST unmatched echo is
+    // the right target... except that scanning oldest-first would match an
+    // echo we have already confirmed. Confirmed echoes carry an eventId and
+    // are skipped, so oldest-first among the UNCONFIRMED ones is correct.
+    for (int i = 0; i < m_messages.size(); ++i) {
+        const auto& m = m_messages[i];
+        if (m.localId.isEmpty()) continue;        // not an echo
+        if (!m.eventId.isEmpty()) continue;       // already reconciled
+        if (m.delivery == DeliveryFailed) continue; // a failed send is not this
+        if (m.sender != sender) continue;
+        if (m.body != body) continue;
+        return i;
+    }
+    return -1;
+}
+
+void MessageModel::adoptEventId(int row, const QString& eventId)
+{
+    if (row < 0 || row >= m_messages.size()) return;
+    if (!m_messages[row].localId.isEmpty() && m_messages[row].eventId.isEmpty()
+        && m_unreconciledEchoes > 0) {
+        --m_unreconciledEchoes;
+    }
+    m_messages[row].eventId = eventId;
+    m_messages[row].delivery = DeliveryConfirmed;
+    if (!eventId.isEmpty()) m_indexByEventId.insert(eventId, row);
+
+    // An edit or a reaction can reach us for an event whose row existed the
+    // whole time under no id at all. The normal append path drains both the
+    // moment it inserts; an adopted echo has to get the same treatment, or
+    // an edit-then-confirm ordering leaves the pre-edit text on screen.
+    drainPendingEdit(m_messages[row]);
+    auto pIt = m_pendingReactions.find(eventId);
+    if (pIt != m_pendingReactions.end()) {
+        for (const auto& pr : pIt.value()) {
+            if (m_reactionIndex.contains(pr.reactionEventId)) continue;
+            auto& bucket = m_messages[row].reactionsByEmoji[pr.emoji];
+            bucket.append(qMakePair(pr.userId, pr.reactionEventId));
+            m_reactionIndex.insert(pr.reactionEventId,
+                                   ReactionRef{eventId, pr.emoji, pr.userId});
+        }
+        m_pendingReactions.erase(pIt);
+    }
+
+    auto idx = index(row);
+    emit dataChanged(idx, idx, {EventIdRole, DeliveryStateRole, BodyRole,
+                                FormattedBodyRole, EditedRole, ReactionsRole});
+}
+
+void MessageModel::appendLocalEcho(const QString& localId, const QString& body,
+                                   const QString& formattedBody, const QString& ownUserId,
+                                   const QString& replyToEventId,
+                                   const QString& threadRootId)
+{
+    if (localId.isEmpty()) return;
+    if (indexOfLocalEcho(localId) >= 0) return; // already echoed
+
+    MessageEntry entry;
+    entry.localId = localId;
+    entry.delivery = DeliverySending;
+    // No eventId: the server has not named it yet. Everything that keys off
+    // event ids (the dedupe index, reactions, edits, redaction) therefore
+    // skips this row until confirmLocalEcho hands it one.
+    entry.sender = ownUserId;
+    entry.senderDisplayName = resolveDisplayName(ownUserId);
+    entry.senderIsBot = resolveIsBot(ownUserId);
+    entry.isOwnMessage = true;
+    // Our own clock. It is only used for ordering against rows that are all
+    // older, and for the timestamp in the bubble; the server's
+    // origin_server_ts replaces nothing, because the row is not rebuilt on
+    // confirmation — re-sorting a message under the user's cursor at the
+    // moment it is confirmed would be worse than a few ms of skew.
+    entry.timestamp = QDateTime::currentMSecsSinceEpoch();
+    entry.msgtype = QStringLiteral("m.text");
+    entry.body = body;
+    entry.formattedBody = formattedBody;
+    entry.replyToEventId = replyToEventId;
+    entry.threadRootId = threadRootId;
+
+    beginInsertRows(QModelIndex(), m_messages.size(), m_messages.size());
+    m_messages.append(std::move(entry));
+    ++m_unreconciledEchoes;
+    if (!threadRootId.isEmpty()) ++m_threadReplyCounts[threadRootId];
+    endInsertRows();
+    emit countChanged();
+}
+
+void MessageModel::confirmLocalEcho(const QString& localId, const QString& eventId)
+{
+    const int row = indexOfLocalEcho(localId);
+    if (row < 0) return;
+    // The event already came down /sync and was matched by body, which
+    // adopted the id there. Nothing left to do, and re-adopting would
+    // re-register the same index entry.
+    if (!m_messages[row].eventId.isEmpty()) return;
+    adoptEventId(row, eventId);
+}
+
+void MessageModel::failLocalEcho(const QString& localId)
+{
+    const int row = indexOfLocalEcho(localId);
+    if (row < 0) return;
+    if (!m_messages[row].eventId.isEmpty()) return; // it landed after all
+    m_messages[row].delivery = DeliveryFailed;
+    auto idx = index(row);
+    emit dataChanged(idx, idx, {DeliveryStateRole});
+}
+
+void MessageModel::discardLocalEcho(const QString& localId)
+{
+    const int row = indexOfLocalEcho(localId);
+    if (row < 0) return;
+    const QString threadRoot = m_messages[row].threadRootId;
+    if (m_messages[row].eventId.isEmpty() && m_unreconciledEchoes > 0) {
+        --m_unreconciledEchoes;
+    }
+    beginRemoveRows(QModelIndex(), row, row);
+    m_messages.remove(row);
+    rebuildIndices();
+    endRemoveRows();
+    emit countChanged();
+    Q_UNUSED(threadRoot) // rebuildIndices recomputes m_threadReplyCounts
+}
+
+QString MessageModel::localEchoBody(const QString& localId) const
+{
+    const int row = indexOfLocalEcho(localId);
+    return row < 0 ? QString() : m_messages[row].body;
 }
 
 MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& event, const QString& ownUserId) const
@@ -935,6 +1088,17 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
     QString eventId = QString::fromStdString(event.event_id);
     if (m_indexByEventId.contains(eventId)) return;
 
+    // Our own local echo, coming back from the server. Normally the PUT
+    // reply has already adopted this id (confirmLocalEcho) and the dedupe
+    // above catches it — but /sync can beat the PUT reply, and then the
+    // echo is still sitting here with no event id at all. Adopt it into the
+    // existing row rather than appending a second copy of the user's own
+    // message next to the one they are already looking at.
+    if (const int echo = indexOfEchoMatching(event); echo >= 0) {
+        adoptEventId(echo, eventId);
+        return;
+    }
+
     MessageEntry entry = eventToEntry(event, ownUserId);
     drainPendingEdit(entry);
     beginInsertRows(QModelIndex(), m_messages.size(), m_messages.size());
@@ -1208,6 +1372,10 @@ void MessageModel::clear()
     m_pendingReactions.clear();
     m_pendingEdits.clear();
     m_reactionIndex.clear();
+    // The rows are gone, so no echo is awaiting reconciliation any more.
+    // Left set, it would make indexOfEchoMatching walk the new room's
+    // timeline on every inbound event for nothing.
+    m_unreconciledEchoes = 0;
     endResetModel();
     // A room switch invalidates the pagination state too — otherwise a
     // stale token from the previous room would drive the next scroll-up.

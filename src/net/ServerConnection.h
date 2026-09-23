@@ -406,6 +406,11 @@ public:
     // on a fallback would also overwrite the memory, which is how the
     // remembered channel gets forgotten permanently.
     Q_INVOKABLE void restoreLastTextRoom();
+    // Drop a poll that suspension is likely to have killed and issue a
+    // fresh one. Called when the app returns to the foreground — see
+    // SyncLoop::refreshNow().
+    void resyncNow();
+
     Q_INVOKABLE void sendMessage(const QString& body);
     // Send an m.emote message (the /me slash command). Renders in
     // italics + "<sender> <body>" form on the receiving side.

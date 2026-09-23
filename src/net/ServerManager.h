@@ -54,6 +54,9 @@ public:
     // never saved under the marketing domain the user happened to know.
     Q_INVOKABLE void addServer(const QString& url, const QString& username, const QString& password);
     Q_INVOKABLE void addServerWithOidc(const QString& url);
+    // Nudge every connection's long poll. Wired to the application coming
+    // back to the foreground; see ServerConnection::resyncNow().
+    void resyncAll();
     Q_INVOKABLE void checkLoginFlows(const QString& url);
     Q_INVOKABLE void registerServer(const QString& url, const QString& username, const QString& password);
 
@@ -211,6 +214,11 @@ private:
     void rebuildConnection(int index, const QString& url);
     // Hooks up a ServerConnection so per-server UI state (unread dot, etc.)
     // in the sidebar tracks the connection's state.
+    // "Are we already on this server?" — see net/ServerDedup.h for why
+    // every add path has to ask, and what went wrong when three of the four
+    // did not.
+    int existingServerIndex(const QString& url, const QString& userId) const;
+    bool adoptExistingServer(int index);
     void wireConnection(ServerConnection* conn);
 
     Settings* m_settings;

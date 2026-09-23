@@ -2,6 +2,7 @@
 #include "net/HttpFetch.h"
 #include "net/VoiceQuit.h"
 #include "net/ServerConnection.h"
+#include "net/ServerDedup.h"
 #include "net/SessionAuth.h"
 #include "net/MatrixClient.h"
 #include "model/RoomListModel.h"
@@ -11,6 +12,7 @@
 #include "identity/IdentityApiClient.h"
 
 #include <QClipboard>
+#include <QDebug>
 #include <QDateTime>
 #include <QDir>
 #include <QImage>
@@ -63,8 +65,45 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
     m_discovery = bsfchat::ServerDiscovery(
         bsfchat::networkFetch(this, bsfchat::kDiscoveryTimeoutMs));
 
-    // Restore saved servers
+    // Restore saved servers.
+    //
+    // Duplicates are dropped here rather than merely skipped, because a
+    // settings file that already contains two rows for one account keeps
+    // producing two sync loops on every launch until something rewrites it.
+    // See net/ServerDedup.h for how they got written in the first place.
+    // Highest index first, so each removal leaves the earlier ones' indices
+    // — and activeServerIndex, which points into this same list — intact.
     auto saved = m_settings->savedServers();
+    {
+        QList<bsfchat::client::ServerIdentity> ids;
+        ids.reserve(saved.size());
+        for (const auto& e : saved) ids.append({e.url, e.userId});
+        const QList<int> dupes = bsfchat::client::duplicateServerRows(ids);
+        for (int i = dupes.size() - 1; i >= 0; --i) {
+            const int row = dupes[i];
+            qWarning() << "servers: dropping duplicate saved entry" << row
+                       << "for" << saved[row].url << saved[row].userId
+                       << "— it would have started a second sync loop for an "
+                          "account already restored";
+            m_settings->removeServer(row);
+            saved.removeAt(row);
+        }
+        // removeServer() renumbers the array but does not know about
+        // activeServerIndex, which is a separate key holding an index INTO
+        // that array. Left alone, dropping a row before the active one
+        // silently moves the user to a different server on launch.
+        if (!dupes.isEmpty()) {
+            const int active = m_settings->activeServerIndex();
+            if (active >= 0) {
+                int shift = 0;
+                for (int row : dupes) if (row < active) ++shift;
+                // An active index that WAS one of the duplicates now points
+                // at the survivor it duplicated, which is the same account.
+                m_settings->setActiveServerIndex(
+                    qBound(0, active - shift, qMax(0, saved.size() - 1)));
+            }
+        }
+    }
     for (const auto& entry : saved) {
         auto* conn = new ServerConnection(entry.url, this);
         conn->setCredentials(entry.userId, entry.accessToken, entry.deviceId, entry.displayName);
@@ -98,6 +137,56 @@ void ServerManager::addServer(const QString& url, const QString& username, const
     });
 }
 
+// Index of the roster entry that would be duplicated by connecting to
+// `url` as `userId` (empty userId = "we do not know yet"), or -1.
+int ServerManager::existingServerIndex(const QString& url, const QString& userId) const
+{
+    QList<bsfchat::client::ServerIdentity> ids;
+    ids.reserve(m_roster.count());
+    for (auto* conn : m_roster.connections()) {
+        ids.append({conn ? conn->serverUrl() : QString(),
+                    conn ? conn->userId() : QString()});
+    }
+    return bsfchat::client::indexOfExistingServer(ids, {url, userId});
+}
+
+// The add paths' shared answer to "we are already on this server".
+//
+// Adding a homeserver the user is already connected to used to append a
+// whole second connection — second MatrixClient, second SyncLoop, second
+// 30-second long poll on the same account, and a second saved row that made
+// it permanent across restarts. Re-adding a server is not a rare mistake
+// either: "sign out and add it again" was the documented way out of a stale
+// session, so the recovery path built the fault.
+//
+// What the user wants in that situation is this server, signed in. So give
+// them that: select it, and re-authenticate it if its session is not
+// healthy. Returns true when the request was absorbed and the caller must
+// not create anything.
+bool ServerManager::adoptExistingServer(int index)
+{
+    auto* conn = m_roster.at(index);
+    if (!conn) return false;
+
+    qWarning() << "servers: already connected to" << conn->serverUrl()
+               << "— selecting it instead of adding a second connection";
+    setActiveServer(index);
+
+    // Only nudge a session that is actually broken. Re-authenticating a
+    // working connection would throw the user into a browser for no reason.
+    switch (conn->reconnectAction()) {
+    case bsfchat::client::ReconnectAction::Ignore:
+        break;                                   // a login is already running
+    case bsfchat::client::ReconnectAction::Reauthenticate:
+        conn->beginReauth();
+        break;
+    case bsfchat::client::ReconnectAction::RetryWithToken:
+        break;                                   // the token is still good
+    }
+    emit loginSuccess(conn->serverUrl());
+    return true;
+}
+
 void ServerManager::addServerResolved(const QString& rawUrl, const QString& username,
                                       const QString& password)
 {
@@ -105,6 +194,10 @@ void ServerManager::addServerResolved(const QString& rawUrl, const QString& user
     if (url.isEmpty()) {
         emit loginError(rawUrl, tr("\"%1\" is not a server address.").arg(rawUrl));
         return;
+    }
+
+    if (const int existing = existingServerIndex(url, QString()); existing >= 0) {
+        if (adoptExistingServer(existing)) return;
     }
 
     auto* conn = new ServerConnection(url, this);
@@ -148,6 +241,10 @@ void ServerManager::registerServerResolved(const QString& rawUrl, const QString&
     if (url.isEmpty()) {
         emit loginError(rawUrl, tr("\"%1\" is not a server address.").arg(rawUrl));
         return;
+    }
+
+    if (const int existing = existingServerIndex(url, QString()); existing >= 0) {
+        if (adoptExistingServer(existing)) return;
     }
 
     auto* conn = new ServerConnection(url, this);
@@ -219,6 +316,10 @@ void ServerManager::addServerWithOidcResolved(const QString& rawUrl)
         return;
     }
 
+    if (const int existing = existingServerIndex(url, QString()); existing >= 0) {
+        if (adoptExistingServer(existing)) return;
+    }
+
     auto* conn = new ServerConnection(url, this);
     m_roster.append(conn);
     m_serverListModel->addServer(url, url);
@@ -265,6 +366,13 @@ void ServerManager::addServerWithOidcResolved(const QString& rawUrl)
 
     if (m_roster.count() == 1) {
         setActiveServer(0);
+    }
+}
+
+void ServerManager::resyncAll()
+{
+    for (auto* conn : m_roster.connections()) {
+        if (conn) conn->resyncNow();
     }
 }
 
@@ -744,14 +852,16 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
 
                         // Skip servers we're already connected to — the user
                         // might re-run the sync while connections exist.
-                        bool already = false;
-                        for (auto* existing : m_roster.connections()) {
-                            if (existing->serverUrl() == serverUrl) {
-                                already = true;
-                                break;
-                            }
-                        }
-                        if (already) continue;
+                        //
+                        // Through the shared comparison, not a raw string
+                        // ==. This check DID exist and could still miss: it
+                        // compared the URL the identity service returned
+                        // against the normalised one already in the roster,
+                        // so a trailing slash, a difference in case or an
+                        // explicit :443 was enough to add a second
+                        // connection to a homeserver already open. See
+                        // net/ServerDedup.h.
+                        if (existingServerIndex(serverUrl, QString()) >= 0) continue;
 
                         addedUrls.append(serverUrl);
                         // Already a canonical homeserver URL from the

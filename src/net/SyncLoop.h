@@ -34,7 +34,26 @@ public:
 
     void start();
     void stop();
+    // Abandon whatever poll is outstanding and go straight back out with a
+    // fresh one.
+    //
+    // For coming back from suspension. iOS freezes the process when the
+    // screen locks or another app takes the foreground, and the socket under
+    // a parked /sync is commonly dead by the time the app is resumed —
+    // without the app being told. Qt only notices when the transfer timeout
+    // expires, and this client sets that to the poll timeout plus 30s, so a
+    // resumed app could sit for up to a minute with a poll that will never
+    // answer and no request in flight that could bring the message the user
+    // just sent. That is the "it only appeared after I locked and unlocked
+    // the phone" report: locking again tore the dead socket down hard
+    // enough for Qt to see it, the loop errored, retried, and the pending
+    // message arrived on the retry.
+    void refreshNow();
     bool isRunning() const { return m_running; }
+    // Whether a /sync is outstanding right now. Exposed so a test can assert
+    // the single-flight invariant directly rather than inferring it from
+    // request counts.
+    bool isPollInFlight() const { return m_inFlight; }
 
     // Seed the loop's stream position from persisted state so a launch can
     // resume incrementally instead of paying for a full initial sync. Must
@@ -71,6 +90,12 @@ private:
     QElapsedTimer m_requestTimer;
     QString m_since;
     bool m_running = false;
+    // True between issuing a /sync and its reply (or its abandonment). The
+    // invariant this class exists to keep is ONE poll outstanding at a time;
+    // `m_running` never expressed that — it says whether the loop wants to
+    // poll, not whether one is already in the air — and the gap between the
+    // two is how a connection ended up with two permanent poll chains.
+    bool m_inFlight = false;
     int m_consecutiveFailures = 0;
     // Successive fast replies that did not advance next_batch. Escalated on
     // the same curve as errors so a broken 200 cannot spin.

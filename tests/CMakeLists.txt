@@ -684,6 +684,40 @@ endif()
 # ServerManager's connection-list lifecycle (U-C1). Header-only logic
 # (src/net/ServerRoster.h) lifted out of ServerManager precisely so this
 # needs no Settings, no ServerConnection, no event loop and no network.
+# "Are we already connected to this server?" — the rule that stops a second
+# ServerConnection, and with it a second /sync long poll, being built for a
+# homeserver the client is already signed into. A real client was found
+# running two sync chains on one token because three of the four add paths
+# never asked; see tests/test_server_dedup.cpp and src/net/ServerDedup.h.
+# Header-only policy: no Settings, no ServerConnection, no event loop.
+qt_add_executable(test_server_dedup test_server_dedup.cpp)
+target_include_directories(test_server_dedup PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_server_dedup PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_server_dedup COMMAND test_server_dedup)
+
+# One /sync outstanding per connection, ever. Unlike the dedup test above
+# this one is about a SINGLE SyncLoop: stop() used to leave the in-flight
+# poll running, so a re-authentication inside the 30s window left two
+# self-sustaining chains behind. Needs a real MatrixClient and a real event
+# loop, because the bug only exists against a server that PARKS the poll —
+# so the test brings its own loopback homeserver that does exactly that. No
+# outbound network.
+qt_add_executable(test_sync_single_flight
+    test_sync_single_flight.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
+)
+target_include_directories(test_sync_single_flight PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_sync_single_flight PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Network Qt6::Test
+)
+add_test(NAME test_sync_single_flight COMMAND test_sync_single_flight)
+
 qt_add_executable(test_server_roster test_server_roster.cpp)
 target_include_directories(test_server_roster PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_server_roster PRIVATE Qt6::Core Qt6::Test)
