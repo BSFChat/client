@@ -24,11 +24,20 @@ ApplicationWindow {
     //
     // Read from Qt's own SafeArea attached property (QtQuick 6.9+), which
     // on iOS is UIKit's safeAreaInsets and on Android the window insets.
-    // Before this the top inset was a hardcoded 0 with a comment saying
-    // Android reserves the status bar for us — true on Android, and the
-    // reason nobody noticed that iOS does NOT: there the 48pt header drew
-    // underneath the notch / Dynamic Island, so the channel name and the
-    // three header buttons sat behind the cutout.
+    // It replaces a hardcoded `topInset: 0`.
+    //
+    // Honest note on what this did and did not fix. On the device these
+    // margins come back 0/0/0/0, and that is CORRECT rather than broken:
+    // the window is 440x860 on a 440x956 screen, so Qt has already laid
+    // it out inside the safe area and there is nothing left to inset. The
+    // header was never under the Dynamic Island, and the report of a
+    // message row under the status clock was the platform translating the
+    // whole scene for the keyboard, not a missing inset.
+    //
+    // It stays because it is right rather than because it repaid itself:
+    // Android does not inset for us the same way, a hardcoded zero cannot
+    // be right on both, and the day anything here goes edge-to-edge these
+    // are the numbers that keep the header out of the cutout.
     //
     // The margins are read off a probe Item rather than off the window,
     // because SafeArea reports the margins OF THE ITEM it is attached to:
@@ -91,34 +100,27 @@ ApplicationWindow {
         return Math.ceil(Math.min(kr.height * scale, root.height * 0.7));
     }
 
-    // What the layout actually applies, and the subtraction that the
-    // first cut of this file got wrong.
+    // How far the layout still has to move after everything else has
+    // already moved it. Three terms, all measured, which is why there is
+    // no per-platform branch here any more:
     //
-    // Two things move the composer out of the keyboard's way and only one
-    // of them is ours:
+    //   windowShrink    the window got shorter — Android's adjustResize
+    //                   does this, and on iOS MobileKeyboard does it by
+    //                   hand for the same reason.
+    //   platformScroll  the iOS plugin translated the whole scene up
+    //                   instead. Only happens now if the window resize
+    //                   was refused; see src/core/MobileKeyboard.h.
+    //   the remainder   is ours, and on a platform that does neither it
+    //                   is the whole keyboard.
     //
-    //   Android  windowSoftInputMode=adjustResize shrinks the window, so
-    //            the layout is already clear and our push must be 0.
-    //   iOS      QIOSInputContext translates the WHOLE Qt scene up — see
-    //            src/core/MobileKeyboard.h — so our push must be the
-    //            keyboard height minus however far it has already gone.
-    //
-    // Before the subtraction, iOS applied both: on an iPhone 16 Pro Max
-    // the composer floated ~250pt above the keyboard with a void beneath
-    // it, and because the platform moves the scene rather than the
-    // window, the header went off the top of the screen and the first
-    // message row rendered under the status clock.
-    //
-    // settle() below asks the platform to recompute, which makes it stand
-    // down to 0 once our push has landed (the cursor is then inside the
-    // area the keyboard does not cover, which is the plugin's own
-    // condition for scrolling back). The subtraction is what makes the
-    // in-between states, and any future Qt that stops standing down,
-    // merely imperfect instead of broken.
+    // Getting this wrong in both directions is what the device caught:
+    // first a push added on top of the platform's scroll, which left the
+    // composer a whole keyboard height in the air over a void, and then
+    // one frame of the same before the correction landed.
     readonly property int keyboardPush:
-        Qt.platform.os === "android"
-            ? 0
-            : Math.max(0, keyboardHeight - mobileKeyboard.platformScroll)
+        Math.max(0, keyboardHeight
+                    - mobileKeyboard.platformScroll
+                    - mobileKeyboard.windowShrink)
 
     // The gap between the bottom of the content and the bottom of the
     // window: the keyboard when it is up, the home indicator / gesture
@@ -160,17 +162,32 @@ ApplicationWindow {
     // reading this file.
     function _keyboardState() {
         var kr = Qt.inputMethod.keyboardRectangle;
+        var cr = Qt.inputMethod.cursorRectangle;
         return {
             "imVisible":  Qt.inputMethod.visible,
+            // Position is NOT trustworthy — the platform converts this
+            // rectangle through its own translated layer, so the y moves
+            // with the scroll. Logged anyway precisely so that stays
+            // visible. Only the size is load-bearing.
             "kbRect":     Math.round(kr.x) + "," + Math.round(kr.y)
                           + "," + Math.round(kr.width) + "x" + Math.round(kr.height),
             "kbScale":    (kr.width > 0 ? (root.width / kr.width).toFixed(3) : "n/a"),
             "kbHeight":   root.keyboardHeight,
+            // The actual input to the platform's own decision, in Qt
+            // window coordinates. If this is above the keyboard's true
+            // top and it still scrolls, the containment test is comparing
+            // spaces that do not line up.
+            "curRect":    Math.round(cr.x) + "," + Math.round(cr.y)
+                          + "," + Math.round(cr.width) + "x" + Math.round(cr.height),
             "push":       root.keyboardPush,
             "bottomGap":  root.bottomGap,
             "insetsTRBL": root.topInset + "/" + root.rightInset + "/"
                           + root.bottomInset + "/" + root.leftInset,
             "window":     Math.round(root.width) + "x" + Math.round(root.height),
+            // Where the window sits on the screen, which is the offset
+            // between the two coordinate spaces above.
+            "winOrigin":  Math.round(root.x) + "," + Math.round(root.y),
+            "screen":     Math.round(Screen.width) + "x" + Math.round(Screen.height),
             "dpr":        Screen.devicePixelRatio
         };
     }

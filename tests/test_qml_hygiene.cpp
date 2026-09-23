@@ -1052,31 +1052,60 @@ private slots:
                  "no platform gate on the manual keyboard push");
     }
 
-    void theKeyboardPushNetsOffWhatThePlatformAlreadyDid()
+    void theKeyboardPushNetsOffWhatEverythingElseAlreadyDid()
     {
-        // The first cut of this pushed the layout up by the keyboard's
-        // height on iOS while QIOSInputContext was independently
-        // translating the whole Qt scene up by the same amount, and the
-        // two composed: on device the composer floated ~250pt above the
-        // keyboard over an empty void, and — because the platform moves
-        // the scene rather than the window — the header went off the top
-        // of the screen and a message row rendered under the status clock.
+        // The push is what is LEFT after the platform has had its way, and
+        // both ways it can have it have to be netted off:
         //
-        // Whatever the platform has already done has to come off our own
-        // push. src/core/MobileKeyboard.h has the full reasoning.
+        //   windowShrink    the window got shorter (Android's adjustResize,
+        //                   or MobileKeyboard doing the same by hand on iOS)
+        //   platformScroll  QIOSInputContext translated the whole scene up
+        //
+        // Missing the second one is what put the composer a whole keyboard
+        // height in the air over a void on the device. Missing the first
+        // would do exactly the same thing again the moment the window
+        // resize works.
         const QString src = withoutComments(readQml(QStringLiteral("/mobile/MobileMain.qml")));
 
-        static const QRegularExpression push(
-            QStringLiteral(R"(property\s+int\s+keyboardPush\s*:(?:[^\n]*\n){0,6}?[^\n]*platformScroll)"));
-        QVERIFY2(push.match(src).hasMatch(),
-                 "keyboardPush does not subtract mobileKeyboard.platformScroll, "
-                 "so on iOS the platform's scroll and ours will compose again");
+        for (const QString& term : {QStringLiteral("platformScroll"),
+                                    QStringLiteral("windowShrink")}) {
+            const QRegularExpression push(
+                QStringLiteral(R"(property\s+int\s+keyboardPush\s*:(?:[^\n]*\n){0,8}?[^\n]*%1)")
+                    .arg(term));
+            QVERIFY2(push.match(src).hasMatch(),
+                     qPrintable(QStringLiteral("keyboardPush does not subtract "
+                                               "mobileKeyboard.%1").arg(term)));
+        }
 
-        // Netting off is only half of it: something has to ask the
-        // platform to recompute, or it keeps the scroll it decided on
-        // before our push existed and the subtraction just cancels us out.
+        // Every term is measured, so the expression needs no per-platform
+        // branch — and must not grow one back, because a branch is an
+        // assumption about what the platform did rather than a reading of it.
+        static const QRegularExpression branched(
+            QStringLiteral(R"(property\s+int\s+keyboardPush\s*:(?:[^\n]*\n){0,8}?[^\n]*Qt\.platform)"));
+        QVERIFY2(!branched.match(src).hasMatch(),
+                 "keyboardPush branches on the platform again; the three terms "
+                 "are measurements and cover every platform between them");
+
+        // Netting off is only half of it: something has to ask the platform
+        // to recompute, or it keeps the scroll it decided on before our
+        // layout existed.
         QVERIFY2(src.contains(QStringLiteral("mobileKeyboard.settle(")),
                  "nothing asks the platform to recompute its own scroll");
+    }
+
+    void theKeyboardBridgeExposesBothMeasurements()
+    {
+        // MobileMain binds to both on every layout pass; a rename that only
+        // touched the C++ would be a silent ReferenceError in the hottest
+        // binding in the shell, and the symptom would be the composer under
+        // the keyboard rather than anything that looks like a typo.
+        QFile f(QStringLiteral(BSFCHAT_SRC_DIR "/core/MobileKeyboard.h"));
+        QVERIFY2(f.open(QIODevice::ReadOnly | QIODevice::Text), "MobileKeyboard.h not found");
+        const QString src = QString::fromUtf8(f.readAll());
+        QVERIFY2(src.contains(QStringLiteral("Q_PROPERTY(int platformScroll")),
+                 "platformScroll is not a QML property any more");
+        QVERIFY2(src.contains(QStringLiteral("Q_PROPERTY(int windowShrink")),
+                 "windowShrink is not a QML property any more");
     }
 
     void theKeyboardGapIsNeverAnimated()
