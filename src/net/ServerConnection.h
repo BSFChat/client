@@ -114,9 +114,10 @@ class ServerConnection : public QObject {
     // account may do, and it is the control a user reaches for when a
     // moderator is not around.
     //
-    // It is NOT fed by /sync: this server sends no account_data there, so the
-    // list changes only when something asks. See BlockedUsersModel's header
-    // for where those asks happen and what the UI is allowed to claim.
+    // Fed by /sync as well as by its own reads: an account_data section
+    // carries a block made on another device here within a poll (server
+    // schema v30). The explicit reads are still what ESTABLISH the list, since
+    // the section is a delta — see BlockedUsersModel's header.
     Q_PROPERTY(BlockedUsersModel* blockedUsersModel READ blockedUsersModel CONSTANT)
     // Bumped whenever the set of known bot user ids changes, so QML that
     // asks isBot(userId) directly (the profile card, which has a user id and

@@ -12,18 +12,19 @@ import BSFChat
 //
 // ── Why there is a Refresh button and a timestamp ────────────────────────
 //
-// The block list is account data, and this server sends no account_data
-// section in /sync. Nothing pushes it. A block made on a phone does not
-// appear on a desktop until the desktop asks, and it asks at three moments:
+// The block list is account data, and /sync carries an account_data section
+// now (server schema v30), so a block made on a phone reaches a desktop that
+// is running, within a poll. The client also asks outright at three moments:
 // when the session connects, after one of its own writes, and when this pane
 // opens.
 //
-// That is a real limitation and this pane says so rather than implying a
-// liveness it does not have. The line under the list is the honest version of
-// "synced ✓": it says when this client last looked, and the button next to it
-// is how you make it look again. Inventing a poll instead would spend a
-// request a minute on a document that changes twice a year and STILL be
-// stale between ticks.
+// The line under the list stays, and still says only what it can: when this
+// client last had the document from the server. The push is a delta, so a
+// client that was not running for it learns nothing from it, and a pane that
+// claimed "synced ✓" would be claiming something it cannot check. The button
+// next to it is how you make it look again. Inventing a poll instead would
+// spend a request a minute on a document that changes twice a year and STILL
+// be stale between ticks.
 Popup {
     id: blockedDialog
 

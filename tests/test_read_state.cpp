@@ -13,6 +13,7 @@
 #include <QtTest/QtTest>
 #include <QFile>
 #include <QHash>
+#include <QJsonObject>
 #include <QRegularExpression>
 
 #include "core/ReadState.h"
@@ -274,6 +275,97 @@ private slots:
         QVERIFY2(m.captured(0).contains(QStringLiteral("newestServerTimestampMs")),
                  "markActiveRoomRead reads a timestamp that may be a local "
                  "echo's client clock");
+    }
+
+    // ── The marker the server sends down ─────────────────────────────
+
+    void theServerMarkerIsReadFromItsTimestamp()
+    {
+        // The spec field this client cannot use, and the one it can.
+        QJsonObject doc;
+        doc[QStringLiteral("event_id")] = QStringLiteral("$abc:server");
+        doc[QStringLiteral("bsfchat.origin_server_ts")] = 1'700'000'000'000.0;
+        QCOMPARE(serverReadMarkerTs(doc), 1'700'000'000'000LL);
+
+        // A server that does not send the timestamp, a malformed one, and a
+        // zero all mean "nothing to apply" — never "read up to time zero",
+        // which would be a marker that moves a real one backwards.
+        QJsonObject specOnly;
+        specOnly[QStringLiteral("event_id")] = QStringLiteral("$abc:server");
+        QCOMPARE(serverReadMarkerTs(specOnly), 0LL);
+        QJsonObject wrongType;
+        wrongType[QStringLiteral("bsfchat.origin_server_ts")] = QStringLiteral("soon");
+        QCOMPARE(serverReadMarkerTs(wrongType), 0LL);
+        QJsonObject zero;
+        zero[QStringLiteral("bsfchat.origin_server_ts")] = 0.0;
+        QCOMPARE(serverReadMarkerTs(zero), 0LL);
+        QCOMPARE(serverReadMarkerTs(QJsonObject{}), 0LL);
+    }
+
+    // The phone reads to the end; the desktop, which has been asleep, learns
+    // about it from the next sync and its dot goes out. This is the whole
+    // feature, as arithmetic.
+    void aMarkerFromAnotherDeviceClearsTheDot()
+    {
+        Markers m;
+        const qint64 newest = 1'700'000'009'000;
+        m.seed(QStringLiteral("!r"), 1'700'000'000'000);
+        QVERIFY(isUnread(newest, m.get(QStringLiteral("!r"))));
+
+        QJsonObject fromSync;
+        fromSync[QStringLiteral("bsfchat.origin_server_ts")] =
+            static_cast<double>(newest);
+        const qint64 ts = serverReadMarkerTs(fromSync);
+        if (readMarkerAdvances(m.get(QStringLiteral("!r")), ts)) m.ts[QStringLiteral("!r")] = ts;
+
+        QVERIFY2(!isUnread(newest, m.get(QStringLiteral("!r"))),
+                 "a room read on another device still shows a dot here");
+    }
+
+    // And the other direction, which is the one that would be a REGRESSION
+    // rather than a missing feature: this device is ahead, the server has not
+    // heard from it yet, and the marker it sends is older. Forward-only is
+    // what stops it re-lighting a dot the user cleared here a second ago.
+    void anOfflineDeviceCannotRewindThisOne()
+    {
+        Markers m;
+        m.ts[QStringLiteral("!r")] = 1'700'000'009'000;  // we are caught up
+
+        QJsonObject stale;
+        stale[QStringLiteral("bsfchat.origin_server_ts")] = 1'700'000'001'000.0;
+        const qint64 ts = serverReadMarkerTs(stale);
+        QVERIFY(ts > 0);
+        QVERIFY2(!readMarkerAdvances(m.get(QStringLiteral("!r")), ts),
+                 "a stale marker from the server was allowed to move this "
+                 "device's cursor backwards");
+        if (readMarkerAdvances(m.get(QStringLiteral("!r")), ts)) m.ts[QStringLiteral("!r")] = ts;
+        QCOMPARE(m.get(QStringLiteral("!r")), 1'700'000'009'000LL);
+        QVERIFY(!isUnread(1'700'000'009'000, m.get(QStringLiteral("!r"))));
+    }
+
+    // The ordering that is easy to lose in a refactor: the marker has to be
+    // applied BEFORE the timeline loop that gates notifications on it, or a
+    // catch-up batch of messages already read on the phone toasts on this
+    // device first and clears second.
+    void theServerMarkerIsAppliedBeforeTheNotificationGate()
+    {
+        const QString conn = withoutComments(
+            readAll(QStringLiteral(BSFCHAT_SRC_DIR "/net/ServerConnection.cpp")));
+        QVERIFY2(!conn.isEmpty(), "ServerConnection.cpp not readable?");
+
+        const int applied = conn.indexOf(QStringLiteral("serverReadMarkerTs"));
+        QVERIFY2(applied >= 0,
+                 "nothing in ServerConnection reads the server's m.fully_read "
+                 "marker, so read state does not cross devices at all");
+
+        // The gate: the notification suppression that compares an event's
+        // timestamp against the stored marker.
+        const int gate = conn.indexOf(QStringLiteral("m_firstSyncProcessed && eventTs > readTs"));
+        QVERIFY2(gate >= 0, "the notification read-gate has moved — re-pin this");
+        QVERIFY2(applied < gate,
+                 "the server's read marker is applied AFTER the notification "
+                 "gate, so a batch the user already read on another device "
+                 "toasts here before the marker silences it");
     }
 
     void channelListStaysInTheServerClock() {

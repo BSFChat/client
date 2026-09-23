@@ -539,8 +539,10 @@ private slots:
     void lastRefreshedIsStampedOnEveryAdoptionBecauseNothingElseWill()
     {
         // The pane renders this verbatim, and it is the whole of the currency
-        // claim this client is entitled to make: there is no account_data in
-        // /sync, so nothing arrives unasked.
+        // claim this client is entitled to make. /sync pushes the document now
+        // (onDocumentFromSync), but only as a delta, so "when the server last
+        // told us" is still the strongest true statement — and a push stamps
+        // it like any other adoption, because it IS the server telling us.
         BlockedUsersModel m;
         Recorder rec;
         rec.install(m);
@@ -554,6 +556,10 @@ private slots:
         m.block(QStringLiteral("@a:h"));
         m.onWriteStored(rec.lastRequestId(), rec.lastDocument());
         QCOMPARE(m.lastRefreshedMs(), 5000);
+
+        now = 9000;
+        QVERIFY(m.onDocumentFromSync(obj("{'ignored_users':{'@a:h':{},'@b:h':{}}}")));
+        QCOMPARE(m.lastRefreshedMs(), 9000);
     }
 
     void theCeilingIsCheckedAgainstWhatTheBatchWouldLeaveNotTheCurrentCount()
@@ -1027,6 +1033,66 @@ private slots:
             QRegularExpression::CaseInsensitiveOption);
         QVERIFY2(!overclaim.match(src).hasMatch(),
                  "the report dialog promises an action the server does not take");
+    }
+
+    // ── The block list arriving from /sync ────────────────────────────────
+
+    // The server carries account data in /sync now, so a block made on the
+    // phone reaches the desktop without anybody pressing Refresh.
+    void aDocumentPushedBySyncIsAdopted()
+    {
+        BlockedUsersModel m;
+        Recorder rec;
+        rec.install(m);
+        m.onDocument(obj("{'ignored_users':{'@old:h':{}}}"));
+
+        QVERIFY(m.onDocumentFromSync(obj("{'ignored_users':{'@old:h':{},'@new:h':{}}}")));
+        QVERIFY2(m.isBlocked(QStringLiteral("@new:h")),
+                 "a block made on another device did not arrive through sync");
+        QCOMPARE(m.count(), 2);
+        QCOMPARE(rec.fetches, 0);  // no round trip of our own was needed
+    }
+
+    // …but not while we have a write outstanding. The document /sync built
+    // may predate our PUT, and adopting it would put a user we just unblocked
+    // back in the list — and then build the NEXT full replacement from it,
+    // which is how a full-replacement document silently un-blocks people.
+    void aPushedDocumentNeverOverwritesAWriteInFlight()
+    {
+        BlockedUsersModel m;
+        Recorder rec;
+        rec.install(m);
+        m.setSelfUserId(QStringLiteral("@me:h"));
+        m.onDocument(obj("{'ignored_users':{'@old:h':{},'@spammer:h':{}}}"));
+
+        m.unblock(QStringLiteral("@spammer:h"));
+        QCOMPARE(rec.documents.size(), 1);
+
+        // The server's pre-unblock copy arrives while the PUT is in flight.
+        QVERIFY2(!m.onDocumentFromSync(obj("{'ignored_users':{'@old:h':{},'@spammer:h':{}}}")),
+                 "a pushed document was adopted over a write in flight");
+        QVERIFY2(!m.isBlocked(QStringLiteral("@spammer:h")),
+                 "the unblock the user just made was undone by a sync push");
+
+        // Our own reply is the newer truth, and it settles the row.
+        m.onWriteStored(rec.lastRequestId(), rec.lastDocument());
+        QVERIFY(!m.isBlocked(QStringLiteral("@spammer:h")));
+        QCOMPARE(m.count(), 1);
+    }
+
+    // An intent recorded before the list had ever been read must survive a
+    // push too: pump() is waiting for a document to build a replacement from,
+    // and adopting one here would race the write it is about to make.
+    void aPushedDocumentIsDeclinedWhileAnIntentIsWaiting()
+    {
+        BlockedUsersModel m;
+        Recorder rec;
+        rec.install(m);
+        m.block(QStringLiteral("@spammer:h"));
+        QCOMPARE(rec.documents.size(), 0);  // nothing to build from yet
+
+        QVERIFY(!m.onDocumentFromSync(obj("{'ignored_users':{}}")));
+        QVERIFY(m.isBlocked(QStringLiteral("@spammer:h")));
     }
 };
 

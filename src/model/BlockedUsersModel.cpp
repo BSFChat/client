@@ -139,6 +139,16 @@ void BlockedUsersModel::onDocument(const QJsonObject& document)
     pump();
 }
 
+bool BlockedUsersModel::onDocumentFromSync(const QJsonObject& document)
+{
+    // Anything outstanding means the newer truth is already on its way here.
+    // See the header: adopting an older document would resurrect a change the
+    // user has already made and then build the next replacement from it.
+    if (m_fetching || !m_inFlightId.isEmpty() || !m_intent.isEmpty()) return false;
+    onDocument(document);
+    return true;
+}
+
 void BlockedUsersModel::onDocumentAbsent()
 {
     m_fetching = false;

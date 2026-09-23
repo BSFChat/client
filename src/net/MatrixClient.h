@@ -255,9 +255,12 @@ public:
     // accountDataError so a caller cannot mistake "no block list" for "the
     // request failed" and leave the UI empty for the wrong reason.
     //
-    // There is NO account_data section in /sync on this server, so nothing
-    // here ever arrives unasked. A change made on another device is invisible
-    // until the next explicit GET.
+    // A change made on another device also arrives unasked, in /sync's
+    // account_data section (server schema v30) — see
+    // ServerConnection::processSyncResponse. That section is a DELTA against
+    // the caller's sync token, so it never replaces this GET: a client that
+    // was not running for the write learns the document here, and hears about
+    // later ones there.
     void getAccountData(const QString& userId, const QString& type);
     void putAccountData(const QString& requestId, const QString& userId,
                         const QString& type, const QJsonObject& content);
