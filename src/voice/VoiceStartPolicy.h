@@ -58,7 +58,16 @@ inline QString refusalMessage(StartRefusal refusal)
     case StartRefusal::MicrophoneDenied:
         // One return per platform: a preprocessor conditional inside a
         // macro argument is ill-formed and MSVC rejects it (C2121).
-#if defined(Q_OS_MACOS)
+        //
+        // iOS is checked before macOS: Qt defines Q_OS_DARWIN on both, and
+        // while Q_OS_MACOS is not defined on iOS today, ordering the
+        // narrower platform first means this cannot silently start
+        // showing an iPhone user the System Settings path.
+#if defined(Q_OS_IOS)
+        return QStringLiteral(
+            "Microphone access is denied for BSFChat in Settings → Privacy & "
+            "Security → Microphone. Turn it on there, then join again.");
+#elif defined(Q_OS_MACOS)
         return QStringLiteral(
             "Microphone access is denied for BSFChat in System Settings → "
             "Privacy & Security → Microphone. Turn it on there, then join "

@@ -171,6 +171,17 @@ public:
     // MODE_IN_COMMUNICATION (which is what engages the platform AGC), or
     // only the routing. If a real Android sender turns out to be as quiet
     // as desktop was, this is the switch to revisit.
+    //
+    // iOS is deliberately NOT in this list, and that is a verified fact
+    // rather than a pending question. Qt's iOS QAudioSource is built on
+    // kAudioUnitSubType_RemoteIO, not kAudioUnitSubType_VoiceProcessingIO
+    // — QtMultimedia 6.10.3's only AudioComponentDescription reads
+    // 'auou'/'rioc'/'appl' — so iOS gets NO platform AGC, NO noise
+    // suppression and NO echo cancellation, whatever AVAudioSession mode
+    // is set (see voice/IosAudioSession.h). The software SpeechAgc must
+    // therefore keep running there, exactly as on desktop. This flips to
+    // true only if and when iOS grows a native VoiceProcessingIO capture
+    // path — docs/ios-voice.md, section 4.
 #ifdef Q_OS_ANDROID
     static constexpr bool kPlatformVoiceProcessing = true;
 #else

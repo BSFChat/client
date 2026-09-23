@@ -17,12 +17,38 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(GAMECHAT_CLIENT_BUILD_TESTS "Build client tests" ON)
-# Voice defaults OFF on iOS for the MVP mobile build — libdatachannel
-# + opus + audio capture paths need mobile-specific plumbing that's
-# on the roadmap but not done yet. Enable explicitly once that work
-# lands: cmake -DBSFCHAT_ENABLE_VOICE=ON.
+# Voice is ON for iOS as of 2026-09-23, when it was built, installed and
+# USED on a real iPhone 16 Pro Max: a voice channel carried audio both
+# ways, and the microphone prompt appeared at first join, which is the
+# behaviour Apple wants. It was OFF before that only because nothing on
+# the path had ever been compiled, let alone run.
+#
+# It is ON rather than passed by CI because the product decision is that
+# voice ships in the first iOS release: a default that disagrees with
+# the shipping configuration means the thing under test is not the thing
+# released, and the first TestFlight build would have been a text-only
+# client while the listing described a voice app.
+#
+# Known and NOT fixed by turning this on:
+#   * Echo cancellation. Confirmed echoey on speakerphone on a real
+#     device. Tracked separately; see docs/ios-voice.md.
+#
+# What is still genuinely missing rather than merely unbuilt, in the
+# order it bites — full analysis and estimates in docs/ios-voice.md:
+#   1. Echo cancellation. Qt's iOS QAudioSource is RemoteIO, not
+#      VoiceProcessingIO, so there is none. Speakerphone echo on a
+#      handheld phone is the single biggest quality risk.
+#   2. Interruption/route recovery. IosAudioSession.h defines the
+#      events; nothing consumes them yet, so a phone call mid-voice
+#      leaves the session dead until the user rejoins.
+#   3. Camera capture. CameraController's non-macOS branch lands on
+#      QCamera with no permission handling and no orientation handling.
+#   4. Video codecs. VideoToolbox is gated to `APPLE AND NOT IOS`
+#      below, and openh264/libaom are excluded on iOS, so an iOS build
+#      advertises no codecs at all and peers fall back to the legacy
+#      JPEG path.
 if(IOS)
-    option(BSFCHAT_ENABLE_VOICE "Enable voice chat (requires libdatachannel + opus)" OFF)
+    option(BSFCHAT_ENABLE_VOICE "Enable voice chat (requires libdatachannel + opus)" ON)
 else()
     # Android: voice builds against our NDK-compiled OpenSSL (see
     # deps/openssl-android-arm64). libdatachannel + opus are pulled
@@ -48,6 +74,64 @@ if(ANDROID AND BSFCHAT_ENABLE_VOICE)
         "${OPENSSL_ROOT_DIR}/lib/libssl_3.so" CACHE FILEPATH "" FORCE)
     set(OPENSSL_CRYPTO_LIBRARY
         "${OPENSSL_ROOT_DIR}/lib/libcrypto_3.so" CACHE FILEPATH "" FORCE)
+endif()
+
+# iOS: the same hint, for the OpenSSL scripts/build-openssl-ios.sh
+# cross-builds into deps/openssl-ios-{device,simulator}.
+#
+# Unlike the Android block this one does NOT force: scripts/build-ios.sh
+# and the `ios` CI job both already pass the full OPENSSL_* quadruple on
+# the command line, and they are the paths that matter. This is the
+# fallback for a hand-rolled `qt-cmake` that passes none of them, which
+# otherwise fails at bsfchat_protocol's unconditional
+# find_package(OpenSSL REQUIRED) with an error that reads like a missing
+# system package rather than "run the vendoring script".
+#
+# All four, not just the root: under the iOS toolchain CMake's
+# find_library is confined to the sysroot, so FindOpenSSL would search
+# OPENSSL_ROOT_DIR and still come up empty. Same reasoning as the
+# comment in scripts/build-ios.sh.
+#
+# Static .a here, where Android uses .so — iOS forbids loading a
+# dylib the app did not embed, and the script configures `no-shared`.
+#
+# Unconditional for iOS, deliberately OUTSIDE the vendored-OpenSSL
+# branch below: the caller supplying its own OPENSSL_ROOT_DIR (which CI
+# does) needs this just as much, and getting it only by the accident of
+# NOT passing a root is how the first voice configure in CI would have
+# failed. libdatachannel has an Apple branch that FORCEs
+# OPENSSL_{SSL,CRYPTO}_LIBRARY to .dylib paths unless this is set, and
+# an iOS OpenSSL is `no-shared`, so those dylibs do not exist.
+# find_package then creates no OpenSSL::SSL target and
+# datachannel-static fails against a target "not found" — an error that
+# names OpenSSL without naming the reason.
+if(IOS)
+    set(OPENSSL_USE_STATIC_LIBS ON CACHE BOOL "iOS: no shared OpenSSL" FORCE)
+endif()
+
+if(IOS AND NOT DEFINED OPENSSL_ROOT_DIR)
+    if(CMAKE_OSX_SYSROOT MATCHES "iphonesimulator")
+        set(_bsfchat_ios_ssl_target "simulator")
+    else()
+        set(_bsfchat_ios_ssl_target "device")
+    endif()
+    set(_bsfchat_ios_ssl
+        "${CMAKE_CURRENT_SOURCE_DIR}/deps/openssl-ios-${_bsfchat_ios_ssl_target}")
+    if(EXISTS "${_bsfchat_ios_ssl}/lib/libcrypto.a")
+        set(OPENSSL_ROOT_DIR    "${_bsfchat_ios_ssl}" CACHE PATH "iOS OpenSSL root")
+        set(OPENSSL_INCLUDE_DIR "${_bsfchat_ios_ssl}/include" CACHE PATH "")
+        set(OPENSSL_CRYPTO_LIBRARY
+            "${_bsfchat_ios_ssl}/lib/libcrypto.a" CACHE FILEPATH "")
+        set(OPENSSL_SSL_LIBRARY
+            "${_bsfchat_ios_ssl}/lib/libssl.a" CACHE FILEPATH "")
+        message(STATUS "iOS OpenSSL: ${_bsfchat_ios_ssl}")
+    else()
+        message(WARNING
+            "No vendored OpenSSL at ${_bsfchat_ios_ssl}. OpenSSL is NOT "
+            "voice-gated — bsfchat_protocol requires it unconditionally for "
+            "jwt-cpp — so this configure will fail at find_package(OpenSSL). "
+            "Run: ./scripts/build-openssl-ios.sh ${_bsfchat_ios_ssl_target}")
+    endif()
 endif()
 
 # LiveKit SFU transport. OFF by default and deliberately so: it needs a
@@ -229,8 +313,29 @@ if(BSFCHAT_ENABLE_VOICE)
         $<$<AND:$<PLATFORM_ID:Darwin>,$<NOT:$<BOOL:${IOS}>>>:src/voice/MacScreenCapturer.mm>
         $<$<AND:$<PLATFORM_ID:Darwin>,$<NOT:$<BOOL:${IOS}>>>:src/voice/MacCameraPermission.mm>
         $<$<AND:$<PLATFORM_ID:Darwin>,$<NOT:$<BOOL:${IOS}>>>:src/voice/MacCameraCapturer.mm>
+        # iOS: AVAudioSession category/mode/activation + interruption and
+        # route-change observers. The iOS counterpart of
+        # AndroidAudioRouting.cpp, and the reason it is a .mm rather than
+        # a no-op-everywhere .cpp is that it has to be Objective-C++;
+        # IosAudioSession.h keeps the call sites in AudioWorker.cpp free
+        # of #ifdef by inlining no-ops off iOS.
+        #
+        # NEVER COMPILED SO FAR: this line is only reached when someone
+        # passes -DBSFCHAT_ENABLE_VOICE=ON for iOS, which is not the
+        # default and has not been done. See docs/ios-voice.md.
+        $<$<BOOL:${IOS}>:src/voice/IosAudioSession.mm>
     )
     target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_VOICE_ENABLED)
+    if(IOS)
+        # AVFoundation carries AVAudioSession (via AVFAudio) and the
+        # AVCaptureDevice camera APIs. AudioToolbox is not needed by
+        # IosAudioSession.mm as written, but is the framework a native
+        # VoiceProcessingIO capture path would need, so it is listed
+        # here where the next person will look rather than discovered
+        # as a link error later.
+        target_link_libraries(bsfchat-app PRIVATE
+            "-framework AVFoundation" "-framework AudioToolbox")
+    endif()
     if(BSFCHAT_HAVE_OPENH264)
         target_sources(bsfchat-app PRIVATE
             src/voice/video/OpenH264Encoder.cpp
@@ -475,6 +580,32 @@ if(IOS)
     else()
         set(BSFCHAT_IOS_BUNDLE_VERSION "${BSFCHAT_VERSION_DOTS}")
     endif()
+    # UIBackgroundModes, substituted rather than written literally,
+    # because declaring a background mode the binary cannot actually use
+    # is itself an App Review rejection ("your app declares support for
+    # audio in UIBackgroundModes but does not provide audible content").
+    #
+    # Voice compiled in  -> the app genuinely keeps capturing and playing
+    #                       while backgrounded, and WITHOUT this key iOS
+    #                       silences the session the moment the app
+    #                       leaves the foreground, i.e. every call dies
+    #                       when the user checks anything else.
+    # Voice compiled out -> emit no key at all. That is the state the
+    #                       first submitted build is in.
+    #
+    # "voip" is deliberately never emitted here: it requires a real
+    # PKPushRegistry + CallKit integration, and there is no PushKit, no
+    # CallKit and no APNs anywhere in this client.
+    if(BSFCHAT_ENABLE_VOICE)
+        set(BSFCHAT_IOS_BACKGROUND_MODES
+"\t<key>UIBackgroundModes</key>
+\t<array>
+\t\t<string>audio</string>
+\t</array>
+")
+    else()
+        set(BSFCHAT_IOS_BACKGROUND_MODES "")
+    endif()
     configure_file("${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist.in"
                    "${CMAKE_CURRENT_BINARY_DIR}/Info.plist" @ONLY)
     set_target_properties(bsfchat-app PROPERTIES
@@ -664,6 +795,46 @@ fi
         COMMENT "Checking the iOS bundle's usage descriptions, URL scheme and export-compliance key"
         VERBATIM
     )
+
+    # Voice-only guard, kept as its own script rather than another key in
+    # the loop above because the loop's content is a bracket argument —
+    # no variable expansion — and rewriting it as a quoted string to
+    # inject one conditional key would mean re-escaping every quote in
+    # a script whose escaping has already cost this project one CI
+    # failure.
+    #
+    # Why it is worth a guard at all: with voice compiled in, a bundle
+    # that reaches a device WITHOUT UIBackgroundModes=audio does not
+    # fail, warn, or log. It works perfectly until the user switches
+    # apps or locks the screen, at which point iOS silences the session
+    # and the call dies — reported as "voice randomly cuts out", which
+    # is the hardest possible shape of bug to trace back to a plist.
+    # Exactly the reasoning behind the NSMicrophoneUsageDescription
+    # guard in the macOS block.
+    if(BSFCHAT_ENABLE_VOICE)
+        set(_ios_bgmode_check "${CMAKE_CURRENT_BINARY_DIR}/check-ios-bgmode.sh")
+        file(GENERATE OUTPUT "${_ios_bgmode_check}" CONTENT [=[#!/bin/sh
+set -u
+PLIST="${BUILT_PRODUCTS_DIR:-}/${FULL_PRODUCT_NAME:-}/Info.plist"
+if [ ! -f "$PLIST" ]; then
+    echo "check-ios-bgmode: no Info.plist in the built bundle at $PLIST" >&2
+    exit 1
+fi
+if ! /usr/libexec/PlistBuddy -c "print UIBackgroundModes" "$PLIST" 2>/dev/null \
+     | grep -q '^ *audio *$'; then
+    echo "check-ios-bgmode: voice is compiled in but the bundle does not" >&2
+    echo "  declare UIBackgroundModes = audio. Every call would be silenced" >&2
+    echo "  by iOS as soon as the app is backgrounded." >&2
+    echo "  Source template: ios/Info.plist.in (BSFCHAT_IOS_BACKGROUND_MODES)." >&2
+    exit 1
+fi
+]=])
+        add_custom_command(TARGET bsfchat-app POST_BUILD
+            COMMAND /bin/sh "${_ios_bgmode_check}"
+            COMMENT "Checking the iOS bundle declares the audio background mode"
+            VERBATIM
+        )
+    endif()
 endif()
 
 set_source_files_properties(qml/theme/Theme.qml PROPERTIES
