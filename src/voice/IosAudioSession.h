@@ -40,14 +40,19 @@
 //
 // RemoteIO is the raw path: no AEC, no noise suppression, no AGC. So an
 // iOS build that goes through QAudioSource has the SAME speakerphone echo
-// problem the desktop build has (see the open-gap note in VoiceGain.h),
-// and on a phone held at arm's length it is much worse. Closing it needs
-// a native capture path built on VoiceProcessingIO, which is a separate
-// and much larger piece of work — docs/ios-voice.md, section 4.
+// problem the desktop build has, and on a phone held at arm's length it
+// is much worse — confirmed on a real iPhone 16 Pro Max on 2026-09-23,
+// where voice worked in both directions and the far end heard themselves.
 //
-// This file is deliberately only the session layer, because the session
-// layer is correct and useful on its own and is a prerequisite for the
-// native path too.
+// That native path now EXISTS: voice/DarwinVpioBackend.{h,mm}, shared by
+// macOS and iOS. This file stays exactly what it was, and is still a
+// prerequisite rather than a solution — the VPIO unit is opened INTO the
+// session configured here, and an unconfigured session means a unit that
+// cannot record whatever subtype it is built on.
+//
+// The relationship in one line: this file decides what kind of audio the
+// OS thinks we are doing; DarwinVpioBackend decides which audio unit
+// does it. Only the second one cancels echo.
 //
 // Everything here is a no-op off iOS so callers don't need
 // `#ifdef Q_OS_IOS` around their invocations — same rule as
@@ -79,6 +84,19 @@ enum class SessionEvent {
     // one built-in microphone and nothing else — so this notification is
     // the ONLY route-change signal an iOS build gets.
     RouteChanged,
+    // A route change whose reason is specifically
+    // AVAudioSessionRouteChangeReasonOldDeviceUnavailable: the device
+    // that was carrying the audio has gone — headphones pulled out, a
+    // Bluetooth headset switched off or out of range.
+    //
+    // Split out from RouteChanged because the required behaviour is the
+    // opposite. A normal route change is "re-evaluate and carry on"; this
+    // one PAUSES. That is the iOS convention every other app follows, and
+    // it exists for a privacy reason rather than an audio one: falling
+    // back to the built-in speaker means a conversation the user was
+    // having privately is suddenly playing out loud in whatever room they
+    // are standing in. See DarwinVoiceLifecycle.h, rule 3.
+    RouteChangedDeviceLost,
     // The media server died and restarted. Every audio object in the
     // process is now invalid; the session must be reconfigured from
     // scratch and every unit reopened. Rare, but it does happen.

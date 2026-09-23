@@ -63,6 +63,9 @@ Settings::Settings(QObject* parent)
     connect(&bsfchat::AudioDeviceStatus::instance(),
             &bsfchat::AudioDeviceStatus::changed,
             this, &Settings::audioInUseChanged);
+    connect(&bsfchat::AudioDeviceStatus::instance(),
+            &bsfchat::AudioDeviceStatus::voiceAudioStateChanged,
+            this, &Settings::voiceAudioStateChanged);
 
     // Volume settings: migrate once, then hand the live values to the
     // audio pipeline. See core/AudioVolume.h for why a value stored
@@ -520,6 +523,41 @@ QVariantList Settings::audioInputDevices() const {
 QVariantList Settings::audioOutputDevices() const {
     return devicesToList(QMediaDevices::audioOutputs(),
                          QMediaDevices::defaultAudioOutput());
+}
+
+bool Settings::voiceProcessing() const {
+    return m_settings.value("audio/voiceProcessing", true).toBool();
+}
+void Settings::setVoiceProcessing(bool on) {
+    if (voiceProcessing() == on) return;
+    m_settings.setValue("audio/voiceProcessing", on);
+    // Deliberately not pushed anywhere live. Switching the audio backend
+    // mid-call means closing and reopening both directions, which is an
+    // audible gap in the middle of a conversation for a setting whose
+    // whole purpose is to change how the conversation sounds. The worker
+    // reads audio/voiceProcessing in startDevices(); the dialog says it
+    // applies on the next join, exactly as the device selection does.
+    emit voiceProcessingChanged();
+}
+bool Settings::voiceProcessingAvailable() const {
+#if defined(BSFCHAT_DARWIN_VPIO)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool Settings::voiceAudioSuspended() const {
+    return bsfchat::AudioDeviceStatus::instance().voiceAudioSuspended();
+}
+bool Settings::voiceAudioNeedsResume() const {
+    return bsfchat::AudioDeviceStatus::instance().voiceAudioNeedsResume();
+}
+QString Settings::voiceAudioReason() const {
+    return bsfchat::AudioDeviceStatus::instance().voiceAudioReason();
+}
+void Settings::resumeVoiceAudio() {
+    bsfchat::AudioDeviceStatus::instance().requestResume();
 }
 
 QString Settings::audioInputInUse() const {

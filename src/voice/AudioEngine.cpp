@@ -3,12 +3,25 @@
 #include "voice/AudioWorker.h"
 #include "core/AudioDeviceStatus.h"
 #include "core/AudioGainSettings.h"
+#include "voice/IosAudioSession.h"
 
 #include <QAudioDevice>
 #include <QMediaDevices>
 #include <QThread>
 
 using bsfchat::voice::AudioPacketQueue;
+using bsfchat::voice::VoiceAudioAction;
+
+namespace {
+// The one engine that currently owns the platform audio session.
+// IosAudioSession's handler is a plain function pointer with no context
+// argument, and there is never more than one voice session in this
+// process, so a file-static is the honest representation rather than a
+// shortcut. Written and read on the GUI thread only: start() and
+// teardownThread() both run there, and the AVAudioSession observers are
+// registered against [NSOperationQueue mainQueue].
+AudioEngine* g_lifecycleOwner = nullptr;
+} // namespace
 
 AudioEngine::AudioEngine(QObject* parent)
     : QObject(parent)
@@ -35,6 +48,13 @@ AudioEngine::AudioEngine(QObject* parent)
             [this](const QString& userId, float gain) {
                 if (m_worker) m_queue->pushPeerGain(userId, gain);
             });
+
+    // The UI's tap-to-resume. Routed through AudioDeviceStatus for the
+    // same reason the device captions are: the producer and the consumer
+    // have no owner in common.
+    connect(&bsfchat::AudioDeviceStatus::instance(),
+            &bsfchat::AudioDeviceStatus::resumeRequested,
+            this, &AudioEngine::requestAudioResume);
 }
 
 void AudioEngine::applyGainSettings()
@@ -162,6 +182,20 @@ bool AudioEngine::start() {
     const auto& peerGains = bsfchat::AudioGainSettings::instance().peerGains();
     for (auto it = peerGains.cbegin(); it != peerGains.cend(); ++it)
         m_queue->pushPeerGain(it.key(), it.value());
+
+    // Devices are open, so the lifecycle is Running. The Open action is
+    // already done — startDevices() above IS the open — so the return
+    // value is deliberately dropped here and only the state matters.
+    m_lifecycle.onStart();
+    g_lifecycleOwner = this;
+    // Installed per session rather than once at startup, which is a
+    // small departure from the advice in IosAudioSession.h. The reason
+    // it is safe: an interruption that arrives with no session is a
+    // no-op in the state machine anyway (VoiceAudioState::Stopped
+    // answers None to everything), so the window the header warns about
+    // has nothing to lose in it.
+    bsfchat::ios_audio::setEventHandler(&AudioEngine::platformAudioEventTrampoline);
+    publishAudioState();
     return true;
 }
 
@@ -172,6 +206,14 @@ void AudioEngine::stop() {
 
 void AudioEngine::teardownThread() {
     if (!m_thread) return;
+
+    // Before the worker goes away, so a late notification cannot arrive
+    // and try to reopen devices on a pipeline that is being destroyed.
+    if (g_lifecycleOwner == this) {
+        bsfchat::ios_audio::setEventHandler(nullptr);
+        g_lifecycleOwner = nullptr;
+    }
+    m_lifecycle.onStop();
 
     if (m_worker) {
         // Close the devices, kill the pump timer and destroy the Opus
@@ -206,6 +248,113 @@ void AudioEngine::teardownThread() {
     // is gone and be discarded.
     bsfchat::AudioDeviceStatus::instance().setInputInUse(QString());
     bsfchat::AudioDeviceStatus::instance().setOutputInUse(QString());
+    publishAudioState();
+}
+
+// ---------------------------------------------------------------------
+// Platform audio lifecycle
+// ---------------------------------------------------------------------
+
+void AudioEngine::platformAudioEventTrampoline(
+    bsfchat::ios_audio::SessionEvent event)
+{
+    if (g_lifecycleOwner) g_lifecycleOwner->onPlatformAudioEvent(event);
+}
+
+void AudioEngine::onPlatformAudioEvent(bsfchat::ios_audio::SessionEvent event)
+{
+    applyLifecycleAction(m_lifecycle.onEvent(event));
+    publishAudioState();
+}
+
+void AudioEngine::requestAudioResume()
+{
+    applyLifecycleAction(m_lifecycle.onUserResumeRequested());
+    publishAudioState();
+}
+
+void AudioEngine::applyLifecycleAction(VoiceAudioAction action)
+{
+    AudioWorker* worker = m_worker;
+    if (!worker) return;
+
+    switch (action) {
+    case VoiceAudioAction::None:
+    case VoiceAudioAction::Open:
+    case VoiceAudioAction::Close:
+        // Open and Close are performed by start()/stop() themselves;
+        // seeing one here would mean the state machine and the caller
+        // had got out of step.
+        return;
+
+    case VoiceAudioAction::Suspend:
+        // Blocking: the UI is about to claim the microphone is closed,
+        // and it must be closed before that claim is on screen.
+        QMetaObject::invokeMethod(worker, [worker]() {
+            worker->suspendDevices();
+        }, Qt::BlockingQueuedConnection);
+        return;
+
+    case VoiceAudioAction::Resume: {
+        bool ok = false;
+        QMetaObject::invokeMethod(worker, [worker, &ok]() {
+            ok = worker->resumeDevices();
+        }, Qt::BlockingQueuedConnection);
+        if (!ok) m_lifecycle.onResumeFailed();
+        return;
+    }
+
+    case VoiceAudioAction::Rebuild: {
+        // A media-services reset invalidates every audio object in the
+        // process, so partial recovery is not an option: the encoder,
+        // the jitter buffers and the session all go, and are built
+        // again. The peer connections survive — nothing about them is
+        // CoreAudio — so this is still not a disconnect.
+        qWarning("[voice] rebuilding the audio pipeline after a media "
+                 "services reset");
+        bool ok = false;
+        QMetaObject::invokeMethod(worker, [worker, &ok]() {
+            worker->stopDevices();
+            ok = worker->startDevices();
+        }, Qt::BlockingQueuedConnection);
+        if (!ok) {
+            m_lifecycle.onResumeFailed();
+            return;
+        }
+        // The worker forgot the gain settings and per-peer volumes along
+        // with everything else it tore down.
+        applyGainSettings();
+        const auto& peerGains = bsfchat::AudioGainSettings::instance().peerGains();
+        for (auto it = peerGains.cbegin(); it != peerGains.cend(); ++it)
+            m_queue->pushPeerGain(it.key(), it.value());
+        return;
+    }
+
+    case VoiceAudioAction::ReevaluateRoute:
+        // Queued, not blocking: nothing is waiting on the answer, and a
+        // route change can arrive in a burst.
+        QMetaObject::invokeMethod(worker, [worker]() {
+            worker->reevaluateDevices();
+        }, Qt::QueuedConnection);
+        return;
+    }
+}
+
+void AudioEngine::publishAudioState()
+{
+    // Deliberately NOT forcing the user's mute toggle on, which
+    // docs/ios-voice.md §3 suggests. Overwriting a user's own setting
+    // means having to guess later whether to put it back, and guessing
+    // wrong leaves someone muted who does not know why. The requirement
+    // behind the suggestion — that nobody believes they are being heard
+    // when they are not — is met by closing the devices (so nothing is
+    // transmitted), by the mic level falling to zero, and by this
+    // banner saying so in words.
+    bsfchat::AudioDeviceStatus::instance().setVoiceAudioState(
+        !m_lifecycle.audioLive()
+            && m_lifecycle.state() != bsfchat::voice::VoiceAudioState::Stopped,
+        m_lifecycle.needsUserResume(),
+        QString::fromLatin1(m_lifecycle.reason()));
 }
 
 void AudioEngine::setMuted(bool muted) {

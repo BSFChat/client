@@ -26,4 +26,17 @@ void AudioDeviceStatus::setOutputInUse(const QString& description)
     emit changed();
 }
 
+void AudioDeviceStatus::setVoiceAudioState(bool suspended, bool needsResume,
+                                           const QString& reason)
+{
+    if (m_suspended == suspended && m_needsResume == needsResume
+        && m_reason == reason) {
+        return;
+    }
+    m_suspended = suspended;
+    m_needsResume = needsResume;
+    m_reason = reason;
+    emit voiceAudioStateChanged();
+}
+
 } // namespace bsfchat

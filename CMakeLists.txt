@@ -26,12 +26,19 @@ option(GAMECHAT_CLIENT_BUILD_TESTS "Build client tests" ON)
 #
 # What is still genuinely missing rather than merely unbuilt, in the
 # order it bites — full analysis and estimates in docs/ios-voice.md:
-#   1. Echo cancellation. Qt's iOS QAudioSource is RemoteIO, not
-#      VoiceProcessingIO, so there is none. Speakerphone echo on a
-#      handheld phone is the single biggest quality risk.
-#   2. Interruption/route recovery. IosAudioSession.h defines the
-#      events; nothing consumes them yet, so a phone call mid-voice
-#      leaves the session dead until the user rejoins.
+#   1. Echo cancellation — IMPLEMENTED 2026-09-23, NOT YET HEARD.
+#      src/voice/DarwinVpioBackend.mm runs capture and playback through
+#      one kAudioUnitSubType_VoiceProcessingIO unit on both Apple
+#      platforms. It compiles and links for arm64-iphoneos; whether the
+#      far end stops hearing themselves is a device question and is
+#      untested. BSFCHAT_DARWIN_VPIO=OFF, or Settings → Audio → Echo
+#      cancellation, puts it back on the Qt path.
+#   2. Interruption/route recovery — IMPLEMENTED 2026-09-23, NOT YET
+#      TRIGGERED. AudioEngine now consumes IosAudioSession's events
+#      through src/voice/DarwinVoiceLifecycle.h (unit-tested), so a
+#      phone call mid-voice suspends and resumes instead of leaving the
+#      session dead. No notification has actually been observed firing:
+#      a simulator cannot take a phone call.
 #   3. Camera capture. CameraController's non-macOS branch lands on
 #      QCamera with no permission handling and no orientation handling.
 #   4. Video codecs. VideoToolbox is gated to `APPLE AND NOT IOS`
@@ -49,6 +56,25 @@ else()
     # permission (requested at first voice-join via Haptics cousin
     # AudioPermission, wired below).
     option(BSFCHAT_ENABLE_VOICE "Enable voice chat (requires libdatachannel + opus)" ON)
+endif()
+
+# Acoustic echo cancellation on Apple platforms, via a native
+# kAudioUnitSubType_VoiceProcessingIO capture+render backend
+# (src/voice/DarwinVpioBackend.mm). ON by default on macOS and iOS —
+# speakerphone echo is the worst audible defect this client has, and
+# without this the iOS build has no AEC, no noise suppression and no AGC
+# at all, because Qt's iOS QAudioSource is built on RemoteIO.
+#
+# Turning it OFF compiles the backend out entirely and leaves every
+# platform on QAudioSource/QAudioSink. There is also a runtime switch for
+# the same thing (Settings → Audio → Echo cancellation); this flag is the
+# heavier hammer, for a build that must not contain the new code path at
+# all. See src/voice/AudioBackendSelect.h.
+if(APPLE)
+    option(BSFCHAT_DARWIN_VPIO
+           "Use VoiceProcessingIO for voice capture/playback on macOS and iOS" ON)
+else()
+    set(BSFCHAT_DARWIN_VPIO OFF)
 endif()
 
 # On Android, point FetchContent'd libdatachannel at the OpenSSL we
@@ -85,6 +111,27 @@ endif()
 #
 # Static .a here, where Android uses .so — iOS forbids loading a
 # dylib the app did not embed, and the script configures `no-shared`.
+#
+# OPENSSL_USE_STATIC_LIBS is set for EVERY iOS configure, outside the
+# auto-discovery branch below, and that placement is the fix rather than
+# tidiness. libdatachannel has an Apple branch that FORCEs
+# OPENSSL_{SSL,CRYPTO}_LIBRARY to .dylib paths unless this is set, and
+# build-openssl-ios.sh configures `no-shared`, so those dylibs do not
+# exist: find_package then creates no OpenSSL::SSL target and
+# datachannel/datachannel-static fail against a target "not found",
+# naming OpenSSL but not the reason.
+#
+# It used to live inside `if(IOS AND NOT DEFINED OPENSSL_ROOT_DIR)`,
+# which meant it did not run for the one caller that matters —
+# scripts/build-ios.sh passes -DOPENSSL_ROOT_DIR explicitly (it has to;
+# under the iOS toolchain find_library is confined to the sysroot), so
+# the script skipped the branch and every voice=ON configure through it
+# failed. The first iOS voice build was configured by hand with the flag
+# on the command line, which is why the gap was not visible.
+if(IOS)
+    set(OPENSSL_USE_STATIC_LIBS ON CACHE BOOL "iOS: no shared OpenSSL" FORCE)
+endif()
+
 if(IOS AND NOT DEFINED OPENSSL_ROOT_DIR)
     if(CMAKE_OSX_SYSROOT MATCHES "iphonesimulator")
         set(_bsfchat_ios_ssl_target "simulator")
@@ -95,14 +142,8 @@ if(IOS AND NOT DEFINED OPENSSL_ROOT_DIR)
         "${CMAKE_CURRENT_SOURCE_DIR}/deps/openssl-ios-${_bsfchat_ios_ssl_target}")
     if(EXISTS "${_bsfchat_ios_ssl}/lib/libcrypto.a")
         set(OPENSSL_ROOT_DIR    "${_bsfchat_ios_ssl}" CACHE PATH "iOS OpenSSL root")
-        # REQUIRED on iOS, and the reason the first voice configure failed.
-        # libdatachannel has an Apple branch that FORCEs
-        # OPENSSL_{SSL,CRYPTO}_LIBRARY to .dylib paths unless this is set
-        # — and build-openssl-ios.sh configures `no-shared`, so those
-        # dylibs do not exist. find_package then creates no OpenSSL::SSL
-        # target and datachannel/datachannel-static fail to link against
-        # a target "not found", naming OpenSSL but not the reason.
-        set(OPENSSL_USE_STATIC_LIBS ON CACHE BOOL "iOS: no shared OpenSSL" FORCE)
+        # OPENSSL_USE_STATIC_LIBS is set above, for every iOS configure
+        # rather than only this branch. See the comment there.
         set(OPENSSL_INCLUDE_DIR "${_bsfchat_ios_ssl}/include" CACHE PATH "")
         set(OPENSSL_CRYPTO_LIBRARY
             "${_bsfchat_ios_ssl}/lib/libcrypto.a" CACHE FILEPATH "")
@@ -249,6 +290,13 @@ if(BSFCHAT_ENABLE_VOICE)
         # and AudioPacketQueue is the handoff between them.
         src/voice/AudioEngine.cpp
         src/voice/AudioWorker.cpp
+        # The seam between AudioWorker's frame arithmetic and the thing
+        # actually talking to the hardware (src/voice/AudioBackend.h).
+        # QtAudioBackend is the QAudioSource/QAudioSink path every
+        # platform has always used and is compiled everywhere, including
+        # on Apple, where it is the fallback when VoiceProcessingIO is
+        # turned off or fails to start.
+        src/voice/QtAudioBackend.cpp
         src/voice/AudioPacketQueue.cpp
         src/voice/AudioMixer.cpp
         # Capture AGC + look-ahead limiter (both directions). Pure DSP,
@@ -310,6 +358,33 @@ if(BSFCHAT_ENABLE_VOICE)
         $<$<BOOL:${IOS}>:src/voice/IosAudioSession.mm>
     )
     target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_VOICE_ENABLED)
+
+    # The build-flag half of the echo-cancellation off switch; the other
+    # half is the user setting (audio/voiceProcessing, Settings.h). Both
+    # exist because this is new code in the most user-visible part of the
+    # app AND because the processing itself is a preference — see
+    # src/voice/AudioBackendSelect.h for the full argument.
+    if(BSFCHAT_DARWIN_VPIO AND APPLE)
+        # Acoustic echo cancellation for BOTH Apple platforms, on one
+        # kAudioUnitSubType_VoiceProcessingIO audio unit. Not iOS-only
+        # and deliberately so: the desktop macOS AEC gap and the iOS one
+        # are the same gap (VoiceGain.h records the desktop half), the
+        # audio unit subtype exists on both, and one backend closes both.
+        #
+        # Added here rather than as a $<PLATFORM_ID:Darwin> generator
+        # expression in the source list above, because PLATFORM_ID
+        # compares against CMAKE_SYSTEM_NAME and that is "iOS" on iOS,
+        # not "Darwin" — so the generator-expression spelling silently
+        # skipped the file on the one platform whose echo is confirmed,
+        # and only the linker noticed. `APPLE` covers both.
+        target_sources(bsfchat-app PRIVATE src/voice/DarwinVpioBackend.mm)
+        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_DARWIN_VPIO)
+        # AudioToolbox carries AudioUnit, AudioConverter and (on macOS)
+        # the CoreAudio hardware object API the device lookup uses.
+        target_link_libraries(bsfchat-app PRIVATE
+            "-framework AudioToolbox" "-framework CoreAudio")
+    endif()
+
     if(IOS)
         # AVFoundation carries AVAudioSession (via AVFAudio) and the
         # AVCaptureDevice camera APIs. AudioToolbox is not needed by

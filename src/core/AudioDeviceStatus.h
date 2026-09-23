@@ -40,15 +40,47 @@ public:
     void setInputInUse(const QString& description);
     void setOutputInUse(const QString& description);
 
+    // ---- interruption state (Apple platforms) ----
+    //
+    // Whether the voice pipeline's devices are currently DOWN for a
+    // reason outside the user's control: an incoming phone call, Siri,
+    // headphones pulled out, the media server restarting. The call
+    // itself is still up — the peer connections, the roster and the
+    // signalling are untouched — but nothing is being captured or
+    // played, and the user has to be told, because the failure mode
+    // this exists to prevent is someone talking into a microphone that
+    // is not listening.
+    bool voiceAudioSuspended() const { return m_suspended; }
+    // Whether it will come back by itself. False during a phone call
+    // (it resumes when the call ends); true when the OS declined to
+    // grant resumption or the route went away, in which case the UI
+    // must offer something to tap. See voice/DarwinVoiceLifecycle.h.
+    bool voiceAudioNeedsResume() const { return m_needsResume; }
+    QString voiceAudioReason() const { return m_reason; }
+    void setVoiceAudioState(bool suspended, bool needsResume,
+                            const QString& reason);
+
+    // The UI asking for the audio back. AudioEngine connects to this;
+    // nothing happens if there is no voice session.
+    void requestResume() { emit resumeRequested(); }
+
 signals:
     // One signal for both, because the only consumer re-reads both.
     void changed();
+    // Suspension state changed. Separate from changed() because the
+    // consumers differ: changed() drives a caption in a settings dialog,
+    // this drives a banner over the call.
+    void voiceAudioStateChanged();
+    void resumeRequested();
 
 private:
     AudioDeviceStatus() = default;
 
     QString m_input;
     QString m_output;
+    bool m_suspended = false;
+    bool m_needsResume = false;
+    QString m_reason;
 };
 
 } // namespace bsfchat

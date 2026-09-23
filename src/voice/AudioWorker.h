@@ -15,8 +15,10 @@
 // Device affinity
 // ---------------
 // QAudioSource and QAudioSink must be created and driven on one thread;
-// Qt does not diagnose a violation, it just misbehaves quietly. Both
-// are constructed inside startDevices() and destroyed inside
+// Qt does not diagnose a violation, it just misbehaves quietly. The
+// same is true of the CoreAudio alternative, so the rule did not change
+// when the devices moved behind IAudioBackend (voice/AudioBackend.h):
+// the backend is constructed inside startDevices() and destroyed inside
 // stopDevices(), and AudioEngine invokes each of those with a
 // BlockingQueuedConnection so they always execute on the audio thread.
 // The pump QTimer is heap-allocated for the same reason: a QTimer must
@@ -77,12 +79,10 @@
 
 #include "voice/AudioPacketQueue.h"
 #include "voice/AudioDevicePolicy.h"
+#include "voice/AudioBackend.h"
 #include "voice/VoiceGain.h"
 
 class AudioMixer;
-class QAudioSource;
-class QAudioSink;
-class QIODevice;
 class QTimer;
 
 namespace bsfchat::voice { class JitterBuffer; }
@@ -136,6 +136,12 @@ public:
     // piled up at the front.
     static constexpr int kCaptureCompactBytes = 64 * kFrameBytes;
 
+    // How much one readCapture() pull asks the backend for. Eight
+    // frames (160 ms) is more than any backend will have waiting; the
+    // drain loops until the backend says it has nothing, so this is a
+    // buffer size rather than a limit.
+    static constexpr int kCaptureReadChunkBytes = 8 * kFrameBytes;
+
     // Emit peerLevelChanged once per this many rendered output frames.
     // Four frames = 80ms = 12.5Hz, which is well past what a pulsing
     // speaking ring can express and roughly the rate a display can show
@@ -172,16 +178,20 @@ public:
     // only the routing. If a real Android sender turns out to be as quiet
     // as desktop was, this is the switch to revisit.
     //
-    // iOS is deliberately NOT in this list, and that is a verified fact
-    // rather than a pending question. Qt's iOS QAudioSource is built on
-    // kAudioUnitSubType_RemoteIO, not kAudioUnitSubType_VoiceProcessingIO
-    // — QtMultimedia 6.10.3's only AudioComponentDescription reads
-    // 'auou'/'rioc'/'appl' — so iOS gets NO platform AGC, NO noise
-    // suppression and NO echo cancellation, whatever AVAudioSession mode
-    // is set (see voice/IosAudioSession.h). The software SpeechAgc must
-    // therefore keep running there, exactly as on desktop. This flips to
-    // true only if and when iOS grows a native VoiceProcessingIO capture
-    // path — docs/ios-voice.md, section 4.
+    // THIS IS NOW ONLY THE DEFAULT, not the answer. The answer is
+    // m_platformVoiceProcessing, which the backend sets when it opens,
+    // because on macOS and iOS it depends on WHICH backend opened:
+    // DarwinVpioBackend runs the OS's voice processing and reports true;
+    // QtAudioBackend on the same machine reports false. A compile-time
+    // constant cannot express a user-facing setting.
+    //
+    // The old note about iOS still holds for the Qt path and is worth
+    // keeping, because it is the reason the VPIO backend exists: Qt's
+    // iOS QAudioSource is built on kAudioUnitSubType_RemoteIO, not
+    // kAudioUnitSubType_VoiceProcessingIO — QtMultimedia 6.10.3's only
+    // AudioComponentDescription reads 'auou'/'rioc'/'appl' — so an iOS
+    // build on the Qt backend gets NO platform AGC, NO noise suppression
+    // and NO echo cancellation, whatever AVAudioSession mode is set.
 #ifdef Q_OS_ANDROID
     static constexpr bool kPlatformVoiceProcessing = true;
 #else
@@ -227,6 +237,28 @@ public:
     // encoder, and all per-peer jitter buffers. Idempotent.
     void stopDevices();
 
+    // ---- interruption recovery (AudioEngine drives these) ----
+    //
+    // Closes both directions and LEAVES EVERYTHING ELSE ALIVE: the Opus
+    // encoder, every peer's jitter buffer and its adaptive playout
+    // target, the pump timer, the peer connections. An incoming phone
+    // call is not a reason to be dropped from the call, and rebuilding
+    // the pipeline on the way back would be an audible restart on top of
+    // the interruption. Idempotent; a no-op when not started.
+    void suspendDevices();
+    // Re-enters the platform voice mode and reopens both directions
+    // through the ordinary device policy, so the route the OS left us on
+    // is the one we come back on. Returns false when the session could
+    // not be re-activated — on iOS that means the user is still on a
+    // phone call and we must stay down.
+    bool resumeDevices();
+    // Re-run the device policy for both directions without the
+    // debounce. For the iOS route-change notification, which is the only
+    // route signal that platform has (QMediaDevices does not fire).
+    void reevaluateDevices();
+    // Whether the devices are open right now. False while suspended.
+    bool devicesOpen() const;
+
     enum class Direction { Input, Output };
 
     // Hands the worker the GUI thread's view of the system's audio
@@ -260,7 +292,11 @@ signals:
     void deviceInUseChanged(bool input, const QString& description);
 
 private:
-    void onMicDataReady();
+    // Pulls everything the backend has captured and encodes whole
+    // frames out of it. Called from the backend's ready notification on
+    // a push-shaped backend (Qt), and from the pump on a polled one
+    // (VPIO) — see IAudioBackend::capturePolled().
+    void drainCapture();
     // Safety pump. How *much* it writes is decided by the sink's
     // bytesFree(), not by the timer.
     void pumpPlayback();
@@ -294,6 +330,17 @@ private:
     void closeSource();
     void openSink(const QAudioDevice& device);
     void closeSink();
+    // Builds m_backend from the user's setting and the platform, and
+    // wires its capture notification. Called by startDevices() and by
+    // demoteBackend().
+    void createBackend();
+    // A VPIO unit failed to start. Swap in the Qt backend for the rest
+    // of the process and reopen whatever was open. Returns true if the
+    // swap happened (so the caller can retry its open), false if we were
+    // already on Qt and there is nothing left to fall back to.
+    // `retrying` is the direction the caller is about to reopen itself;
+    // the other one is carried across by demoteBackend().
+    bool demoteBackend(const QString& reason, Direction retrying);
     void setInUse(Direction dir, const QString& id, const QString& description);
 
     std::shared_ptr<bsfchat::voice::AudioPacketQueue> m_queue;
@@ -301,8 +348,17 @@ private:
     // per-pump drain does not allocate.
     std::deque<bsfchat::voice::AudioPacketQueue::Item> m_inbox;
 
-    QAudioSource* m_audioSource = nullptr;
-    QIODevice* m_captureDevice = nullptr;
+    // Capture and playback, behind the seam: QAudioSource/QAudioSink on
+    // Windows, Linux and Android, one VoiceProcessingIO audio unit on
+    // macOS and iOS. See voice/AudioBackend.h.
+    std::unique_ptr<bsfchat::voice::IAudioBackend> m_backend;
+    // What the backend that is actually open says about OS-side voice
+    // processing. Seeded from kPlatformVoiceProcessing so a worker with
+    // no backend yet behaves as it always did.
+    bool m_platformVoiceProcessing = kPlatformVoiceProcessing;
+    // Scratch for one readCapture() pull. A member so the capture drain
+    // does not allocate.
+    QByteArray m_captureChunk;
     QByteArray m_captureBuffer;
     // Read cursor into m_captureBuffer. Consuming a frame bumps this
     // index instead of memmove'ing the whole buffer down 1920 bytes
@@ -335,8 +391,6 @@ private:
     int64_t m_playbackLimitedFrames = 0;
     bool m_levelSummaryLogged = false;
 
-    QAudioSink* m_audioSink = nullptr;
-    QIODevice* m_playbackDevice = nullptr;
     QTimer* m_playbackTimer = nullptr;
     // Bytes handed to the mixer but not yet accepted by the device.
     QByteArray m_playbackPending;

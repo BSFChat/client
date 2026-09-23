@@ -515,6 +515,26 @@ Popup {
                         }
                     }
 
+                    // Echo cancellation. macOS and iOS only — everywhere else
+                    // the switch would be a switch that does nothing, which is
+                    // the thing this page stopped shipping (see the AGC row
+                    // above).
+                    SettingRow {
+                        title: "Echo cancellation"
+                        description: "Lets the system remove your speakers from what your microphone picks up, so others do not hear themselves. Also applies noise suppression and gain control. Turn off if you use headphones and want your microphone untouched. Applies the next time you join voice."
+                        visible: appSettings.voiceProcessingAvailable
+                        ThemedSwitch {
+                            checked: appSettings.voiceProcessing
+                            // Re-bind after the user's write (D-C1).
+                            onToggled: {
+                                appSettings.voiceProcessing = checked;
+                                checked = Qt.binding(function() {
+                                    return appSettings.voiceProcessing;
+                                });
+                            }
+                        }
+                    }
+
                     SettingRow {
                         title: "Input volume"
                         description: "How loud you are to others, applied after automatic gain control. 100% leaves it unchanged."

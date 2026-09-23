@@ -1,12 +1,17 @@
 // AVAudioSession configuration for voice. See IosAudioSession.h for why
 // this exists and what it deliberately does NOT do (echo cancellation).
 //
-// *** NOT YET COMPILED BY ANY BUILD. ***
-// CMakeLists.txt adds this file only under `if(IOS AND BSFCHAT_ENABLE_VOICE)`,
-// and BSFCHAT_ENABLE_VOICE still defaults OFF on iOS. Nothing here has been
-// through a compiler, let alone a device. Treat every line as a reviewed
-// proposal, not as working code — docs/ios-voice.md is explicit about which
-// parts carry which risk.
+// Compiled (2026-09-23, -DBSFCHAT_ENABLE_VOICE=ON for arm64-iphoneos) and
+// RUN on a real iPhone 16 Pro Max the same day: voice calls carry audio in
+// both directions and the microphone permission prompt appears at first
+// join, which means the category/mode/activation here are doing their job.
+//
+// What is still unobserved is everything on the recovery path. Nothing in
+// this file's interruption, route-change or media-services-reset handling
+// has been seen to fire — a simulator cannot take a phone call, and the
+// device session did not have one. The events are now CONSUMED (they were
+// not before: see AudioEngine and voice/DarwinVoiceLifecycle.h), so the
+// policy is testable; the notifications that drive it are not.
 //
 // Written without ARC. This project does not pass -fobjc-arc (nothing in
 // CMakeLists.txt or the CI workflow sets CLANG_ENABLE_OBJC_ARC, and
@@ -88,9 +93,16 @@ void installObservers()
                              queue:main
                         usingBlock:^(NSNotification* note) {
             NSNumber* reason = note.userInfo[AVAudioSessionRouteChangeReasonKey];
-            qCInfo(logIosAudio) << "route changed, reason="
-                               << (reason ? reason.unsignedIntegerValue : 0);
-            emitEvent(SessionEvent::RouteChanged);
+            const NSUInteger code = reason ? reason.unsignedIntegerValue : 0;
+            qCInfo(logIosAudio) << "route changed, reason=" << code;
+            // OldDeviceUnavailable is the one reason with different
+            // required behaviour — the device carrying the audio is
+            // gone, and iOS convention is to pause rather than fall
+            // back to the speaker. See the header and
+            // DarwinVoiceLifecycle.h.
+            emitEvent(code == AVAudioSessionRouteChangeReasonOldDeviceUnavailable
+                          ? SessionEvent::RouteChangedDeviceLost
+                          : SessionEvent::RouteChanged);
         }]));
 
     g_resetToken = const_cast<void*>(CFBridgingRetain(
