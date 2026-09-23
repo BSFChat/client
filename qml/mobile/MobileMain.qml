@@ -100,44 +100,27 @@ ApplicationWindow {
         return Math.ceil(Math.min(kr.height * scale, root.height * 0.7));
     }
 
-    // What the layout actually applies, and the subtraction that the
-    // first cut of this file got wrong.
+    // How far the layout still has to move after everything else has
+    // already moved it. Three terms, all measured, which is why there is
+    // no per-platform branch here any more:
     //
-    // Two things move the composer out of the keyboard's way and only one
-    // of them is ours:
+    //   windowShrink    the window got shorter — Android's adjustResize
+    //                   does this, and on iOS MobileKeyboard does it by
+    //                   hand for the same reason.
+    //   platformScroll  the iOS plugin translated the whole scene up
+    //                   instead. Only happens now if the window resize
+    //                   was refused; see src/core/MobileKeyboard.h.
+    //   the remainder   is ours, and on a platform that does neither it
+    //                   is the whole keyboard.
     //
-    //   Android  windowSoftInputMode=adjustResize shrinks the window, so
-    //            the layout is already clear and our push must be 0.
-    //   iOS      QIOSInputContext translates the WHOLE Qt scene up — see
-    //            src/core/MobileKeyboard.h — so our push must be the
-    //            keyboard height minus however far it has already gone.
-    //
-    // Before the subtraction, iOS applied both: on an iPhone 16 Pro Max
-    // the composer floated ~250pt above the keyboard with a void beneath
-    // it, and because the platform moves the scene rather than the
-    // window, the header went off the top of the screen and the first
-    // message row rendered under the status clock.
-    //
-    // settle() below asks the platform to recompute. On the device it did
-    // not stand down — it scrolled the full keyboard height and kept it —
-    // so today this subtraction resolves to a push of zero and the
-    // platform owns keyboard avoidance. That is a deliberate, measured
-    // choice and not a silent one: src/core/MobileKeyboard.h sets out why
-    // the plugin's containment test cannot be satisfied from out here
-    // (it compares Qt window coordinates against UIKit screen
-    // coordinates, and the keyboard rectangle it uses has the scroll
-    // already baked into it).
-    //
-    // The subtraction stays because it is what makes that fallback
-    // automatic rather than hardcoded: if a future Qt stops scrolling,
-    // the samples go to zero and the shell takes the push back with no
-    // edit here. MobileKeyboard credits the platform with the scroll from
-    // the instant the keyboard appears, so there is no frame where both
-    // are applied — that frame was the composer floating over a void.
+    // Getting this wrong in both directions is what the device caught:
+    // first a push added on top of the platform's scroll, which left the
+    // composer a whole keyboard height in the air over a void, and then
+    // one frame of the same before the correction landed.
     readonly property int keyboardPush:
-        Qt.platform.os === "android"
-            ? 0
-            : Math.max(0, keyboardHeight - mobileKeyboard.platformScroll)
+        Math.max(0, keyboardHeight
+                    - mobileKeyboard.platformScroll
+                    - mobileKeyboard.windowShrink)
 
     // The gap between the bottom of the content and the bottom of the
     // window: the keyboard when it is up, the home indicator / gesture
