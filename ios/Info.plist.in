@@ -76,8 +76,14 @@
 	     string has to name the feature and why it needs the hardware.
 	     Each one is also the switch that makes Qt link the matching
 	     permission plugin; see the note at the top of this file. -->
+	<!-- The background clause is not padding. With UIBackgroundModes =
+	     audio the microphone genuinely keeps running after the user
+	     leaves the app, and a usage string that implies otherwise is
+	     inaccurate in exactly the way App Review looks for. It also
+	     answers the obvious reviewer question about why the background
+	     mode is there at all. -->
 	<key>NSMicrophoneUsageDescription</key>
-	<string>BSFChat uses your microphone so other people in a voice channel can hear you speak. Your microphone is only active while you are connected to a voice channel, and muting stops it.</string>
+	<string>BSFChat uses your microphone so other people in a voice channel can hear you speak. Your microphone is only active while you are connected to a voice channel — including while BSFChat is in the background, so the call continues when you switch apps — and muting stops it.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>BSFChat uses your camera so you can turn your video on in a voice channel. The camera is only active while you choose to share video.</string>
 
@@ -174,24 +180,32 @@
 		</dict>
 	</array>
 
-	<!-- ===== Deliberately absent, with reasons =====
+	<!-- ===== Background modes =====
+	     Substituted by CMakeLists.txt, and EMPTY unless
+	     BSFCHAT_ENABLE_VOICE is on — because the honesty of this key is
+	     what App Review checks. "audio" is legitimate only for an app
+	     that really does keep capturing and playing while backgrounded;
+	     declaring it in a build with voice compiled out is an unused
+	     background mode, which is itself a rejection reason. Conversely,
+	     with voice compiled in the key is MANDATORY: without it iOS
+	     silences the session the moment the app leaves the foreground,
+	     so every call would die when the user switched apps or locked
+	     the screen.
 
-	     UIBackgroundModes: NOT declared, and this is a considered "no",
-	     not an oversight.
-	       * "voip" is rejected on sight for an app that never registers
-	         a PKPushRegistry. There is no PushKit, no CallKit and no APNs
-	         anywhere in the client; notifications are local-only
-	         (src/core/NotificationManager.h).
-	       * "audio" is only legitimate for an app that actually keeps
-	         playing or capturing while backgrounded. Voice is compiled
-	         out of the iOS target today (BSFCHAT_ENABLE_VOICE=OFF in
-	         CMakeLists.txt), so declaring it would be an unused
-	         background mode — itself a rejection reason.
-	     When voice is enabled for iOS, add exactly <array><string>audio
-	     </string></array> here, together with an AVAudioSession category
-	     of playAndRecord — nothing in the tree configures AVAudioSession
-	     today, so a backgrounded call would be silenced by the OS. Only
-	     add "voip" alongside a real PushKit + CallKit integration.
+	     What makes the declaration true rather than merely present is
+	     src/voice/IosAudioSession.mm, which sets the AVAudioSession
+	     category to playAndRecord with mode voiceChat. Those two things
+	     ship together or not at all — a background mode with no
+	     configured session is a rejection, and a configured session with
+	     no background mode is a call that dies on backgrounding.
+
+	     "voip" is never emitted. It requires a real PKPushRegistry +
+	     CallKit integration and is rejected on sight without one; there
+	     is no PushKit, no CallKit and no APNs anywhere in this client,
+	     and notifications are local-only
+	     (src/core/NotificationManager.h). -->
+@BSFCHAT_IOS_BACKGROUND_MODES@
+	<!-- ===== Deliberately absent, with reasons =====
 
 	     NSPhotoLibraryUsageDescription / NSPhotoLibraryAddUsageDescription:
 	     not declared because nothing touches the photo library. Both

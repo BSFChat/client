@@ -2,6 +2,7 @@
 #include "voice/AudioMixer.h"
 #include "voice/JitterBuffer.h"
 #include "voice/AndroidAudioRouting.h"
+#include "voice/IosAudioSession.h"
 #include "core/AppProfile.h"
 
 #include <QAudioFormat>
@@ -58,6 +59,20 @@ bool AudioWorker::startDevices() {
     // open doesn't re-plumb the routing graph. No-op off Android.
     bsfchat::audio_routing::enterVoiceMode();
 
+    // Same rule, same reason, on iOS: AVAudioSession's category and mode
+    // decide which signal path the audio unit is built on, so they have to
+    // be set BEFORE QAudioSource opens. Unlike Android this one can fail in
+    // a way we must not push past — the default iOS category (SoloAmbient)
+    // does not permit recording at all, so a session we failed to configure
+    // means guaranteed silence rather than degraded audio, and joining
+    // anyway would reproduce the V-H4 ghost-member bug on a new platform.
+    // No-op returning true off iOS.
+    if (!bsfchat::ios_audio::enterVoiceMode()) {
+        qWarning("[voice] Failed to configure the iOS audio session");
+        bsfchat::audio_routing::exitVoiceMode();
+        return false;
+    }
+
     // Initialize Opus encoder
     int err;
     m_encoder = opus_encoder_create(kSampleRate, kChannels, OPUS_APPLICATION_VOIP, &err);
@@ -65,6 +80,7 @@ bool AudioWorker::startDevices() {
         qWarning("Failed to create Opus encoder: %s", opus_strerror(err));
         m_encoder = nullptr;
         bsfchat::audio_routing::exitVoiceMode();
+        bsfchat::ios_audio::exitVoiceMode();
         return false;
     }
     opus_encoder_ctl(m_encoder, OPUS_SET_BITRATE(32000));
@@ -222,6 +238,9 @@ void AudioWorker::stopDevices() {
     // Hand VoIP mode back to the OS. Balanced against enterVoiceMode()
     // in startDevices().
     bsfchat::audio_routing::exitVoiceMode();
+    // …and the iOS session, which additionally un-ducks whatever the join
+    // interrupted (NotifyOthersOnDeactivation). No-op off iOS.
+    bsfchat::ios_audio::exitVoiceMode();
 }
 
 void AudioWorker::onMicDataReady() {
