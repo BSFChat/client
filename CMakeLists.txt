@@ -17,12 +17,21 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(GAMECHAT_CLIENT_BUILD_TESTS "Build client tests" ON)
-# Voice defaults OFF on iOS. It now COMPILES — the whole stack
-# (libdatachannel, opus, usrsctp, the RTP/pacing layer, VideoToolbox)
-# cross-compiles for arm64-iphoneos and links into a 70 MB .app, built
-# 2026-09-23 with -DBSFCHAT_ENABLE_VOICE=ON. The default stays OFF
-# because compiling is not working: nothing on this path has been RUN
-# on a device, and the gaps below are runtime gaps.
+# Voice is ON for iOS as of 2026-09-23, when it was built, installed and
+# USED on a real iPhone 16 Pro Max: a voice channel carried audio both
+# ways, and the microphone prompt appeared at first join, which is the
+# behaviour Apple wants. It was OFF before that only because nothing on
+# the path had ever been compiled, let alone run.
+#
+# It is ON rather than passed by CI because the product decision is that
+# voice ships in the first iOS release: a default that disagrees with
+# the shipping configuration means the thing under test is not the thing
+# released, and the first TestFlight build would have been a text-only
+# client while the listing described a voice app.
+#
+# Known and NOT fixed by turning this on:
+#   * Echo cancellation. Confirmed echoey on speakerphone on a real
+#     device. Tracked separately; see docs/ios-voice.md.
 #
 # What is still genuinely missing rather than merely unbuilt, in the
 # order it bites — full analysis and estimates in docs/ios-voice.md:
@@ -46,7 +55,7 @@ option(GAMECHAT_CLIENT_BUILD_TESTS "Build client tests" ON)
 #      advertises no codecs at all and peers fall back to the legacy
 #      JPEG path.
 if(IOS)
-    option(BSFCHAT_ENABLE_VOICE "Enable voice chat (requires libdatachannel + opus)" OFF)
+    option(BSFCHAT_ENABLE_VOICE "Enable voice chat (requires libdatachannel + opus)" ON)
 else()
     # Android: voice builds against our NDK-compiled OpenSSL (see
     # deps/openssl-android-arm64). libdatachannel + opus are pulled
