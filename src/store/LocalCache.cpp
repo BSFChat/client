@@ -241,7 +241,18 @@ bool LocalCache::ensureSchema()
                             "  type TEXT NOT NULL,"
                             "  state_key TEXT NOT NULL DEFAULT '',"
                             "  json TEXT NOT NULL,"
-                            "  PRIMARY KEY (room_id, type, state_key))") }) {
+                            "  PRIMARY KEY (room_id, type, state_key))"),
+             // The newest slice of each room's TIMELINE, so a phone that is
+             // killed every time it goes to the background does not come
+             // back with every channel cold. `ordinal` is position within
+             // the stored window, 0 = oldest, and it is what makes the
+             // window come back in the order it went in — event ids carry
+             // no order and origin_server_ts is a clock we do not control.
+             QStringLiteral("CREATE TABLE IF NOT EXISTS timeline ("
+                            "  room_id TEXT NOT NULL,"
+                            "  ordinal INTEGER NOT NULL,"
+                            "  json TEXT NOT NULL,"
+                            "  PRIMARY KEY (room_id, ordinal))") }) {
         if (!q.exec(stmt)) {
             qWarning() << "LocalCache: schema create failed:" << q.lastError().text();
             return false;
@@ -342,6 +353,7 @@ void LocalCache::clearAll()
     QSqlQuery q(QSqlDatabase::database(m_connectionName, false));
     for (const auto& stmt : { QStringLiteral("DELETE FROM room_state"),
                               QStringLiteral("DELETE FROM rooms"),
+                              QStringLiteral("DELETE FROM timeline"),
                               QStringLiteral("DELETE FROM meta") }) {
         if (!q.exec(stmt)) qWarning() << "LocalCache: clear failed:" << q.lastError().text();
     }
@@ -509,4 +521,89 @@ bool LocalCache::buildHydrationSync(bsfchat::SyncResponse& out) const
     // advanced the sync position.
     out.next_batch.clear();
     return true;
+}
+
+void LocalCache::recordTimeline(const QString& roomId,
+                                const QVector<bsfchat::RoomEvent>& chronological)
+{
+    if (!m_open || roomId.isEmpty()) return;
+
+    auto db = QSqlDatabase::database(m_connectionName, false);
+    const bool inTransaction = db.transaction();
+
+    QSqlQuery del(db);
+    del.prepare(QStringLiteral("DELETE FROM timeline WHERE room_id = ?"));
+    del.addBindValue(roomId);
+    if (!del.exec()) {
+        qWarning() << "LocalCache: timeline clear failed:" << del.lastError().text();
+        if (inTransaction) db.rollback();
+        return;
+    }
+
+    // Whole-window replace rather than an upsert per event. A window is a
+    // contiguous slice and its ordinals shift every time the front is
+    // trimmed, so merging into the old rows would leave a mixture of two
+    // slices under one numbering — which is exactly the reordering the
+    // ordinal exists to prevent.
+    QSqlQuery ins(db);
+    ins.prepare(QStringLiteral(
+        "INSERT INTO timeline (room_id, ordinal, json) VALUES (?, ?, ?)"));
+
+    // The tail of the window, not all of it: this runs on a room switch, and
+    // the point is a fast repaint on the next launch, not a full archive.
+    const int total = static_cast<int>(chronological.size());
+    const int from = total > kPersistedEventsPerRoom ? total - kPersistedEventsPerRoom : 0;
+    int ordinal = 0;
+    bool ok = true;
+    for (int i = from; i < total; ++i) {
+        nlohmann::json j;
+        try {
+            bsfchat::to_json(j, chronological[i]);
+        } catch (const std::exception& e) {
+            // One unserialisable event must not cost the whole window; skip
+            // it and keep the rest in order.
+            qWarning() << "LocalCache: skipping unserialisable timeline event:" << e.what();
+            continue;
+        }
+        ins.bindValue(0, roomId);
+        ins.bindValue(1, ordinal++);
+        ins.bindValue(2, QString::fromStdString(j.dump()));
+        if (!ins.exec()) { ok = false; break; }
+    }
+
+    if (!ok) {
+        qWarning() << "LocalCache: timeline write failed:" << ins.lastError().text();
+        if (inTransaction) db.rollback();
+        return;
+    }
+    if (inTransaction && !db.commit()) {
+        qWarning() << "LocalCache: timeline commit failed:" << db.lastError().text();
+        db.rollback();
+    }
+}
+
+QHash<QString, QVector<bsfchat::RoomEvent>> LocalCache::timelines() const
+{
+    QHash<QString, QVector<bsfchat::RoomEvent>> out;
+    if (!m_open) return out;
+
+    QSqlQuery q(QSqlDatabase::database(m_connectionName, false));
+    if (!q.exec(QStringLiteral(
+            "SELECT room_id, json FROM timeline ORDER BY room_id, ordinal"))) {
+        qWarning() << "LocalCache: timeline read failed:" << q.lastError().text();
+        return out;
+    }
+    while (q.next()) {
+        bsfchat::RoomEvent ev;
+        try {
+            auto j = nlohmann::json::parse(q.value(1).toString().toStdString());
+            bsfchat::from_json(j, ev);
+        } catch (const std::exception&) {
+            // Fail soft, one row at a time: a corrupt event costs a gap in
+            // one room's warm start, not the cache.
+            continue;
+        }
+        out[q.value(0).toString()].append(ev);
+    }
+    return out;
 }

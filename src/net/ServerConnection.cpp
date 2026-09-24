@@ -18,12 +18,14 @@
 #include "util/MentionBadge.h"
 #include "util/ModerationScope.h"
 #include "util/PermissionMath.h"
+#include "util/TimelineTrace.h"
 #include "identity/IdentityClient.h"
 #include "identity/OidcRequest.h"
 #include "core/MediaDownloader.h"
 #include "core/Settings.h"
 #include "core/ReadState.h"
 #include "store/LocalCache.h"
+#include "store/RoomTimelineCache.h"
 #include "voice/CallSignalCodec.h"
 #include "voice/VoiceRosterReconcile.h"
 #include "voice/VoiceTransportSelector.h"
@@ -58,6 +60,23 @@
 #include <QCoreApplication>
 #include <QPermissions>
 #endif
+
+// HistoryFillStop as a word, for the channel-switch trace. Not a QMetaEnum:
+// util/HistoryFill.h is header-only and Qt-Core-free on purpose, so that its
+// rules can be tested without a model, a network or an event loop, and giving
+// it a Q_ENUM would end that.
+static const char* historyStopName(bsfchat::client::HistoryFillStop stop)
+{
+    using bsfchat::client::HistoryFillStop;
+    switch (stop) {
+    case HistoryFillStop::None:        return "None";
+    case HistoryFillStop::Filled:      return "Filled";
+    case HistoryFillStop::StartOfRoom: return "StartOfRoom";
+    case HistoryFillStop::PageCap:     return "PageCap";
+    case HistoryFillStop::Failed:      return "Failed";
+    }
+    return "?";
+}
 
 // @localpart:host → localpart. Anything that is not an mxid comes back
 // unchanged, so this is safe on a string that is already a name.
@@ -549,6 +568,12 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     // Connect room members response
     connect(m_client, &MatrixClient::roomMembersResult, this, [this](const QString& roomId, const QJsonArray& members) {
         if (roomId != m_activeRoomId) return;
+        if (m_membersTimer.isValid()) {
+            qCInfo(logTimeline).nospace()
+                << "/members rt=" << m_membersTimer.elapsed() << "ms n=" << members.size()
+                << " sinceOpen=" << sinceRoomOpenMs() << "ms";
+            m_membersTimer.invalidate();
+        }
         m_memberListModel->clear();
         // The reply is Qt JSON, so each row has to be rebuilt into a
         // RoomEvent rather than parsed like every other member path. Which
@@ -597,15 +622,56 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         const QString from = resp.start ? QString::fromStdString(*resp.start) : QString();
         // No `end` means the start of the room's history.
         const QString end = resp.end ? QString::fromStdString(*resp.end) : QString();
+
+        // Closed BEFORE the model is touched, so `rt` is the network's alone
+        // and `insert` below is the ingest's alone.
+        const qint64 pageRt = m_historyPageTimer.isValid() ? m_historyPageTimer.elapsed() : -1;
+        const int rowsBefore = m_messageModel->rowCount();
+        QElapsedTimer ingest;
+        ingest.start();
         const auto result = m_messageModel->absorbHistoryPage(from, vec, end, m_userId);
+        const qint64 ingestMs = ingest.elapsed();
+
+        if (result.outcome != MessageModel::HistoryPageOutcome::Ignored) {
+            // Pages arrive newest-first across a fill, so each goes in front
+            // of the last. Keeping them is what lets the NEXT visit to this
+            // channel skip the fetch entirely.
+            m_timelines.prependHistory(roomId, vec);
+            m_fillRawEvents += vec.size();
+            if (pageRt >= 0) m_fillNetMs += pageRt;
+            qCInfo(logTimeline).nospace()
+                << "/messages page=" << m_messageModel->historyFill().pagesThisFill()
+                << " from=" << (from.isEmpty() ? QStringLiteral("newest") : from)
+                << " rt=" << pageRt << "ms events=" << vec.size()
+                << " more=" << (end.isEmpty() ? "no" : "yes")
+                << " sinceOpen=" << sinceRoomOpenMs() << "ms";
+        }
+
         switch (result.outcome) {
         case MessageModel::HistoryPageOutcome::Ignored:
             return;
         case MessageModel::HistoryPageOutcome::FetchMore:
+            // Serial by construction: the next page cannot be asked for until
+            // this one has been counted. So a fill costs the SUM of its round
+            // trips, and for all of them the timeline shows nothing — the
+            // model buffers the pages and inserts them on the last one, and
+            // the view's spinner is bound 1:1 to loadingHistory. If this line
+            // appears more than once for one switch, the answer to "why is it
+            // slow" is round trips, not rendering.
+            m_historyPageTimer.restart();
             m_client->getRoomMessages(roomId, result.next.from, QStringLiteral("b"),
                                       result.next.limit);
             return;
         case MessageModel::HistoryPageOutcome::Done:
+            m_historyPageTimer.invalidate();
+            qCInfo(logTimeline).nospace()
+                << "fill stop=" << historyStopName(m_messageModel->historyFill().lastStop())
+                << " pages=" << m_messageModel->historyFill().pagesThisFill()
+                << " rawEvents=" << m_fillRawEvents
+                << " rows=" << m_messageModel->rowCount()
+                << " (+" << (m_messageModel->rowCount() - rowsBefore) << ")"
+                << " net=" << m_fillNetMs << "ms insert=" << ingestMs << "ms"
+                << " sinceOpen=" << sinceRoomOpenMs() << "ms";
             // MessageView listens: the pagination anchor, paginate-until-
             // found reply jumps, and the "view still not full" re-check.
             emit olderMessagesLoaded();
@@ -621,7 +687,15 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             [this](const QString& roomId, const QString& from, const QString& error) {
         qWarning() << "[ServerConnection] /messages failed for" << roomId << ":" << error;
         if (roomId != m_activeRoomId) return;
-        if (m_messageModel->failHistoryFill(from, m_userId)) emit olderMessagesLoaded();
+        if (m_messageModel->failHistoryFill(from, m_userId)) {
+            qCInfo(logTimeline).nospace()
+                << "fill stop=Failed pages=" << m_messageModel->historyFill().pagesThisFill()
+                << " rawEvents=" << m_fillRawEvents
+                << " rows=" << m_messageModel->rowCount()
+                << " sinceOpen=" << sinceRoomOpenMs() << "ms";
+            m_historyPageTimer.invalidate();
+            emit olderMessagesLoaded();
+        }
     });
 
     // ── Server-backed message search ──────────────────────────────────────
@@ -1341,6 +1415,15 @@ void ServerConnection::disconnectFromServer()
     // person's blocks under another person's name.
     m_blockedUsersModel->reset();
     m_messageModel->refreshBotFlags();
+    // Cached timelines are facts about THIS account on THIS server, and the
+    // comment above is the reason: a reconnect may be as a different user.
+    // Dropped rather than marked stale, because stale windows are still
+    // replayed once the next sync vouches for them, and one account must
+    // never be shown another's messages. The cost of being wrong about this
+    // is a privacy incident; the cost of clearing is one round trip per
+    // channel. The member fetch times go with them for the same reason.
+    m_timelines.clear();
+    m_membersFetchedAt.clear();
 
     m_connected = false;
     m_connectionStatus = 0;
@@ -1370,6 +1453,21 @@ void ServerConnection::startSync()
         && qEnvironmentVariableIntValue("BSFCHAT_NO_SYNC_CACHE") == 0
         && m_cache->open(m_userId, m_serverUrl)) {
         m_cacheWired = true;
+        // Warm the in-memory windows from disk. They come up STALE — see the
+        // freshness rule in store/RoomTimelineCache.h — so nothing is
+        // replayed into a timeline until the first sync response has vouched
+        // for them, which lands a few hundred milliseconds from now, long
+        // before a user has picked a channel. What this buys is that the
+        // first open of each channel after a launch is instant too, which on
+        // a phone is nearly every open: iOS kills the app on most
+        // backgroundings.
+        const auto persisted = m_cache->timelines();
+        for (auto it = persisted.constBegin(); it != persisted.constEnd(); ++it)
+            m_timelines.adopt(it.key(), it.value());
+        if (!persisted.isEmpty()) {
+            qCInfo(logTimeline).nospace()
+                << "cache loaded rooms=" << persisted.size() << " from disk";
+        }
         const QString token = m_cache->syncToken();
         const qint64 ageMs = m_cache->syncTokenAgeMs();
         // Snapshots go stale in ways an incremental sync will never correct:
@@ -1396,9 +1494,32 @@ void ServerConnection::startSync()
         connect(m_syncLoop, &SyncLoop::sinceTokenAbandoned, this, [this] {
             m_cache->clearSyncToken();
             m_resumedFromCache = false;
+            // The chain of syncs that guaranteed head-currency is broken, so
+            // no window may be replayed until a full sync has re-established
+            // it. Stale, not dropped: the events are still worth having once
+            // the next sync vouches for them.
+            m_timelines.markStale();
         });
     }
     m_syncLoop->start();
+}
+
+qint64 ServerConnection::sinceRoomOpenMs() const
+{
+    return m_roomOpenTimer.isValid() ? m_roomOpenTimer.elapsed() : -1;
+}
+
+void ServerConnection::noteTimelineVisible(int rows)
+{
+    if (!m_roomOpenTimer.isValid() || m_timelineVisibleLogged) return;
+    // Latched, not invalidated: a fill can still be running when the first
+    // rows appear (a /sync-populated room, or a page that landed before the
+    // last one), and those later lines must keep stamping against the same
+    // t=0. What must not happen is a second "visible" from a late relayout of
+    // the same room — the latch is cleared by the next setActiveRoom().
+    m_timelineVisibleLogged = true;
+    qCInfo(logTimeline).nospace()
+        << "visible rows=" << rows << " sinceOpen=" << m_roomOpenTimer.elapsed() << "ms";
 }
 
 void ServerConnection::loadMembersForRoom(const QString& roomId)
@@ -1421,8 +1542,27 @@ void ServerConnection::loadMembersForRoom(const QString& roomId)
         }
     }
 
-    // Then fetch from server for completeness (handles members from before our sync)
-    m_client->getRoomMembers(roomId);
+    // Then fetch from the server — but not on every single switch.
+    //
+    // This was unconditional, so every channel switch spent a round trip
+    // (~190 ms measured against production, for a nine-member server)
+    // re-fetching a list the client had just rebuilt from cache, competing
+    // with the /messages fill for the same connection pool.
+    //
+    // What the fetch is actually for is members from before our sync window,
+    // and the cache covers that in the normal case: a full sync carries every
+    // room's complete m.room.member state, and store/LocalCache.h snapshots
+    // it, so a client that has synced once already has the list. The fetch is
+    // therefore a repair, not the source — so it runs when there is nothing
+    // cached, and otherwise at most once per room per refresh interval.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 last = m_membersFetchedAt.value(roomId, 0);
+    const bool haveCached = !m_roomMembers.value(roomId).isEmpty();
+    if (!haveCached || last == 0 || now - last >= kMembersRefetchMs) {
+        m_membersFetchedAt.insert(roomId, now);
+        m_membersTimer.restart();
+        m_client->getRoomMembers(roomId);
+    }
 }
 
 void ServerConnection::setActiveRoom(const QString& roomId)
@@ -1456,11 +1596,37 @@ void ServerConnection::setActiveRoom(const QString& roomId)
             m_settings->setLastReadTs(m_activeRoomId, newestTs);
         }
     }
+    // Persist the window of the room being LEFT. A switch is the natural
+    // write point: it is rare, the window is complete, and it is the only
+    // moment at which the user has demonstrably finished with the room.
+    // Best-effort — a failed write costs the next launch one round trip.
+    if (!m_activeRoomId.isEmpty() && m_cacheWired) {
+        if (const auto* window = m_timelines.window(m_activeRoomId))
+            m_cache->recordTimeline(m_activeRoomId, *window);
+    }
+
     // The incoming room has its own scroll position; assume nothing about
     // it until the view says otherwise.
     m_timelineAtBottom = false;
 
     m_activeRoomId = roomId;
+    // t=0 for the whole switch (util/TimelineTrace.h). Started here rather
+    // than at the top of the function so the early return for "same room"
+    // does not re-arm it.
+    m_roomOpenTimer.restart();
+    m_timelineVisibleLogged = false;
+    m_fillRawEvents = 0;
+    m_fillNetMs = 0;
+    // `discarding` is the row count of the room being LEFT — this runs just
+    // before m_messageModel->clear(). It is in the trace because it is the
+    // shape of the problem: there is ONE MessageModel for the whole
+    // connection and a switch throws its contents away, so re-opening a
+    // channel you were reading a second ago costs exactly as much as opening
+    // it for the first time. Nothing caches timeline events, in memory or on
+    // disk (store/LocalCache.h stores state events only, never timeline).
+    qCInfo(logTimeline).nospace()
+        << "open room=" << roomId << " \"" << m_roomListModel->roomDisplayName(roomId)
+        << "\" discarding=" << m_messageModel->rowCount() << " rows";
 
     // Remember this channel for the next time this server comes to the
     // foreground — a server switch, or the next launch. Keyed per server, so
@@ -1505,7 +1671,32 @@ void ServerConnection::setActiveRoom(const QString& roomId)
 
     // Load members and messages for this room
     if (!roomId.isEmpty()) {
+        // The cached window first, and synchronously: these rows are in the
+        // model before this function returns, so a channel the client has
+        // already seen paints in the same frame as the tap instead of after
+        // a round trip. Only when the window is head-current — see the
+        // freshness rule in store/RoomTimelineCache.h, and note that
+        // ingestHistoryEvents PREPENDS the fill's first page under whatever
+        // is loaded, which is only correct if nothing newer is missing.
+        int cachedRows = 0;
+        if (m_timelines.isFresh()) {
+            if (const auto* window = m_timelines.window(roomId)) {
+                m_messageModel->ingestCachedWindow(*window, m_userId);
+                cachedRows = m_messageModel->rowCount();
+            }
+        }
+        if (cachedRows > 0) {
+            qCInfo(logTimeline).nospace()
+                << "cache hit rows=" << cachedRows
+                << " events=" << m_timelines.eventCount(roomId)
+                << " sinceOpen=" << sinceRoomOpenMs() << "ms";
+        }
         loadMembersForRoom(roomId);
+        // Still fetched, even on a hit. Not for the rows — for the
+        // pagination cursor: MessageModel refuses a Gesture or Viewport fill
+        // with no prev-batch token, so a channel served purely from cache
+        // could not be scrolled back. The difference is that this request is
+        // no longer on the critical path; the user is already reading.
         requestHistoryFill(bsfchat::client::HistoryFillKind::Open,
                            bsfchat::client::kHistoryFirstPageLimit);
     }
@@ -1706,6 +1897,7 @@ void ServerConnection::requestHistoryFill(bsfchat::client::HistoryFillKind kind,
     if (m_activeRoomId.isEmpty()) return;
     const auto request = m_messageModel->beginHistoryFill(kind, firstPageLimit);
     if (!request) return;
+    m_historyPageTimer.restart();
     m_client->getRoomMessages(m_activeRoomId, request->from, QStringLiteral("b"),
                               request->limit);
 }
@@ -4176,6 +4368,12 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 }
             }
 
+            // Keep the newest slice of EVERY room, not just the open one:
+            // that is what makes the next channel switch instant instead of
+            // a round trip (store/RoomTimelineCache.h). Skipped while
+            // replaying the on-disk snapshot, which carries state only.
+            if (!m_hydratingFromCache) m_timelines.appendLive(roomId, event);
+
             // Add messages to active room's message model
             if (roomId == m_activeRoomId) {
                 m_messageModel->appendEvent(event, m_userId);
@@ -4386,6 +4584,12 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
     // round trip on every launch whose remembered channel was deleted.
     // Self-disarming — the no-op guard clears the flag once a channel is open.
     if (m_pendingRoomRestore) restoreLastTextRoom();
+
+    // Every held window is now current at the head of its room — see the
+    // freshness rule in store/RoomTimelineCache.h. This is the ONLY thing
+    // that makes a cached window safe to replay, so it stays at the very end
+    // of the pass, after the batch has actually been folded in.
+    if (!m_hydratingFromCache) m_timelines.markFresh();
 
     // Snapshot this sync for the next launch. Skipped while replaying, both
     // because it would be a no-op write and because the replay carries no

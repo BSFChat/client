@@ -56,6 +56,19 @@ private:
         return e;
     }
 
+    static bsfchat::RoomEvent messageEvent(const std::string& roomId, int i)
+    {
+        bsfchat::RoomEvent e;
+        e.event_id = "$msg" + std::to_string(i);
+        e.room_id = roomId;
+        e.sender = "@alice:server";
+        e.type = std::string(bsfchat::event_type::kRoomMessage);
+        e.origin_server_ts = 1000 + i;
+        e.content.data = {{"msgtype", "m.text"},
+                          {"body", "body " + std::to_string(i)}};
+        return e;
+    }
+
     // A response shaped like an initial sync: two rooms with state, unread
     // counts, and a next_batch.
     static bsfchat::SyncResponse initialSync(const std::string& nextBatch = "s42")
@@ -247,6 +260,88 @@ private slots:
         }
         QVERIFY(sawName);
         QVERIFY(sawMember);
+    }
+
+    void testTimelineWindowSurvivesRestartInOrder()
+    {
+        // The half of the cache that is for phones. iOS kills the app on
+        // nearly every backgrounding, so without this every channel is cold
+        // on every launch and the first open of each costs a /messages round
+        // trip (p90 679 ms against production).
+        const QString user = QStringLiteral("@josh:h");
+        const QString host = QStringLiteral("https://h");
+
+        QVector<bsfchat::RoomEvent> window;
+        for (int i = 0; i < 5; ++i) window.append(messageEvent("!general:server", i));
+
+        {
+            LocalCache cache;
+            QVERIFY(cache.open(user, host));
+            cache.recordTimeline(QStringLiteral("!general:server"), window);
+        }
+
+        LocalCache reopened;
+        QVERIFY(reopened.open(user, host));
+        const auto loaded = reopened.timelines();
+        QCOMPARE(loaded.size(), 1);
+        const auto& general = loaded.value(QStringLiteral("!general:server"));
+        QCOMPARE(general.size(), 5);
+        // ORDER is the whole reason `ordinal` exists: event ids carry none
+        // and origin_server_ts is a clock the client does not control.
+        for (int i = 0; i < 5; ++i)
+            QCOMPARE(general[i].event_id, "$msg" + std::to_string(i));
+        QCOMPARE(general[2].content.data.value("body", ""), "body 2");
+    }
+
+    void testTimelineWriteReplacesTheWindowAndKeepsItsTail()
+    {
+        LocalCache cache;
+        QVERIFY(cache.open(QStringLiteral("@josh:h"), QStringLiteral("https://h")));
+
+        QVector<bsfchat::RoomEvent> first;
+        for (int i = 0; i < 4; ++i) first.append(messageEvent("!r:server", i));
+        cache.recordTimeline(QStringLiteral("!r:server"), first);
+
+        // A window is a contiguous slice whose ordinals shift every time its
+        // front is trimmed, so a second write REPLACES rather than merges —
+        // otherwise two slices would share one numbering and come back
+        // interleaved.
+        QVector<bsfchat::RoomEvent> second;
+        for (int i = 100; i < 102; ++i) second.append(messageEvent("!r:server", i));
+        cache.recordTimeline(QStringLiteral("!r:server"), second);
+
+        const auto loaded = cache.timelines().value(QStringLiteral("!r:server"));
+        QCOMPARE(loaded.size(), 2);
+        QCOMPARE(loaded[0].event_id, std::string("$msg100"));
+        QCOMPARE(loaded[1].event_id, std::string("$msg101"));
+
+        // Oversized windows keep their TAIL — the newest events, which are
+        // the ones a first open needs.
+        QVector<bsfchat::RoomEvent> huge;
+        const int n = LocalCache::kPersistedEventsPerRoom + 20;
+        for (int i = 0; i < n; ++i) huge.append(messageEvent("!r:server", i));
+        cache.recordTimeline(QStringLiteral("!r:server"), huge);
+
+        const auto capped = cache.timelines().value(QStringLiteral("!r:server"));
+        QCOMPARE(capped.size(), LocalCache::kPersistedEventsPerRoom);
+        QCOMPARE(capped.first().event_id, std::string("$msg20"));
+        QCOMPARE(capped.last().event_id, "$msg" + std::to_string(n - 1));
+    }
+
+    void testClearAllDropsTheTimelineToo()
+    {
+        LocalCache cache;
+        QVERIFY(cache.open(QStringLiteral("@josh:h"), QStringLiteral("https://h")));
+        cache.recordSync(initialSync("s7"));
+        cache.recordTimeline(QStringLiteral("!general:server"),
+                             {messageEvent("!general:server", 1)});
+        QVERIFY(!cache.timelines().isEmpty());
+
+        // A cache that turns out to belong to somebody else must not leave
+        // one account's messages behind for the next.
+        cache.clearAll();
+        QVERIFY(cache.timelines().isEmpty());
+        QVERIFY(cache.cachedRoomIds().isEmpty());
     }
 
     void testIncrementalStateReplacesRatherThanDuplicates()

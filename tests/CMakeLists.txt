@@ -760,6 +760,7 @@ qt_add_executable(test_identity_provider_url
     ${CMAKE_SOURCE_DIR}/src/model/ChannelInviteModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BlockedUsersModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/TimelineTrace.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
@@ -817,6 +818,7 @@ qt_add_executable(test_error_surface_guards
     ${CMAKE_SOURCE_DIR}/src/model/ChannelInviteModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BlockedUsersModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/TimelineTrace.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
     ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
@@ -864,6 +866,7 @@ qt_add_executable(test_composer_upload_lock
     ${CMAKE_SOURCE_DIR}/src/model/ChannelInviteModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BlockedUsersModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/TimelineTrace.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
     ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
@@ -989,6 +992,7 @@ set_tests_properties(test_media_cache_key PROPERTIES
 qt_add_executable(test_redaction_result
     test_redaction_result.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/TimelineTrace.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
     ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
@@ -1005,6 +1009,7 @@ add_test(NAME test_redaction_result COMMAND test_redaction_result)
 qt_add_executable(test_token_rejection
     test_token_rejection.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/TimelineTrace.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
     ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp

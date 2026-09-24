@@ -8,6 +8,7 @@
 #include <QSignalSpy>
 
 #include "model/MessageModel.h"
+#include "store/RoomTimelineCache.h"
 #include "net/MediaTicketCache.h"
 #include "model/ThreadFilterModel.h"
 #include "model/RoomListModel.h"
@@ -90,6 +91,19 @@ inline bsfchat::RoomEvent reaction(const std::string& id, const std::string& tar
     e.origin_server_ts = 1;
     e.content.data = {{"m.relates_to", {{"rel_type", "m.annotation"},
                                         {"event_id", target}, {"key", "+1"}}}};
+    return e;
+}
+
+// One m.call.member state event — voice presence, not room content.
+inline bsfchat::RoomEvent callMember(const std::string& userId, int64_t ts)
+{
+    bsfchat::RoomEvent e;
+    e.event_id = "$call" + userId;
+    e.sender = userId;
+    e.type = std::string(bsfchat::event_type::kCallMember);
+    e.state_key = userId;
+    e.origin_server_ts = ts;
+    e.content.data = {{"active", true}};
     return e;
 }
 
@@ -1750,6 +1764,343 @@ private slots:
             makeRedactionEvent("$x", "@alice:server", "$m")));
         QVERIFY(!MessageModel::rendersAsRow(
             makeMemberEvent("@bob:server", "Bob", "join")));
+        // Voice membership. Named explicitly because on THIS server it is
+        // the biggest producer of invisible timeline events, and the one
+        // most likely to turn a channel open into a multi-page fill: the
+        // server writes an m.call.member row on every join, leave and reap
+        // sweep (see VoiceSession.cpp), so a channel anyone talks in
+        // accumulates them far faster than messages. A dev database taken
+        // 2026-09-23 held 164 m.call.member against 51 m.room.message, and
+        // one room's newest 50 events contained ZERO renderable rows.
+        QVERIFY(!MessageModel::rendersAsRow(hist::callMember("@bob:server", 3)));
+    }
+
+    // --- The per-room timeline cache ------------------------------------
+    //
+    // store/RoomTimelineCache.h. What makes a channel switch instant, and the
+    // freshness rule that stops it making the timeline wrong.
+
+    void testTimelineCacheKeepsTheNewestSliceOfEveryRoom()
+    {
+        bsfchat::client::RoomTimelineCache cache;
+        QVERIFY(cache.window("!a") == nullptr);
+
+        for (const auto& e : hist::messagePage(3, "$a", 1000))
+            cache.appendLive("!a", e);
+        for (const auto& e : hist::messagePage(2, "$b", 1000))
+            cache.appendLive("!b", e);
+
+        QCOMPARE(cache.eventCount("!a"), 3);
+        QCOMPARE(cache.eventCount("!b"), 2);
+        // Rooms are independent, and a room the user has never opened is
+        // cached too — that is the point, it makes the FIRST switch fast.
+        QCOMPARE(cache.window("!a")->first().event_id, std::string("$a0"));
+
+        // Replaying the same event is a no-op, which matters because /sync
+        // repeats event ids freely.
+        cache.appendLive("!a", hist::message("$a0", 1000));
+        QCOMPARE(cache.eventCount("!a"), 3);
+    }
+
+    void testTimelineCacheKeepsOnlyWhatCanEverBeDisplayed()
+    {
+        // Production, 2026-09-23: 791 m.call.member against 1182
+        // m.room.message in the newest 2000 events server-wide, because the
+        // server writes one on every voice join, leave and reap sweep. An
+        // unfiltered window in a channel people both talk in and sit in
+        // voice in would be flushed of messages by a single busy call — and
+        // none of those events can ever put a row on screen.
+        using bsfchat::client::RoomTimelineCache;
+        QVERIFY(RoomTimelineCache::cacheable(hist::message("$m", 1)));
+        QVERIFY(RoomTimelineCache::cacheable(hist::edit("$e", "$m", 2, "x")));
+        QVERIFY(RoomTimelineCache::cacheable(hist::reaction("$r", "$m")));
+        QVERIFY(RoomTimelineCache::cacheable(
+            makeRedactionEvent("$x", "@alice:server", "$m")));
+        QVERIFY(!RoomTimelineCache::cacheable(hist::callMember("@bob:server", 3)));
+        QVERIFY(!RoomTimelineCache::cacheable(
+            makeMemberEvent("@bob:server", "Bob", "join")));
+
+        RoomTimelineCache cache;
+        cache.appendLive("!a", hist::message("$keep", 1000));
+        for (int i = 0; i < 50; ++i)
+            cache.appendLive("!a", hist::callMember("@u" + std::to_string(i), 1001 + i));
+        cache.appendLive("!a", hist::reaction("$react", "$keep"));
+
+        QCOMPARE(cache.eventCount("!a"), 2);
+        QCOMPARE(cache.window("!a")->first().event_id, std::string("$keep"));
+        QCOMPARE(cache.window("!a")->last().event_id, std::string("$react"));
+    }
+
+    void testTimelineCacheDropsTheOldestAtItsCap()
+    {
+        bsfchat::client::RoomTimelineCache cache;
+        const int cap = bsfchat::client::RoomTimelineCache::kMaxEventsPerRoom;
+        for (const auto& e : hist::messagePage(cap + 25, "$e", 1000))
+            cache.appendLive("!a", e);
+
+        QCOMPARE(cache.eventCount("!a"), cap);
+        // The OLDEST go. A window is only ever replayed as "the newest
+        // slice", and head-currency is the property everything rests on.
+        QCOMPARE(cache.window("!a")->first().event_id, std::string("$e25"));
+        QCOMPARE(cache.window("!a")->last().event_id,
+                 "$e" + std::to_string(cap + 24));
+    }
+
+    void testTimelineCacheIsStaleUntilASyncVouchesForIt()
+    {
+        // The freshness rule. A window may only be replayed when the client
+        // knows nothing newer is missing, because the fill's first page is
+        // PREPENDED under whatever is loaded — replay a stale window and the
+        // newest messages land above week-old ones.
+        bsfchat::client::RoomTimelineCache cache;
+        QVERIFY(!cache.isFresh());
+
+        cache.appendLive("!a", hist::message("$a0", 1000));
+        QVERIFY2(!cache.isFresh(),
+                 "holding events is not the same as vouching for them");
+
+        cache.markFresh();
+        QVERIFY(cache.isFresh());
+
+        // A token the server rejects breaks the chain of syncs that made the
+        // window current, so it must stop being replayed — but not be thrown
+        // away, because the next full sync makes it good again.
+        cache.markStale();
+        QVERIFY(!cache.isFresh());
+        QCOMPARE(cache.eventCount("!a"), 1);
+    }
+
+    void testTimelineCacheRebuildsAStaleWindowFromFetchedHistory()
+    {
+        bsfchat::client::RoomTimelineCache cache;
+        cache.adopt("!a", hist::messagePage(3, "$disk", 1000));
+        QCOMPARE(cache.eventCount("!a"), 3);
+        QVERIFY(!cache.isFresh());
+
+        // While stale, a fetched page cannot be ordered against what is held
+        // — the page may contain messages NEWER than all of it. The window
+        // starts over from the page rather than interleaving wrongly.
+        cache.prependHistory("!a", hist::messagePage(2, "$net", 9000));
+        QCOMPARE(cache.eventCount("!a"), 2);
+        QCOMPARE(cache.window("!a")->first().event_id, std::string("$net0"));
+
+        // Once fresh, pages go in FRONT of what is held: a fill walks
+        // backwards, so each page is older than the last.
+        cache.markFresh();
+        cache.prependHistory("!a", hist::messagePage(2, "$older", 100));
+        QCOMPARE(cache.eventCount("!a"), 4);
+        QCOMPARE(cache.window("!a")->first().event_id, std::string("$older0"));
+        QCOMPARE(cache.window("!a")->last().event_id, std::string("$net1"));
+    }
+
+    void testCachedWindowReplaysAsOneInsertionWithItsRelations()
+    {
+        // The replay path a room switch takes. Two things matter: the model
+        // ends up with the right rows, and it gets there in ONE insertion —
+        // MessageView answers every countChanged with a timeline scan, so a
+        // per-event replay of a 400-event window would be quadratic at the
+        // exact moment the user is waiting to see the channel.
+        MessageModel model;
+        QSignalSpy inserted(&model, &QAbstractItemModel::rowsInserted);
+
+        QVector<bsfchat::RoomEvent> window = hist::messagePage(5, "$m", 1000);
+        window.append(hist::reaction("$react", "$m1"));
+        window.append(hist::edit("$ed", "$m2", 2000, "edited"));
+        window.append(makeRedactionEvent("$red", "@alice:server", "$m3"));
+        window.append(hist::callMember("@bob:server", 1500));
+
+        model.ingestCachedWindow(window, "@me:server");
+
+        QCOMPARE(inserted.count(), 1);
+        // $m3 redacted away, the voice-membership event never a row.
+        QCOMPARE(model.rowCount(), 4);
+        QCOMPARE(model.ownReactionEventId("$m1", "+1", "@bob:server"), "$react");
+        QCOMPARE(model.data(model.index(2), MessageModel::BodyRole).toString(),
+                 QString("edited"));
+        QCOMPARE(model.data(model.index(0), MessageModel::EventIdRole).toString(),
+                 QString("$m0"));
+        QCOMPARE(model.data(model.index(3), MessageModel::EventIdRole).toString(),
+                 QString("$m4"));
+    }
+
+    void testOpenFillPrependsUnderACachedWindow()
+    {
+        // The switch, end to end: a warm channel paints from cache, and the
+        // background fill's first page — older history — lands ABOVE it
+        // without disturbing the rows the user is already reading.
+        MessageModel model;
+        model.ingestCachedWindow(hist::messagePage(4, "$cached", 900000000),
+                                 "@me:server");
+        QCOMPARE(model.rowCount(), 4);
+
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open,
+                                       bsfchat::client::kHistoryFirstPageLimit)
+                    .has_value());
+        // The page overlaps the cached window (the server returns the newest
+        // events, which the cache already had) and carries two older ones.
+        QVector<bsfchat::RoomEvent> page = hist::messagePage(2, "$older", 800000000);
+        page += hist::messagePage(4, "$cached", 900000000);
+        const auto res = model.absorbHistoryPage(QString(), page, "t1", "@me:server");
+
+        // The overlap deduplicated, the older two on top, nothing reordered.
+        QCOMPARE(model.rowCount(), 6);
+        QCOMPARE(model.data(model.index(0), MessageModel::EventIdRole).toString(),
+                 QString("$older0"));
+        QCOMPARE(model.data(model.index(2), MessageModel::EventIdRole).toString(),
+                 QString("$cached0"));
+        QCOMPARE(model.data(model.index(5), MessageModel::EventIdRole).toString(),
+                 QString("$cached3"));
+        // And the cursor is live, so the user can still scroll back.
+        QVERIFY(model.hasMoreHistory());
+        Q_UNUSED(res);
+    }
+
+    void testOpenFillShowsPageOneBeforeTheFillEnds()
+    {
+        // The whole point of flushing: a room that needs three requests must
+        // not be blank for all three. The spinner is bound 1:1 to
+        // loadingHistory, so "rows before the fill ends" is literally "the
+        // user can read something while it is still spinning".
+        MessageModel model;
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open,
+                                       bsfchat::client::kHistoryFirstPageLimit)
+                    .has_value());
+
+        auto r1 = model.absorbHistoryPage(
+            QString(), hist::messagePage(8, "$a", 700000000), "t1", "@me:server");
+        QCOMPARE(r1.outcome, hist::Outcome::FetchMore);
+        // Eight rows, on screen, with two more requests still to come.
+        QCOMPARE(model.rowCount(), 8);
+        QVERIFY(model.loadingHistory());
+
+        // Page two is OLDER, so its rows land ABOVE the ones already shown.
+        auto r2 = model.absorbHistoryPage(
+            "t1", hist::messagePage(6, "$b", 600000000), "t2", "@me:server");
+        QCOMPARE(r2.outcome, hist::Outcome::FetchMore);
+        QCOMPARE(model.rowCount(), 14);
+        QCOMPARE(model.data(model.index(0), MessageModel::EventIdRole).toString(),
+                 QString("$b0"));
+        QCOMPARE(model.data(model.index(13), MessageModel::EventIdRole).toString(),
+                 QString("$a7"));
+    }
+
+    void testOpenFillAppliesRelationsCarriedByLaterPages()
+    {
+        // The regression this guards: flushing page by page sends every page
+        // after the first through prependEvents, which keeps rows and drops
+        // everything else. Without the relation routing in
+        // ingestHistoryEvents, the reaction, the edit and the redaction below
+        // are silently thrown away and this test fails on all three.
+        MessageModel model;
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open,
+                                       bsfchat::client::kHistoryFirstPageLimit)
+                    .has_value());
+
+        // Page 1: enough rows to put the model out of its "empty" branch, but
+        // short of the 30-row target so a second page is asked for.
+        auto r1 = model.absorbHistoryPage(
+            QString(), hist::messagePage(4, "$a", 700000000), "t1", "@me:server");
+        QCOMPARE(r1.outcome, hist::Outcome::FetchMore);
+        QCOMPARE(model.rowCount(), 4);
+
+        // Page 2: three older messages, plus a reaction on one of them, an
+        // edit of another, and a redaction of the third.
+        QVector<bsfchat::RoomEvent> page2 = hist::messagePage(3, "$b", 600000000);
+        page2.append(hist::reaction("$react", "$b0"));
+        page2.append(hist::edit("$ed", "$b1", 650000000, "edited body"));
+        page2.append(makeRedactionEvent("$red", "@alice:server", "$b2"));
+        auto r2 = model.absorbHistoryPage("t1", page2, "t2", "@me:server");
+        QCOMPARE(r2.outcome, hist::Outcome::FetchMore);
+
+        // $b2 was redacted away; $b0 and $b1 remain above page one's four.
+        QCOMPARE(model.rowCount(), 6);
+        QCOMPARE(model.data(model.index(0), MessageModel::EventIdRole).toString(),
+                 QString("$b0"));
+        QCOMPARE(model.data(model.index(1), MessageModel::EventIdRole).toString(),
+                 QString("$b1"));
+        // The reaction folded into its target's chips.
+        QCOMPARE(model.ownReactionEventId("$b0", "+1", "@bob:server"), "$react");
+        // The edit folded into its target's body.
+        QCOMPARE(model.data(model.index(1), MessageModel::BodyRole).toString(),
+                 QString("edited body"));
+        QCOMPARE(model.data(model.index(1), MessageModel::EditedRole).toBool(), true);
+        // And no relation became a row of its own.
+        for (int i = 0; i < model.rowCount(); ++i) {
+            const QString id =
+                model.data(model.index(i), MessageModel::EventIdRole).toString();
+            QVERIFY(id != "$react" && id != "$ed" && id != "$red");
+        }
+    }
+
+    void testScrollBackAppliesRelationsCarriedByTheFetchedPage()
+    {
+        // The same routing, on the path that had been losing relations since
+        // before any of this: a Gesture fill always lands in a populated
+        // model, so its page has ALWAYS gone through prependEvents. Scroll
+        // far enough back and the reaction chips stopped appearing.
+        MessageModel model;
+        model.appendEvents(hist::messagePage(3, "$new", 900000000), "@me:server");
+        model.setPrevBatchToken("t1");
+        QCOMPARE(model.rowCount(), 3);
+
+        auto g = model.beginHistoryFill(hist::Kind::Gesture, 50);
+        QVERIFY(g.has_value());
+        QCOMPARE(g->from, QString("t1"));
+
+        QVector<bsfchat::RoomEvent> page = hist::messagePage(2, "$old", 500000000);
+        page.append(hist::reaction("$react", "$old0"));
+        const auto res = model.absorbHistoryPage("t1", page, QString(), "@me:server");
+        QCOMPARE(res.outcome, hist::Outcome::Done);
+
+        QCOMPARE(model.rowCount(), 5);
+        QCOMPARE(model.ownReactionEventId("$old0", "+1", "@bob:server"), "$react");
+    }
+
+    void testOpenFillStopsAtTheOpenPageCapInAChannelWithNoMessages()
+    {
+        // Production, 2026-09-23: two voice channels of 1300+ events each with
+        // ZERO renderable rows in their newest 150. Before kHistoryOpenMaxPages
+        // this ran the open to ten pages and the viewport trigger spent ten
+        // more — twenty serial round trips to display nothing. It must now
+        // stop at three and admit it, so MessageView can show "Nothing recent
+        // to show" with a Load-older button instead of a spinner.
+        MessageModel model;
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open,
+                                       bsfchat::client::kHistoryFirstPageLimit)
+                    .has_value());
+
+        QString from;
+        int requests = 0;
+        for (int page = 0; page < 12; ++page) {
+            QVector<bsfchat::RoomEvent> voiceChurn;
+            for (int i = 0; i < 40; ++i)
+                voiceChurn.append(hist::callMember(
+                    "@u" + std::to_string(page) + "_" + std::to_string(i), 1000 + i));
+            ++requests;
+            const QString next = QStringLiteral("t%1").arg(page + 1);
+            const auto res = model.absorbHistoryPage(from, voiceChurn, next, "@me:server");
+            if (res.outcome != hist::Outcome::FetchMore) break;
+            from = res.next.from;
+        }
+
+        QCOMPARE(requests, bsfchat::client::kHistoryOpenMaxPages);
+        QCOMPARE(model.historyFill().pagesThisFill(),
+                 bsfchat::client::kHistoryOpenMaxPages);
+        QCOMPARE(model.historyFill().lastStop(), hist::Stop::PageCap);
+        QCOMPARE(model.rowCount(), 0);
+        QVERIFY(!model.loadingHistory());
+        // There IS more history — the empty state must say "nothing recent",
+        // not "no messages ever" (see qml/js/TimelineOverlay.js).
+        QVERIFY(model.hasMoreHistory());
+        // What the client must NOT do is keep asking: one viewport top-up is
+        // all the per-visit budget leaves after a three-page open, and then
+        // the decision is the user's. testRoomOfOnlyEditsStopsAtPageCaps
+        // walks that budget to its end.
+        QVERIFY(model.beginHistoryFill(hist::Kind::Viewport,
+                                       bsfchat::client::kHistoryFollowPageLimit)
+                    .has_value());
+        model.absorbHistoryPage("t3", {}, "t4", "@me:server");
+        QVERIFY(model.historyAutoFillSpent());
     }
 
     void testOpenFillPaginatesPastAPageOfEdits()
@@ -1771,7 +2122,10 @@ private slots:
         QCOMPARE(r1.next.from, QString("t1"));
         QCOMPARE(r1.next.limit, bsfchat::client::kHistoryFollowPageLimit);
         QVERIFY(model.loadingHistory());
-        // Buffered: the view sees one insertion per request it made.
+        // An open fill puts each page in as it lands, so that a room needing
+        // three requests still shows its first rows after one. This page was
+        // all edits of an unloaded board, so it has no rows to show — but the
+        // model is no longer holding anything back.
         QCOMPARE(model.rowCount(), 0);
 
         // Page 2: more edits and 12 real messages — still short of 30.
@@ -1836,10 +2190,13 @@ private slots:
             ++requests;
             r = feed(r.next.from);
         }
-        // One open: exactly kHistoryMaxPagesPerFill requests, then it stops
-        // with nothing to show rather than crawling the whole room.
+        // One open: exactly kHistoryOpenMaxPages requests, then it stops with
+        // nothing to show rather than crawling the whole room. An open is
+        // capped far below a gesture's fill because it is on the critical
+        // path of a tap — see kHistoryOpenMaxPages for the production rooms
+        // that forced the number down from ten.
         QCOMPARE(r.outcome, hist::Outcome::Done);
-        QCOMPARE(requests, bsfchat::client::kHistoryMaxPagesPerFill);
+        QCOMPARE(requests, bsfchat::client::kHistoryOpenMaxPages);
         QCOMPARE(model.historyFill().lastStop(), hist::Stop::PageCap);
         QCOMPARE(model.rowCount(), 0);
         QVERIFY(model.hasMoreHistory());

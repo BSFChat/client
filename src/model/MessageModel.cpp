@@ -1336,7 +1336,25 @@ MessageModel::absorbHistoryPage(const QString& requestedFrom,
         m_historyFillRowIds.insert(id);
         ++newRows;
     }
-    m_historyFillPages.append(chronological);
+    // An OPEN fill puts each page in as it lands; every other kind buffers
+    // until the fill ends.
+    //
+    // An open is on the critical path of a tap and is allowed several serial
+    // requests (util/HistoryFill.h), and buffering meant the timeline showed
+    // NOTHING for all of them — the spinner is bound 1:1 to loadingHistory,
+    // so a three-page open was three round trips of blank screen followed by
+    // everything at once. Flushing makes time-to-first-row one round trip
+    // whatever the room's density.
+    //
+    // Gesture and Viewport fills keep buffering, and that is not an oversight:
+    // MessageView arms its scroll anchor ONCE per request it makes, so those
+    // paths depend on seeing one insertion per request. An open arms no
+    // anchor — the view is in its initial-load window, pinned to the end —
+    // so the extra insertions have nothing to disturb.
+    if (m_historyFill.kind() == bsfchat::client::HistoryFillKind::Open)
+        ingestHistoryEvents(chronological, ownUserId);
+    else
+        m_historyFillPages.append(chronological);
 
     // The server's token is authoritative on every page, the first included:
     // an initial load's answer replaces whatever the model held.
@@ -1364,6 +1382,95 @@ bool MessageModel::failHistoryFill(const QString& requestedFrom, const QString& 
     return true;
 }
 
+void MessageModel::ingestCachedWindow(const QVector<bsfchat::RoomEvent>& chronological,
+                                      const QString& ownUserId)
+{
+    if (chronological.isEmpty()) return;
+    m_ownUserId = ownUserId;
+
+    // ONE insertion for the whole window, not one per event.
+    //
+    // appendEvent emits beginInsertRows/endInsertRows/countChanged per event,
+    // and MessageView answers every countChanged with _recomputeUnreadDivider(),
+    // which scans the timeline — so replaying a 400-event window through it
+    // would be quadratic, and would cost 400 round trips into QML at the exact
+    // moment the user is waiting to see the channel. The point of the cache is
+    // that a switch is instant; a batched insert is what makes the local work
+    // small enough for that to be true on a phone.
+    QVector<MessageEntry> rows;
+    QSet<QString> queued;
+    rows.reserve(chronological.size());
+    for (const auto& event : chronological) {
+        if (!rendersAsRow(event)) continue;
+        const QString eventId = QString::fromStdString(event.event_id);
+        if (m_indexByEventId.contains(eventId) || queued.contains(eventId)) continue;
+        queued.insert(eventId);
+        MessageEntry entry = eventToEntry(event, ownUserId);
+        drainPendingEdit(entry);
+        rows.append(std::move(entry));
+    }
+
+    if (!rows.isEmpty()) {
+        const int first = static_cast<int>(m_messages.size());
+        beginInsertRows(QModelIndex(), first, first + static_cast<int>(rows.size()) - 1);
+        for (auto& row : rows) m_messages.append(std::move(row));
+        rebuildIndices();
+        endInsertRows();
+        emit countChanged();
+    }
+
+    // The window's relations, for ingestHistoryEvents' reason: a reaction, a
+    // redaction or an edit sitting in the cached events is not a row and has
+    // to be folded into one.
+    for (const auto& event : chronological) {
+        if (rendersAsRow(event)) continue;
+        appendEvent(event, ownUserId);
+    }
+}
+
+void MessageModel::ingestHistoryEvents(const QVector<bsfchat::RoomEvent>& chronological,
+                                       const QString& ownUserId)
+{
+    if (chronological.isEmpty()) return;
+
+    if (m_messages.isEmpty()) {
+        // Nothing loaded: replay the lot in order, so reactions, redactions
+        // and in-window edits all take the live path.
+        for (const auto& event : chronological) appendEvent(event, ownUserId);
+        return;
+    }
+
+    // Rows already present — older history, or the cold-start race: /sync's
+    // long-poll can populate the model with the newest events before a
+    // room-open's /messages answer lands. Appending that answer would drop
+    // what /sync delivered as duplicates and put everything /sync DIDN'T
+    // deliver — older history — at the END of the timeline (the pre-v0.0.37
+    // bug: week-old messages at the bottom, April/May above them). It is a
+    // prepend either way.
+    prependEvents(chronological, ownUserId);
+
+    // AND THEN THE PAGE'S RELATIONS, which prependEvents does not apply.
+    //
+    // prependEvents keeps rendersAsRow events and drops everything else, so a
+    // reaction, a redaction or an edit that lives in this page was silently
+    // thrown away. That was invisible while the only multi-page path put
+    // every page through appendEvent (the branch above, taken because an open
+    // started from an empty model) — but it was already losing them on every
+    // scroll-to-top, and flushing an open's pages one at a time would have
+    // made it lose them from page two onwards as well.
+    //
+    // appendEvent IS the relation handler: its reaction, redaction and
+    // m.replace branches each return before the append, and its final guard
+    // is `type != m.room.message`, which is exactly !rendersAsRow. So feeding
+    // it the non-row events cannot produce a duplicate row — the one path
+    // that appends requires the event to be a row, and those went through
+    // prependEvents above.
+    for (const auto& event : chronological) {
+        if (rendersAsRow(event)) continue;
+        appendEvent(event, ownUserId);
+    }
+}
+
 void MessageModel::finishHistoryFill(const QString& ownUserId, bool wasSpent)
 {
     // Pages arrived newest first; the model wants oldest first.
@@ -1374,22 +1481,8 @@ void MessageModel::finishHistoryFill(const QString& ownUserId, bool wasSpent)
     m_historyFillRowIds.clear();
     m_historyFillFrom.clear();
 
-    if (!events.isEmpty()) {
-        if (m_messages.isEmpty()) {
-            // Nothing loaded: replay the lot in order, so reactions,
-            // redactions and in-window edits all take the live path.
-            for (const auto& event : events) appendEvent(event, ownUserId);
-        } else {
-            // Rows already present — older history, or the cold-start race:
-            // /sync's long-poll can populate the model with the newest
-            // events before a room-open's /messages answer lands. Appending
-            // that answer would drop what /sync delivered as duplicates and
-            // put everything /sync DIDN'T deliver — older history — at the
-            // END of the timeline (the pre-v0.0.37 bug: week-old messages at
-            // the bottom, April/May above them). It is a prepend either way.
-            prependEvents(events, ownUserId);
-        }
-    }
+    // Empty for an OPEN fill: absorbHistoryPage already put its pages in.
+    ingestHistoryEvents(events, ownUserId);
     setLoadingHistory(false);
     if (wasSpent != m_historyFill.autoBudgetSpent()) emit historyAutoFillSpentChanged();
 }
