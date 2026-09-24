@@ -10,6 +10,50 @@ on:
   pull_request:
     branches: [main]
 
+  # Manual runs, so that the store-submission paths can be exercised
+  # without a tag.
+  #
+  # Every signing, packaging and upload step in this file is gated on
+  # `startsWith(github.ref, 'refs/tags/v')`, which means the FIRST time
+  # any of them runs for real is a tag push — the one moment where a
+  # mistake is expensive and irreversible. An .aab that fails to build
+  # takes the release with it; an .ipa that uploads with a bad build
+  # number burns that number permanently; a versionCode reaching any
+  # Play track can never be reused. Being able to rehearse the whole
+  # path from a branch is worth the three inputs.
+  #
+  # It also answers a narrower need: Google will not accept an app's
+  # FIRST bundle through the Play Developer API, so the first upload is
+  # a human dragging an .aab into the Console. Producing that .aab used
+  # to require cutting a tag for a release nobody intends to promote.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Version to build as, e.g. 0.0.53-rc.1. Leave blank to derive
+          one the way a branch push does. SET THIS EXPLICITLY for
+          anything you intend to upload: a derived branch version is
+          "<last tag>-dev.<sha>", whose Android versionCode deliberately
+          collides with the eventual release's (see cmake/Version.cmake),
+          and uploading it would burn that release's number for good.
+        required: false
+        type: string
+      android_aab:
+        description: >-
+          Build and sign the Play .aab as well as the .apk. Requires the
+          ANDROID_KEYSTORE_* secrets.
+        required: false
+        type: boolean
+        default: false
+      ios_upload:
+        description: >-
+          Upload the .ipa to TestFlight. Requires the iOS signing and
+          App Store Connect secrets. A build number is consumed
+          permanently on upload, so leave this off unless you mean it.
+        required: false
+        type: boolean
+        default: false
+
 jobs:
   build:
     strategy:
@@ -43,15 +87,32 @@ jobs:
           # On tag pushes GITHUB_REF_NAME is "v0.0.28" → strip the v.
           # On branch/PR pushes we synthesise a -dev suffix so the
           # Updater treats real releases as newer.
-          REF="${GITHUB_REF_NAME:-}"
-          if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
-            VER="${REF#v}"
+          # A manual run may name the version explicitly. That is the
+          # only way to produce an uploadable artefact from a branch:
+          # a derived "<tag>-dev.<sha>" version maps to the SAME Android
+          # versionCode as the eventual release (cmake/Version.cmake
+          # says so and warns), so uploading one burns that release's
+          # number permanently. Requiring the operator to type it makes
+          # the hazard a decision rather than an accident.
+          MANUAL="${{ inputs.version }}"
+          if [ -n "$MANUAL" ]; then
+            if ! [[ "$MANUAL" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+              echo "::error::version input '$MANUAL' is not MAJOR.MINOR.PATCH[-suffix]"
+              exit 1
+            fi
+            VER="$MANUAL"
+            echo "Version from workflow_dispatch input: $VER"
           else
-            # Compose from the most recent tag + short SHA so two
-            # main-branch CI builds produce distinguishable artefacts.
-            LAST=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
-            LAST="${LAST#v}"
-            VER="${LAST}-dev.$(git rev-parse --short HEAD)"
+            REF="${GITHUB_REF_NAME:-}"
+            if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+              VER="${REF#v}"
+            else
+              # Compose from the most recent tag + short SHA so two
+              # main-branch CI builds produce distinguishable artefacts.
+              LAST=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+              LAST="${LAST#v}"
+              VER="${LAST}-dev.$(git rev-parse --short HEAD)"
+            fi
           fi
           # NSIS VIProductVersion needs MAJOR.MINOR.PATCH.BUILD (four
           # numeric components). Derive by stripping any -suffix and
@@ -251,7 +312,14 @@ jobs:
           echo "$MACOS_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
           security import $RUNNER_TEMP/certificate.p12 -P "$MACOS_CERTIFICATE_PWD" \
             -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PWD" $KEYCHAIN_PATH
+          # codesign: as well as apple-tool:/apple:. Apple's own sample
+          # omits it, and with it omitted `codesign` is not on the key's
+          # ACL — so instead of failing, it blocks on a GUI keychain
+          # prompt that a headless runner can never answer, and the job
+          # hangs until the six-hour timeout. Cheap to include, and the
+          # failure it prevents is the most expensive kind.
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: -k "$KEYCHAIN_PWD" $KEYCHAIN_PATH
           security list-keychains -d user -s $KEYCHAIN_PATH login.keychain-db
           # Extract identity name for codesign
           IDENTITY=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep "Developer ID" | head -1 | sed 's/.*"\(.*\)".*/\1/')
@@ -858,13 +926,30 @@ jobs:
         id: version
         shell: bash
         run: |
-          REF="${GITHUB_REF_NAME:-}"
-          if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
-            VER="${REF#v}"
+          # A manual run may name the version explicitly. That is the
+          # only way to produce an uploadable artefact from a branch:
+          # a derived "<tag>-dev.<sha>" version maps to the SAME Android
+          # versionCode as the eventual release (cmake/Version.cmake
+          # says so and warns), so uploading one burns that release's
+          # number permanently. Requiring the operator to type it makes
+          # the hazard a decision rather than an accident.
+          MANUAL="${{ inputs.version }}"
+          if [ -n "$MANUAL" ]; then
+            if ! [[ "$MANUAL" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+              echo "::error::version input '$MANUAL' is not MAJOR.MINOR.PATCH[-suffix]"
+              exit 1
+            fi
+            VER="$MANUAL"
+            echo "Version from workflow_dispatch input: $VER"
           else
-            LAST=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
-            LAST="${LAST#v}"
-            VER="${LAST}-dev.$(git rev-parse --short HEAD)"
+            REF="${GITHUB_REF_NAME:-}"
+            if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+              VER="${REF#v}"
+            else
+              LAST=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+              LAST="${LAST#v}"
+              VER="${LAST}-dev.$(git rev-parse --short HEAD)"
+            fi
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "BSFChat version: $VER"
@@ -1053,7 +1138,26 @@ jobs:
             echo "::error::32-bit ABI present without a matching 64-bit build"
             exit 1
           fi
-          echo "APK identity OK: $PKG targetSdk=$TGT arm64-v8a"
+          # Surface the two numbers a human has to reconcile with the
+          # Play Console by hand. A versionCode is burned permanently by
+          # an upload to ANY track, including internal testing, and the
+          # next upload must be strictly greater — so whoever is about
+          # to drag a bundle into the Console needs to read this off the
+          # artefact, not off the source or off their memory of the tag.
+          VC=$(echo "$BADGING" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")
+          VN=$(echo "$BADGING" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+          MIN=$(echo "$BADGING" | sed -n "s/^sdkVersion:'\([^']*\)'.*/\1/p" | head -1)
+          {
+            echo "### Android artefact"
+            echo ""
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| application id | \`$PKG\` |"
+            echo "| versionCode | **$VC** (burned permanently on upload) |"
+            echo "| versionName | \`$VN\` |"
+            echo "| minSdk / targetSdk | $MIN / $TGT |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "APK identity OK: $PKG $VN ($VC) minSdk=$MIN targetSdk=$TGT arm64-v8a"
 
       # The `secrets` context cannot be read from a step-level `if`, and a
       # step's own `env:` block is not applied until after its `if` is
@@ -1101,12 +1205,22 @@ jobs:
           name: BSFChat-Android-APK
           path: BSFChat-android-arm64*.apk
 
-      # === App Bundle: tag builds only ===
+      # === App Bundle: tag builds, or a manual run that asks for it ===
       # The .aab is the only format Play accepts for the listing. It is
       # built from the same tree that produced the APK above, so the
       # identity assertions already passed for these bits.
+      #
+      # There is deliberately NO upload-to-Play step anywhere in this
+      # job, and that is not an omission. Google will not accept an
+      # app's first bundle through the Play Developer API — the app
+      # record has to exist and have had one release uploaded by a human
+      # before the API will talk to it — so the first Play upload is a
+      # person dragging this artefact into the Console. See
+      # docs/store-submission-runbook.md. Automating later uploads means
+      # adding a service-account JSON secret; do that once the manual
+      # path has worked at least once.
       - name: Build AAB
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.android_aab
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
@@ -1116,7 +1230,7 @@ jobs:
       # bundle is a release nobody can upload, and it would be noticed
       # only in the Play Console.
       - name: Sign AAB
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.android_aab
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -1144,7 +1258,7 @@ jobs:
           bash scripts/sign-android.sh "${AABS[0]}" "$GITHUB_WORKSPACE/BSFChat-android.aab"
 
       - name: Upload AAB artifact
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.android_aab
         uses: actions/upload-artifact@v4
         with:
           name: BSFChat-Android-AAB
@@ -1248,13 +1362,30 @@ jobs:
         id: version
         shell: bash
         run: |
-          REF="${GITHUB_REF_NAME:-}"
-          if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
-            VER="${REF#v}"
+          # A manual run may name the version explicitly. That is the
+          # only way to produce an uploadable artefact from a branch:
+          # a derived "<tag>-dev.<sha>" version maps to the SAME Android
+          # versionCode as the eventual release (cmake/Version.cmake
+          # says so and warns), so uploading one burns that release's
+          # number permanently. Requiring the operator to type it makes
+          # the hazard a decision rather than an accident.
+          MANUAL="${{ inputs.version }}"
+          if [ -n "$MANUAL" ]; then
+            if ! [[ "$MANUAL" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+              echo "::error::version input '$MANUAL' is not MAJOR.MINOR.PATCH[-suffix]"
+              exit 1
+            fi
+            VER="$MANUAL"
+            echo "Version from workflow_dispatch input: $VER"
           else
-            LAST=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
-            LAST="${LAST#v}"
-            VER="${LAST}-dev.$(git rev-parse --short HEAD)"
+            REF="${GITHUB_REF_NAME:-}"
+            if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+              VER="${REF#v}"
+            else
+              LAST=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+              LAST="${LAST#v}"
+              VER="${LAST}-dev.$(git rev-parse --short HEAD)"
+            fi
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "build_number=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
@@ -1357,6 +1488,19 @@ jobs:
             echo "available=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # A .p12 exported from Keychain Access effectively always has
+          # a passphrase. If the certificate secret is set but the
+          # password one is not, `security import` fails several lines
+          # below with "MAC verification failed during PKCS12 import",
+          # which reads like a corrupt certificate and sends you looking
+          # in the wrong place. Say which secret is missing instead.
+          if [ -z "${IOS_DIST_CERTIFICATE_PWD:-}" ]; then
+            echo "::error::IOS_DIST_CERTIFICATE is set but" \
+                 "IOS_DIST_CERTIFICATE_PWD is empty. If the .p12 really has" \
+                 "no passphrase, re-export it with one — an unprotected" \
+                 "distribution key does not belong in a secret."
+            exit 1
+          fi
           KEYCHAIN_PATH=$RUNNER_TEMP/ios-signing.keychain-db
           KEYCHAIN_PWD=$(openssl rand -hex 16)
           security create-keychain -p "$KEYCHAIN_PWD" $KEYCHAIN_PATH
@@ -1365,7 +1509,14 @@ jobs:
           echo "$IOS_DIST_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/ios_dist.p12
           security import $RUNNER_TEMP/ios_dist.p12 -P "$IOS_DIST_CERTIFICATE_PWD" \
             -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PWD" $KEYCHAIN_PATH
+          # codesign: as well as apple-tool:/apple:. Apple's own sample
+          # omits it, and with it omitted `codesign` is not on the key's
+          # ACL — so instead of failing, it blocks on a GUI keychain
+          # prompt that a headless runner can never answer, and the job
+          # hangs until the six-hour timeout. Cheap to include, and the
+          # failure it prevents is the most expensive kind.
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: -k "$KEYCHAIN_PWD" $KEYCHAIN_PATH
           security list-keychains -d user -s $KEYCHAIN_PATH login.keychain-db
           rm -f $RUNNER_TEMP/ios_dist.p12
           IDENTITY=$(security find-identity -v -p codesigning $KEYCHAIN_PATH \
@@ -1383,10 +1534,15 @@ jobs:
       # One key does two jobs. xcodebuild -allowProvisioningUpdates uses
       # it to create and download the App Store provisioning profile on
       # the fly, so there is NO .mobileprovision secret to rotate every
-      # twelve months; and iTMSTransporter uses it to authenticate the
-      # upload. It lands in ~/.appstoreconnect/private_keys, which is
-      # where Transporter looks for it by convention, under the exact
-      # AuthKey_<KEYID>.p8 name both tools require.
+      # twelve months; and the same key authenticates the TestFlight
+      # upload at the bottom of this job.
+      #
+      # It lands in ~/.appstoreconnect/private_keys under the exact
+      # AuthKey_<KEYID>.p8 name, which is the convention every Apple
+      # upload tool searches for — xcodebuild is passed the path
+      # explicitly, but altool (the fallback documented in
+      # docs/store-submission-runbook.md, for a hand-driven upload from
+      # the owner's Mac) finds it there with no path argument at all.
       #
       # The .p8 can only be downloaded once from App Store Connect, so
       # it lives in the secret base64-encoded.
@@ -1529,10 +1685,16 @@ jobs:
       - name: Export .ipa
         if: steps.signing.outputs.available == 'true'
         run: |
+          set -euo pipefail
           # ExportOptions is templated rather than committed complete:
-          # the team id is the one account-specific value in it.
-          sed "s/@APPLE_TEAM_ID@/${{ secrets.APPLE_TEAM_ID }}/" \
+          # the team id is one account-specific value, and the
+          # destination is the difference between "write me an .ipa" and
+          # "send it to Apple". This render is the former; the upload
+          # step below renders the same template again as the latter.
+          sed -e "s/@APPLE_TEAM_ID@/${{ secrets.APPLE_TEAM_ID }}/" \
+              -e "s/@EXPORT_DESTINATION@/export/" \
             ios/ExportOptions.plist.in > "$RUNNER_TEMP/ExportOptions.plist"
+          plutil -lint "$RUNNER_TEMP/ExportOptions.plist"
           AUTH=()
           if [ "${{ steps.asc.outputs.available }}" = "true" ]; then
             AUTH=(-allowProvisioningUpdates
@@ -1545,11 +1707,26 @@ jobs:
             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
             -exportPath "$RUNNER_TEMP/export" \
             "${AUTH[@]}"
-          # The .ipa is named after the product, not the scheme; resolve
-          # it rather than guessing, and fail loudly if export produced
-          # nothing (exportArchive can exit 0 having written only logs).
-          IPA=$(find "$RUNNER_TEMP/export" -name '*.ipa' | head -1)
-          test -n "$IPA" || { echo "::error::no .ipa produced by exportArchive"; exit 1; }
+          # Resolved-and-UNIQUE, not `head -1`. The .ipa is named after
+          # the product rather than the scheme so it has to be resolved,
+          # but taking the first of several would be worse than failing:
+          # an export that emits more than one .ipa means something
+          # changed about how it is packaged, and uploading whichever
+          # one the filesystem returned first is exactly the kind of
+          # mistake that is only visible in App Store Connect. (This is
+          # also why the `thinning` key is no longer in ExportOptions —
+          # it was what could produce a directory of per-variant .ipa
+          # files here.) exportArchive can exit 0 having written only
+          # logs, so zero is a failure too.
+          # No `mapfile` here, unlike the Android job: this runs on macOS,
+          # where /bin/bash is still 3.2 and mapfile does not exist.
+          IPA_COUNT=$(find "$RUNNER_TEMP/export" -name '*.ipa' | wc -l | tr -d ' ')
+          if [ "$IPA_COUNT" -ne 1 ]; then
+            echo "::error::expected exactly 1 .ipa from exportArchive, found $IPA_COUNT"
+            ls -laR "$RUNNER_TEMP/export"
+            exit 1
+          fi
+          IPA=$(find "$RUNNER_TEMP/export" -name '*.ipa')
           echo "IPA_PATH=$IPA" >> "$GITHUB_ENV"
           ls -la "$RUNNER_TEMP/export"
 
@@ -1560,27 +1737,68 @@ jobs:
           name: BSFChat-iOS
           path: ${{ runner.temp }}/export/*.ipa
 
-      # Tags only. A TestFlight build number is consumed permanently on
-      # upload, so uploading from every main push would burn the numbers
-      # and fill the tester-facing build list with noise.
+      # Tags only, or a manual run that explicitly asked. A TestFlight
+      # build number is consumed permanently on upload, so uploading
+      # from every main push would burn the numbers and fill the
+      # tester-facing build list with noise.
       #
-      # iTMSTransporter, not `xcrun altool --upload-app`: altool's
-      # upload path is deprecated and has regressed in recent Xcode
-      # (it fails to open the package), while Transporter ships with
-      # Xcode, is Apple's supported route, and reads the same
-      # ~/.appstoreconnect/private_keys/AuthKey_<ID>.p8 that the
-      # archive step already uses. No third-party action, one secret.
+      # `xcodebuild -exportArchive` with destination=upload, NOT
+      # iTMSTransporter and not altool. The previous version of this
+      # step ran:
+      #
+      #     xcrun iTMSTransporter -m upload -assetFile "$IPA_PATH" ...
+      #
+      # which on current Xcode prints "iTMSTransporter is now part of
+      # Transporter. Please install Transporter from the Mac App Store"
+      # and exits — the binary Xcode ships under that name is a stub.
+      # Verified against Xcode 26.6 locally; the macos-15 runner image
+      # moves with Xcode, so this would have failed the first time it
+      # ran for real, at the last step of a tag build, after the archive
+      # had already cost twenty minutes.
+      #
+      # altool --upload-package does still work, but its option spelling
+      # changed between Xcode 16 (--apiKey/--apiIssuer) and Xcode 26
+      # (--api-key/--api-issuer), so pinning either one makes the job
+      # depend on the runner image's Xcode. xcodebuild's own upload
+      # destination has been stable across both, is documented in
+      # `xcodebuild -help`, and reuses the exact -authenticationKey*
+      # arguments the archive and export steps already pass. One tool,
+      # no third-party action, nothing to re-learn when Xcode moves.
+      #
+      # It re-exports from the same archive rather than uploading the
+      # .ipa produced above. That costs a minute or two and buys the
+      # guarantee that what Apple receives came out of the same archive
+      # the artefact did, signed the same way, with no opportunity for
+      # the two to diverge.
       - name: Upload to TestFlight
         if: >-
-          startsWith(github.ref, 'refs/tags/v')
+          (startsWith(github.ref, 'refs/tags/v') || inputs.ios_upload)
           && steps.signing.outputs.available == 'true'
           && steps.asc.outputs.available == 'true'
         run: |
-          xcrun iTMSTransporter -m upload \
-            -assetFile "$IPA_PATH" \
-            -apiKey "${{ secrets.ASC_KEY_ID }}" \
-            -apiIssuer "${{ secrets.ASC_ISSUER_ID }}" \
-            -v informational
+          set -euo pipefail
+          sed -e "s/@APPLE_TEAM_ID@/${{ secrets.APPLE_TEAM_ID }}/" \
+              -e "s/@EXPORT_DESTINATION@/upload/" \
+            ios/ExportOptions.plist.in > "$RUNNER_TEMP/ExportOptions-upload.plist"
+          plutil -lint "$RUNNER_TEMP/ExportOptions-upload.plist"
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/BSFChat.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions-upload.plist" \
+            -exportPath "$RUNNER_TEMP/upload" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$ASC_KEY_PATH" \
+            -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}"
+          {
+            echo "### TestFlight"
+            echo ""
+            echo "Uploaded \`${{ steps.version.outputs.version }}\`" \
+                 "build \`${{ steps.version.outputs.build_number }}\`."
+            echo ""
+            echo "Processing in App Store Connect takes 5-30 minutes." \
+                 "Export compliance must be answered before external" \
+                 "testers can be added — see docs/store-submission-runbook.md."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Runs even when an earlier step failed: the decoded .p8 is a
       # long-lived App Store Connect credential and must not survive on

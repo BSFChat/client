@@ -7,7 +7,9 @@
   is why this is a .in rather than a finished file.
 
   A local export can use it the same way:
-    sed "s/@APPLE_TEAM_ID@/ABCDE12345/" ios/ExportOptions.plist.in > /tmp/eo.plist
+    sed -e "s/@APPLE_TEAM_ID@/ABCDE12345/" \
+        -e "s/@EXPORT_DESTINATION@/export/" \
+        ios/ExportOptions.plist.in > /tmp/eo.plist
 -->
 <plist version="1.0">
 <dict>
@@ -30,12 +32,6 @@
 	<key>signingStyle</key>
 	<string>automatic</string>
 
-	<!-- Bitcode has been dead since Xcode 14 and an archive that still
-	     carries it is rejected. Explicit rather than relying on the
-	     default so a future Xcode cannot change it under us. -->
-	<key>uploadBitcode</key>
-	<false/>
-
 	<!-- Upload the dSYMs so App Store Connect can symbolicate crash
 	     reports from testers. This is the ONLY diagnostic channel the
 	     client has — there is no crash reporter and no telemetry in the
@@ -45,14 +41,31 @@
 	<key>uploadSymbols</key>
 	<true/>
 
-	<!-- Keep the app thinned for all device variants rather than
-	     producing a single fat binary. -->
-	<key>thinning</key>
-	<string>&lt;thin-for-all-variants&gt;</string>
+	<!-- export (write an .ipa next to the archive) or upload (send it
+	     straight to App Store Connect). Templated because the CI job
+	     renders this file twice: once to produce the artefact a human
+	     can download and inspect, once to hand the same archive to
+	     Apple. A local export leaves it as "export". -->
+	<key>destination</key>
+	<string>@EXPORT_DESTINATION@</string>
 
-	<!-- Do not let Xcode silently downgrade the bundle id or strip
-	     entitlements it does not recognise. -->
+	<!-- Xcode's default for this is YES, and YES means Xcode rewrites
+	     CFBundleVersion during distribution. We set the build number
+	     deliberately from the workflow run number (see the ios job's
+	     "Derive version" step) precisely because it has to be unique
+	     and monotonic across uploads, so Xcode must not touch it. -->
 	<key>manageAppVersionAndBuildNumber</key>
 	<false/>
+
+	<!-- Deliberately NOT set: `thinning`. `xcodebuild -help` documents
+	     it as "For non-App Store exports", and an app-store-connect
+	     export must hand Apple one universal package — Apple does the
+	     thinning on its side, per device, at download time. The earlier
+	     value here was <thin-for-all-variants>, which for a non-store
+	     method makes exportArchive emit a DIRECTORY of per-variant
+	     .ipa files; combined with the CI step's `find -name '*.ipa' |
+	     head -1` that would have picked an arbitrary thinned variant
+	     and uploaded it. Also not set: `uploadBitcode`, which Xcode 26
+	     no longer lists as a valid key at all. -->
 </dict>
 </plist>
