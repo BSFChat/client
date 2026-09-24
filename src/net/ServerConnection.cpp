@@ -963,11 +963,13 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
     emit connectionStatusChanged();
     startSync();
 
-    // The block list, once, here. It is the ONLY moment a session is
-    // guaranteed to learn it — /sync carries no account_data on this server,
-    // so nothing else will bring a block made on another device, or on this
-    // one before the app was last closed. Cheap: one GET of a document that
-    // is usually empty, on a path the session has just authenticated.
+    // The block list, once, here. /sync carries account data now, so a block
+    // made on another device WILL arrive on its own — but only as a delta,
+    // above the token this session starts from, and a session that was not
+    // running for the write has nothing to replay it from. This is the read
+    // that establishes what the list currently is; the pushes keep it that
+    // way. Cheap: one GET of a document that is usually empty, on a path the
+    // session has just authenticated.
     refreshBlockedUsers();
 
     // Persisted ids can be stale or corrupt (a doubled "@" once shipped
@@ -3698,8 +3700,52 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
         }
     }
 
+    // GLOBAL account data. This account's own documents, as some device of
+    // ours last wrote them — a delta, so an empty section means nothing
+    // changed rather than "no account data" (see the protocol header).
+    //
+    // Today one type is acted on. m.direct arrives here too and is handled
+    // above, from direct_rooms, which is where every existing reader of it
+    // looks.
+    for (const auto& doc : response.account_data) {
+        const QString type = QString::fromStdString(doc.type);
+        if (type != bsfchat::net::kIgnoredUserListType) continue;
+        // The block list, written on another device. onDocumentFromSync
+        // declines it while we have a write of our own outstanding — see
+        // BlockedUsersModel — because the document /sync built may predate it.
+        const QJsonObject content =
+            QJsonDocument::fromJson(QByteArray::fromStdString(doc.content.dump())).object();
+        if (m_blockedUsersModel) m_blockedUsersModel->onDocumentFromSync(content);
+    }
+
     for (const auto& [roomIdStr, joinedRoom] : response.rooms.join) {
         QString roomId = QString::fromStdString(roomIdStr);
+
+        // ROOM account data: m.fully_read, how far THIS ACCOUNT has read the
+        // room — which is to say, how far it read on whichever device last
+        // said so. This is the whole of cross-device read state on the
+        // receiving end.
+        //
+        // AHEAD of the timeline loop below, deliberately, and this is the part
+        // that is easy to get subtly wrong. The loop gates notifications and
+        // mention badges on `eventTs > lastReadTs`. Applying the marker first
+        // means a catch-up batch of messages the user already read on their
+        // phone arrives here silently, which is exactly what it should do;
+        // applying it afterwards would toast every one of them first and clear
+        // the dot second.
+        //
+        // setLastReadTs is FORWARD-ONLY (core/ReadState.h), which is what
+        // makes this safe in the other direction: this device may be the one
+        // that is ahead — it has been reading while the phone was in a pocket
+        // — and a marker from a server that has not heard from it yet must not
+        // drag its own cursor back.
+        for (const auto& doc : joinedRoom.account_data) {
+            if (doc.type != bsfchat::event_type::kFullyRead) continue;
+            const QJsonObject content =
+                QJsonDocument::fromJson(QByteArray::fromStdString(doc.content.dump())).object();
+            const qint64 serverTs = bsfchat::client::serverReadMarkerTs(content);
+            if (serverTs > 0 && m_settings) m_settings->setLastReadTs(roomId, serverTs);
+        }
 
         // Process state events (room name, topic, members)
         for (const auto& event : joinedRoom.state.events) {

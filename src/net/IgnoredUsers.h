@@ -32,14 +32,15 @@
 // server last gave us, unknown keys and all (documentWith / documentWithout),
 // and adopting a server response is the only way the contents change.
 //
-// ── There is no live propagation, and this class does not pretend otherwise ──
+// ── Where a new document comes from ─────────────────────────────────────
 //
-// /sync carries no account_data section on this server, so a block made on
-// another device does NOT arrive here. `loaded()` is "we have asked at least
-// once", not "this is current"; the owner (ServerConnection) re-asks at the
-// moments where being wrong would be visible — after login, after each of our
-// own writes, and whenever the managed list is opened — and the UI says when it
-// last looked. Nothing here schedules, polls or guesses.
+// Two places, and this class cares about neither: it is handed documents and
+// has no network of its own. /sync carries an account_data section now (server
+// schema v30), so a block made on another device arrives within a poll, and
+// the owner (ServerConnection) still re-asks at the moments where being wrong
+// would be visible — after login, after each of our own writes, and whenever
+// the managed list is opened. `loaded()` remains "we have been given a
+// document", not "this is current". Nothing here schedules, polls or guesses.
 //
 // Header-only and free of ServerConnection, QObject and the network, so
 // tests/test_ignored_users.cpp can pin the round trip — parse a document,
