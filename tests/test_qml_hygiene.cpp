@@ -1810,6 +1810,98 @@ private slots:
                      + offenders.join(QStringLiteral(" | "))));
     }
 
+    // The voice dock always has room for the button that ends the call.
+    //
+    // It did not. A single RowLayout with fixed margins, and a RowLayout
+    // neither wraps nor clips: when its children's preferred widths exceed
+    // the space, it lays them out past the edge. With the full desktop
+    // control set on a 412 dp Pixel 6 Pro the row wanted 655 dp and the
+    // disconnect button — last child of the centre cluster — began at
+    // x = 569, which is 197 dp off the side of the screen. A call the owner
+    // could not hang up.
+    //
+    // TWO HALVES, and the first is the one that has to hold.
+    //
+    // (a) Structure. The button is positioned from the dock's own right
+    //     edge, and the row that holds everything else ends where the button
+    //     begins. No number of controls added to its left can move it. This
+    //     is checkable from the source text exactly as written.
+    //
+    // (b) Budget. This is only honest because of a property peculiar to this
+    //     file: EVERY control in that row is a DockButton, a component
+    //     declared in the same file with one known size. So the row's worst
+    //     case really is countable — n buttons, n-1 gaps, the gutters and the
+    //     leave button — and no implicit width has to be guessed at. It is
+    //     not a general row-width checker and must not be extended into one;
+    //     for any other row the numbers would be invented.
+    //
+    //     Deliberately pessimistic in two ways. It counts every DockButton in
+    //     the row including the push-to-talk one, which is mutually exclusive
+    //     with plain mute and so can never be on screen beside it — that is
+    //     one button of free headroom. And it measures against 360 dp, the
+    //     narrowest Android phone class we mean to support, not against the
+    //     412 the bug was found on. Below 360 the identity cluster has
+    //     already shrunk to nothing and the controls begin to clip, which is
+    //     survivable; the leave button going anywhere is not.
+    void theVoiceDockAlwaysHasRoomForTheLeaveButton()
+    {
+        const QString src = withoutComments(
+            readQml(QStringLiteral("/components/VoiceDock.qml")));
+        QVERIFY2(!src.isEmpty(), "VoiceDock.qml not found");
+
+        // ── (a) structure ────────────────────────────────────────────
+        const qsizetype leaveAt = src.indexOf(QStringLiteral("id: leaveBtn"));
+        QVERIFY2(leaveAt > 0,
+                 "VoiceDock.qml has no `leaveBtn` — if the hang-up control was "
+                 "renamed, retarget this rule rather than dropping it");
+        const qsizetype rowAt = src.indexOf(QStringLiteral("anchors.right: leaveBtn.left"));
+        QVERIFY2(rowAt > 0,
+                 "nothing in VoiceDock.qml is bounded by `leaveBtn.left` — the "
+                 "control row can reach past the hang-up button again");
+        QVERIFY2(leaveAt < rowAt,
+                 "leaveBtn is declared after the row that anchors to it; an "
+                 "anchor to a later sibling does not resolve");
+        // The button's own position must come from the dock, not from a layout.
+        const QString leaveBlock = src.mid(leaveAt, 600);
+        QVERIFY2(leaveBlock.contains(QStringLiteral("anchors.right: parent.right")),
+                 "leaveBtn is no longer anchored to the dock's right edge, so "
+                 "its position is once again whatever its siblings leave over");
+        QVERIFY2(!leaveBlock.contains(QStringLiteral("Layout.")),
+                 "leaveBtn has Layout attached properties, which means it is "
+                 "back inside a layout and can be pushed off the edge again");
+
+        // ── (b) budget ───────────────────────────────────────────────
+        // Every DockButton USAGE (the `component DockButton:` declaration is
+        // excluded by requiring the brace to open a new object, not a type).
+        static const QRegularExpression usage(
+            QStringLiteral(R"((?<!component )DockButton\s*\{)"));
+        int buttons = 0;
+        for (auto it = usage.globalMatch(src); it.hasNext();) { it.next(); ++buttons; }
+        QVERIFY2(buttons >= 2,
+                 "fewer than two DockButtons in VoiceDock.qml — the dock has "
+                 "been restructured and this budget no longer describes it");
+
+        const int inRow      = buttons - 1;          // all but the anchored one
+        const int touchSize  = 44;                   // Theme.isMobile branch
+        const int clusterGap = 8;                    // Theme.sp.s3
+        const int rowToLeave = 12;                   // Theme.sp.s5
+        const int gutter     = 16;                   // Theme.mobileGutter
+        const int narrowestPhoneDp = 360;
+
+        const int worstCase = inRow * touchSize
+                            + (inRow - 1) * clusterGap
+                            + rowToLeave
+                            + touchSize                 // the leave button
+                            + 2 * gutter;
+        QVERIFY2(worstCase <= narrowestPhoneDp,
+                 qPrintable(QStringLiteral(
+                     "the voice dock's controls need %1 dp at the touch size "
+                     "and the narrowest phone we support is %2 dp. %3 buttons "
+                     "in the row is one too many: drop one on mobile, or move "
+                     "it into the voice room view.")
+                     .arg(worstCase).arg(narrowestPhoneDp).arg(inRow)));
+    }
+
 private:
     // The text between the braces of the first block whose opening matches
     // `opener` (which must end at that block's `{`). Null when there is none.
