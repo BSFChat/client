@@ -1527,6 +1527,78 @@ private slots:
                      + offenders.join(QStringLiteral(" | "))));
     }
 
+    // A control that both BINDS and WRITES its own currentIndex must re-bind.
+    //
+    // D-C1, in the one shape that is easy to miss. `currentIndex: <expr>` on
+    // a ComboBox looks like an ordinary binding, but selecting a row makes
+    // ComboBox ASSIGN currentIndex itself, and that assignment destroys the
+    // binding. The handler that then writes the backing property still works
+    // — once. Afterwards the field is a fixed number, and anything else that
+    // moves that property moves the pages and leaves the field behind.
+    //
+    // Found live on the phone section pickers that replaced the settings nav
+    // rails. ServerSettings' onAboutToShow resets selectedSection to 0 on
+    // every open, so after one pick the dialog reopened showing Overview with
+    // the dropdown still reading "Bots" — the section list and the section on
+    // screen disagreeing, with no way back but picking something else and
+    // returning. The sliders in ClientSettings have restored their bindings
+    // this way since the audio pane was written; the combos did not.
+    //
+    // SCOPED BY THE BOUND PROPERTY, not by the file, and the first draft of
+    // this rule got that wrong. Matching "a file with a currentIndex binding
+    // and an onActivated somewhere in it" flagged ChannelSettings.qml, where
+    // the two belong to different combos: the slowmode one keeps its index in
+    // sync imperatively (no binding to lose), and the role one is
+    // `currentIndex: 0` — an INITIAL value, which is supposed to be replaced
+    // the moment the user picks something. Only a binding to a property that
+    // the file also assigns is the defect, so that is what is matched:
+    // literals are skipped precisely because they are the legitimate case.
+    //
+    // The limit, stated: the RESTORE is looked for anywhere in the file, not
+    // in the same block as the binding. A file with two such combos, one
+    // fixed and one not, would pass. Narrowing that needs a real block parse;
+    // until some file has two, this catches the shape at the point it is
+    // introduced, which is when it is cheap to fix.
+    void aComboBoxThatWritesItsOwnIndexRestoresTheBinding()
+    {
+        // currentIndex bound to a bare property path — not a literal, not an
+        // inline expression. `(?![\w.$])` keeps the path whole.
+        static const QRegularExpression boundToProperty(
+            QStringLiteral(R"(^\s*currentIndex\s*:\s*([A-Za-z_$][\w.$]*)\s*$)"),
+            QRegularExpression::MultilineOption);
+        static const QRegularExpression restore(
+            QStringLiteral(R"(currentIndex\s*=\s*Qt\.binding)"));
+
+        QStringList offenders;
+        int checked = 0;
+        for (const QString& path : filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
+                                              QStringLiteral("*.qml"))) {
+            const QString src = withoutComments(readAll(path));
+            for (auto it = boundToProperty.globalMatch(src); it.hasNext();) {
+                const QString prop = it.next().captured(1);
+                // Is that property ever assigned in this file? If not, the
+                // binding is never at risk — nothing writes currentIndex back.
+                const QRegularExpression written(
+                    QRegularExpression::escape(prop) + QStringLiteral(R"(\s*=[^=])"));
+                if (!written.match(src).hasMatch()) continue;
+                ++checked;
+                if (restore.match(src).hasMatch()) continue;
+                offenders << QStringLiteral("%1: currentIndex: %2")
+                                 .arg(QFileInfo(path).fileName(), prop);
+            }
+        }
+        QVERIFY2(checked > 0,
+                 "nothing binds currentIndex to a property it also assigns any "
+                 "more — has the pattern changed? This guard is only "
+                 "meaningful while something does.");
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "currentIndex is bound to a property the same file writes, "
+                     "with no Qt.binding restore — the control stops tracking "
+                     "after the first selection: ")
+                     + offenders.join(QStringLiteral(" | "))));
+    }
+
 private:
     // The text between the braces of the first block whose opening matches
     // `opener` (which must end at that block's `{`). Null when there is none.

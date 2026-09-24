@@ -608,7 +608,11 @@ Popup {
         Rectangle {
             visible: serverSettingsPopup._mayOpen && !Theme.isMobile
             Layout.fillHeight: true
-            Layout.preferredWidth: Theme.isMobile ? 0 : 200
+            // Unconditional — see the identical note in ClientSettings.qml.
+            // A layout never reads an invisible child's size hints, so the
+            // mobile branch this used to carry did nothing except look like
+            // a 0 pt touch target to the hygiene scan.
+            Layout.preferredWidth: 200
             color: Theme.bg0
             radius: Theme.r2
 
@@ -700,7 +704,26 @@ Popup {
             implicitHeight: 44
             model: serverSettingsPopup.sections
             currentIndex: serverSettingsPopup.selectedSection
-            onActivated: serverSettingsPopup.selectedSection = currentIndex
+            // Re-established with Qt.binding, not left as the plain value
+            // ComboBox just wrote (D-C1 — the rule this file states for
+            // every control that is both bound and written imperatively).
+            //
+            // Selecting a row makes ComboBox assign `currentIndex` itself,
+            // which DESTROYS the binding above. `onAboutToShow` sets
+            // selectedSection back to 0 on every open, so the very next time
+            // the dialog is opened the pages go to Overview and this field
+            // does not.
+            // From then on this field is a one-shot value: it shows whatever
+            // was last picked while the pages behind it show something else,
+            // and the only way back is to pick a different section and
+            // return. Read off `currentIndex` rather than the injected
+            // signal argument, matching the other combos in the tree.
+            onActivated: {
+                serverSettingsPopup.selectedSection = currentIndex;
+                currentIndex = Qt.binding(function() {
+                    return serverSettingsPopup.selectedSection;
+                });
+            }
         }
 
         // Content area
