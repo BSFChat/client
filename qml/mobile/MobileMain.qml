@@ -271,6 +271,33 @@ ApplicationWindow {
     }
     readonly property bool _noServers: _serverCount === 0
 
+    // A server is connected, has finished its first sync, and still has no
+    // channels at all. Distinct from "no channel is selected", which is what
+    // the empty-state page said in both cases — and on a server with nothing
+    // in it, "tap the menu button to pick a server and channel" sends the
+    // reader to an empty list and leaves them there.
+    //
+    // GATED ON initialSyncComplete, and that gate is the whole difficulty. An
+    // empty room list before the first sync looks exactly like an empty
+    // server, so without it every cold start would flash "No channels yet"
+    // for a round trip — trading a rare wrong message for a common one.
+    // Waiting for a channel to ARRIVE is not an alternative: the list is a
+    // snapshot that only signals when it changes, so a server that has always
+    // had zero channels never emits anything to wait for.
+    //
+    // Sums the channels in every category, because an empty category is still
+    // nothing to open. The desktop shell asks the same question through
+    // TimelineOverlay.emptyStateKind's `channelCount`, and passes `undefined`
+    // before the first sync for the same reason.
+    readonly property bool _noChannels: {
+        var s = serverManager.activeServer;
+        if (!s || !s.initialSyncComplete) return false;
+        var groups = s.categorizedRooms || [];
+        for (var i = 0; i < groups.length; i++)
+            if ((groups[i].channels || []).length > 0) return false;
+        return true;
+    }
+
     // Every global popup positions itself against THIS item rather than
     // against Overlay.overlay directly. A Popup's `parent` is only its
     // positioning frame — the popup item itself still lives in the
@@ -636,7 +663,7 @@ ApplicationWindow {
                         anchors.centerIn: parent
                         spacing: Theme.sp.s5
                         Icon {
-                            name: _noServers ? "plus" : "hash"
+                            name: (_noServers || _noChannels) ? "plus" : "hash"
                             size: 48
                             color: Theme.fg3
                             Layout.alignment: Qt.AlignHCenter
@@ -644,7 +671,9 @@ ApplicationWindow {
                         Text {
                             text: _noServers
                                 ? "No servers yet"
-                                : "No channel selected"
+                                : _noChannels
+                                    ? "No channels yet"
+                                    : "No channel selected"
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.xl
                             font.weight: Theme.fontWeight.semibold
@@ -655,7 +684,10 @@ ApplicationWindow {
                             text: _noServers
                                 ? "Sign in with your BSFChat ID, or join a server by the "
                                   + "address whoever runs it gave you."
-                                : "Tap the menu button to pick a server and channel."
+                                : _noChannels
+                                    ? "This server doesn't have any channels yet. Open the "
+                                      + "channel list to add the first one."
+                                    : "Tap the menu button to pick a server and channel."
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.md
                             color: Theme.fg3
@@ -723,6 +755,45 @@ ApplicationWindow {
                                 color: emptyJoinByAddressCta.hovered ? Theme.bg3 : "transparent"
                                 border.color: Theme.accent
                                 border.width: 1
+                                radius: Theme.r2
+                                implicitWidth: 240
+                                implicitHeight: Theme.touchTarget
+                            }
+                        }
+                        // The way out of an empty server, and the counterpart
+                        // of the two above: this page is a dead end without a
+                        // control on it, and on a phone the channel list — and
+                        // the "+" that creates one — is behind a drawer the
+                        // reader has no reason to think contains anything.
+                        //
+                        // It opens the DRAWER rather than the create prompt.
+                        // The prompt is a Popup inside ChannelList, which
+                        // lives in that drawer, so driving it from out here
+                        // would mean opening a popup in a closed container.
+                        // The "+" beside CHANNELS is the first thing in the
+                        // drawer and is an ordinary tap target, not a hover or
+                        // right-click affordance.
+                        //
+                        // A grandchild of the layout, like the two above, so
+                        // its `visible:` is not the second writer that
+                        // theMobileMainColumnHasExactlyOneWriter() forbids.
+                        Button {
+                            id: emptyOpenChannelsCta
+                            visible: !_noServers && _noChannels
+                            text: "Open channel list"
+                            Layout.alignment: Qt.AlignHCenter
+                            onClicked: leftDrawer.open()
+                            contentItem: Text {
+                                text: parent.text
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.md
+                                font.weight: Theme.fontWeight.semibold
+                                color: Theme.onAccent
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                color: emptyOpenChannelsCta.hovered ? Theme.accentDim : Theme.accent
                                 radius: Theme.r2
                                 implicitWidth: 240
                                 implicitHeight: Theme.touchTarget

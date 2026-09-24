@@ -131,6 +131,20 @@ class ServerConnection : public QObject {
     Q_PROPERTY(QString activeRoomName READ activeRoomName NOTIFY activeRoomNameChanged)
     Q_PROPERTY(QString activeRoomTopic READ activeRoomTopic NOTIFY activeRoomTopicChanged)
     Q_PROPERTY(bool connected READ isConnected NOTIFY connectedChanged)
+    // Has a real sync landed yet? `connected` cannot answer this: it is set
+    // optimistically the moment the session is established, before anything
+    // has been fetched.
+    //
+    // It exists because an empty room list is ambiguous and the ambiguity is
+    // user-visible. "This server has no channels" and "we have not asked yet"
+    // both look like zero rooms, and a shell that cannot tell them apart
+    // either says nothing useful on a genuinely empty server or announces
+    // "No channels yet" for a moment on every single cold start. Nothing else
+    // distinguishes them: categorizedRoomsChanged does not fire when the list
+    // is unchanged, so a server that has always had zero channels never emits
+    // anything at all.
+    Q_PROPERTY(bool initialSyncComplete READ initialSyncComplete
+               NOTIFY initialSyncCompleteChanged)
     Q_PROPERTY(int connectionStatus READ connectionStatus NOTIFY connectionStatusChanged)
     Q_PROPERTY(QString syncErrorMessage READ syncErrorMessage NOTIFY syncErrorMessageChanged)
     // The homeserver has stopped accepting this connection's access token
@@ -259,6 +273,10 @@ public:
     QString accessToken() const { return m_accessToken; }
     QString deviceId() const { return m_deviceId; }
     bool isConnected() const { return m_connected; }
+    // Deliberately NOT cleared on a reconnect. The room list survives one, so
+    // re-arming this would reintroduce the flash it exists to prevent, on the
+    // one path where the answer is already known.
+    bool initialSyncComplete() const { return m_firstSyncProcessed; }
     QString activeRoomId() const { return m_activeRoomId; }
     QString activeRoomName() const { return m_activeRoomName; }
     QString activeRoomTopic() const { return m_activeRoomTopic; }
@@ -1004,6 +1022,7 @@ signals:
     void pttPressedChanged();
     void activeRoomNameChanged();
     void connectedChanged();
+    void initialSyncCompleteChanged();
     // The homeserver has stopped accepting our access token (expired,
     // revoked, signed out elsewhere). Sync has been stopped; only a fresh
     // login can revive this connection. ServerManager surfaces it.

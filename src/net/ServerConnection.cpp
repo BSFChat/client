@@ -4590,6 +4590,9 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             }
         }
         m_firstSyncProcessed = true;
+        // Tells QML the empty room list is now an ANSWER rather than the
+        // absence of one. See the property's comment in the header.
+        emit initialSyncCompleteChanged();
     }
 
     // A restore that had to wait for the channel list gets another go now that

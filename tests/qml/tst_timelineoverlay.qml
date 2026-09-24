@@ -73,6 +73,23 @@ TestCase {
         return [
             { tag: "no server",   server: false, room: "!r:s", rows: 5, expect: "no-server" },
             { tag: "no channel",  server: true,  room: "",     rows: 5, expect: "no-channel" },
+            // "Pick a channel / choose one from the sidebar" is the wrong
+            // advice on a server that has none — it sends the reader to look
+            // for something that is not there, which is what a brand-new
+            // server did until it started creating its own first channels.
+            { tag: "no channels on the server", server: true, room: "", rows: 0,
+              channels: 0, expect: "no-channels" },
+            { tag: "channels exist, none picked", server: true, room: "", rows: 0,
+              channels: 3, expect: "no-channel" },
+            // A caller that cannot count must not be told the server is
+            // empty: undefined keeps the original answer.
+            { tag: "channel count unknown", server: true, room: "", rows: 0,
+              expect: "no-channel" },
+            // "No channels" is about the SERVER, so it outranks anything the
+            // message list is doing — with no room selected there is no
+            // history to be loading in the first place.
+            { tag: "no channels beats a loading list", server: true, room: "", rows: 0,
+              loading: true, more: true, channels: 0, expect: "no-channels" },
             { tag: "no history",  server: true,  room: "!r:s", rows: 0, expect: "no-history" },
             { tag: "has content", server: true,  room: "!r:s", rows: 1, expect: "" },
             // An empty LIST is not always an empty CHANNEL (#notifications,
@@ -92,9 +109,11 @@ TestCase {
         ];
     }
     function test_emptyStateKind(d) {
-        var kind = Overlay.emptyStateKind(d.server, d.room, d.rows, d.loading, d.more);
+        var kind = Overlay.emptyStateKind(d.server, d.room, d.rows, d.loading, d.more,
+                                          d.channels);
         compare(kind, d.expect);
-        compare(Overlay.emptyStateVisible(d.server, d.room, d.rows, d.loading, d.more),
+        compare(Overlay.emptyStateVisible(d.server, d.room, d.rows, d.loading, d.more,
+                                          d.channels),
                 d.expect !== "");
         // Every non-empty kind has wording and an icon of its own — the
         // three cases need different copy, which is why the state is a
@@ -107,7 +126,7 @@ TestCase {
     }
 
     function test_emptyStateWordingIsDistinctPerKind() {
-        var kinds = ["no-server", "no-channel", "no-history", "more-history"];
+        var kinds = ["no-server", "no-channels", "no-channel", "no-history", "more-history"];
         var seenTitle = {}, seenIcon = {};
         for (var i = 0; i < kinds.length; ++i) {
             var t = Overlay.emptyStateTitle(kinds[i]);
