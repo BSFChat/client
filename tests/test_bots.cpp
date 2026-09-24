@@ -1098,19 +1098,56 @@ private slots:
 
     void theBotsPageIsWiredIntoServerSettings()
     {
-        // The nav list and the StackLayout children are ONE ordering written
-        // twice: the nav Repeater's `index` is the StackLayout index. A page
-        // appended at the end while its nav row sits in the middle shows the
-        // wrong tab for every entry after it, silently. Pin that the label
-        // exists and that the pane it selects is instantiated.
+        // The section list and the StackLayout children are ONE ordering: the
+        // list index selects the StackLayout index. A page appended at the end
+        // while its section sits in the middle shows the wrong tab for every
+        // entry after it, silently.
+        //
+        // This used to match one exact substring of the nav Repeater's inline
+        // model — `"Overview", "Roles", "Members", "Bots"`. That array has
+        // since moved to a `sections` property read by TWO controls (the
+        // desktop nav rail and the phone's section dropdown, which replaced
+        // the 200 pt rail that does not fit a phone), and in moving it wrapped
+        // after "Members". The test failed on the line break while the Bots
+        // page was reachable the whole time, on both form factors.
+        //
+        // So it reads the order out of the array instead of matching its
+        // formatting, and pins the thing the refactor actually put at risk:
+        // that both controls drive off the ONE list. Two copies of it is how
+        // Bots comes back on a desktop and stays missing on a phone.
         const QString src = withoutComments(readAll(
             QStringLiteral(BSFCHAT_QML_DIR "/components/ServerSettings.qml")));
         QVERIFY(!src.isEmpty());
 
-        const int navAt = src.indexOf(QStringLiteral("\"Overview\", \"Roles\", \"Members\", \"Bots\""));
-        QVERIFY2(navAt > 0, "the Bots nav row is missing or reordered");
+        static const QRegularExpression sectionsDecl(
+            QStringLiteral(R"(property\s+var\s+sections\s*:\s*\[([^\]]*)\])"));
+        const auto decl = sectionsDecl.match(src);
+        QVERIFY2(decl.hasMatch(),
+                 "ServerSettings.qml has no `sections` array — if the nav was "
+                 "restructured again, retarget this rule rather than deleting "
+                 "it: something still has to say where Bots is");
+
+        static const QRegularExpression quoted(QStringLiteral(R"(\x22([^\x22]*)\x22)"));
+        QStringList sections;
+        for (auto it = quoted.globalMatch(decl.captured(1)); it.hasNext();)
+            sections << it.next().captured(1);
+
+        const QStringList expected{
+            QStringLiteral("Overview"), QStringLiteral("Roles"),
+            QStringLiteral("Members"),  QStringLiteral("Bots"),
+            QStringLiteral("Channels"), QStringLiteral("Bans")};
+        QCOMPARE(sections, expected);
+
+        // Both entry points read that one list. A hardcoded index or a second
+        // literal in either of them is the drift this guards.
+        QVERIFY2(src.count(QStringLiteral("model: serverSettingsPopup.sections")) == 2,
+                 "the nav rail and the phone section picker do not both take "
+                 "their model from `sections` — one of them can now disagree "
+                 "about which entry is Bots, or omit it");
+
+        // …and the page that index lands on exists.
         QVERIFY2(src.contains(QStringLiteral("BotManagerPane {")),
-                 "the Bots nav row selects a page that does not instantiate "
+                 "the Bots section selects a page that does not instantiate "
                  "BotManagerPane");
     }
 

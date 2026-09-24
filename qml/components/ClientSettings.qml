@@ -194,7 +194,14 @@ Popup {
         Rectangle {
             visible: !Theme.isMobile
             Layout.fillHeight: true
-            Layout.preferredWidth: Theme.isMobile ? 0 : 180
+            // Unconditional. A QtQuick layout skips `visible: false`
+            // children outright — they get no cell and their size hints are
+            // never read — which is the same fact the GridLayout above
+            // relies on to stack the two form factors. So a
+            // `Theme.isMobile ? 0 : 180` here was inert, and it read to
+            // aMobileSizeBranchIsNeverBelowTheTouchMinimum as somebody
+            // sizing a 0 pt touch target. Do not put the branch back.
+            Layout.preferredWidth: 180
             color: Theme.bg0
             radius: Theme.r2
             Rectangle { // right-edge clip
@@ -291,7 +298,25 @@ Popup {
             implicitHeight: 44
             model: clientSettingsPopup.sections
             currentIndex: clientSettingsPopup.section
-            onActivated: clientSettingsPopup.section = currentIndex
+            // Re-established with Qt.binding, not left as the plain value
+            // ComboBox just wrote (D-C1 — the rule this file states for
+            // every control that is both bound and written imperatively).
+            //
+            // Selecting a row makes ComboBox assign `currentIndex` itself,
+            // which DESTROYS the binding above. Nothing resets `section` today, so this one is
+            // latent rather than live — but it is the same defect one line
+            // of reset away, and the desktop rail writes the same property.
+            // From then on this field is a one-shot value: it shows whatever
+            // was last picked while the pages behind it show something else,
+            // and the only way back is to pick a different section and
+            // return. Read off `currentIndex` rather than the injected
+            // signal argument, matching the other combos in the tree.
+            onActivated: {
+                clientSettingsPopup.section = currentIndex;
+                currentIndex = Qt.binding(function() {
+                    return clientSettingsPopup.section;
+                });
+            }
         }
 
         // Right content
