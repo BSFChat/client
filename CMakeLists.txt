@@ -725,6 +725,15 @@ if(IOS)
     else()
         set(BSFCHAT_IOS_BACKGROUND_MODES "")
     endif()
+
+    # The app icon set's name, defined ONCE because it has to be spelled
+    # identically in two places that are checked by different tools:
+    # ASSETCATALOG_COMPILER_APPICON_NAME (below, what actool compiles)
+    # and CFBundleIconName in ios/Info.plist.in (what Apple's upload
+    # validator reads). A mismatch between them is an ITMS-90713 that
+    # only appears after a successful build and a 20-minute upload.
+    set(BSFCHAT_IOS_APPICON_NAME "AppIcon")
+
     configure_file("${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist.in"
                    "${CMAKE_CURRENT_BINARY_DIR}/Info.plist" @ONLY)
     set_target_properties(bsfchat-app PROPERTIES
@@ -756,6 +765,25 @@ if(IOS)
     # CFBundleIconName"), before a human ever sees it — the .icns the
     # macOS bundle uses is not a substitute. The catalog carries the
     # single 1024×1024 universal icon (all Xcode has needed since 14).
+    #
+    # COMPILING THE CATALOG IS NOT SUFFICIENT, and this is the part that
+    # cost a CI run. actool does run from the Resources build phase, does
+    # emit Assets.car, and does hand Xcode a partial Info.plist — but
+    # what that partial plist contains is:
+    #
+    #   CFBundleIcons -> CFBundlePrimaryIcon -> CFBundleIconName = AppIcon
+    #
+    # i.e. the NESTED key. The TOP-LEVEL CFBundleIconName that the
+    # upload validator actually reads is not in there. Xcode adds that
+    # one itself only for targets with GENERATE_INFOPLIST_FILE=YES, where
+    # it synthesises the plist from build settings. We hand it a real
+    # INFOPLIST_FILE (we must — see the V-H4 note above), so nothing
+    # synthesises anything and the key is simply absent.
+    #
+    # So it is declared literally in ios/Info.plist.in, from
+    # BSFCHAT_IOS_APPICON_NAME, the same variable that names the icon set
+    # to actool below.
+
     # Multimedia backend: AVFoundation only, never FFmpeg.
     #
     # Qt for iOS is a STATIC build, so every plugin of every module the
@@ -790,14 +818,21 @@ if(IOS)
     set_source_files_properties("${BSFCHAT_IOS_ASSETS}" PROPERTIES
         MACOSX_PACKAGE_LOCATION Resources)
     set_target_properties(bsfchat-app PROPERTIES
-        XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon")
+        XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME
+            "${BSFCHAT_IOS_APPICON_NAME}")
 endif()
 
 # Bundle the brand .icns into Contents/Resources/ so the value of
 # MACOSX_BUNDLE_ICON_FILE actually resolves at runtime. Without
 # this, Finder shows the generic Qt icon even though Info.plist
 # names the right file.
-if(APPLE)
+#
+# NOT `if(APPLE)`: iOS is APPLE too, and an iOS .app is a FLAT bundle, so
+# this was dropping a 48 KB macOS-only .icns at the root of the shipped
+# iOS bundle. Nothing on iOS reads it — CFBundleIconFile is not in
+# ios/Info.plist.in and iOS does not render .icns — it just rode along
+# into the .ipa. Same exclusion as the plist-check block below.
+if(APPLE AND NOT IOS)
     set(BSFCHAT_ICNS "${CMAKE_CURRENT_SOURCE_DIR}/branding/BSFChat.icns")
     if(EXISTS "${BSFCHAT_ICNS}")
         target_sources(bsfchat-app PRIVATE "${BSFCHAT_ICNS}")
@@ -849,12 +884,17 @@ endif()
 
 if(IOS)
     # Same guard as the macOS block above, iOS keys and iOS bundle
-    # layout. The two that are not about permissions are the ones that
+    # layout. The ones that are not about permissions are the ones that
     # cost a round trip through App Store Connect rather than a runtime
     # bug: ITSAppUsesNonExemptEncryption missing turns every single
     # upload into a manual export-compliance questionnaire, and a build
-    # with no CFBundleShortVersionString is rejected by the upload
-    # validator.
+    # with no CFBundleShortVersionString or no CFBundleIconName is
+    # rejected by the upload validator (ITMS-90713 for the latter).
+    # CFBundleIconName is checked HERE, against the built bundle, rather
+    # than trusted from the template: it is the one key in this list
+    # that a green build can still be missing, because what puts it in
+    # the bundle is a template substitution that has to agree with the
+    # asset catalog. CI re-checks it on the archive.
     #
     # Written as a generated script rather than a list of PlistBuddy
     # COMMANDs, because the obvious spelling DOES NOT WORK under the
@@ -897,7 +937,7 @@ fi
 missing=""
 for key in NSMicrophoneUsageDescription NSCameraUsageDescription \
            NSLocalNetworkUsageDescription ITSAppUsesNonExemptEncryption \
-           CFBundleShortVersionString \
+           CFBundleShortVersionString CFBundleIconName \
            CFBundleURLTypes:0:CFBundleURLSchemes:0; do
     if ! /usr/libexec/PlistBuddy -c "print $key" "$PLIST" >/dev/null 2>&1; then
         missing="$missing $key"
