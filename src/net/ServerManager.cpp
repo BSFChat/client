@@ -817,6 +817,21 @@ void ServerManager::onLoginFailed(ServerConnection* conn, const QString& error)
     }
 }
 
+void ServerManager::forgetIdentitySession()
+{
+    m_identityAccessToken.clear();
+    m_identityAccount = {};
+    if (m_identityApi) {
+        m_identityApi->deleteLater();
+        m_identityApi = nullptr;
+    }
+    // The browser flow object is kept: it owns a listening socket and a
+    // PKCE verifier for an attempt that may still be in the air, and
+    // tearing it down from here is how you get a second flow racing the
+    // first. loginWithIdentityAndSync already disconnects it before reuse.
+    emit identityAccountChanged();
+}
+
 void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
 {
     // Normalise the identity URL. Empty means "default to the hosted
@@ -842,9 +857,19 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
     }
 
     connect(m_identityClient, &IdentityClient::loginCompleted, this,
-        [this](const QString& /*idToken*/, const QString& accessToken,
+        [this](const QString& idToken, const QString& accessToken,
                const QString& refreshToken) {
             m_identityAccessToken = accessToken;
+
+            // Name the account before anything else happens. The browser
+            // may have completed this whole flow from an existing session
+            // without showing the user a thing, so this is the only
+            // opportunity to say who is being signed in — and the only one
+            // at all for an account with no servers, which never produces
+            // a ServerConnection to ask afterwards. Read-only; the token
+            // was already checked for audience and nonce upstream.
+            m_identityAccount = bsfchat::idTokenAccount(idToken);
+            emit identityAccountChanged();
 
             // (Re)build the API client bound to this fresh token.
             if (m_identityApi) {
@@ -902,10 +927,7 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
                     // connected is an ordinary success (the user re-ran the
                     // sync), and must not be reported as a failure.
                     if (servers.isEmpty()) {
-                        emit identityLoginFailed(
-                            tr("your account isn't a member of any server yet "
-                               "— ask a server admin for an invite, or add a "
-                               "server by URL below."));
+                        emit identityHasNoServers();
                         return;
                     }
 

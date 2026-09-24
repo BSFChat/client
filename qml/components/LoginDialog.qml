@@ -28,13 +28,40 @@ Dialog {
     // When OIDC is available, password fields collapse behind a toggle
     // so OIDC is the obvious default. Click "Use password instead" to expand.
     property bool showPasswordFallback: false
-    // Whether the "add a specific server" block is expanded. Hidden by
-    // default when the dialog opens with no saved servers so the big
-    // BSFChat-ID button is the obvious path.
-    property bool showManualServer: false
     // True while we wait for the identity-first sync flow (browser OIDC +
     // /api/servers fetch + per-server auto-login).
     property bool identitySyncInProgress: false
+
+    // --- Which of the dialog's four screens is up.
+    //
+    //   "choose"    two buttons: sign in with a BSFChat ID, or join a
+    //               server by its address. The opening screen.
+    //   "address"   type an address, probe it, sign in to it.
+    //   "signedIn"  who we just signed in as, and a way to say "not me".
+    //   "noServers" signed in fine; the account has joined nothing yet.
+    //
+    // This replaced `showManualServer`, a bool that started false and hid
+    // the entire address flow behind a text link reading "Add a specific
+    // server". On a phone that link was the only route to the product's
+    // central act — BSFChat is self-hosted, so joining somebody else's
+    // server IS the flow — and the owner of the product had to be told
+    // where it was. A store reviewer handed "sign in to uat.bsfchat.com"
+    // would not have found it. The two paths are now two buttons of equal
+    // weight on the screen the dialog opens on.
+    property string mode: "choose"
+
+    // Servers THIS sign-in added, so "not you?" can undo exactly what just
+    // happened and nothing else. Anything already in the sidebar when the
+    // dialog opened is somebody's earlier decision and is left alone.
+    property var joinedUrls: []
+    // Set while an address-mode connect is in flight, so the loginSuccess
+    // that answers it lands on the confirmation screen while the dozen
+    // that arrive during an identity sync do not each re-enter it.
+    property bool awaitingSingleJoin: false
+    // Shown on the chooser after "not you?": the local session is gone but
+    // the browser's is not, and the next attempt will sail straight back in
+    // as the same person unless they know that.
+    property bool browserSessionNote: false
 
     // --- What the last probe of the typed URL found (see
     // ServerManager::serverProbed). Before a probe lands we know nothing,
@@ -55,6 +82,16 @@ Dialog {
     // that named a homeserver which did not answer.
     property string probeNote: ""
     property bool probeRedirected: false
+
+    // Open straight onto address entry. Both shells expose this as
+    // Window.window.openJoinByAddress() so a shared component can offer
+    // "join a server by address" as a first-class action without the user
+    // having to find it inside the dialog first.
+    function openAtAddress() {
+        dialog.open();
+        dialog.mode = "address";
+        urlField.forceActiveFocus();
+    }
 
     function probeFailed() {
         return dialog.probeOutcome === "not_a_server"
@@ -98,6 +135,96 @@ Dialog {
         serverManager.checkLoginFlows(url);
     }
 
+    // The roster row serving `url`, or null. ServerListModel carries no
+    // user id, so the live ServerConnection is the only place the @user:host
+    // this phone just became is written down.
+    function connectionFor(url) {
+        if (!serverManager || !serverManager.servers) return null;
+        var n = serverManager.servers.rowCount();
+        for (var i = 0; i < n; ++i) {
+            var c = serverManager.connectionAt(i);
+            if (c && c.serverUrl === url) return c;
+        }
+        return null;
+    }
+
+    function rosterIndexOf(url) {
+        if (!serverManager || !serverManager.servers) return -1;
+        var n = serverManager.servers.rowCount();
+        for (var i = 0; i < n; ++i) {
+            var c = serverManager.connectionAt(i);
+            if (c && c.serverUrl === url) return i;
+        }
+        return -1;
+    }
+
+    // The name to put in front of the user on the confirmation screen.
+    //
+    // Prefer the homeserver's own @user:host when we joined exactly one
+    // server: that is the handle the other people in the room will see.
+    // Otherwise the identity provider's account, which ServerManager reads
+    // out of the id_token and therefore knows even when no homeserver has
+    // answered yet — the case that matters, because the whole reason this
+    // screen exists is a browser session completing the flow in silence.
+    function signedInAs() {
+        if (dialog.joinedUrls.length === 1) {
+            var c = dialog.connectionFor(dialog.joinedUrls[0]);
+            if (c && c.userId !== "") return c.userId;
+        }
+        if (serverManager.identityAccountName !== "")
+            return serverManager.identityAccountName;
+        return serverManager.identityAccountId;
+    }
+
+    // The quieter second line: whichever of the two identifiers signedInAs()
+    // did not use. Empty when there is nothing more to add.
+    function signedInDetail() {
+        var primary = dialog.signedInAs();
+        if (serverManager.identityAccountId !== ""
+            && serverManager.identityAccountId !== primary) {
+            return serverManager.identityAccountName !== ""
+                   && serverManager.identityAccountName !== primary
+                ? serverManager.identityAccountName
+                  + " · " + serverManager.identityAccountId
+                : serverManager.identityAccountId;
+        }
+        return "";
+    }
+
+    function joinedSummary() {
+        if (dialog.joinedUrls.length === 0) return "";
+        if (dialog.joinedUrls.length === 1)
+            return "Joined " + dialog.joinedUrls[0];
+        return "Restored " + dialog.joinedUrls.length + " servers.";
+    }
+
+    // "Not you?" — undo this sign-in.
+    //
+    // It cannot undo the half that caused the confusion: the session lives
+    // in the system browser, and asking the provider to re-prompt means
+    // sending `prompt=login` on the authorize request, which belongs to the
+    // OIDC flow. So it does what it can honestly do — drop the servers this
+    // sign-in added and the identity session behind them — and then says,
+    // in words, what the user has to do themselves.
+    function notMe() {
+        for (var i = dialog.joinedUrls.length - 1; i >= 0; --i) {
+            var idx = dialog.rosterIndexOf(dialog.joinedUrls[i]);
+            if (idx >= 0) serverManager.removeServer(idx);
+        }
+        dialog.joinedUrls = [];
+        serverManager.forgetIdentitySession();
+        dialog.browserSessionNote = true;
+        dialog.errorMessage = "";
+        dialog.mode = "choose";
+    }
+
+    // Host only, for the "sign out in your browser" line — the full URL
+    // makes that sentence unreadable on a phone.
+    function identityHost() {
+        var u = identityUrlField.text.trim();
+        return u.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+    }
+
     background: Rectangle {
         color: Theme.bg1
         radius: Theme.r3
@@ -110,7 +237,10 @@ Dialog {
         height: 64
         Text {
             anchors.centerIn: parent
-            text: "Add a server"
+            text: dialog.mode === "signedIn" ? "Signed in"
+                : dialog.mode === "noServers" ? "Almost there"
+                : dialog.mode === "address" ? "Join a server"
+                : "Add a server"
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.xl
             font.weight: Theme.fontWeight.semibold
@@ -141,11 +271,22 @@ Dialog {
             dialog.oidcInProgress = false;
             dialog.isConnecting = false;
             dialog.errorMessage = "";
+            // The join the user is watching: confirm it by name instead of
+            // vanishing. Everything else — a server arriving late in an
+            // identity sync, a background re-auth — leaves the screen alone.
+            if (dialog.awaitingSingleJoin) {
+                dialog.awaitingSingleJoin = false;
+                dialog.joinedUrls = [serverUrl];
+                dialog.mode = "signedIn";
+                return;
+            }
+            if (dialog.mode === "signedIn" || dialog.mode === "noServers") return;
             dialog.close();
         }
         function onLoginError(serverUrl, error) {
             dialog.oidcInProgress = false;
             dialog.isConnecting = false;
+            dialog.awaitingSingleJoin = false;
             // THE inline surface for a login failure (D-H5 / U-M13). This
             // used to be set from main.qml's own Connections on the same
             // signal, while a third handler toasted it — so one failure
@@ -155,10 +296,23 @@ Dialog {
         }
         function onIdentityLoginComplete(serverUrls) {
             dialog.identitySyncInProgress = false;
-            // Let the individual per-server logins proceed in the
-            // background — close the dialog so the user sees their
-            // servers populate the sidebar.
-            dialog.close();
+            dialog.joinedUrls = serverUrls;
+            // Deliberately NOT close(). If the system browser already held
+            // a session the entire flow just completed without showing the
+            // user anything, and closing here is what let the owner sign in
+            // as himself while expecting a demo account. The per-server
+            // logins carry on behind this screen; "Continue" dismisses it.
+            dialog.mode = "signedIn";
+        }
+        // Sign-in worked and the account has joined nothing. Not an error:
+        // it used to arrive on the failure channel reading "Identity login
+        // failed: your account isn't a member of any server yet", which is
+        // both wrong and a dead end.
+        function onIdentityHasNoServers() {
+            dialog.identitySyncInProgress = false;
+            dialog.joinedUrls = [];
+            dialog.errorMessage = "";
+            dialog.mode = "noServers";
         }
         function onIdentityLoginFailed(error) {
             dialog.identitySyncInProgress = false;
@@ -171,11 +325,14 @@ Dialog {
     // attempt at a different server — greeted the user the next time
     // they opened it (D-H5).
     onAboutToShow: {
+        dialog.mode = "choose";
         dialog.errorMessage = "";
         dialog.isConnecting = false;
         dialog.oidcInProgress = false;
         dialog.identitySyncInProgress = false;
         dialog.checkingFlows = false;
+        dialog.awaitingSingleJoin = false;
+        dialog.joinedUrls = [];
         dialog.probed = false;
         dialog.resolvedUrl = "";
         dialog.probeOutcome = "";
@@ -192,7 +349,10 @@ Dialog {
         dialog.oidcProviderUrl = "";
         dialog.passwordAvailable = true;
         dialog.showPasswordFallback = false;
-        dialog.showManualServer = false;
+        dialog.mode = "choose";
+        dialog.awaitingSingleJoin = false;
+        dialog.joinedUrls = [];
+        dialog.browserSessionNote = false;
         dialog.identitySyncInProgress = false;
         dialog.probed = false;
         dialog.resolvedUrl = "";
@@ -223,9 +383,16 @@ Dialog {
             width: contentFlick.width
             spacing: Theme.sp.s5
 
-            // --- Identity-first sign-in (the fast path).
+            // ── Chooser ──────────────────────────────────────────────
+            //
+            // Two buttons, same size, same screen. Which one a person
+            // wants depends on something they already know — whether they
+            // have a BSFChat ID, or an address somebody gave them — so
+            // neither can be "advanced".
             Text {
-                text: "Sign in with your BSFChat ID to restore every server you've joined."
+                visible: dialog.mode === "choose"
+                text: "BSFChat servers are self-hosted. Sign in to restore the "
+                    + "servers you've already joined, or join a new one by its address."
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.md
                 color: Theme.fg1
@@ -236,6 +403,7 @@ Dialog {
 
             Button {
                 id: identityButton
+                visible: dialog.mode === "choose"
                 Layout.fillWidth: true
                 Layout.topMargin: Theme.sp.s3
                 enabled: !dialog.identitySyncInProgress && !dialog.isConnecting && !dialog.oidcInProgress
@@ -260,14 +428,67 @@ Dialog {
                 }
                 onClicked: {
                     dialog.errorMessage = "";
+                    dialog.browserSessionNote = false;
                     dialog.identitySyncInProgress = true;
                     serverManager.loginWithIdentityAndSync(identityUrlField.text.trim());
                 }
             }
 
+            // The other half of the choice. An outline rather than a second
+            // filled button — equal footprint, equal reachability, but the
+            // ID path stays the recommended one for somebody who has an ID.
+            Button {
+                id: joinByAddressButton
+                visible: dialog.mode === "choose"
+                Layout.fillWidth: true
+                enabled: !dialog.identitySyncInProgress && !dialog.isConnecting && !dialog.oidcInProgress
+                contentItem: Text {
+                    text: "Join a server by address"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackTight.md
+                    color: joinByAddressButton.enabled ? Theme.fg0 : Theme.fg3
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    color: joinByAddressButton.hovered && joinByAddressButton.enabled
+                           ? Theme.bg3 : "transparent"
+                    border.color: joinByAddressButton.enabled ? Theme.accent : Theme.line
+                    border.width: 1
+                    radius: Theme.r2
+                    implicitHeight: 48
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                }
+                onClicked: {
+                    dialog.errorMessage = "";
+                    dialog.browserSessionNote = false;
+                    dialog.mode = "address";
+                    urlField.forceActiveFocus();
+                }
+            }
+
+            // What "not you?" leaves behind. The local session is gone; the
+            // browser's is not, and without this line the next attempt looks
+            // broken — it signs straight back in as the same person.
+            Text {
+                visible: dialog.mode === "choose" && dialog.browserSessionNote
+                Layout.fillWidth: true
+                text: "Signed out on this device. Your browser is still signed in to "
+                    + dialog.identityHost()
+                    + " — sign out there first, or the same account will be used again."
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                color: Theme.fg2
+                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignHCenter
+            }
+
             // Identity URL — editable for self-hosters, default to hosted service.
             RowLayout {
                 Layout.fillWidth: true
+                visible: dialog.mode === "choose"
                 spacing: Theme.sp.s3
 
                 Text {
@@ -302,42 +523,179 @@ Dialog {
                 }
             }
 
-            // Divider with embedded "or" label — softer than a full-width line
-            // with the toggle text separately below.
-            RowLayout {
+            // ── Signed in / no servers: who, and what next ───────────
+            // Hidden rather than filled with a guess when we have no name
+            // for the account: every real path supplies one (the identity
+            // provider's `sub` always, a homeserver's @user:host always),
+            // and a caption over a placeholder would be the same silence
+            // this screen exists to end, wearing a label.
+            Text {
+                visible: (dialog.mode === "signedIn" || dialog.mode === "noServers")
+                         && dialog.signedInAs() !== ""
                 Layout.fillWidth: true
-                Layout.topMargin: Theme.sp.s3
-                spacing: Theme.sp.s3
-
-                Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
-                Text {
-                    text: "OR"
-                    font.family: Theme.fontSans
-                    font.pixelSize: Theme.fontSize.xs
-                    font.weight: Theme.fontWeight.semibold
-                    font.letterSpacing: Theme.trackWidest.xs
-                    color: Theme.fg3
-                }
-                Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
+                text: "Signed in as"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                font.weight: Theme.fontWeight.semibold
+                font.letterSpacing: Theme.trackWidest.xs
+                color: Theme.fg3
+                horizontalAlignment: Text.AlignHCenter
             }
 
-            // Collapse toggle for the manual "add a specific server" flow.
             Text {
+                visible: (dialog.mode === "signedIn" || dialog.mode === "noServers")
+                         && dialog.signedInAs() !== ""
                 Layout.fillWidth: true
-                text: dialog.showManualServer ? "Hide manual server entry"
-                                              : "Add a specific server"
+                text: dialog.signedInAs()
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.lg
+                font.weight: Theme.fontWeight.semibold
+                color: Theme.fg0
+                horizontalAlignment: Text.AlignHCenter
+                // Wrap rather than elide: a long @user:homeserver.example
+                // matters most in the middle, which is exactly what an
+                // elide eats, and this screen exists to be read.
+                wrapMode: Text.WrapAnywhere
+            }
+
+            Text {
+                visible: (dialog.mode === "signedIn" || dialog.mode === "noServers")
+                         && dialog.signedInDetail() !== ""
+                Layout.fillWidth: true
+                Layout.topMargin: -Theme.sp.s3
+                text: dialog.signedInDetail()
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.fontSize.xs
+                color: Theme.fg3
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+            }
+
+            Text {
+                visible: dialog.mode === "signedIn" && dialog.joinedSummary() !== ""
+                Layout.fillWidth: true
+                text: dialog.joinedSummary()
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
-                font.weight: Theme.fontWeight.medium
-                color: manualToggle.containsMouse ? Theme.accentDim : Theme.accent
+                color: Theme.fg2
                 horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+            }
 
-                MouseArea {
-                    id: manualToggle
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: dialog.showManualServer = !dialog.showManualServer
+            // The dead end, answered. An identity account that belongs to no
+            // server used to land on "Identity login failed: …" with the only
+            // route onward hidden behind a disclosure link.
+            Text {
+                visible: dialog.mode === "noServers"
+                Layout.fillWidth: true
+                text: "This account hasn't joined a BSFChat server yet, so there's "
+                    + "nothing to restore.\n\nBSFChat servers are run by the people "
+                    + "who use them. Ask whoever runs yours for its address — "
+                    + "something like chat.example.com — and join it below."
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.fg2
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+            }
+
+            Button {
+                id: continueButton
+                visible: dialog.mode === "signedIn"
+                Layout.fillWidth: true
+                contentItem: Text {
+                    text: "Continue"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    font.weight: Theme.fontWeight.semibold
+                    color: Theme.onAccent
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    color: continueButton.hovered ? Theme.accentDim : Theme.accent
+                    radius: Theme.r2
+                    implicitHeight: 48
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                }
+                onClicked: dialog.close()
+            }
+
+            Button {
+                id: noServersJoinButton
+                visible: dialog.mode === "noServers"
+                Layout.fillWidth: true
+                contentItem: Text {
+                    text: "Join a server by address"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    font.weight: Theme.fontWeight.semibold
+                    color: Theme.onAccent
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    color: noServersJoinButton.hovered ? Theme.accentDim : Theme.accent
+                    radius: Theme.r2
+                    implicitHeight: 48
+                    Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                }
+                onClicked: {
+                    dialog.mode = "address";
+                    urlField.forceActiveFocus();
+                }
+            }
+
+            // "Not you?" — the whole point of the confirmation screen. A
+            // browser that already holds a provider session completes the
+            // OIDC round trip without showing anything, so this is the only
+            // moment the wrong account is catchable.
+            Button {
+                id: notYouButton
+                visible: dialog.mode === "signedIn" || dialog.mode === "noServers"
+                Layout.fillWidth: true
+                contentItem: Text {
+                    text: "Not you? Sign out and use a different account"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.sm
+                    font.weight: Theme.fontWeight.medium
+                    color: notYouButton.hovered ? Theme.accentDim : Theme.accent
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    wrapMode: Text.Wrap
+                }
+                background: Rectangle {
+                    color: "transparent"
+                    implicitHeight: Theme.touchTarget
+                }
+                onClicked: dialog.notMe()
+            }
+
+            // ── Address entry ────────────────────────────────────────
+            Button {
+                id: backButton
+                visible: dialog.mode === "address"
+                Layout.alignment: Qt.AlignLeft
+                contentItem: Text {
+                    text: "‹ Back"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.sm
+                    color: backButton.hovered ? Theme.fg1 : Theme.fg3
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    color: "transparent"
+                    implicitHeight: Theme.touchTarget
+                    implicitWidth: 88
+                }
+                onClicked: {
+                    dialog.errorMessage = "";
+                    // Walking back out of a join in flight must not leave
+                    // the flag armed, or the success that lands afterwards
+                    // drags the user onto a confirmation screen for a
+                    // server they just decided against.
+                    dialog.awaitingSingleJoin = false;
+                    dialog.mode = "choose";
                 }
             }
 
@@ -345,10 +703,10 @@ Dialog {
             ColumnLayout {
                 spacing: Theme.sp.s1
                 Layout.fillWidth: true
-                visible: dialog.showManualServer
+                visible: dialog.mode === "address"
 
                 Text {
-                    text: "SERVER URL"
+                    text: "SERVER ADDRESS"
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.xs
                     font.weight: Theme.fontWeight.semibold
@@ -363,20 +721,32 @@ Dialog {
                     TextField {
                         id: urlField
                         Layout.fillWidth: true
-                        placeholderText: "http://localhost:8448"
+                        placeholderText: "chat.example.com"
                         placeholderTextColor: Theme.fg2
                         color: Theme.fg0
                         font.pixelSize: Theme.fontSize.md
+                        // A server address is a hostname. Autocapitalising it
+                        // and offering to correct the spelling of "bsfchat"
+                        // is how a phone turns a correct address into a
+                        // "No BSFChat server found at …".
+                        inputMethodHints: Qt.ImhUrlCharactersOnly
+                                        | Qt.ImhNoAutoUppercase
+                                        | Qt.ImhNoPredictiveText
                         enabled: !dialog.isConnecting && !dialog.oidcInProgress
                         background: Rectangle {
                             color: Theme.bg0
                             radius: Theme.r2
                             border.color: urlField.activeFocus ? Theme.accent : Theme.line
                             border.width: 1
+                            implicitHeight: Theme.touchTarget
                         }
                         padding: Theme.sp.s3
 
                         onEditingFinished: {
+                            if (urlField.text.trim() !== "")
+                                dialog.beginCheck(urlField.text.trim());
+                        }
+                        Keys.onReturnPressed: {
                             if (urlField.text.trim() !== "")
                                 dialog.beginCheck(urlField.text.trim());
                         }
@@ -402,7 +772,10 @@ Dialog {
                             border.width: 1
                             radius: Theme.r2
                             implicitWidth: 80
-                            implicitHeight: 36
+                            // Sits beside urlField, so it inherits the same
+                            // floor: a 36-px control next to a 44-px field is
+                            // a miss on a phone and a ragged row everywhere.
+                            implicitHeight: Theme.touchTarget
                             Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                         }
                         onClicked: {
@@ -418,7 +791,7 @@ Dialog {
                 text: "Checking server capabilities..."
                 font.pixelSize: Theme.fontSize.sm
                 color: Theme.fg2
-                visible: dialog.checkingFlows && dialog.showManualServer
+                visible: dialog.checkingFlows && dialog.mode === "address"
                 Layout.alignment: Qt.AlignHCenter
             }
 
@@ -428,7 +801,7 @@ Dialog {
             // domain learns the address their client is actually using.
             Text {
                 Layout.fillWidth: true
-                visible: dialog.showManualServer && dialog.probed && !dialog.checkingFlows
+                visible: dialog.mode === "address" && dialog.probed && !dialog.checkingFlows
                 text: dialog.probeSummary()
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
@@ -441,7 +814,7 @@ Dialog {
             // having no well-known file at all is the normal case.
             Text {
                 Layout.fillWidth: true
-                visible: dialog.showManualServer && dialog.probeNote !== "" && !dialog.checkingFlows
+                visible: dialog.mode === "address" && dialog.probeNote !== "" && !dialog.checkingFlows
                 text: dialog.probeNote
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.xs
@@ -453,7 +826,7 @@ Dialog {
             Button {
                 id: oidcButton
                 Layout.fillWidth: true
-                visible: dialog.showManualServer && dialog.oidcAvailable && !dialog.checkingFlows
+                visible: dialog.mode === "address" && dialog.oidcAvailable && !dialog.checkingFlows
                 enabled: !dialog.isConnecting && !dialog.oidcInProgress
                 contentItem: Text {
                     text: "Sign in with BSFChat ID"
@@ -468,12 +841,13 @@ Dialog {
                     color: !oidcButton.enabled ? Theme.bg2
                          : (oidcButton.hovered ? Theme.accentDim : Theme.accent)
                     radius: Theme.r2
-                    implicitHeight: 44
+                    implicitHeight: Theme.touchTarget
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                 }
                 onClicked: {
                     dialog.errorMessage = "";
                     dialog.oidcInProgress = true;
+                    dialog.awaitingSingleJoin = true;
                     serverManager.addServerWithOidc(dialog.targetUrl());
                 }
             }
@@ -485,7 +859,7 @@ Dialog {
             Text {
                 Layout.fillWidth: true
                 Layout.topMargin: -Theme.sp.s1
-                visible: dialog.showManualServer && dialog.probed && dialog.oidcAvailable
+                visible: dialog.mode === "address" && dialog.probed && dialog.oidcAvailable
                          && !dialog.passwordAvailable && !dialog.checkingFlows
                 text: "No account needed — one is created the first time you sign in."
                 font.family: Theme.fontSans
@@ -497,28 +871,33 @@ Dialog {
 
             // When OIDC is available, collapse password behind a link.
             // When OIDC is NOT available, show password fields directly.
-            Text {
+            Button {
+                id: passwordToggle
                 Layout.fillWidth: true
                 Layout.topMargin: -Theme.sp.s1
-                text: dialog.showPasswordFallback ? "Hide password login" : "Use password instead"
-                font.pixelSize: Theme.fontSize.sm
-                color: Theme.accent
-                horizontalAlignment: Text.AlignHCenter
-                visible: dialog.showManualServer && dialog.probed && dialog.oidcAvailable
+                visible: dialog.mode === "address" && dialog.probed && dialog.oidcAvailable
                          && dialog.passwordAvailable && !dialog.checkingFlows
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: dialog.showPasswordFallback = !dialog.showPasswordFallback
+                contentItem: Text {
+                    text: dialog.showPasswordFallback ? "Hide password login"
+                                                      : "Use password instead"
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.sm
+                    color: Theme.accent
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
                 }
+                background: Rectangle {
+                    color: "transparent"
+                    implicitHeight: Theme.touchTarget
+                }
+                onClicked: dialog.showPasswordFallback = !dialog.showPasswordFallback
             }
 
             // Username (only when password auth is relevant and not collapsed)
             ColumnLayout {
                 spacing: Theme.sp.s1
                 Layout.fillWidth: true
-                visible: dialog.showManualServer && dialog.probed && dialog.passwordAvailable
+                visible: dialog.mode === "address" && dialog.probed && dialog.passwordAvailable
                          && !dialog.checkingFlows
                          && (!dialog.oidcAvailable || dialog.showPasswordFallback)
 
@@ -538,12 +917,14 @@ Dialog {
                     placeholderTextColor: Theme.fg2
                     color: Theme.fg0
                     font.pixelSize: Theme.fontSize.md
+                    inputMethodHints: Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
                     enabled: !dialog.isConnecting && !dialog.oidcInProgress
                     background: Rectangle {
                         color: Theme.bg0
                         radius: Theme.r2
                         border.color: usernameField.activeFocus ? Theme.accent : Theme.line
                         border.width: 1
+                        implicitHeight: Theme.touchTarget
                     }
                     padding: Theme.sp.s3
                 }
@@ -553,7 +934,7 @@ Dialog {
             ColumnLayout {
                 spacing: Theme.sp.s1
                 Layout.fillWidth: true
-                visible: dialog.showManualServer && dialog.probed && dialog.passwordAvailable
+                visible: dialog.mode === "address" && dialog.probed && dialog.passwordAvailable
                          && !dialog.checkingFlows
                          && (!dialog.oidcAvailable || dialog.showPasswordFallback)
 
@@ -580,6 +961,7 @@ Dialog {
                         radius: Theme.r2
                         border.color: passwordField.activeFocus ? Theme.accent : Theme.line
                         border.width: 1
+                        implicitHeight: Theme.touchTarget
                     }
                     padding: Theme.sp.s3
 
@@ -614,7 +996,7 @@ Dialog {
                 // server has said, in a login-flows document of its own, that
                 // it accepts m.login.password. Assuming it did is the entire
                 // bug this dialog is being fixed for.
-                visible: dialog.showManualServer && dialog.probed && dialog.passwordAvailable
+                visible: dialog.mode === "address" && dialog.probed && dialog.passwordAvailable
                          && !dialog.checkingFlows
                          && (!dialog.oidcAvailable || dialog.showPasswordFallback)
 
@@ -637,7 +1019,7 @@ Dialog {
                         border.color: Theme.line
                         border.width: 1
                         radius: Theme.r2
-                        implicitHeight: 40
+                        implicitHeight: Theme.touchTarget
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                     }
                     onClicked: {
@@ -647,6 +1029,7 @@ Dialog {
                             return;
                         }
                         dialog.isConnecting = true;
+                        dialog.awaitingSingleJoin = true;
                         serverManager.registerServer(dialog.targetUrl(), usernameField.text.trim(), passwordField.text.trim());
                     }
                 }
@@ -669,7 +1052,7 @@ Dialog {
                         color: !loginButton.enabled ? Theme.bg2
                              : (loginButton.hovered ? Theme.accentDim : Theme.accent)
                         radius: Theme.r2
-                        implicitHeight: 40
+                        implicitHeight: Theme.touchTarget
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                     }
                     onClicked: {
@@ -679,14 +1062,19 @@ Dialog {
                             return;
                         }
                         dialog.isConnecting = true;
+                        dialog.awaitingSingleJoin = true;
                         serverManager.addServer(dialog.targetUrl(), usernameField.text.trim(), passwordField.text.trim());
                     }
                 }
             }
 
-            // Cancel — ghost text link, no bg at all.
+            // Cancel — ghost text link, no bg at all. Not offered on the
+            // confirmation screens: there "Continue" is the dismiss, and a
+            // second way out next to "Not you?" only muddies which one
+            // keeps the account.
             Button {
                 id: cancelBtn
+                visible: dialog.mode === "choose" || dialog.mode === "address"
                 Layout.fillWidth: true
                 contentItem: Text {
                     text: "Cancel"
@@ -696,7 +1084,7 @@ Dialog {
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                 }
-                background: Rectangle { color: "transparent"; implicitHeight: 32 }
+                background: Rectangle { color: "transparent"; implicitHeight: Theme.touchTarget }
                 onClicked: dialog.close()
             }
         }

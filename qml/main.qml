@@ -486,6 +486,10 @@ ApplicationWindow {
     // ServerSidebar rail, both of which are shared with the mobile shell and
     // so cannot see `loginDialog` by id. Mirrored in MobileMain.qml.
     function openLoginDialog() { loginDialog.open(); }
+    // Straight onto address entry, skipping the chooser. Mirrored in
+    // MobileMain.qml — ChannelList's empty state offers it on both shells,
+    // and a helper that exists on one is a TypeError on the other.
+    function openJoinByAddress() { loginDialog.openAtAddress(); }
     // Manual "Check for updates" — surfaced from ClientSettings →
     // About via Window.window.checkForUpdates().
     function checkForUpdates() {

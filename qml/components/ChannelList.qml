@@ -2438,6 +2438,39 @@ Rectangle {
             }
             onClicked: Window.window.openLoginDialog()
         }
+
+        // The second half of the same choice, said out loud.
+        //
+        // "Add a server" opens a dialog that then asks which way; on a
+        // phone that dialog is the whole screen and the address path used
+        // to be a text link inside it. BSFChat is self-hosted — being
+        // handed an address by the person who runs the server is the
+        // normal way in — so the address path gets a control of its own,
+        // here, at the size of a thumb.
+        Button {
+            id: joinByAddressCta
+            Layout.alignment: Qt.AlignHCenter
+            visible: serverManager.servers && serverManager.servers.rowCount() === 0
+            contentItem: Text {
+                text: "Join a server by address"
+                color: joinByAddressCta.hovered ? Theme.fg0 : Theme.fg1
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                font.weight: Theme.fontWeight.medium
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+            }
+            background: Rectangle {
+                color: joinByAddressCta.hovered ? Theme.bg3 : "transparent"
+                border.color: Theme.line
+                border.width: 1
+                radius: Theme.r2
+                implicitHeight: Theme.touchTarget
+                implicitWidth: 200
+                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+            }
+            onClicked: Window.window.openJoinByAddress()
+        }
     }
 
     // Room context menu — inline-styled items, danger action uses

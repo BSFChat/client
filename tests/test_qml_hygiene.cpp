@@ -840,6 +840,200 @@ private slots:
         }
     }
 
+    // Joining a server by its address is the product's central act.
+    //
+    // BSFChat is self-hosted. "Somebody gave me an address" is not an
+    // advanced case, it is THE case — and until 2026-09-24 it was a text
+    // link inside the sign-in dialog, reading "Add a specific server",
+    // below a divider, hidden by `property bool showManualServer: false`.
+    // On the owner's own Pixel, on a fresh install, the owner of the
+    // product had to be told where it was. A store reviewer handed
+    // "sign in to uat.bsfchat.com with these credentials" would not have
+    // found it, and that is a rejection, not a papercut.
+    //
+    // The property this pins: the path exists as a control of its own, on
+    // both shells, one tap from the sign-in screen. It is written as four
+    // checks because "reachable" has four separable ways to rot — the
+    // dialog's entry point, the shells' helpers, an actual affordance that
+    // calls them, and the chooser still being the screen the dialog opens
+    // on.
+    //
+    // WHAT IT DOES NOT CATCH: whether any of it is on screen. Nothing
+    // headless can measure that — a button behind a Loader that never
+    // activates, or under the notch, passes. It also cannot tell a real
+    // affordance from a dead one; it checks that the wiring exists, in the
+    // places a human would look for it.
+    void joiningAServerByAddressIsReachableOnBothShells()
+    {
+        const QString dialog = withoutComments(
+            readQml(QStringLiteral("/components/LoginDialog.qml")));
+        const QString desktop = withoutComments(readQml(QStringLiteral("/main.qml")));
+        const QString mobile = withoutComments(
+            readQml(QStringLiteral("/mobile/MobileMain.qml")));
+
+        // 1. The dialog can be opened straight onto address entry.
+        QVERIFY2(dialog.contains(QLatin1String("function openAtAddress(")),
+                 "LoginDialog has no way to be opened on address entry — the "
+                 "only route back in is the chooser, and a caller who already "
+                 "knows the user has an address has to make them choose again");
+
+        // 2. Both shells expose it under the same name. A helper on one
+        //    shell only is a TypeError on the other; see
+        //    everyShellHelperASharedComponentCallsExistsOnBothShells.
+        struct Shell { const char* name; const QString* src; };
+        const Shell shells[] = {{"main.qml", &desktop},
+                                {"mobile/MobileMain.qml", &mobile}};
+        for (const auto& shell : shells) {
+            QVERIFY2(declaredMembers(*shell.src).contains(
+                         QStringLiteral("openJoinByAddress")),
+                     qPrintable(QStringLiteral("%1 does not declare openJoinByAddress()")
+                                    .arg(QLatin1String(shell.name))));
+        }
+
+        // 3. Somebody actually offers it. A helper nothing calls is a
+        //    helper nobody can reach, which is the state the mobile shell
+        //    was already in with the address flow.
+        int callers = 0;
+        QStringList surfaces = filesUnder(QStringLiteral(BSFCHAT_QML_DIR "/components"),
+                                          QStringLiteral("*.qml"));
+        surfaces << QStringLiteral(BSFCHAT_QML_DIR "/mobile/MobileMain.qml")
+                 << QStringLiteral(BSFCHAT_QML_DIR "/main.qml");
+        for (const QString& path : std::as_const(surfaces)) {
+            const QString src = withoutComments(readAll(path));
+            // A declaration reads `function openJoinByAddress() {`, which
+            // contains the call text verbatim — count only what is left
+            // once the declarations are taken out, or a shell declaring the
+            // helper and nobody offering it would satisfy this.
+            const int uses = static_cast<int>(src.count(QLatin1String("openJoinByAddress()")))
+                - static_cast<int>(src.count(QLatin1String("function openJoinByAddress()")));
+            if (uses > 0) ++callers;
+        }
+        QVERIFY2(callers >= 2,
+                 qPrintable(QStringLiteral("openJoinByAddress() is offered from %1 place(s); "
+                                           "expected the shared empty state and at least one "
+                                           "shell's own")
+                                .arg(callers)));
+
+        // 4. And the choice is on the screen the dialog opens on, not
+        //    behind a disclosure: the dialog resets to the chooser every
+        //    time it is shown, and the chooser's address button switches
+        //    mode rather than expanding something.
+        QVERIFY2(dialog.contains(QLatin1String("dialog.mode = \"choose\"")),
+                 "LoginDialog no longer resets to the chooser when it opens");
+        QVERIFY2(dialog.contains(QLatin1String("\"Join a server by address\"")),
+                 "the chooser lost the words for the address path");
+        const qsizetype button = dialog.indexOf(QLatin1String("id: joinByAddressButton"));
+        QVERIFY2(button >= 0, "the chooser lost its address button");
+        QVERIFY2(dialog.mid(button, 1600).contains(QLatin1String("dialog.mode = \"address\"")),
+                 "the chooser's address button no longer leads to address entry");
+    }
+
+    // Sign-in must say who it signed in as.
+    //
+    // From the same device session: when the system browser already holds
+    // a session for the identity provider, the OIDC round trip completes
+    // without rendering anything, LoginDialog closed itself, and the
+    // client was signed in as whoever that session belonged to. The owner
+    // expected a demo account and was silently signed in as himself. On a
+    // shared phone that is not confusing, it is wrong.
+    //
+    // The existing browser session is a FEATURE and this rule does not ask
+    // for it to be removed — only that its result be visible and
+    // reversible. So: the dialog may not close itself out of
+    // identityLoginComplete, it must name the account, and it must offer a
+    // way to undo.
+    //
+    // WHAT IT DOES NOT CATCH: "not you?" cannot end the session the system
+    // browser holds — that needs `prompt=login` on the authorize request,
+    // which belongs to the OIDC flow. It drops the local session and the
+    // servers this sign-in added, and the dialog says the rest in words.
+    // This rule pins the affordance, not the completeness of the sign-out.
+    void signInNeverCompletesWithoutNamingTheAccount()
+    {
+        const QString dialog = withoutComments(
+            readQml(QStringLiteral("/components/LoginDialog.qml")));
+
+        const qsizetype handler =
+            dialog.indexOf(QLatin1String("function onIdentityLoginComplete("));
+        QVERIFY2(handler >= 0, "LoginDialog stopped listening for identityLoginComplete");
+        // The body runs to the next `function ` at the same nesting; a
+        // generous fixed window is enough to catch a close() put back.
+        QVERIFY2(!dialog.mid(handler, 700).contains(QLatin1String("dialog.close()")),
+                 "LoginDialog closes itself the moment identity sign-in completes — "
+                 "with a live browser session that is the entire flow happening in "
+                 "silence, as whoever the browser is signed in as");
+
+        QVERIFY2(dialog.contains(QLatin1String("serverManager.identityAccountName"))
+                     || dialog.contains(QLatin1String("serverManager.identityAccountId")),
+                 "nothing in the sign-in dialog names the account that just signed in");
+        QVERIFY2(dialog.contains(QLatin1String("Not you?")),
+                 "the confirmation screen lost its \"not you?\" escape");
+        QVERIFY2(dialog.contains(QLatin1String("serverManager.forgetIdentitySession()")),
+                 "\"not you?\" no longer drops the identity session it is disowning");
+
+        // And the C++ side it reads from. A Q_PROPERTY quietly renamed
+        // leaves the QML above binding to undefined, which renders as an
+        // empty string — i.e. back to saying nothing, silently.
+        const QString header = withoutComments(
+            readAll(QStringLiteral(BSFCHAT_SRC_DIR "/net/ServerManager.h")));
+        QVERIFY2(!header.isEmpty(), "ServerManager.h not found");
+        for (const char* member : {"identityAccountName", "identityAccountId",
+                                   "forgetIdentitySession"}) {
+            QVERIFY2(header.contains(QLatin1String(member)),
+                     qPrintable(QStringLiteral("ServerManager no longer offers %1, which the "
+                                               "sign-in confirmation is bound to")
+                                    .arg(QLatin1String(member))));
+        }
+    }
+
+    // An account that has joined nothing must not dead-end.
+    //
+    // D-M8 caught the first half of this: identity sign-in for an account
+    // with an empty membership list closed the dialog and left the user in
+    // an empty app with nothing said. The fix routed it to
+    // identityLoginFailed, which the shell toasts as "Identity login
+    // failed: your account isn't a member of any server yet — … or add a
+    // server by URL below." Three things wrong with that. The sign-in did
+    // not fail. There was no "below" on a phone, only a collapsed link.
+    // And a toast is gone in four seconds.
+    //
+    // It now has its own signal and its own screen, which names the
+    // account, says plainly what happened, and puts the one useful next
+    // step — join a server by address — under the user's thumb.
+    void anAccountWithNoServersIsToldWhatToDoNext()
+    {
+        const QString manager = withoutComments(
+            readAll(QStringLiteral(BSFCHAT_SRC_DIR "/net/ServerManager.h")));
+        QVERIFY2(manager.contains(QLatin1String("void identityHasNoServers()")),
+                 "ServerManager no longer distinguishes \"joined nothing yet\" from a "
+                 "failed sign-in, so it is back to being reported as an error");
+
+        const QString impl = withoutComments(
+            readAll(QStringLiteral(BSFCHAT_SRC_DIR "/net/ServerManager.cpp")));
+        const qsizetype empty = impl.indexOf(QLatin1String("if (servers.isEmpty())"));
+        QVERIFY2(empty >= 0, "the empty-membership branch is gone from the identity sync");
+        QVERIFY2(impl.mid(empty, 300).contains(QLatin1String("emit identityHasNoServers()")),
+                 "an empty membership list is reported on the failure channel again");
+
+        const QString dialog = withoutComments(
+            readQml(QStringLiteral("/components/LoginDialog.qml")));
+        QVERIFY2(dialog.contains(QLatin1String("function onIdentityHasNoServers(")),
+                 "LoginDialog does not handle identityHasNoServers, so the signal lands "
+                 "nowhere and the dialog sits on \"Waiting for browser login…\" forever");
+        const qsizetype screen = dialog.indexOf(QLatin1String("dialog.mode === \"noServers\""));
+        QVERIFY2(screen >= 0, "there is no screen for the no-servers case");
+        QVERIFY2(dialog.contains(QLatin1String("hasn't joined a BSFChat server yet")),
+                 "the no-servers screen lost the sentence explaining what happened");
+        // The way out has to be a control, not prose pointing at one.
+        const qsizetype button = dialog.indexOf(QLatin1String("id: noServersJoinButton"));
+        QVERIFY2(button >= 0,
+                 "the no-servers screen has no button onto address entry — telling "
+                 "someone to \"add a server by URL below\" when there is no below is "
+                 "the dead end this replaced");
+        QVERIFY2(dialog.mid(button, 1200).contains(QLatin1String("dialog.mode = \"address\"")),
+                 "the no-servers screen's button no longer leads to address entry");
+    }
+
     // An expired session must offer a way out of itself.
     //
     // On 2026-09-19 the homeserver's access_tokens table was purged. Clients
