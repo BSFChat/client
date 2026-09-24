@@ -101,6 +101,10 @@ OpenSSL.
 
 ### 1.4 The H.264 encoder — **use VideoToolbox, not openh264**
 
+> **Done, 2026-09-23. See §10.** The assessment below was right on
+> every count and is kept as the reasoning; §10 records what was
+> actually built and which of its predictions a build confirmed.
+
 The tree vendors openh264 for Linux and desktop macOS and deliberately
 excludes it from both mobile platforms
 (`cmake/Dependencies.cmake`: `if(NOT WIN32 AND NOT ANDROID AND NOT IOS)`).
@@ -466,6 +470,10 @@ test: a simulator cannot take a phone call.
 ---
 
 ## 4. Camera video on iOS
+
+> **Partly done, 2026-09-23. See §10.** Permission, orientation and
+> the codec are built. Front/back switching and mobile rate ceilings
+> are NOT — they are still open, and items 1 and 5 below stand.
 
 `src/voice/MacCameraCapturer.mm` is excluded from iOS
 (`$<$<AND:$<PLATFORM_ID:Darwin>,$<NOT:$<BOOL:${IOS}>>>`), so an iOS
@@ -838,3 +846,272 @@ backend choice.
    set per element is what Chromium does, but Apple documents the
    property as global-scope; if VPIO ignores the element, the symptom is
    the output device setting being ignored while AEC is on.
+
+---
+
+## 10. Camera video on iOS, built (2026-09-23)
+
+Branch `feat/ios-video`, on top of `feat/darwin-aec`. Voice already ran
+on a real iPhone 16 Pro Max (§9); this is the video half.
+
+**Status: it builds for arm64-iphoneos and every pure-logic test passes.
+Not one frame has been captured or encoded on a phone.** Everything in
+"What a device has to answer" below is genuinely open.
+
+### 10.1 What changed
+
+**VideoToolbox is built for iOS.** The gate in `CMakeLists.txt` went
+from `if(APPLE AND NOT IOS)` to `if(APPLE)`. That was the whole reason
+an iOS build advertised no codecs: with openh264 and libaom correctly
+excluded on mobile, there was no video backend compiled in at all, so
+`h264EncodeProfiles()` and `h264DecodeProfiles()` both returned empty,
+`localCapsJson()` published `video_codecs: []`, and every peer in the
+mesh was routed to the legacy JPEG stills path — while the phone itself
+could not send video at all, because `VideoEncoder::create()` had
+nothing to return.
+
+Confirmed on the built binary: `bsfchat-app` for `iphoneos` links
+`VideoToolbox`, `CoreMedia`, `CoreVideo`, and carries
+`MacVTEncoder`/`MacVTDecoder` symbols and the `VTCompressionSession*` /
+`VTDecompressionSession*` imports.
+
+`LatencyCriticalActivity.mm` stays macOS-only — its header defines the
+methods inline off macOS, so compiling it on iOS is a redefinition, and
+what it opts out of (App Nap, desktop timer coalescing) has no iOS
+meaning.
+
+**The encoder's three iOS-specific defects, all as predicted in §1.4:**
+
+1. `kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder`
+   is now macOS-only (`BSFCHAT_VT_WANT_HW_SPEC`, keyed on
+   `TARGET_OS_OSX`), at both sites. On iOS the hardware encoder is the
+   only encoder; the key is `ios(17.4)` against a deployment target of
+   17, so referencing it would be a weak-linking hazard for a question
+   with one possible answer.
+2. Input is now **NV12 from an IOSurface-backed pool** instead of a
+   freshly-allocated tri-planar `CVPixelBuffer` per frame. The session's
+   own pool (`VTCompressionSessionGetPixelBufferPool`) is used where it
+   exists, with a hand-allocated IOSurface-backed buffer as the fallback;
+   the I420→NV12 interleave is `src/voice/video/NV12Pack.{h,cpp}`,
+   which is pure and unit-tested against padded destination strides.
+   **Applied on macOS too, deliberately** — NV12 is VideoToolbox's
+   native input on both platforms, and sharing the path means the Mac,
+   which gets used daily, exercises the code the phone runs.
+3. `kVTInvalidSessionErr` is handled. iOS reclaims the compression
+   session when the app backgrounds; every call after that fails, and
+   nothing upstream could see why — `VideoSendPipeline` only learns that
+   `encode()` returned false, treats it as a bad frame, and retries
+   forever. `encode()` now rebuilds the session once and retries with a
+   forced keyframe. One retry, not a loop: a second failure is not the
+   session, and the pipeline's software-fallback path is the right next
+   move.
+
+The decode side needed nothing: `Result::Error` already causes
+`VideoReceivePipeline` to reset the decoder, arm the keyframe gate and
+request an IDR, which is exactly right for an invalidated session — and
+it does *not* reach `onDecoderUnavailable`, so a backgrounded app cannot
+latch `markH265DecodeBroken()` and retract H.265 for the rest of the
+process. That distinction is invisible from `MacVTDecoder.mm` and is now
+written down there.
+
+**`VTCompressionSessionCompleteFrames` per frame was left in place.**
+It drains the hardware pipeline every frame and is real waste on a
+phone, but removing it means making `VideoEncoder::encode()`
+asynchronous for every backend on every platform. That is a different
+change and should be made against a measurement, not blind.
+
+**Camera permission is lazy, and structurally so.** The rule is
+`src/voice/CameraPermissionPolicy.h` (pure, unit-tested); iOS answers it
+through `QCameraPermission`, macOS keeps its AVFoundation shim because
+Homebrew Qt has no permission plugin, and every other platform reports
+`Unsupported` and behaves exactly as before. Two things make "lazy" a
+property rather than an intention:
+
+- The policy is consulted from exactly one place —
+  `CameraController::startForCamera()` — which is only reachable from
+  the dock's camera button.
+- `CameraController`'s constructor no longer builds a `QCamera`. The
+  capture objects are created in `ensureCaptureSession()` on first
+  start, and device enumeration moved there too. The constructor runs at
+  launch on every platform, so anything it does happens on the splash
+  screen; this is the same class of bug a worker fixed on Android on
+  2026-09-22, where a startup camera prompt would have failed review.
+
+`androidPerms.hasCamera()` returns true off Android, so `VoiceDock.qml`
+short-circuits its Android branch on iOS and calls `camera.start()`
+directly — no QML change was needed, and the iOS prompt is raised inside
+the controller.
+
+`NSCameraUsageDescription` was reviewed and left as written: it names
+the feature and the fact that the camera is only on while the user
+chooses to share video, which is accurate for what now ships. It is
+notably *not* the microphone string — there is no background clause,
+because camera capture genuinely stops when the app backgrounds.
+
+**Orientation is baked into the pixels at the sender.** The rule is
+`src/voice/video/VideoFrameOrientation.h`. Qt stamps a presentation
+rotation (and a mirror flag) on every captured `QVideoFrame` and applies
+both when *drawing*; the pixels are untouched, so everything that reads
+them — `FrameConverter::toI420` for the encoder, `QVideoFrame::toImage()`
+for the legacy JPEG path — got a sideways picture, and H.264 over RTP
+carries no orientation metadata for a receiver to undo it with.
+
+Both paths now apply the rotation. The alternative — RTP's CVO header
+extension — is the "proper" answer and was rejected because it needs
+every receiver to implement it, and this mesh has desktop peers on three
+platforms plus a JPEG fallback; a rotation the old peers ignore is a
+rotation that does not happen. Scaling happens before rotating (a
+quarter turn leaves the long edge unchanged, so the output size is the
+same and the rotation touches far fewer pixels).
+
+**Mirroring is deliberately not applied to the wire.** The front camera
+is mirrored for the local preview because people expect their own image
+to behave like a mirror; the far end is looking at you, not at
+themselves, and would otherwise read your T-shirt backwards. Qt gives
+both for free — the preview goes through `QVideoSink`, which applies the
+flag, and the encoder gets raw pixels that never had it applied.
+
+**`scripts/build-ios.sh` no longer forces voice off.** It defaulted
+`BSFCHAT_ENABLE_VOICE` to `OFF` and passed it unconditionally, which
+outranks an `option()` default — so the commit that turned voice on for
+iOS had no effect through the script that device builds are actually
+made with. **This was caught by building: the first iOS binary of this
+branch linked no VideoToolbox at all.** The script now passes the flag
+only when the caller sets one.
+
+**An iPhone's camera state is announced to the roster.** The
+`setLocalMediaState` block in `main.cpp` excluded iOS because there was
+no capture controller there; without it an iPhone's video tile would
+never appear on anyone's roster until the first frame landed (the S-7
+failure shape). The screen half is a compile-time `false` — there is
+still no iOS screen share.
+
+### 10.2 Tests
+
+`tests/test_mobile_video.cpp` (17 cases, all passing), covering the
+orientation rule and its effect on `FrameConverter` (including the
+dimension swap that `VideoSendPipeline` sizes the encoder from), the
+NV12 packing against padded strides, the permission policy, and what the
+build advertises and negotiates — built the same way `localCapsJson()`
+builds it and run through the real `peerCanReceiveRtpVideo` /
+`peerNeedsLegacyJpeg` predicates, with the old codec-less shape kept as
+an explicit contrast.
+
+Nothing in it opens a camera, a microphone, a screen or an encode
+session, so it runs on the owner's Mac without a TCC prompt.
+
+The existing `test_video_codec` VideoToolbox round-trips
+(`vtEncodesOpenh264Decodes`, `openh264EncodesVtDecodes`) pass on the new
+NV12/pool path, which is real evidence that the encoder change produces
+a valid bitstream — on a Mac.
+
+### 10.3 What a device has to answer
+
+None of this can be checked without a phone:
+
+1. **Does Qt's iOS AVF backend stamp a rotation on the frame at all?**
+   The whole orientation fix rests on it. If it reports `None` for every
+   device orientation, the picture is upright only when the phone is
+   held the way the sensor likes, and the fix has to move to
+   `AVCaptureConnection.videoRotationAngle` — which Qt does not expose,
+   and which would mean porting the capturer after all.
+2. **Does the hardware encoder accept the pooled NV12 buffers?** §1.4
+   called this the most likely functional failure on iOS. A Mac proves
+   the format is right; it does not prove the pool is.
+3. **Does the prompt appear at first video use and nowhere else?**
+4. **What happens across a background/foreground cycle?** The
+   invalidation retry has never run.
+5. **Thermals.** 720p30 hardware-encoded should be sustainable. Nobody
+   has measured it.
+
+### 10.4 Left undone, on purpose
+
+- **Front/back camera switching.** §4 item 1 stands. A phone has two
+  cameras and the dock has no control to flip between them; the button
+  starts the default one. This is the most obvious remaining user-facing
+  gap.
+- **`VideoRateController` was not retuned.** It was overhauled recently
+  for desktop and a phone breaks several of its assumptions; retuning it
+  blind would be worse than leaving it. The specific breaks, for whoever
+  picks this up:
+  - **Encode pressure cannot fire.** `VideoSendStats.h` declares an
+    encode bottleneck when convert+encode takes ≥90 % of a frame
+    interval. With a fixed-function encoder that time measures submit
+    latency, not load, and sits near zero while the SoC throttles — so a
+    thermally-throttled phone never declares itself encode-bound. The
+    upshift headroom model compounds this: it predicts cost as
+    quadratic in the long edge, which is true for software motion search
+    and false for hardware.
+  - **A camera that drops frames is classified `Idle`, not `Capture`.**
+    `CameraController` passes `capturePolled=false`, so the capture
+    branch in `VideoSendStats` is skipped entirely. On a phone, dropping
+    from 30 to 15 fps is routine — thermal throttle, or low light
+    extending exposure — and `Idle` is excluded from the sender-short
+    path, so the bitrate is not scaled down. Bytes per frame double,
+    packets per frame double, and the frame-damage model then amplifies
+    any loss. This is the sharpest latent bug of the set.
+  - **The resolution ladder sheds encode bits, not capture cost.**
+    Nothing selects a `QCameraFormat`; the camera keeps running its
+    native format and libyuv scales afterwards. On a phone that is
+    battery and heat the ladder cannot reclaim.
+  - **Back-off is bounded to 15 %/tick with a "never below 70 % of
+    recent goodput" ratchet.** That is tuned for a WiFi hiccup. A
+    cellular handover drops capacity by an order of magnitude instantly,
+    and the ratchet actively prevents the fast collapse that needs.
+    There is also no network-change hook: `resetState()` is called only
+    from `setActive(true)`, so a knee learned on one cell survives the
+    handover and takes ~20 s to climb back through.
+  - **Nothing thermal anywhere.** No `NSProcessInfo` thermal state, no
+    low-power-mode check, no hook to feed one into. The controller has
+    exactly two inputs: receiver delivery reports and the sender window.
+- **Screen sharing on iOS.** Still needs ReplayKit and a Broadcast
+  Upload Extension. Unchanged.
+
+### 10.5 Portrait-only, and what it does to the orientation question
+
+The app ships portrait-only on both platforms now (`feat/mobile-ui-polish`:
+`screenOrientation="portrait"`, and `UISupportedInterfaceOrientations`
+reduced to `UIInterfaceOrientationPortrait`). That is independent of the
+sender-side rotation here — locking the UI does not turn the sensor —
+but it changes the shape of the problem in a useful way, and it changes
+what is worth testing.
+
+**It makes the problem strictly simpler.** There is now exactly one
+interface orientation the app can ever be in, so whatever angle the
+capture arrives at, it is a *constant*. The fix, if one is needed, is a
+single number rather than a mapping table maintained against four
+orientations.
+
+**The evidence says a fix probably IS needed.** Qt 6.10.3's concrete iOS
+camera backend is `AVFCameraSession` — the shared Darwin one — and it
+carries no orientation or rotation method at all: no
+`videoRotationAngle`, no `videoOrientation`, nothing that consults the
+screen. If that reading is right, `QVideoFrame::rotation()` is always
+`None` on iOS, `videoorient::wireRotation()` returns 0, and the
+orientation code added here is in place and doing nothing while the far
+end gets a sideways picture. This is static reading of a binary, not a
+measurement; §10.3 item 1 is still the open question.
+
+**The local preview is a free oracle for it.** Qt applies the same
+presentation rotation when it *draws* a frame through `QVideoSink`. So
+if Qt stamps nothing, the preview is sideways too — inside a portrait
+UI, which is unmissable. That means:
+
+- **Preview sideways in the portrait UI ⇒ Qt stamps nothing.** The
+  rotation has to come from somewhere else, and the `[camera] first
+  frame:` log line says which way round to apply it.
+- **Preview upright ⇒ Qt stamps a rotation**, the wire gets the same
+  one, and the far end should be upright too.
+
+Either way the log line settles it on the first build, which is why it
+was added rather than leaving the question for a second round trip.
+
+**The "rotate to landscape and back" test no longer applies as written**
+— the UI cannot rotate. Replace it with a *tilt* observation, which
+answers a different and still-open question: whether Qt derives any
+rotation it does stamp from the INTERFACE orientation (locked, so
+constant) or from the physical DEVICE orientation (still free to change
+in a locked app). Tilt the phone to landscape while watching your own
+preview: if the preview rotates inside the portrait UI, Qt is keyed on
+the device and the wire angle moves with the user's wrist; if it stays
+put, the angle is constant and there is exactly one number to get right.

@@ -7,12 +7,16 @@
 #include <QTimer>
 #include <QVariantList>
 
+#include "voice/CameraPermissionPolicy.h"
 #include "voice/video/VideoSendStats.h"
+
+#include <functional>
+
 #ifdef Q_OS_MACOS
 class MacCameraCapturer;
 #else
-#include <QCamera>
-#include <QMediaCaptureSession>
+class QCamera;
+class QMediaCaptureSession;
 #endif
 
 class IVoiceTransport;
@@ -28,6 +32,28 @@ class VideoRateController;
 //
 // Unlike QScreenCapture, QCamera works on Homebrew's Qt Multimedia
 // build — no native Objective-C++ wrapper needed.
+//
+// ON MOBILE, NOTHING IN THIS CLASS MAY TOUCH THE CAMERA BEFORE start().
+//
+// The instance is constructed in main() at launch on every platform, so
+// anything the constructor does happens on the splash screen. On Android
+// and iOS that rules out constructing a QCamera there — bringing Qt's
+// multimedia stack up is enough to provoke the platform's CAMERA prompt,
+// which is exactly how users got a camera prompt on the SIGN-IN screen
+// (observed on a device, fixed 2026-09-22; Play treats an unprompted
+// sensitive-permission request as a policy problem and App Review reads
+// it the same way). It equally rules out querying or requesting a
+// permission from the constructor.
+//
+// So on mobile the constructor wires signals and nothing else, and
+// ensureCaptureSession() builds the capture objects at the first
+// startForCamera() — which is only reachable from the dock's camera
+// button. Desktop still primes them in the constructor: there is no
+// prompt to provoke there, and nothing should change for it. macOS uses
+// MacCameraCapturer instead, whose constructor is empty.
+//
+// The permission itself is asked in startForCamera() on both Apple
+// platforms and nowhere else; see CameraPermissionPolicy.h.
 class CameraController : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool active READ active NOTIFY activeChanged)
@@ -109,12 +135,27 @@ private:
     // next join.
     void rewireVoiceLeaveWatch();
 
+    // ---- Lazy capture + permission (never at launch on mobile) -------
+    //
     // Build QCamera + QMediaCaptureSession if they do not exist yet.
-    // Called from the constructor on desktop and from the first
+    // Called from the constructor on DESKTOP, where there is no prompt to
+    // provoke and nothing should change, and from the first
     // startForCamera() on Android / iOS, where constructing them early
     // makes the platform ask for the CAMERA permission on the sign-in
     // screen. No-op on macOS, which uses MacCameraCapturer instead.
     void ensureCaptureSession();
+    // This platform's current camera permission, without prompting.
+    camperm::Status cameraPermission() const;
+    // Prompt. `done` runs on the main thread with the user's answer.
+    // Only called when cameraPermission() said Undetermined.
+    void requestCameraPermission(std::function<void(bool granted)> done);
+    // Set m_lastError and notify. One place so the refusal paths cannot
+    // forget the signal.
+    void failWith(const QString& message);
+    // One line per camera start, naming what the capture backend
+    // actually handed us: the frame's presentation rotation and mirror
+    // flag, its size, and the screen orientation at the time.
+    void logFirstFrameGeometry(const QVideoFrame& frame);
 
 #ifdef Q_OS_MACOS
     MacCameraCapturer* m_mac = nullptr;
@@ -145,6 +186,10 @@ private:
     // server).
     QList<QMetaObject::Connection> m_voiceRoomConns;
     QVideoFrame m_pendingFrame;
+    // Log the first frame's geometry once per start. See
+    // logFirstFrameGeometry() — this is the seam that tells us, from a
+    // device log, whether Qt stamps a capture rotation at all.
+    bool m_loggedFrameGeometry = false;
     bool m_active = false;
     bool m_transmitting = false;
     QString m_lastError;

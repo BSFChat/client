@@ -255,7 +255,25 @@ VideoDecoder::Result MacVTDecoder::decode(const QByteArray& au, QVideoFrame& out
         0 /* synchronous */, nullptr, nullptr);
     CFRelease(sample);
     if (status != noErr) {
-        qCWarning(logVTDec, "decode failed: %d", int(status));
+        // kVTInvalidSessionErr is the one worth naming: iOS reclaims the
+        // hardware decode session while the app is backgrounded, and
+        // every call after that fails with it until the session is
+        // rebuilt. It needs no special case here — Result::Error already
+        // means exactly the right thing. VideoReceivePipeline answers it
+        // by calling reset() (which tears the dead session down), arming
+        // the keyframe gate and asking the sender for an IDR; the next
+        // keyframe carries the parameter sets and ensureSession()
+        // rebuilds from them.
+        //
+        // It also does NOT reach VoiceEngine::onDecoderUnavailable —
+        // that edge is raised by a failed VideoDecoder::create(), not by
+        // a failed decode — so a backgrounded app cannot latch
+        // videohealth::markH265DecodeBroken() and retract H.265 from our
+        // advertised caps for the rest of the process. That distinction
+        // is load-bearing on iOS and invisible from here, hence the note.
+        qCWarning(logVTDec, "decode failed: %d%s", int(status),
+                 status == kVTInvalidSessionErr
+                     ? " (session invalidated — backgrounded?)" : "");
         return Result::Error;
     }
     if (!m_slot->valid) return Result::NeedMore;
