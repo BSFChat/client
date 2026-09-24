@@ -1290,6 +1290,12 @@ void ServerConnection::loginWithOidc(const QString& providerUrl)
             onLoginAttemptFailed(error);
         }, Qt::SingleShotConnection);
 
+    // NOT SingleShotConnection and NOT routed through onLoginAttemptFailed:
+    // the attempt is still running, and the only thing that has gone wrong
+    // is that the user has to open the link themselves.
+    connect(m_identityClient, &IdentityClient::browserOpenFailed, this,
+        &ServerConnection::browserOpenFailed, Qt::UniqueConnection);
+
     m_identityClient->startLogin(providerUrl, resource);
 }
 

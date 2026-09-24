@@ -1,9 +1,10 @@
 #include "MediaDownloader.h"
 
+#include "util/ExternalBrowser.h"
+
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDebug>
-#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -186,7 +187,7 @@ void MediaDownloader::openDownloaded(const QString& remoteUrl)
     // fetch, just show it.
     const QUrl url(remoteUrl);
     if (url.isLocalFile()) {
-        if (!QDesktopServices::openUrl(url)) {
+        if (!bsfchat::openExternalUrl(url)) {
             emit openFailed(remoteUrl, QStringLiteral("the system could not open this file"));
         }
         return;
@@ -203,7 +204,7 @@ void MediaDownloader::handOffToDesktop(const QString& remoteUrl, const QString& 
     // OS is handed is constructed from a path this process wrote into its own
     // cache directory, so there is no way for a remote URL to reach the
     // browser through here.
-    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(localPath))) {
+    if (!bsfchat::openExternalUrl(QUrl::fromLocalFile(localPath))) {
         emit openFailed(remoteUrl, QStringLiteral("the system could not open this file"));
     }
 }

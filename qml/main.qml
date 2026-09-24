@@ -546,6 +546,17 @@ ApplicationWindow {
         function onIdentityLoginFailed(error) {
             toastError("Identity login failed: " + error);
         }
+        // The link itself is too long for a toast, so the toast says what
+        // happened and puts the link where a browser can take it. The
+        // LoginDialog shows it inline as well when it is up; this is the
+        // only surface for the flows that have no dialog — the re-auth
+        // banner's "sign in again", and a saved server re-authenticating
+        // on its own.
+        function onBrowserOpenFailed(authUrl) {
+            serverManager.copyToClipboard(authUrl);
+            toastError("Couldn't open a browser — the sign-in link is on your "
+                       + "clipboard. Paste it into a browser to finish.");
+        }
         function onReauthFailed(index, serverUrl, error) {
             // The browser-based OIDC flow has no dialog of its own to report
             // through; ReauthDialog shows the password case inline. A failed

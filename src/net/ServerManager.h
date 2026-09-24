@@ -227,6 +227,22 @@ signals:
     // dead-end wearing different words.
     void identityHasNoServers();
     void identityAccountChanged();
+    // No browser opened for a sign-in — the account-level one or any
+    // server's — and `authUrl` is the page the user must open by hand to
+    // finish it. One manager-level signal for every sign-in path, because
+    // the surfaces that answer it (LoginDialog, the shells' toast) have no
+    // way to know which IdentityClient is in flight.
+    //
+    // Whatever handles this MUST show the URL somewhere the user can copy
+    // it. A message without the link is the silent failure with extra
+    // steps: the link cannot be reconstructed by hand — it carries this
+    // attempt's PKCE challenge, state and loopback port.
+    //
+    // Only the attempt that actually holds the browser gets one. Anything
+    // queued behind it has no URL yet — a waiting attempt mints no PKCE
+    // material until its page is shown — and is answered with
+    // identityLoginFailed instead (IdentityClient::startLogin).
+    void browserOpenFailed(const QString& authUrl);
     void viewingDmsChanged();
 
 private:

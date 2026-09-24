@@ -777,6 +777,7 @@ qt_add_executable(test_identity_provider_url
     ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
     ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
     ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/ExternalBrowser.cpp
     ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AudioDeviceStatus.cpp
@@ -834,6 +835,7 @@ qt_add_executable(test_error_surface_guards
     ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
     ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
     ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/ExternalBrowser.cpp
     ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AudioDeviceStatus.cpp
@@ -882,6 +884,7 @@ qt_add_executable(test_composer_upload_lock
     ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
     ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
     ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/ExternalBrowser.cpp
     ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AudioDeviceStatus.cpp
@@ -973,6 +976,7 @@ add_test(NAME test_direct_rooms COMMAND test_direct_rooms)
 qt_add_executable(test_media_cache_key
     test_media_cache_key.cpp
     ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/ExternalBrowser.cpp
 )
 target_include_directories(test_media_cache_key PRIVATE ${CMAKE_SOURCE_DIR}/src)
 # Qt6::Gui for QDesktopServices: the downloader gained openDownloaded(), which
@@ -1047,11 +1051,28 @@ add_test(NAME test_oidc_request COMMAND test_oidc_request)
 qt_add_executable(test_oidc_serialisation
     test_oidc_serialisation.cpp
     ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/ExternalBrowser.cpp
 )
 target_include_directories(test_oidc_serialisation PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_oidc_serialisation PRIVATE
     bsfchat_protocol Qt6::Core Qt6::Gui Qt6::Network Qt6::Test)
 add_test(NAME test_oidc_serialisation COMMAND test_oidc_serialisation)
+
+# "Sign-in must never fail silently" — the Linux release-tarball report of
+# 2026-09-24, where clicking Sign in did nothing at all. Pure argv shaping,
+# the IdentityClient surface, and how a browser that will not open interacts
+# with the serialisation above. Runs anywhere.
+qt_add_executable(test_external_browser
+    test_external_browser.cpp
+    ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/ExternalBrowser.cpp
+)
+target_include_directories(test_external_browser PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_external_browser PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Gui Qt6::Network Qt6::Test
+)
+add_test(NAME test_external_browser COMMAND test_external_browser)
 
 qt_add_executable(test_auth_error
     test_auth_error.cpp

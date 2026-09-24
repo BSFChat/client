@@ -1,4 +1,5 @@
 #include "net/ServerManager.h"
+#include "util/ExternalBrowser.h"
 #include "net/HttpFetch.h"
 #include "net/VoiceQuit.h"
 #include "net/ServerConnection.h"
@@ -18,7 +19,6 @@
 #include <QImage>
 #include <QMimeData>
 #include <QStandardPaths>
-#include <QDesktopServices>
 #include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -710,6 +710,10 @@ void ServerManager::wireConnection(ServerConnection* conn)
             if (idx < 0) return;
             emit reauthFailed(idx, conn->serverUrl(), error);
         });
+    // No index needed: the link is the whole message, and it is the same
+    // message wherever the sign-in was started from.
+    connect(conn, &ServerConnection::browserOpenFailed, this,
+            &ServerManager::browserOpenFailed);
 
     // Settings plumbed in so the mic gate can read voiceMode / PTT.
     conn->setSettings(m_settings);
@@ -720,7 +724,7 @@ void ServerManager::loginWithIdentity(const QString& identityUrl) {
     // and can see their server list. Future: auto-fetch the list and
     // connect each server programmatically.
     QString url = identityUrl.isEmpty() ? QStringLiteral("https://id.bsfchat.com") : identityUrl;
-    QDesktopServices::openUrl(QUrl(url + "/profile.html"));
+    bsfchat::openExternalUrl(QUrl(url + "/profile.html"));
 }
 
 void ServerManager::registerServerMembership(const QString& identityUrl,
@@ -954,6 +958,13 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
         [this](const QString& error) {
             emit identityLoginFailed(error);
         });
+
+    // Deliberately not identityLoginFailed: that one closes the dialog's
+    // spinner and reads as "this is over", and this attempt is not over —
+    // the loopback listener is up and waiting for the link the user is
+    // about to open themselves.
+    connect(m_identityClient, &IdentityClient::browserOpenFailed, this,
+            &ServerManager::browserOpenFailed);
 
     m_identityClient->startLogin(m_identityUrl);
 }

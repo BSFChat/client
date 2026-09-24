@@ -952,6 +952,22 @@ ApplicationWindow {
         }
     }
 
+    // Mirrors the desktop shell's handler of the same name (main.qml). A
+    // sign-in that cannot reach a browser has to say so on every platform:
+    // on Android that is a device with no browser able to take the
+    // ACTION_VIEW, which is rare and, unreported, indistinguishable from a
+    // dead button. The LoginDialog — the same component both shells use —
+    // shows the link inline; this is the surface when it is not up.
+    Connections {
+        target: serverManager
+        ignoreUnknownSignals: true
+        function onBrowserOpenFailed(authUrl) {
+            serverManager.copyToClipboard(authUrl);
+            root.toastError("Couldn't open a browser — the sign-in link is on "
+                            + "your clipboard. Paste it into a browser to finish.");
+        }
+    }
+
     // (Persisting the active text channel moved into
     // ServerConnection::setActiveRoom — same write, but on the side of
     // the boundary that also owns the restore, and reached by every path

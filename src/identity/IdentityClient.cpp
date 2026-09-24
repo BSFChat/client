@@ -1,9 +1,9 @@
 #include "identity/IdentityClient.h"
 #include "identity/OidcRequest.h"
+#include "util/ExternalBrowser.h"
 
 #include <QCryptographicHash>
 #include <QDebug>
-#include <QDesktopServices>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkReply>
@@ -114,6 +114,7 @@ bool IdentityClient::isActive() const
 void IdentityClient::releaseBrowser()
 {
     m_queued = false;
+    m_browserUnavailable = false;
     g_browserQueue.removeAll(QPointer<IdentityClient>(this));
     if (g_browserOwner != this) return;
 
@@ -133,6 +134,37 @@ void IdentityClient::releaseBrowser()
         });
         return;
     }
+}
+
+QString IdentityClient::noBrowserForWaiterMessage()
+{
+    return tr("Couldn't open a browser for this sign-in. Finish the one "
+              "that's waiting for you, then try this one again.");
+}
+
+void IdentityClient::failWaitersWithNoBrowser(IdentityClient* head)
+{
+    if (g_browserQueue.isEmpty()) return;
+
+    // Through the event loop, for the reason releaseBrowser() gives: this
+    // runs inside startLogin's call stack, and telling a waiter its sign-in
+    // is over can take the ServerConnection that owns it with it.
+    const QPointer<IdentityClient> owner(head);
+    QTimer::singleShot(0, head, [owner]() {
+        // The browser changed hands while we waited a turn — the head
+        // finished, or was cancelled, and whoever has it now may well have
+        // opened a page. The waiters are behind something live again; leave
+        // them alone.
+        if (!owner || g_browserOwner != owner) return;
+
+        const QList<QPointer<IdentityClient>> waiting = g_browserQueue;
+        g_browserQueue.clear();
+        for (const QPointer<IdentityClient>& client : waiting) {
+            if (!client) continue;
+            client->m_queued = false;
+            emit client->loginFailed(noBrowserForWaiterMessage());
+        }
+    });
 }
 
 QString IdentityClient::redirectUri() const
@@ -156,6 +188,12 @@ void IdentityClient::startLogin(const QString& providerUrl, const QString& resou
         m_providerUrl.chop(1);
     m_resource = resource;
 
+    // One line per attempt, so a sign-in that goes wrong can be placed in
+    // time against whatever else the log holds. The provider only — the
+    // authorize URL's query is the attempt's CSRF material.
+    qInfo() << "[IdentityClient] starting sign-in at" << m_providerUrl
+            << (m_resource.isEmpty() ? "(account)" : "(for a server)");
+
     if (sameSignInAlreadyRunning(this, m_providerUrl, m_resource)) {
         // Refused rather than queued: making the user approve the same server
         // twice in a row is not a fix for asking twice.
@@ -169,8 +207,19 @@ void IdentityClient::startLogin(const QString& providerUrl, const QString& resou
     }
 
     if (g_browserOwner && g_browserOwner != this) {
+        if (g_browserOwner->m_browserUnavailable) {
+            // The attempt in front could not open a browser and is waiting
+            // for the user to open its link by hand. Queueing behind that is
+            // a five-minute silence ending in a turn this machine cannot use
+            // — the same "nothing happened" this whole path exists to stop.
+            qWarning() << "[IdentityClient] the sign-in holding the browser "
+                          "could not open one; refusing to queue behind it";
+            emit loginFailed(noBrowserForWaiterMessage());
+            return;
+        }
         // Wait our turn. Nothing is generated and no timeout starts until the
         // page is actually shown — see openAuthorizationPage.
+        qInfo() << "[IdentityClient] another sign-in has the browser; waiting";
         m_queued = true;
         g_browserQueue.append(this);
         return;
@@ -183,6 +232,7 @@ void IdentityClient::startLogin(const QString& providerUrl, const QString& resou
 void IdentityClient::openAuthorizationPage()
 {
     m_queued = false;
+    m_browserUnavailable = false;
 
     // Generate PKCE parameters
     m_codeVerifier = generateCodeVerifier();
@@ -194,6 +244,12 @@ void IdentityClient::openAuthorizationPage()
     // Start local HTTP server
     m_server = new QTcpServer(this);
     if (!m_server->listen(QHostAddress::LocalHost, 0)) {
+        // Said in the log as well as at the user: this one is reported, but
+        // a bug report that only says "it wouldn't sign in" needs the
+        // reason, and the socket error is the whole reason.
+        qWarning() << "[IdentityClient] could not listen on a loopback port "
+                      "for the sign-in callback:"
+                   << m_server->errorString();
         delete m_server;
         m_server = nullptr;
         // Give the browser up before reporting, or an attempt that never
@@ -258,10 +314,31 @@ void IdentityClient::openAuthorizationPage()
     // to an ACTION_VIEW intent, and the redirect comes back the same way —
     // see the intent-filter in android/AndroidManifest.xml and
     // UrlHandler::checkAndroidLaunchIntent().
+    //
+    // The return value is not optional. This call used to be a statement
+    // whose answer was thrown away, and on a Linux machine where it answered
+    // "no" — no xdg-utils, or the release tarball's LD_LIBRARY_PATH killing
+    // the browser it spawned (util/ExternalBrowser.h) — the user got a
+    // button that did nothing, no message, and not one line in the log.
+    bool opened = true;
     if (g_pagePresenter) {
         g_pagePresenter(authUrl);
     } else {
-        QDesktopServices::openUrl(authUrl);
+        opened = bsfchat::openExternalUrl(authUrl);
+    }
+    if (!opened) {
+        // The attempt is deliberately NOT cancelled, and deliberately keeps
+        // the browser. The loopback listener is up and the URL is good for
+        // the full five minutes, so a user who opens the link by hand
+        // finishes signing in exactly as if we had opened it for them — and
+        // handing the browser to the next attempt while they do would put a
+        // second authorization against the same provider session, which is
+        // the 403 this file's serialisation exists to prevent.
+        qWarning() << "[IdentityClient] no browser could be opened; offering "
+                      "the sign-in link for the user to open by hand";
+        m_browserUnavailable = true;
+        emit browserOpenFailed(authUrl.toString());
+        failWaitersWithNoBrowser(this);
     }
 #endif
 

@@ -840,9 +840,24 @@ jobs:
           MimeType=x-scheme-handler/bsfchat;
           DESKTOP
           # Create a simple launch script
+          #
+          # BSFCHAT_BUNDLE_DIR / BSFCHAT_HOST_LD_LIBRARY_PATH are not
+          # decoration. Everything below is inherited by every process the
+          # app spawns, and the app spawns one that matters: the browser,
+          # for BSFChat ID sign-in. xdg-open is a shell script that execs
+          # the user's real browser, which then starts with OUR libicu,
+          # libssl and libav* ahead of its own and dies on a symbol
+          # mismatch — silently, because the spawn itself succeeded. So we
+          # record what the session's LD_LIBRARY_PATH was BEFORE this line
+          # changes it, and src/util/ExternalBrowser.cpp puts it back for
+          # the browser. Recorded even when empty: "was not set" and "we
+          # never looked" have to be distinguishable, and the marker is
+          # what tells the app it is running from this bundle at all.
           cat > BSFChat/bsfchat.sh << 'SCRIPT'
           #!/bin/bash
           DIR="$(cd "$(dirname "$0")" && pwd)"
+          export BSFCHAT_BUNDLE_DIR="$DIR"
+          export BSFCHAT_HOST_LD_LIBRARY_PATH="${LD_LIBRARY_PATH-}"
           export LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export QT_PLUGIN_PATH="$DIR/plugins"
           export QML2_IMPORT_PATH="$DIR/qml${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
