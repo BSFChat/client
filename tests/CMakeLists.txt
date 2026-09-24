@@ -1279,19 +1279,37 @@ if(BSFCHAT_ENABLE_VOICE)
             BSFCHAT_HAVE_OPENH264)
         target_link_libraries(test_mobile_video PRIVATE openh264::openh264)
     endif()
-    # `APPLE`, matching the app's own gate — the iOS build takes this
-    # branch too, and the advertising cases exist to check exactly that.
+    # The platform hardware backend, as an if/elseif chain MIRRORING the
+    # one in the top-level CMakeLists.txt. It has to be the same shape,
+    # because the advertising cases below assert what that chain produces
+    # — and when this target was missing the WIN32 arm it compiled with
+    # NO backend at all on Windows (openh264 is excluded there, APPLE is
+    # false), so h264EncodeProfiles() came back empty and two cases
+    # failed on one platform only. test_mobile_video.cpp now refuses to
+    # compile in that state rather than failing at run time; see the
+    # #error at the top of it.
+    #
+    # `APPLE`, not `APPLE AND NOT IOS`: the iOS build takes this branch
+    # too, and the advertising cases exist to check exactly that.
     if(APPLE)
         target_sources(test_mobile_video PRIVATE
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTEncoder.mm
-            # MacVTEncoder.mm fills its pixel buffers through this.
-            ${CMAKE_SOURCE_DIR}/src/voice/video/NV12Pack.cpp
             ${CMAKE_SOURCE_DIR}/src/voice/video/MacVTDecoder.mm)
+        # NV12Pack.cpp is already in this target's main source list —
+        # the packing cases need it on every platform, not just Apple.
         target_compile_definitions(test_mobile_video PRIVATE
             BSFCHAT_HAVE_VIDEOTOOLBOX)
         target_link_libraries(test_mobile_video PRIVATE
             "-framework VideoToolbox" "-framework CoreMedia"
             "-framework CoreVideo" "-framework Foundation")
+    elseif(WIN32)
+        target_sources(test_mobile_video PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MFEncoder.cpp
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MFDecoder.cpp)
+        target_compile_definitions(test_mobile_video PRIVATE
+            BSFCHAT_HAVE_MEDIAFOUNDATION)
+        target_link_libraries(test_mobile_video PRIVATE
+            mfplat mfuuid mf mfreadwrite wmcodecdspuuid ole32 oleaut32)
     endif()
     if(BSFCHAT_HAVE_AOM)
         target_sources(test_mobile_video PRIVATE
