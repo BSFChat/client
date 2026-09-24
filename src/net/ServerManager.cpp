@@ -339,6 +339,10 @@ void ServerManager::addServerWithOidcResolved(const QString& rawUrl)
     tempClient->setHomeserver(url);
     tempClient->getLoginFlows();
 
+    // Single-shot, both of them. A second loginFlowsResult — a retry inside
+    // MatrixClient, or the reply arriving after deleteLater() was queued but
+    // before it ran — would call loginWithOidc a second time and open a
+    // second browser page for one server.
     connect(tempClient, &MatrixClient::loginFlowsResult, this, [this, conn, tempClient](const QJsonArray& flows) {
         QString providerUrl;
         for (const auto& flowVal : flows) {
@@ -355,12 +359,12 @@ void ServerManager::addServerWithOidcResolved(const QString& rawUrl)
             return;
         }
         conn->loginWithOidc(providerUrl);
-    });
+    }, Qt::SingleShotConnection);
 
     connect(tempClient, &MatrixClient::loginError, this, [this, conn, tempClient](const QString& error) {
         tempClient->deleteLater();
         onLoginFailed(conn, "Failed to query login flows: " + error);
-    });
+    }, Qt::SingleShotConnection);
 
     emit serverAdded(index);
 
@@ -844,6 +848,12 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
 
             // (Re)build the API client bound to this fresh token.
             if (m_identityApi) {
+                // disconnect BEFORE deleteLater: the old object outlives this
+                // statement by an event-loop turn, and a /api/servers reply
+                // still in flight on it would deliver a second serversFetched
+                // into the handler below — which adds servers, which starts
+                // sign-ins. Once was the design; twice is the fan-out.
+                m_identityApi->disconnect(this);
                 m_identityApi->deleteLater();
                 m_identityApi = nullptr;
             }
@@ -900,7 +910,7 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
                     }
 
                     emit identityLoginComplete(addedUrls);
-                });
+                }, Qt::SingleShotConnection);
 
             connect(m_identityApi, &IdentityApiClient::fetchFailed, this,
                 [this](const QString& error) {

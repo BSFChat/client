@@ -851,6 +851,50 @@ ApplicationWindow {
         function onConnectedChanged() { _maybeAutoSelect(); }
     }
 
+    // A sign-in that fails AFTER the login dialog has gone has to say so
+    // somewhere, and on this shell it had nowhere to say it.
+    //
+    // The identity-first flow closes the dialog on identityLoginComplete —
+    // the account sign-in worked and the servers are populating — and only
+    // then runs the per-server BSFChat ID sign-in that produces the
+    // audience-bound id_token. When THAT failed, ServerManager emitted
+    // loginError and removed the connection; LoginDialog's handler set an
+    // errorMessage on a dialog nobody was looking at, and the desktop shell's
+    // toast fallback (main.qml) has no counterpart here. So the sidebar
+    // emptied itself and the app said nothing at all — which is what the
+    // owner saw on 2026-09-24 while the browser held a 403 he never got back
+    // to. Mirrors main.qml's block, including the "only when the dialog is
+    // not up" rule that keeps one failure to one message (D-H5).
+    Connections {
+        target: serverManager
+        ignoreUnknownSignals: true
+        function onLoginError(serverUrl, error) {
+            if (!loginDialogGlobal.opened) root.toastError("Couldn't sign in: " + error);
+        }
+        function onIdentityLoginFailed(error) {
+            if (!loginDialogGlobal.opened) root.toastError("BSFChat ID sign-in failed: " + error);
+        }
+        function onReauthFailed(index, serverUrl, error) {
+            root.toastError("Couldn't sign in: " + error);
+        }
+        // Signing in with a BSFChat ID takes TWO browser trips, and the
+        // second one is a surprise: the first proves who you are and fetches
+        // your servers, the second is the one that produces the token for a
+        // particular server — an id_token is audience-bound to exactly one
+        // (identity/OidcRequest.h), so there is no way to fold them into one
+        // trip. The dialog closes between them, so from the phone's side the
+        // app simply threw the user back into the browser with no
+        // explanation. Say what is happening before it does.
+        function onIdentityLoginComplete(serverUrls) {
+            if (serverUrls && serverUrls.length > 0) {
+                root.toastInfo(serverUrls.length === 1
+                    ? "Signing in to your server — approve it in your browser."
+                    : "Signing in to your " + serverUrls.length
+                      + " servers — approve each one in your browser.");
+            }
+        }
+    }
+
     // Send-side feedback (rate limits, permission errors, …) as
     // toasts. ServerConnection pre-formats the copy + severity.
     Connections {
