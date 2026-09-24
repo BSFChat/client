@@ -727,6 +727,12 @@ ApplicationWindow {
     UserSettings   { id: userSettingsGlobal;   parent: popupSurface }
     ClientSettings { id: clientSettingsGlobal; parent: popupSurface }
     RoleAssignPopup { id: roleAssignGlobal;    parent: popupSurface }
+    // Member-facing self-assignable role picker. Mirrored from main.qml for
+    // the reason the safety surfaces below are: ChannelList's "Your Roles"
+    // item is shared source, it calls Window.window.openSelfRoles(), and a
+    // helper that exists on one shell only is a TypeError on the other.
+    // Sized exactly like RoleAssignPopup above, which already works here.
+    SelfRolePicker { id: selfRolePickerGlobal; parent: popupSurface }
     SearchPopup {
         id: searchPopupGlobal
         parent: popupSurface
@@ -754,6 +760,10 @@ ApplicationWindow {
     DeleteAccountDialog { id: deleteAccountGlobal; parent: popupSurface }
 
     function openUserSettings()   { userSettingsGlobal.open(); }
+    function openSelfRoles()      { selfRolePickerGlobal.openPicker(); }
+    // "Add a server" — the empty state of a fresh install, so on a phone this
+    // is the only way into the app at all. Name-for-name with main.qml.
+    function openLoginDialog()    { loginDialogGlobal.open(); }
     function openClientSettings() { clientSettingsGlobal.open(); }
     function openSearch()         { searchPopupGlobal.open(); }
     function openStatusPicker()   { statusPickerGlobal.open(); }

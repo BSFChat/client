@@ -482,6 +482,10 @@ ApplicationWindow {
     }
 
     function openUserSettings() { userSettingsGlobal.open(); }
+    // "Add a server" lives in ChannelList's empty state and in the
+    // ServerSidebar rail, both of which are shared with the mobile shell and
+    // so cannot see `loginDialog` by id. Mirrored in MobileMain.qml.
+    function openLoginDialog() { loginDialog.open(); }
     // Manual "Check for updates" — surfaced from ClientSettings →
     // About via Window.window.checkForUpdates().
     function checkForUpdates() {

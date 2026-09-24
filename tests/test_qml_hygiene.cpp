@@ -33,11 +33,34 @@
 // would not have caught the bug that prompted it: `_failed` and
 // `_looksLikeChallenge` were both declared on LinkPreview. What went wrong
 // was when the callback ran, not what it named.
+
+// STILL not checked here, for the same reason: the general form of that rule.
+//
+// What IS checked, as of the 0.0.53 store submission, is the narrow case that
+// actually shipped broken — a shared component reaching for a name that only
+// one shell defines. QML ids resolve per component scope, so
+//
+//     qml/components/ChannelList.qml:  onClicked: loginDialog.open()
+//
+// is a ReferenceError under qml/mobile/MobileMain.qml, which declares the same
+// LoginDialog under `loginDialogGlobal`. On a phone that button is "Add a
+// server" on the empty state of a fresh install: no server, so no sign-in, so
+// no app. Nothing caught it because nothing looked.
+//
+// The general rule needs a JS lexer; these two do not, because they match a
+// *finite known vocabulary* (the ids and the root-level members the two shells
+// actually declare) instead of trying to prove every identifier resolves:
+//
+//   aSharedComponentNeverReachesForAShellsId()
+//   everyShellHelperASharedComponentCallsExistsOnBothShells()
+//
+// See each one's own comment for exactly what it does not catch.
 #include <QtTest>
 #include <QDirIterator>
 #include <QFileInfo>
 #include <QFile>
 #include <QRegularExpression>
+#include <QSet>
 
 namespace {
 
@@ -66,6 +89,41 @@ QStringList filesUnder(const QString& root, const QString& glob)
     while (it.hasNext()) out << it.next();
     out.sort();
     return out;
+}
+
+
+// Every `id: foo` in a source text. Ids are lowerCamelCase by QML rule (the
+// engine rejects a capitalised id), so the character class is exact.
+QSet<QString> declaredIds(const QString& src)
+{
+    static const QRegularExpression re(QStringLiteral(R"(\bid\s*:\s*([a-z_]\w*)\b)"));
+    QSet<QString> out;
+    for (auto it = re.globalMatch(src); it.hasNext();) out.insert(it.next().captured(1));
+    return out;
+}
+
+// Names a file introduces itself: properties, functions, signals, at any
+// depth. Used only ever to SUPPRESS a report, so over-collecting is the safe
+// direction — a nested `function foo()` hiding a real offender named `foo`
+// costs a miss, never a false alarm.
+QSet<QString> declaredMembers(const QString& src)
+{
+    static const QRegularExpression prop(
+        QStringLiteral(R"(\bproperty\s+(?:alias\s+|var\s+|[\w.<>]+\s+)([A-Za-z_]\w*))"));
+    static const QRegularExpression func(
+        QStringLiteral(R"(\bfunction\s+([A-Za-z_]\w*)\s*\()"));
+    static const QRegularExpression sig(
+        QStringLiteral(R"(\bsignal\s+([A-Za-z_]\w*)\b)"));
+    QSet<QString> out;
+    for (const QRegularExpression* re : {&prop, &func, &sig})
+        for (auto it = re->globalMatch(src); it.hasNext();) out.insert(it.next().captured(1));
+    return out;
+}
+
+// 1-based line number of an offset, for an error message a reader can open.
+int lineOf(const QString& src, qsizetype offset)
+{
+    return static_cast<int>(QStringView(src).left(offset).count(QLatin1Char('\n'))) + 1;
 }
 
 } // namespace
@@ -459,6 +517,156 @@ private slots:
                      "unqualified Window.window inside a Connections block (it is not an "
                      "Item, so this is null — go through an Item id): ")
                      + offenders.join(QStringLiteral(", "))));
+    }
+
+    // ---- Cross-shell scope, the two halves ------------------------------
+    //
+    // qml/components/ is shared verbatim between qml/main.qml (desktop) and
+    // qml/mobile/MobileMain.qml (phone). A component can therefore only rely
+    // on what BOTH shells offer, and QML gives it two ways to forget that.
+
+    // Half one: an `id`.
+    //
+    // A component that writes `loginDialog.open()` compiles, passes qmllint
+    // and works on the desktop, because main.qml happens to declare
+    // `id: loginDialog` in an enclosing component scope. Under MobileMain,
+    // which declares the same dialog as `loginDialogGlobal`, the name
+    // resolves to nothing and the handler dies with a ReferenceError.
+    //
+    // The rule: for every id either shell declares, no file under
+    // qml/components/ may reference it unless that file declares it too.
+    // The vocabulary is finite and known, so this needs no JS lexer.
+    //
+    // WHAT IT DOES NOT CATCH, precisely:
+    //   * a name no shell declares at all (a plain typo). Out of scope --
+    //     that is the general rule this file's header explains it cannot do.
+    //   * a reference inside a string literal is counted, not skipped. Only
+    //     comments are stripped. A string containing `someShellId.` or
+    //     `someShellId(` would be reported; none exists, and one would be
+    //     worth a look anyway.
+    //   * a file that declares its own `property`/`function`/`signal` of the
+    //     same name is skipped wholesale, so a second, genuinely cross-shell
+    //     use of that same name in that same file is missed.
+    //   * a reference built at runtime (`root["login" + "Dialog"]`). Nothing
+    //     in the tree does this.
+    //   * it says nothing about whether a shared component is reachable from
+    //     the mobile shell. It is deliberately stricter than that: a
+    //     component nobody mounts on a phone today can be mounted tomorrow.
+    void aSharedComponentNeverReachesForAShellsId()
+    {
+        const QString desktop = withoutComments(
+            readAll(QStringLiteral(BSFCHAT_QML_DIR "/main.qml")));
+        const QString mobile = withoutComments(
+            readAll(QStringLiteral(BSFCHAT_QML_DIR "/mobile/MobileMain.qml")));
+        QVERIFY2(!desktop.isEmpty(), "qml/main.qml not found");
+        QVERIFY2(!mobile.isEmpty(), "qml/mobile/MobileMain.qml not found");
+
+        QSet<QString> shellIds = declaredIds(desktop);
+        shellIds.unite(declaredIds(mobile));
+        QStringList vocabulary(shellIds.cbegin(), shellIds.cend());
+        vocabulary.sort();   // QSet order is unspecified; keep output stable
+
+        QStringList offenders;
+        const QStringList shared = filesUnder(
+            QStringLiteral(BSFCHAT_QML_DIR "/components"), QStringLiteral("*.qml"));
+        for (const QString& path : shared) {
+            const QString src = withoutComments(readAll(path));
+            const QSet<QString> mine = declaredIds(src);
+            const QSet<QString> members = declaredMembers(src);
+            for (const QString& name : std::as_const(vocabulary)) {
+                if (mine.contains(name) || members.contains(name)) continue;
+                // A use, not a mention: the name at the head of a member
+                // access or a call, not preceded by `.` (so `foo.loginDialog`
+                // is someone else's property) or by a word character.
+                const QRegularExpression use(
+                    QStringLiteral(R"((?<![\w.$]))")
+                    + QRegularExpression::escape(name)
+                    + QStringLiteral(R"(\s*[.(])"));
+                const QRegularExpressionMatch m = use.match(src);
+                if (!m.hasMatch()) continue;
+                offenders << QStringLiteral("%1:%2 reaches for `%3`")
+                                 .arg(QFileInfo(path).fileName())
+                                 .arg(lineOf(src, m.capturedStart()))
+                                 .arg(name);
+            }
+        }
+        offenders.sort();
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "shared component reaches for an id only a shell declares (QML ids "
+                     "do not cross component scope, so this is a ReferenceError under the "
+                     "other shell) — add a helper function to BOTH main.qml and "
+                     "MobileMain.qml and call it through Window.window: ")
+                     + offenders.join(QStringLiteral("; "))));
+    }
+
+    // Half two: a helper.
+    //
+    // The fix for half one is `Window.window.openLoginDialog()`, which is the
+    // pattern the tree already uses (openUserSettings, openReportDialog, the
+    // toast family). It only works if both shells implement it. `openSelfRoles`
+    // did not: main.qml had it, MobileMain.qml did not, and ChannelList's
+    // "Your Roles" item was the same bug wearing a different hat -- a
+    // TypeError instead of a ReferenceError.
+    //
+    // The rule: every `Window.window.<name>` a shared component calls must be
+    // declared on both shells. A shell may implement it as a deliberate no-op
+    // (MobileMain's openShortcutsDialog is one); it may not simply be absent.
+    //
+    // WHAT IT DOES NOT CATCH, precisely:
+    //   * which Window actually answers at runtime. A component instantiated
+    //     inside VideoPopoutWindow / VideoFullscreenWindow sees THAT window,
+    //     which implements none of these. Call sites there guard with a
+    //     truthiness check (VoiceDock, MessageView already do); this rule does
+    //     not verify the guard.
+    //   * arity or argument types -- name presence only. A helper taking six
+    //     arguments on one shell and two on the other passes.
+    //   * a helper reached by any route other than the literal text
+    //     `Window.window.<name>` (an alias, a stored reference).
+    //   * declaredMembers() collects at any depth, so a same-named function
+    //     nested inside an unrelated block on one shell would satisfy it.
+    void everyShellHelperASharedComponentCallsExistsOnBothShells()
+    {
+        const QString desktop = withoutComments(
+            readAll(QStringLiteral(BSFCHAT_QML_DIR "/main.qml")));
+        const QString mobile = withoutComments(
+            readAll(QStringLiteral(BSFCHAT_QML_DIR "/mobile/MobileMain.qml")));
+        QVERIFY2(!desktop.isEmpty() && !mobile.isEmpty(), "shell sources not found");
+
+        const QSet<QString> onDesktop = declaredMembers(desktop);
+        const QSet<QString> onMobile = declaredMembers(mobile);
+
+        static const QRegularExpression call(
+            QStringLiteral(R"(Window\s*\.\s*window\s*\??\s*\.\s*([A-Za-z_]\w*))"));
+
+        QStringList offenders;
+        const QStringList shared = filesUnder(
+            QStringLiteral(BSFCHAT_QML_DIR "/components"), QStringLiteral("*.qml"));
+        for (const QString& path : shared) {
+            const QString src = withoutComments(readAll(path));
+            for (auto it = call.globalMatch(src); it.hasNext();) {
+                const QRegularExpressionMatch m = it.next();
+                const QString name = m.captured(1);
+                const bool d = onDesktop.contains(name);
+                const bool b = onMobile.contains(name);
+                if (d && b) continue;
+                offenders << QStringLiteral("%1:%2 calls Window.window.%3 (missing on %4)")
+                                 .arg(QFileInfo(path).fileName())
+                                 .arg(lineOf(src, m.capturedStart()))
+                                 .arg(name)
+                                 .arg(d ? QStringLiteral("MobileMain.qml")
+                                        : b ? QStringLiteral("main.qml")
+                                            : QStringLiteral("BOTH shells"));
+            }
+        }
+        offenders.removeDuplicates();
+        offenders.sort();
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "shared component calls a shell helper that one shell does not "
+                     "implement (a TypeError there) — mirror it, no-op body if that is "
+                     "what it means on that shell: ")
+                     + offenders.join(QStringLiteral("; "))));
     }
 
     // A LinkPreview's `url` is a binding, and a live delegate sees it change

@@ -2436,7 +2436,7 @@ Rectangle {
                 implicitWidth: 160
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
             }
-            onClicked: loginDialog.open()
+            onClicked: Window.window.openLoginDialog()
         }
     }
 

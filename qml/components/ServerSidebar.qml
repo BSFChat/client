@@ -290,7 +290,7 @@ Rectangle {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: loginDialog.open()
+                    onClicked: Window.window.openLoginDialog()
                 }
 
                 ToolTip.visible: addArea.containsMouse
