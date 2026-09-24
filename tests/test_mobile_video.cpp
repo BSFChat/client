@@ -39,6 +39,30 @@
 
 #include <vector>
 
+// A missing platform branch in this target must break the BUILD, not one
+// platform's test run.
+//
+// This target compiles VideoCodecFactory.cpp and then asserts what it
+// advertises, so it needs the same backend the app gets. It shipped
+// without the WIN32 arm: openh264 is excluded on Windows and APPLE is
+// false there, so on that one platform it compiled with no backend at
+// all, h264EncodeProfiles() returned an empty list, and two cases failed
+// — in CI, on a platform nobody can reproduce on a Mac, reported by name
+// only. The diagnosis cost a round trip.
+//
+// A compile-time check costs nothing, fires on the machine that made the
+// mistake, and says which file to edit. Note this is the OPPOSITE of the
+// codec-less shape the advertising cases deliberately construct below:
+// that one is a PeerCaps object built by hand, which is data, not a
+// build configuration.
+#if !defined(BSFCHAT_HAVE_VIDEOTOOLBOX) \
+    && !defined(BSFCHAT_HAVE_MEDIAFOUNDATION) \
+    && !defined(BSFCHAT_HAVE_OPENH264)
+#error "test_mobile_video has no video backend on this platform. Its target \
+in tests/CMakeLists.txt is missing this platform's arm of the backend \
+if/elseif chain — mirror the one in the top-level CMakeLists.txt."
+#endif
+
 namespace {
 
 // A frame with an unmistakable corner: everything dark except a white
@@ -448,10 +472,13 @@ void TestMobileVideo::buildAdvertisesH264BothWays() {
     // as close as a machine without a phone attached can get.
     QVERIFY2(!VideoDecoder::h264DecodeProfiles().isEmpty(),
              "this build can decode no H.264 — every peer will be told to "
-             "send JPEG stills");
+             "send JPEG stills. If this fires, the compiled-in backend "
+             "(VideoToolbox / Media Foundation / openh264) reported no "
+             "decode profiles.");
     QVERIFY2(!VideoEncoder::h264EncodeProfiles().isEmpty(),
              "this build can encode no H.264 — VideoSendPipeline will find "
-             "no backend and send nothing");
+             "no backend and send nothing. If this fires, the compiled-in "
+             "backend reported no encode profiles.");
 
     auto encoder = VideoEncoder::create(VideoCodecKind::H264);
     QVERIFY2(encoder != nullptr, "no H.264 encoder backend");
