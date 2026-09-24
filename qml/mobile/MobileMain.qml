@@ -525,7 +525,18 @@ ApplicationWindow {
                     OverflowItem {
                         text: "Switch server…"
                         iconName: "forward"
-                        onTriggered: loginDialogGlobal.open()
+                        onTriggered: root.openLoginDialog()
+                    }
+
+                    // The same act once you already have a server: someone
+                    // hands you an address for a second one. Its own item
+                    // rather than a step inside "Switch server…" — on a
+                    // phone every step inside a dialog is a step somebody
+                    // does not find.
+                    OverflowItem {
+                        text: "Join a server by address…"
+                        iconName: "plus"
+                        onTriggered: root.openJoinByAddress()
                     }
 
                     // Sign out of the active server. Preserves saved
@@ -615,7 +626,8 @@ ApplicationWindow {
             }
             Text {
                 text: _noServers
-                    ? "Sign in to a BSFChat server to start chatting."
+                    ? "Sign in with your BSFChat ID, or join a server by the "
+                      + "address whoever runs it gave you."
                     : "Tap the menu button to pick a server and channel."
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.md
@@ -628,11 +640,19 @@ ApplicationWindow {
             // Re-open the login dialog — first-launch opens it via
             // Component.onCompleted but if it closes we need a way
             // back in that doesn't require a force-quit.
+            //
+            // TWO buttons, not one behind the other. This screen is what a
+            // store reviewer sees on a fresh install if they dismiss the
+            // dialog, and "join a server by address" was, until now,
+            // reachable only through a text link inside it. It is the
+            // product's central act on a self-hosted chat system; it gets
+            // a button.
             Button {
+                id: signInCta
                 visible: _noServers
-                text: "Add a server"
+                text: "Sign in with BSFChat ID"
                 Layout.alignment: Qt.AlignHCenter
-                onClicked: loginDialogGlobal.open()
+                onClicked: root.openLoginDialog()
                 contentItem: Text {
                     text: parent.text
                     font.family: Theme.fontSans
@@ -643,10 +663,34 @@ ApplicationWindow {
                     verticalAlignment: Text.AlignVCenter
                 }
                 background: Rectangle {
-                    color: parent.hovered ? Theme.accentDim : Theme.accent
+                    color: signInCta.hovered ? Theme.accentDim : Theme.accent
                     radius: Theme.r2
-                    implicitWidth: 180
-                    implicitHeight: 44
+                    implicitWidth: 240
+                    implicitHeight: Theme.touchTarget
+                }
+            }
+            Button {
+                id: emptyJoinByAddressCta
+                visible: _noServers
+                text: "Join a server by address"
+                Layout.alignment: Qt.AlignHCenter
+                onClicked: root.openJoinByAddress()
+                contentItem: Text {
+                    text: parent.text
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.md
+                    font.weight: Theme.fontWeight.semibold
+                    color: Theme.fg0
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    color: emptyJoinByAddressCta.hovered ? Theme.bg3 : "transparent"
+                    border.color: Theme.accent
+                    border.width: 1
+                    radius: Theme.r2
+                    implicitWidth: 240
+                    implicitHeight: Theme.touchTarget
                 }
             }
         }
@@ -764,6 +808,9 @@ ApplicationWindow {
     // "Add a server" — the empty state of a fresh install, so on a phone this
     // is the only way into the app at all. Name-for-name with main.qml.
     function openLoginDialog()    { loginDialogGlobal.open(); }
+    // The product's central act on a phone: somebody gives you an address,
+    // you join their server. Name-for-name with main.qml.
+    function openJoinByAddress() { loginDialogGlobal.openAtAddress(); }
     function openClientSettings() { clientSettingsGlobal.open(); }
     function openSearch()         { searchPopupGlobal.open(); }
     function openStatusPicker()   { statusPickerGlobal.open(); }

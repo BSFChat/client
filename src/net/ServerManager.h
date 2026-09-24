@@ -4,6 +4,7 @@
 #include <QList>
 #include <QStringList>
 
+#include "identity/IdTokenAccount.h"
 #include "net/ServerDiscovery.h"
 #include "net/ServerRoster.h"
 
@@ -27,6 +28,20 @@ class ServerManager : public QObject {
     // send), but the sidebar highlights the DM chip instead of the
     // hosting server. Cleared when the user picks a server icon.
     Q_PROPERTY(bool viewingDms READ viewingDms WRITE setViewingDms NOTIFY viewingDmsChanged)
+    // Who the identity provider said we are, the moment it said so — read
+    // out of the id_token, so it is known before any homeserver has
+    // answered and even for an account that belongs to no server at all.
+    //
+    // The sign-in UI shows this and offers "not you?". Without it the
+    // browser-session shortcut is silent: if the system browser already
+    // holds a session, the whole OIDC round trip completes with nothing on
+    // screen and the client signs in as whoever that session belongs to.
+    // `identityAccountName` is the human name (may be empty),
+    // `identityAccountId` the provider's `sub` (the one to trust).
+    Q_PROPERTY(QString identityAccountName READ identityAccountName
+               NOTIFY identityAccountChanged)
+    Q_PROPERTY(QString identityAccountId READ identityAccountId
+               NOTIFY identityAccountChanged)
 
 public:
     explicit ServerManager(Settings* settings, QObject* parent = nullptr);
@@ -99,6 +114,19 @@ public:
 
     bool viewingDms() const { return m_viewingDms; }
     Q_INVOKABLE void setViewingDms(bool v);
+
+    QString identityAccountName() const { return m_identityAccount.name; }
+    QString identityAccountId() const { return m_identityAccount.subject; }
+    // Drop this process's identity session: the access token, the API
+    // client bound to it, and the account we were told about. The "not
+    // you?" affordance behind the signed-in confirmation.
+    //
+    // What it does NOT do, and cannot from here, is end the session the
+    // system browser holds with the provider — that is a cookie in another
+    // application, and re-prompting for it means adding `prompt=login` to
+    // the authorize request, which lives in the OIDC flow. Until that
+    // lands the UI says so in words rather than pretending.
+    Q_INVOKABLE void forgetIdentitySession();
 
     // Aggregate every connection's `directRooms()` into a single
     // flat list with the server's URL + human name stamped on each
@@ -191,6 +219,14 @@ signals:
     void reauthFailed(int index, const QString& serverUrl, const QString& error);
     void identityLoginComplete(const QStringList& serverUrls);
     void identityLoginFailed(const QString& error);
+    // Sign-in worked; the account is simply not a member of anything yet.
+    // Its own signal rather than a flavour of identityLoginFailed because
+    // it is not a failure and must not be toasted as one: the account name
+    // is known, nothing is wrong, and the only useful next step is to join
+    // a server by address. Reported as an error it produced the D-M8
+    // dead-end wearing different words.
+    void identityHasNoServers();
+    void identityAccountChanged();
     void viewingDmsChanged();
 
 private:
@@ -244,4 +280,5 @@ private:
     IdentityApiClient* m_identityApi = nullptr;
     QString m_identityUrl;
     QString m_identityAccessToken;
+    bsfchat::IdTokenAccount m_identityAccount;
 };
