@@ -1066,3 +1066,52 @@ None of this can be checked without a phone:
     exactly two inputs: receiver delivery reports and the sender window.
 - **Screen sharing on iOS.** Still needs ReplayKit and a Broadcast
   Upload Extension. Unchanged.
+
+### 10.5 Portrait-only, and what it does to the orientation question
+
+The app ships portrait-only on both platforms now (`feat/mobile-ui-polish`:
+`screenOrientation="portrait"`, and `UISupportedInterfaceOrientations`
+reduced to `UIInterfaceOrientationPortrait`). That is independent of the
+sender-side rotation here — locking the UI does not turn the sensor —
+but it changes the shape of the problem in a useful way, and it changes
+what is worth testing.
+
+**It makes the problem strictly simpler.** There is now exactly one
+interface orientation the app can ever be in, so whatever angle the
+capture arrives at, it is a *constant*. The fix, if one is needed, is a
+single number rather than a mapping table maintained against four
+orientations.
+
+**The evidence says a fix probably IS needed.** Qt 6.10.3's concrete iOS
+camera backend is `AVFCameraSession` — the shared Darwin one — and it
+carries no orientation or rotation method at all: no
+`videoRotationAngle`, no `videoOrientation`, nothing that consults the
+screen. If that reading is right, `QVideoFrame::rotation()` is always
+`None` on iOS, `videoorient::wireRotation()` returns 0, and the
+orientation code added here is in place and doing nothing while the far
+end gets a sideways picture. This is static reading of a binary, not a
+measurement; §10.3 item 1 is still the open question.
+
+**The local preview is a free oracle for it.** Qt applies the same
+presentation rotation when it *draws* a frame through `QVideoSink`. So
+if Qt stamps nothing, the preview is sideways too — inside a portrait
+UI, which is unmissable. That means:
+
+- **Preview sideways in the portrait UI ⇒ Qt stamps nothing.** The
+  rotation has to come from somewhere else, and the `[camera] first
+  frame:` log line says which way round to apply it.
+- **Preview upright ⇒ Qt stamps a rotation**, the wire gets the same
+  one, and the far end should be upright too.
+
+Either way the log line settles it on the first build, which is why it
+was added rather than leaving the question for a second round trip.
+
+**The "rotate to landscape and back" test no longer applies as written**
+— the UI cannot rotate. Replace it with a *tilt* observation, which
+answers a different and still-open question: whether Qt derives any
+rotation it does stamp from the INTERFACE orientation (locked, so
+constant) or from the physical DEVICE orientation (still free to change
+in a locked app). Tilt the phone to landscape while watching your own
+preview: if the preview rotates inside the portrait UI, Qt is keyed on
+the device and the wire angle moves with the user's wrist; if it stays
+put, the angle is constant and there is exactly one number to get right.
