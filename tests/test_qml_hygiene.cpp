@@ -549,6 +549,9 @@ private slots:
     //     use of that same name in that same file is missed.
     //   * a reference built at runtime (`root["login" + "Dialog"]`). Nothing
     //     in the tree does this.
+    //   * it reports the FIRST use of each name per file, not every use. The
+    //     build fails either way; a fixer working from the message should
+    //     re-run rather than assume one line per name is the whole of it.
     //   * it says nothing about whether a shared component is reachable from
     //     the mobile shell. It is deliberately stricter than that: a
     //     component nobody mounts on a phone today can be mounted tomorrow.
