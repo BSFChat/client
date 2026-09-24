@@ -345,19 +345,93 @@ void TestMobileVideo::permissionActionPerStatus() {
     QCOMPARE(camperm::action(S::Unsupported), A::Proceed);
 }
 
-void TestMobileVideo::permissionRefusalNamesARemedy() {
-    // A refusal the user cannot act on is a dead end. Denied points at
-    // the switch; Restricted says out loud that there isn't one, so
-    // nobody goes hunting through Settings for it.
-    const QString denied = camperm::refusalMessage(camperm::Status::Denied);
-    QVERIFY(!denied.isEmpty());
-    QVERIFY(denied.contains(QStringLiteral("Settings")));
+void TestMobileVideo::permissionRefusalNamesARemedy()
+{
+    // What this protects: a refusal must tell the user how to undo it. A
+    // dead-end refusal is not hypothetical — the macOS prompt-denied
+    // path used to say, in full, "Camera access denied."
+    //
+    // EVERY platform is checked here, not just the host's. The first
+    // version of this case asserted that the message contains "Settings"
+    // — right on iOS, Android, macOS and Windows, wrong on Linux, where
+    // there is no per-app camera permission to send anyone to. It passed
+    // on macOS and failed the Linux and Windows CI jobs. camperm takes
+    // the platform as a parameter now precisely so that a Mac can catch
+    // that.
+    const camperm::Platform all[] = {
+        camperm::Platform::IOS,     camperm::Platform::MacOS,
+        camperm::Platform::Android, camperm::Platform::Windows,
+        camperm::Platform::OtherDesktop,
+    };
 
-    const QString restricted =
-        camperm::refusalMessage(camperm::Status::Restricted);
-    QVERIFY(!restricted.isEmpty());
-    QVERIFY(restricted != denied);
-    QVERIFY(restricted.contains(QStringLiteral("restricted")));
+    for (camperm::Platform p : all) {
+        const QString denied = camperm::refusalMessageFor(
+            camperm::Status::Denied, p);
+        const QString where = camperm::settingsPathFor(p);
+        QVERIFY2(!denied.isEmpty(), "every platform needs a refusal");
+
+        if (!where.isEmpty()) {
+            // Not a tautology: settingsPathFor() and refusalMessageFor()
+            // are separate, so a message that stopped interpolating the
+            // location, or named a different one, fails here.
+            QVERIFY2(denied.contains(where),
+                     qPrintable(QStringLiteral(
+                         "refusal must name where to change the decision "
+                         "(expected \"%1\") but said: %2").arg(where, denied)));
+            // A destination, not a description. "your system privacy
+            // settings" is what Windows used to get.
+            QVERIFY2(where.contains(QStringLiteral(">")),
+                     qPrintable(QStringLiteral(
+                         "settings path should be navigable, got: %1").arg(where)));
+        } else {
+            // No per-app permission exists, so naming a settings pane
+            // would send the user after a switch that is not there. The
+            // message must still be actionable — it names the two things
+            // that actually stop a camera opening.
+            QVERIFY2(denied.contains(QStringLiteral("other"))
+                         && denied.contains(QStringLiteral("permission")),
+                     qPrintable(QStringLiteral(
+                         "with no settings pane to point at, the refusal "
+                         "must still name a cause, but said: %1").arg(denied)));
+        }
+
+        // Restricted is the other half: there IS no switch, and saying so
+        // is the remedy — otherwise the user hunts for one that does not
+        // exist.
+        const QString restricted = camperm::refusalMessageFor(
+            camperm::Status::Restricted, p);
+        QVERIFY(!restricted.isEmpty());
+        QVERIFY(restricted != denied);
+        QVERIFY(restricted.contains(QStringLiteral("restricted")));
+        if (!where.isEmpty())
+            QVERIFY2(!restricted.contains(where),
+                     "a restricted device has no settings switch to offer, "
+                     "so the message must not point at one");
+    }
+
+    // macOS is the one platform where "try again" is wrong: a TCC change
+    // does not reach an already-running process, so the user must
+    // relaunch. Checked explicitly because it is the kind of
+    // platform-specific truth a later tidy-up would flatten away.
+    QVERIFY(camperm::refusalMessageFor(camperm::Status::Denied,
+                                       camperm::Platform::MacOS)
+                .contains(QStringLiteral("restart")));
+    QVERIFY(!camperm::refusalMessageFor(camperm::Status::Denied,
+                                        camperm::Platform::IOS)
+                 .contains(QStringLiteral("restart")));
+
+    // And the host wiring is real — hostPlatform() must actually select
+    // one of the above, not fall through to a default nobody meant.
+    QCOMPARE(camperm::refusalMessage(camperm::Status::Denied),
+             camperm::refusalMessageFor(camperm::Status::Denied,
+                                        camperm::hostPlatform()));
+#if defined(Q_OS_MACOS)
+    QCOMPARE(camperm::hostPlatform(), camperm::Platform::MacOS);
+#elif defined(Q_OS_WIN)
+    QCOMPARE(camperm::hostPlatform(), camperm::Platform::Windows);
+#elif defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
+    QCOMPARE(camperm::hostPlatform(), camperm::Platform::OtherDesktop);
+#endif
 }
 
 // =====================================================================
