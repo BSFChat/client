@@ -89,6 +89,24 @@ nativeOnFrame(JNIEnv* env, jclass, jbyteArray jpeg)
     }, Qt::QueuedConnection);
 }
 
+extern "C" JNIEXPORT void JNICALL
+nativeOnError(JNIEnv* env, jclass, jstring messageJ)
+{
+    auto* inst = g_instance.data();
+    if (!inst) return;
+    QString message;
+    if (messageJ) {
+        const char* raw = env->GetStringUTFChars(messageJ, nullptr);
+        if (raw) {
+            message = QString::fromUtf8(raw);
+            env->ReleaseStringUTFChars(messageJ, raw);
+        }
+    }
+    QMetaObject::invokeMethod(inst, [inst, message]() {
+        inst->onError(message);
+    }, Qt::QueuedConnection);
+}
+
 void registerNatives()
 {
     static bool registered = false;
@@ -107,11 +125,14 @@ void registerNatives()
         { const_cast<char*>("nativeOnFrame"),
           const_cast<char*>("([B)V"),
           reinterpret_cast<void*>(nativeOnFrame) },
+        { const_cast<char*>("nativeOnError"),
+          const_cast<char*>("(Ljava/lang/String;)V"),
+          reinterpret_cast<void*>(nativeOnError) },
     };
     QJniEnvironment env;
     if (env.registerNativeMethods(
             "com/bsfchat/client/ScreenCaptureHelper",
-            methods, 4)) {
+            methods, 5)) {
         registered = true;
         qCInfo(logScreenShare)
             << "Registered JNI bridges on ScreenCaptureHelper";
@@ -229,6 +250,16 @@ void AndroidScreenShareController::onPermissionDenied()
     setActive(false);
 }
 
+void AndroidScreenShareController::onError(const QString& message)
+{
+    qCWarning(logScreenShare, "screen share failed: %s",
+              qUtf8Printable(message));
+    setLastError(message.isEmpty()
+                     ? QStringLiteral("Screen sharing could not start")
+                     : message);
+    setActive(false);
+}
+
 void AndroidScreenShareController::onFrame(const QByteArray& jpeg)
 {
     if (!m_active) return;
@@ -271,6 +302,7 @@ void AndroidScreenShareController::stop() {}
 void AndroidScreenShareController::onStarted(int, int) {}
 void AndroidScreenShareController::onStopped() {}
 void AndroidScreenShareController::onPermissionDenied() {}
+void AndroidScreenShareController::onError(const QString&) {}
 void AndroidScreenShareController::onFrame(const QByteArray&) {}
 void AndroidScreenShareController::broadcast(const QByteArray&) {}
 void AndroidScreenShareController::setActive(bool) {}

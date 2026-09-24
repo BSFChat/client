@@ -427,6 +427,10 @@ Rectangle {
             }
             tile.clicked();
         }
+        // The same menu the right-click opens. Without it a phone had no
+        // route to "Full screen" at all: the corner buttons below are
+        // revealed by hover, and there is no hover.
+        onPressAndHold: feedMenu.popup()
     }
 
     // ── Hover actions ────────────────────────────────────────────────
@@ -446,11 +450,19 @@ Rectangle {
         // buttons would cover the picture. The context menu still
         // reaches them.
         visible: !tile.compact && tile._roomyEnoughForChrome
-        opacity: tileMouse.containsMouse || popHover.containsMouse
+        // Permanently out on touch. Reveal-on-hover is not a dimmer there,
+        // it is an off switch, and what it was switching off is the only
+        // control that makes somebody else's camera readable on a phone.
+        opacity: Theme.isMobile || tileMouse.containsMouse
+                 || popHover.containsMouse
                  || fullHover.containsMouse ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
 
         Rectangle {
+            // Pop-out opens a second OS window. There is no such thing on a
+            // phone, so the button is not there either — which also gives
+            // the fullscreen button beside it room to be finger-sized.
+            visible: !Theme.isMobile
             width: 26
             height: 26
             radius: Theme.r1
@@ -475,14 +487,20 @@ Rectangle {
         }
 
         Rectangle {
-            width: 26
-            height: 26
+            // 44 pt on touch. The tile only draws this chrome at all above
+            // 220 px wide (tile._roomyEnoughForChrome), so a finger-sized
+            // button here cannot swallow a thumbnail.
+            width: Theme.isMobile ? 44 : 26
+            height: Theme.isMobile ? 44 : 26
             radius: Theme.r1
             color: fullHover.containsMouse ? Theme.accent : Qt.rgba(0, 0, 0, 0.6)
+            Accessible.role: Accessible.Button
+            Accessible.name: "Full screen"
+            Accessible.onPressAction: tile.fullscreenRequested()
             Icon {
                 anchors.centerIn: parent
                 name: "expand"
-                size: 13
+                size: Theme.isMobile ? 18 : 13
                 color: fullHover.containsMouse ? Theme.onAccent : "white"
             }
             MouseArea {
@@ -505,6 +523,10 @@ Rectangle {
             onTriggered: tile.fullscreenRequested()
         }
         MenuItem {
+            // No second window to pop out into on a phone. A menu item that
+            // cannot do anything is worse than a shorter menu.
+            visible: !Theme.isMobile
+            height: visible ? implicitHeight : 0
             text: tile.poppedOut ? "Close pop-out window" : "Pop out"
             onTriggered: tile.poppedOut ? tile.closePopOutRequested()
                                         : tile.popOutRequested()

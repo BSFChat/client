@@ -202,7 +202,10 @@ Rectangle {
             delegate: Item {
                 id: memberDelegate
                 width: ListView.view.width
-                height: 40
+                // 40 is below Apple's 44 pt minimum, and this row is
+                // where Block and Report live on mobile — the two
+                // controls the store guidelines are actually about.
+                height: Theme.isMobile ? 48 : 40
 
                 // Role + name colour lookup, bound to the outer `_gen` so
                 // a role save ripples through to every row instantly.

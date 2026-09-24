@@ -20,6 +20,7 @@
 #include "core/TintedIconProvider.h"
 #include "core/MediaDownloader.h"
 #include "core/Haptics.h"
+#include "core/MobileKeyboard.h"
 #include "core/Updater.h"
 #include "core/AndroidPermissions.h"
 #include "util/FileLogger.h"
@@ -181,6 +182,15 @@ int main(int argc, char *argv[])
     Haptics haptics;
     QQmlEngine::setObjectOwnership(&haptics, QQmlEngine::CppOwnership);
     engine.rootContext()->setContextProperty("haptics", &haptics);
+
+    // Software-keyboard bridge. The mobile shell pushes its own layout
+    // clear of the keyboard and needs to know what the platform did on
+    // its own account, so the two do not both move the composer. Exposed
+    // on every platform (it reads 0 and does nothing off iOS) so
+    // MobileMain does not have to guard every call site.
+    MobileKeyboard mobileKeyboard;
+    QQmlEngine::setObjectOwnership(&mobileKeyboard, QQmlEngine::CppOwnership);
+    engine.rootContext()->setContextProperty("mobileKeyboard", &mobileKeyboard);
 
     // Auto-update — desktop only. We don't ship the dialog into the
     // mobile QML on Android / iOS because (a) Play Store / TestFlight
@@ -399,6 +409,57 @@ int main(int argc, char *argv[])
     // the screen off or while switching apps. The foreground
     // service anchored by VoiceService.java keeps the process
     // alive across backgrounding, so `aboutToQuit` is enough.
+
+    // Coming BACK to the foreground is a different matter, and until now
+    // nothing was wired to it at all.
+    //
+    // A /sync long poll holds a socket open for 30 seconds. When iOS
+    // suspends the process — the screen locks, or another app comes
+    // forward — that socket is routinely dead by the time we are resumed,
+    // and nothing tells us: Qt finds out when the transfer timeout expires,
+    // which MatrixClient::sync sets to the poll timeout plus 30s. So a
+    // resumed app could sit for up to a minute with a poll that will never
+    // answer, no request in flight, and therefore no way for a message to
+    // arrive — including the one the user just sent, because this client
+    // now shows that as a local echo but still needs the sync to confirm it.
+    //
+    // That is the reported symptom exactly: "it only showed up after I
+    // locked and unlocked the phone". Locking again tore the dead socket
+    // down hard enough for Qt to notice, the loop errored and retried, and
+    // the retry brought everything at once. Re-polling on Active makes the
+    // resume itself do that, immediately.
+    //
+    // LEAVING the foreground is the other half, and it is the only read
+    // signal a phone reliably produces.
+    //
+    // Every other read-marker trigger in this client is shaped like a
+    // desktop: a row arriving while the message list is parked at its end
+    // (MessageView), or a context-menu item (ChannelList). A phone user
+    // opens the app, reads what is on screen, and swipes away — no new row,
+    // no scroll, no click — and the process is suspended, and then killed,
+    // without `aboutToQuit`. So the last thing on screen was never recorded
+    // as read, and the buffered QSettings write that a moment like this
+    // produces never reached disk either.
+    //
+    // Both are done here, on the same hook, in that order: mark first so the
+    // marker is part of what the flush persists. `markActiveRoomsRead` is
+    // gated on the view's at-bottom sample, so this cannot mark a history
+    // the user was reading halfway up (U-M3).
+    //
+    // Not guarded by #ifdef: on a desktop `ApplicationInactive` means the
+    // window lost focus, where marking the room you were just reading is
+    // both correct and — because the foreground path has already marked it —
+    // very nearly always a no-op that markRoomRead's own dedupe swallows.
+    QObject::connect(&app, &QGuiApplication::applicationStateChanged, &app,
+        [sm = application.serverManager(),
+         settings = application.settings()](Qt::ApplicationState state) {
+            if (state == Qt::ApplicationActive) {
+                if (sm) sm->resyncAll();
+                return;
+            }
+            if (sm) sm->markActiveRoomsRead();
+            if (settings) settings->flush();
+        });
 
     return app.exec();
 }

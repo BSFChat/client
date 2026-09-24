@@ -124,15 +124,84 @@
           promise. Was "true" (Qt's template default) until the Play
           hardening pass; it has never shipped to a store.
         -->
+        <!--
+          screenOrientation="portrait" — PORTRAIT ONLY, deliberately, for
+          the first release. This is the Android half of the decision
+          recorded at length in ios/Info.plist.in's
+          UISupportedInterfaceOrientations; read that comment for the
+          reasoning and the numbers.
+
+          Short version: there is no orientation-aware code in qml/ at
+          all, every phone surface is a vertical stack sized for a
+          portrait viewport, and with the software keyboard up a
+          landscape phone leaves well under a hundred dp for the message
+          list. "unspecified" (Qt's template default) let the device
+          rotate into a layout that had never been looked at.
+
+          Two things this does NOT do, both fine for a phone-first first
+          release but worth knowing:
+
+            • targetSdk is 36 (CMakeLists.txt BSFCHAT_ANDROID_TARGET_SDK).
+              From Android 16, screenOrientation is IGNORED on displays
+              whose smallest width is >= 600dp, so tablets, unfolded
+              foldables and Chromebooks will still rotate this app. They
+              are not a launch target; when they become one the answer is
+              a landscape layout, not a manifest attribute.
+            • configChanges below still lists orientation|screenSize, so
+              a rotation that does happen anyway is handled in-process
+              rather than by recreating the activity — which would take
+              the live voice session down with it.
+        -->
         <activity
             android:name="com.bsfchat.client.BSFChatActivity"
-            android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density"
+            android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density|fontWeightAdjustment"
             android:label="BSFChat"
             android:theme="@style/Theme.BSFChat.Splash"
-            android:launchMode="singleTop"
-            android:screenOrientation="unspecified"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustResize"
             android:exported="true">
+            <!--
+              configChanges: everything up to "density" is Qt's own
+              template list, byte for byte, and must stay that way — Qt
+              handles those changes in-process and an activity recreation
+              tears the QGuiApplication down under the running native
+              main(). Rotation is in that list, so a rotate does NOT
+              recreate this activity.
+
+              "fontWeightAdjustment" is ours, added for the same reason:
+              it is a configuration change from API 31 (toggling the
+              accessibility "Bold text" switch) that Qt's list predates,
+              and without it that toggle recreates the activity. Requires
+              compileSdk 31 or newer to compile, which the Play floor of
+              36 and the local android-34 both satisfy.
+
+              launchMode: singleTask, NOT singleTop.
+
+              singleTop only routes an incoming intent to onNewIntent when
+              the instance is already on top of the SAME task. A browser
+              handing back the OIDC redirect starts the intent with
+              FLAG_ACTIVITY_NEW_TASK, and against a singleTop activity
+              that can land in a brand-new task — which was observed on a
+              device: a VIEW intent for bsfchat://oauth/callback created a
+              second task while the app was already running in another.
+              A second instance means a second process state, and the PKCE
+              verifier and expected `state` for the sign-in in flight are
+              deliberately memory-only in the FIRST one, so the callback
+              arrives somewhere that cannot redeem it and the sign-in hangs
+              or fails its CSRF check.
+
+              singleTask guarantees at most one instance, always its
+              task's root: a NEW_TASK VIEW intent finds it, brings its task
+              forward and delivers onNewIntent. That is the property this
+              app needs anyway — Qt hosts exactly one QGuiApplication per
+              process, so a second activity instance was never something
+              this app could serve. It fixes the ACTION_SEND share path in
+              the same way, and the alternative (a separate
+              redirect-receiver activity that forwards) would only move the
+              same NEW_TASK question up one level while splitting deep-link
+              handling across two classes.
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -152,11 +221,25 @@
                  Host-scoped to "oauth" deliberately: this filter exists
                  for the sign-in, and claiming the bare scheme would
                  also claim every message deep link for an intent path
-                 that has no reason to handle them. The activity is
-                 already singleTop, so the redirect resumes the running
-                 instance rather than stacking a second copy, and
-                 onNewIntent -> nativeOnNewIntent -> UrlHandler
-                 ::checkAndroidLaunchIntent picks it up. -->
+                 that has no reason to handle them. Note the consequence:
+                 a bsfchat://room/... link opened from a browser is NOT
+                 claimed on Android. In-app notification taps are
+                 unaffected, because AndroidNotifier builds an EXPLICIT
+                 intent (setClass on this activity) which needs no filter
+                 to be delivered.
+
+                 The activity is singleTask, so the redirect resumes the
+                 one running instance rather than starting a second one in
+                 a second task, and onNewIntent -> nativeOnNewIntent ->
+                 UrlHandler::checkAndroidLaunchIntent picks it up. See the
+                 launchMode note above for why singleTop was not enough.
+
+                 Cold start is the case this cannot rescue: if the process
+                 dies while the browser has the foreground, the redirect
+                 relaunches us and arrives as the launch intent, but the
+                 PKCE verifier it needs died with the old process.
+                 IdentityClient::deliverCallbackUrl consumes it with a
+                 warning rather than mistaking it for a room link. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

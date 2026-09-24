@@ -24,7 +24,12 @@ Dialog {
 
     parent: Overlay.overlay
     anchors.centerIn: parent
-    width: 420
+    // Clamped rather than a bare 420. This picker is the Windows/Linux
+    // stand-in and is never reached on a phone, but "never reached" is a
+    // claim about today's call sites, not about the file, and a bare
+    // number is what every one of these was before it went off the edge
+    // of somebody's screen.
+    width: Math.min(420, (parent ? parent.width : 420) - 2 * Theme.mobileGutter)
     modal: true
     title: ""
 

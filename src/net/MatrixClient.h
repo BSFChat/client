@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QPointer>
 #include <QString>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -19,6 +20,10 @@ class MatrixClient : public QObject {
 
 public:
     explicit MatrixClient(QObject* parent = nullptr);
+    // Tears the outstanding /sync down while this object is still whole,
+    // rather than leaving it for ~QNetworkAccessManager to finish during
+    // member destruction. See m_syncReply.
+    ~MatrixClient() override;
 
     void setHomeserver(const QString& url);
     QString homeserver() const { return m_homeserver; }
@@ -33,7 +38,23 @@ public:
     void registerUser(const QString& username, const QString& password);
 
     // Sync
+    //
+    // At most ONE /sync may be outstanding on a client at a time, and this
+    // enforces it: a call made while a poll is still in flight abandons the
+    // old one first. Two concurrent polls on one credential is never a thing
+    // anybody wants — they each hold a socket (and, on the server, an httplib
+    // worker for the socket's whole life), they answer into the same models,
+    // and the slower one writes back a stream position the faster one has
+    // already passed.
     void sync(const QString& since = {}, int timeout = 30000);
+
+    // Abandon the outstanding /sync, if any, without reporting it as an
+    // error. SyncLoop::stop() needs this: leaving the poll running meant a
+    // stop()/start() pair inside the 30s window left the reply from before
+    // the stop still in the air, and it arrived to find the loop running
+    // again and scheduled a successor. That is a second, permanent poll
+    // chain on one SyncLoop — see tests/test_sync_single_flight.cpp.
+    void abortSync();
 
     // Rooms
     // `requestId` correlates the call with its createRoomSuccess/
@@ -56,7 +77,13 @@ public:
     void getRoomMembers(const QString& roomId);
 
     // Messages
-    void sendMessage(const QString& roomId, const QString& body);
+    // Returns the transaction id the send was issued under. That id is the
+    // handle for the local echo: the caller puts a row on screen with it
+    // immediately, and messageSendAccepted/messageSendFailed name it when
+    // the server answers. It used to be a local variable that was minted,
+    // used in the URL and thrown away, which is why nothing could correlate
+    // a send with its outcome.
+    QString sendMessage(const QString& roomId, const QString& body);
     // Rich message with explicit HTML formatting and @mention targeting.
     // `formattedBody` is the `format: org.matrix.custom.html` payload
     // (sender-generated — the composer adds <a> anchors for @Name and
@@ -69,7 +96,7 @@ public:
     // the composer reaches this through ServerConnection::sendRichMessage and
     // that file is being edited concurrently.
     static constexpr QLatin1StringView kRoomMentionSentinel{"@room"};
-    void sendRichMessage(const QString& roomId, const QString& body,
+    QString sendRichMessage(const QString& roomId, const QString& body,
                           const QString& formattedBody,
                           const QStringList& mentionedUserIds);
     void sendRoomEvent(const QString& roomId, const QString& eventType, const QByteArray& content);
@@ -228,9 +255,12 @@ public:
     // accountDataError so a caller cannot mistake "no block list" for "the
     // request failed" and leave the UI empty for the wrong reason.
     //
-    // There is NO account_data section in /sync on this server, so nothing
-    // here ever arrives unasked. A change made on another device is invisible
-    // until the next explicit GET.
+    // A change made on another device also arrives unasked, in /sync's
+    // account_data section (server schema v30) — see
+    // ServerConnection::processSyncResponse. That section is a DELTA against
+    // the caller's sync token, so it never replaces this GET: a client that
+    // was not running for the write learns the document here, and hears about
+    // later ones there.
     void getAccountData(const QString& userId, const QString& type);
     void putAccountData(const QString& requestId, const QString& userId,
                         const QString& type, const QJsonObject& content);
@@ -417,6 +447,16 @@ signals:
 
     void messageSent(const QString& eventId);
     void sendMessageError(const QString& error);
+    // The same two outcomes, but naming WHICH send they belong to.
+    //
+    // messageSent/sendMessageError are connection-wide and anonymous: with
+    // two sends in flight there is no way to tell which one a reply is
+    // about, which is why nothing was ever connected to messageSent and why
+    // sendMessageError could only ever raise a generic toast. These carry
+    // the transaction id returned by sendMessage/sendRichMessage, so a
+    // local echo can be reconciled or marked failed individually.
+    void messageSendAccepted(const QString& localId, const QString& eventId);
+    void messageSendFailed(const QString& localId, const QString& error);
 
     // roomId is carried alongside the response so the receiver can
     // filter to the currently-active room. The server doesn't echo
@@ -667,6 +707,20 @@ private:
     // for why it is one function and not two.
     void wireReportReply(QNetworkReply* reply, const QString& requestId);
 
+    // The outstanding /sync, or null. Identity, not ownership: it is the
+    // token a finished handler compares itself against to find out whether
+    // it is still the current poll. Cleared before the reply is abandoned,
+    // so a superseded handler answers "not me" and returns silently instead
+    // of emitting syncError for a cancellation nobody asked about.
+    //
+    // DECLARED BEFORE m_nam, so that it outlives the network manager:
+    // members are destroyed in reverse declaration order, and a reply that
+    // ~QNetworkAccessManager finishes on its way out would otherwise run
+    // the handler below against a member that has already gone. The
+    // destructor aborts the poll before any of that can happen, so this is
+    // the second of two guards rather than the load-bearing one — but the
+    // ordering costs nothing and the failure it prevents is silent.
+    QPointer<QNetworkReply> m_syncReply;
     QNetworkAccessManager m_nam;
     bsfchat::client::MediaTicketCache m_mediaTickets;
     QString m_homeserver;

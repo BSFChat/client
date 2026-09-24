@@ -261,6 +261,40 @@ QtObject {
         readonly property int s12: 56
     }
 
+    // ─── Phone chrome gutter ─────────────────────────────────
+    // The single left/right margin every full-width surface on a phone
+    // keeps clear. It is NOT a safe-area inset (the window is already
+    // inside the safe area — Qt lays it out there, and on an iPhone in
+    // portrait UIKit's horizontal safe-area insets are 0 even on a
+    // Dynamic Island device). It is the margin that keeps content out of
+    // the display's ROUNDED CORNERS, which no inset describes.
+    //
+    // Why 16 and not the 8 the composer used to use. An iPhone 15's
+    // display corner is a ~55 pt radius. Take the composer: a r3 (14 pt
+    // radius) rounded rect, so the rightmost point of its border sits one
+    // radius up from its own bottom edge. With the software keyboard up
+    // its bottom margin is a handful of points, which puts that point at
+    // roughly (x = gutter, y = 20) measured from the screen's
+    // bottom-right corner. It is inside the glass iff
+    //
+    //     (55 − x)² + (55 − 20)² ≤ 55²
+    //
+    // x = 8  → 2209 + 1225 = 3434 > 3025   clipped — the reported bug
+    // x = 16 → 1521 + 1225 = 2746 < 3025   clear, with room to spare
+    //
+    // The bottom margin in that sum is not stable — it changes with the
+    // keyboard, and the shell may take it over entirely — so the gutter is
+    // the half of this worth pinning: at 16 the composer clears the corner
+    // at ANY bottom margin, including zero, and stops being the outermost
+    // thing on the screen regardless.
+    //
+    // 16 is also plain iOS/Material body margin, so nothing looks odd for
+    // having been derived this way. Anything laid out full-width on a
+    // phone — the header row, the timeline, the composer — uses this one
+    // number, because three different gutters (10, 16 and 8) is what made
+    // the composer the outermost thing on the screen in the first place.
+    readonly property int mobileGutter: 16
+
     // ─── Avatar sizes ────────────────────────────────────────
     readonly property QtObject avatar: QtObject {
         readonly property int sm:  24   // inline chips
@@ -374,6 +408,16 @@ QtObject {
         readonly property int xl: 44
     }
     readonly property ControlHeights controlHeight: ControlHeights {}
+
+    // ─── Minimum touch target ────────────────────────────────
+    // Apple's HIG asks for 44×44 pt and Material for 48×48 dp; 44 is the
+    // number an App Store reviewer measures against, so it is the floor
+    // every `Theme.isMobile ? … : …` branch in the tree uses for anything
+    // a finger has to hit. It is deliberately a separate token from
+    // controlHeight.xl (which happens to be 44 too): that one is a
+    // typographic choice about how tall a button looks, this one is a
+    // hard accessibility minimum, and they must be free to diverge.
+    readonly property int touchTarget: 44
 
     // ─── Accessibility borders (our extension) ───────────────
     // Accessibility mode draws thick, accent-colored borders between panels

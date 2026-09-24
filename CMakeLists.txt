@@ -141,12 +141,13 @@ endif()
 # naming OpenSSL but not the reason.
 #
 # It used to live inside `if(IOS AND NOT DEFINED OPENSSL_ROOT_DIR)`,
-# which meant it did not run for the one caller that matters —
-# scripts/build-ios.sh passes -DOPENSSL_ROOT_DIR explicitly (it has to;
-# under the iOS toolchain find_library is confined to the sysroot), so
-# the script skipped the branch and every voice=ON configure through it
-# failed. The first iOS voice build was configured by hand with the flag
-# on the command line, which is why the gap was not visible.
+# which meant it did not run for either caller that matters. Both
+# scripts/build-ios.sh and the `ios` CI job pass -DOPENSSL_ROOT_DIR
+# explicitly (they have to; under the iOS toolchain find_library is
+# confined to the sysroot), so both skipped the branch and every
+# voice=ON configure through them failed. The first iOS voice build was
+# configured by hand with the flag on the command line, which is why the
+# gap stayed invisible — and why two people found it independently.
 if(IOS)
     set(OPENSSL_USE_STATIC_LIBS ON CACHE BOOL "iOS: no shared OpenSSL" FORCE)
 endif()
@@ -229,6 +230,14 @@ qt_add_executable(bsfchat-app
     src/core/MediaDownloader.cpp
     src/core/Updater.cpp
     src/core/Haptics.cpp
+    # UIKit feedback generators for the iOS half of Haptics. Objective-C++
+    # and iOS-only, same shape as IosAuthSession.mm below; UIKit is already
+    # linked for the iOS target further down this file.
+    $<$<BOOL:${IOS}>:src/core/HapticsIos.mm>
+    src/core/MobileKeyboard.cpp
+    # Reads back the iOS platform plugin's own keyboard scroll so the
+    # mobile shell does not push the composer twice. See MobileKeyboard.h.
+    $<$<BOOL:${IOS}>:src/core/MobileKeyboardIos.mm>
     src/core/AndroidPermissions.cpp
     src/core/AndroidNotifier.cpp
     src/core/UrlHandler.cpp
@@ -265,6 +274,7 @@ qt_add_executable(bsfchat-app
     src/util/MentionRenderer.cpp
     src/util/PermissionMath.cpp
     src/util/SearchParser.cpp
+    src/util/TimelineTrace.cpp
     # NotificationSounds is used by NotificationManager for chat
     # chimes — always needed, not voice-gated. SoundGenerator is
     # its only dep (a tiny pure-DSP helper).

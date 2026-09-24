@@ -43,16 +43,17 @@
 // account already had — silently, and visibly only weeks later when the people
 // they blocked started speaking again.
 //
-// ── The thing this model exists to be honest about ───────────────────────
+// ── Where the list comes from ────────────────────────────────────────────
 //
-// /sync on this server carries no account_data section, so THE BLOCK LIST DOES
-// NOT PROPAGATE. A block made on another device does not arrive here; a block
-// made here does not arrive there. Nothing in this class polls, because a
-// poller would be inventing freshness it cannot have and would spend a request
-// a minute on a document that changes twice a year.
+// /sync carries an account_data section now (server schema v30,
+// server/docs/read-state.md), so a block made on another device DOES arrive
+// here, within a poll, through onDocumentFromSync. Nothing in this class
+// polls: a poller would spend a request a minute on a document that changes
+// twice a year, and the push has made it pointless as well as wasteful.
 //
-// What it does instead is re-ask at the moments where being wrong is visible,
-// and say when it last looked:
+// The explicit re-asks below are kept, because the push is a delta and a
+// client that was not running for it has nothing to replay from — and because
+// they are what the pane's "Checked N ago" is honest about:
 //
 //   * after login / reconnect            (ServerConnection::refreshBlockedUsers)
 //   * after every successful write of our own — the list is replaced with what
@@ -61,8 +62,9 @@
 //   * when the managed list is opened, and whenever the user presses Refresh
 //
 // `lastRefreshedMs` is what the settings pane renders ("Checked 4 minutes
-// ago"), and it is the whole of the claim this client makes about currency.
-// There is deliberately no "live" indicator, because there is no live.
+// ago"), and a document pushed by /sync updates it like any other: the claim
+// is "this is what the server last told us", and a push is the server telling
+// us.
 //
 // ── Optimism, and its limit ──────────────────────────────────────────────
 //
@@ -173,6 +175,19 @@ public:
 
     // A 200 from the GET, or the document read back after a write.
     void onDocument(const QJsonObject& document);
+    // The document as /sync delivered it — a write made on ANOTHER DEVICE,
+    // arriving without anybody here having asked.
+    //
+    // Adopted only when this client has nothing outstanding. A document that
+    // /sync built before our own PUT landed is older than what we asked for,
+    // and adopting it would put a user we just unblocked back in the list
+    // until the reply arrived — a visible flicker, and, worse, the base that
+    // the NEXT full replacement would be derived from. Our own write's reply
+    // adopts the server's answer anyway, and it is the newer one. Dropping the
+    // pushed copy therefore costs nothing.
+    //
+    // Returns whether it was adopted, so a caller can log the difference.
+    bool onDocumentFromSync(const QJsonObject& document);
     // A 404 from the GET: this account has never written a block list.
     void onDocumentAbsent();
     // The GET failed. The list keeps whatever it had — a failed refresh must

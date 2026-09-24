@@ -5,8 +5,11 @@
 #ifdef Q_OS_ANDROID
 #include <QCoreApplication>
 #include <QDebug>
+#include <QGuiApplication>
 #include <QJniEnvironment>
 #include <QJniObject>
+#include <QMetaObject>
+#include <QPointer>
 
 namespace {
 
@@ -24,6 +27,50 @@ constexpr jint kPiImmutable     = 0x04000000; // FLAG_IMMUTABLE (API 23+)
 QJniObject appContext()
 {
     return QJniObject(QNativeInterface::QAndroidApplication::context());
+}
+
+// The single notifier, so SyncService's stop callback can reach it.
+QPointer<AndroidNotifier> g_instance;
+
+// Android told us background sync is over. The one case that matters is
+// the Android 15 dataSync budget: SyncService.onTimeout fires, the service
+// stops itself, and nothing else would ever tell the app that its
+// background delivery is gone.
+extern "C" JNIEXPORT void JNICALL
+nativeOnSyncServiceStopped(JNIEnv* env, jclass, jstring reasonJ)
+{
+    auto* inst = g_instance.data();
+    if (!inst) return;
+    QString reason;
+    if (reasonJ) {
+        const char* raw = env->GetStringUTFChars(reasonJ, nullptr);
+        if (raw) {
+            reason = QString::fromUtf8(raw);
+            env->ReleaseStringUTFChars(reasonJ, raw);
+        }
+    }
+    QMetaObject::invokeMethod(inst, [inst, reason]() {
+        inst->onSyncServiceStopped(reason);
+    }, Qt::QueuedConnection);
+}
+
+void registerSyncNatives()
+{
+    static bool registered = false;
+    if (registered) return;
+    JNINativeMethod methods[] = {
+        { const_cast<char*>("nativeOnSyncServiceStopped"),
+          const_cast<char*>("(Ljava/lang/String;)V"),
+          reinterpret_cast<void*>(nativeOnSyncServiceStopped) },
+    };
+    QJniEnvironment env;
+    if (env.registerNativeMethods("com/bsfchat/client/SyncService",
+                                  methods, 1)) {
+        registered = true;
+    } else {
+        qWarning("[notifier] could not register the SyncService stop bridge; "
+                 "an Android 15 dataSync timeout will go unnoticed");
+    }
 }
 
 QJniObject notificationManager()
@@ -136,11 +183,55 @@ QJniObject buildTapIntent(const QString& deepLink)
 } // namespace
 #endif // Q_OS_ANDROID
 
-AndroidNotifier::AndroidNotifier(QObject* parent) : QObject(parent) {}
+AndroidNotifier::AndroidNotifier(QObject* parent) : QObject(parent)
+{
+#ifdef Q_OS_ANDROID
+    g_instance = this;
+    registerSyncNatives();
+
+    // The only moment at which starting a foreground service is
+    // unconditionally legal is while the app is in the foreground, so every
+    // deferred or failed start is retried from here.
+    if (auto* gui = qobject_cast<QGuiApplication*>(QCoreApplication::instance())) {
+        connect(gui, &QGuiApplication::applicationStateChanged, this,
+            [this](Qt::ApplicationState state) {
+                if (state != Qt::ApplicationActive) return;
+                // One attempt per foreground after a budget stop. If the
+                // 24h window has not rolled over yet the start is refused,
+                // SyncService reports it, and we go quiet again until the
+                // next time the user opens the app.
+                m_budgetExhausted = false;
+                tryStartSyncService();
+            });
+    }
+#endif
+}
 
 void AndroidNotifier::startSyncService()
 {
+    m_syncWanted = true;
+    tryStartSyncService();
+}
+
+void AndroidNotifier::tryStartSyncService()
+{
 #ifdef Q_OS_ANDROID
+    if (!m_syncWanted || m_syncRunning || m_budgetExhausted) return;
+
+    // Android 12+ throws ForegroundServiceStartNotAllowedException out of
+    // startForegroundService() when the app is not in the foreground, and
+    // that exception is fatal to the process. The call site for this is a
+    // ServerManager::serverAdded, which fires while connections are being
+    // restored — before the activity is resumed on a cold start, and from
+    // a reconnect at any time. So the state is checked, not assumed.
+    if (QGuiApplication::applicationState() != Qt::ApplicationActive) {
+        qInfo("[notifier] deferring SyncService start: app is not in the "
+              "foreground (state=%d)",
+              int(QGuiApplication::applicationState()));
+        emit backgroundSyncUnavailable(QStringLiteral("deferred-background"));
+        return;
+    }
+
     QJniObject ctx = appContext();
     if (!ctx.isValid()) return;
 
@@ -164,13 +255,28 @@ void AndroidNotifier::startSyncService()
             "(Landroid/content/Intent;)Landroid/content/ComponentName;",
             intent.object());
     }
+    // Belt as well as braces: QJniObject clears a pending exception after
+    // each call, but it does not tell the caller, so the start would
+    // otherwise look like it succeeded. This asks explicitly.
+    if (env.checkAndClearExceptions()) {
+        qWarning("[notifier] SyncService start was refused by the platform; "
+                 "background sync stays off until the app is foregrounded "
+                 "again");
+        emit backgroundSyncUnavailable(QStringLiteral("start-threw"));
+        return;
+    }
+
+    setSyncRunning(true);
     qInfo("[notifier] SyncService started");
 #endif
 }
 
 void AndroidNotifier::stopSyncService()
 {
+    m_syncWanted = false;
 #ifdef Q_OS_ANDROID
+    setSyncRunning(false);
+
     QJniObject ctx = appContext();
     if (!ctx.isValid()) return;
 
@@ -189,6 +295,35 @@ void AndroidNotifier::stopSyncService()
         "(Landroid/content/Intent;)Z", intent.object());
     qInfo("[notifier] SyncService stopped");
 #endif
+}
+
+void AndroidNotifier::onSyncServiceStopped(const QString& reason)
+{
+    setSyncRunning(false);
+    if (reason == QLatin1String("dataSync-budget-exhausted")) {
+        // Android 15 spent our six hours. Do NOT restart: the platform
+        // refuses another dataSync FGS until the 24h window rolls over, and
+        // an app that keeps asking just burns battery being told no. We
+        // degrade to foreground-only sync — the /sync loop is ours and keeps
+        // running for as long as the process does — and try once more the
+        // next time the user brings the app up. Firebase is not the answer
+        // here and never will be; see the note in SyncService.java.
+        m_budgetExhausted = true;
+        qWarning("[notifier] Android stopped background sync: the dataSync "
+                 "foreground-service budget for this 24h window is spent. "
+                 "Messages will now arrive only while BSFChat is open.");
+    } else {
+        qWarning("[notifier] background sync stopped (%s)",
+                 qUtf8Printable(reason));
+    }
+    emit backgroundSyncUnavailable(reason);
+}
+
+void AndroidNotifier::setSyncRunning(bool running)
+{
+    if (m_syncRunning == running) return;
+    m_syncRunning = running;
+    emit backgroundSyncActiveChanged();
 }
 
 void AndroidNotifier::postChatNotification(const QString& tag,

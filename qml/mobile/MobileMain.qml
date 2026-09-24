@@ -20,31 +20,177 @@ ApplicationWindow {
     visibility: Window.Maximized
     color: Theme.bg0
 
-    // Software keyboard avoidance. Tracked so layout can bind its
-    // bottom margin; Android's adjustResize should auto-handle the
-    // window-level resize for us, but modal dialogs parent to the
-    // Overlay which doesn't participate in adjustResize — hence the
-    // manual push applied via a Binding below.
-    readonly property int keyboardHeight: Qt.inputMethod.visible
-        ? Math.ceil(Qt.inputMethod.keyboardRectangle.height
-            / (Screen.devicePixelRatio > 0 ? Screen.devicePixelRatio : 1))
-        : 0
-
     // ── Safe-area handling ───────────────────────────────────────
-    // Qt's ApplicationWindow on Android already reserves space for the
-    // system status bar (it doesn't draw edge-to-edge by default), so
-    // we don't need to add our own top padding — doing so stacks an
-    // extra status-bar-sized gap above the header and makes the top
-    // chrome look comically tall. Kept as a 0 here (rather than
-    // removing it entirely) so anywhere in the tree that reads
-    // `Window.window.topInset` still has something to bind to; iOS
-    // may bring this back under QQuickWindow.safeAreaMargins in a
-    // later Qt release.
-    readonly property int topInset: 0
-    // Bottom inset for the iOS home indicator / Android gesture bar.
-    // Use QQuickWindow.safeAreaMargins if Qt 6.7+, else a 16px
-    // fallback that looks right on a Pixel / Samsung gesture strip.
-    readonly property int bottomInset: 16
+    //
+    // Read from Qt's own SafeArea attached property (QtQuick 6.9+), which
+    // on iOS is UIKit's safeAreaInsets and on Android the window insets.
+    // It replaces a hardcoded `topInset: 0`.
+    //
+    // Honest note on what this did and did not fix. On the device these
+    // margins come back 0/0/0/0, and that is CORRECT rather than broken:
+    // the window is 440x860 on a 440x956 screen, so Qt has already laid
+    // it out inside the safe area and there is nothing left to inset. The
+    // header was never under the Dynamic Island, and the report of a
+    // message row under the status clock was the platform translating the
+    // whole scene for the keyboard, not a missing inset.
+    //
+    // It stays because it is right rather than because it repaid itself:
+    // Android does not inset for us the same way, a hardcoded zero cannot
+    // be right on both, and the day anything here goes edge-to-edge these
+    // are the numbers that keep the header out of the cutout.
+    //
+    // The margins are read off a probe Item rather than off the window,
+    // because SafeArea reports the margins OF THE ITEM it is attached to:
+    // attach it to something whose geometry these numbers then change and
+    // you get a binding loop. ApplicationWindow's contentItem is exactly
+    // such an item (the header height below is derived from topInset, and
+    // the header height is what positions contentItem). The overlay is
+    // not — it always fills the whole window, whatever the header does —
+    // so the probe lives there and nothing it reports feeds back into it.
+    //
+    // It draws nothing and accepts nothing; it exists only to be measured.
+    // Deliberately left visible rather than `visible: false` — SafeArea is
+    // a geometry calculation and an invisible item is not worth betting
+    // that it still runs.
+    Item {
+        id: safeAreaProbe
+        parent: Overlay.overlay
+        anchors.fill: parent
+        enabled: false
+    }
+    readonly property int topInset:    Math.ceil(safeAreaProbe.SafeArea.margins.top)
+    readonly property int leftInset:   Math.ceil(safeAreaProbe.SafeArea.margins.left)
+    readonly property int rightInset:  Math.ceil(safeAreaProbe.SafeArea.margins.right)
+    // Bottom inset for the iOS home indicator / Android gesture bar. The
+    // 16px floor on Android is the old hardcoded value, kept because Qt
+    // there does not draw edge-to-edge and so reports 0: dropping it would
+    // change how the shipping Android build looks for no reason.
+    readonly property int bottomInset:
+        Math.max(Math.ceil(safeAreaProbe.SafeArea.margins.bottom),
+                 Qt.platform.os === "android" ? 16 : 0)
+
+    // ── Software keyboard avoidance ──────────────────────────────
+    //
+    // The comment here used to promise "a Binding below" that pushed the
+    // layout up. There was no Binding, and nothing read keyboardHeight —
+    // the whole strategy was Android's `adjustResize`
+    // (android/AndroidManifest.xml), which shrinks the window so the
+    // layout gets out of the keyboard's way by itself. iOS has no
+    // equivalent: the window stays full-screen and the keyboard is simply
+    // drawn on top of it, which in a chat app means on top of the
+    // composer you are typing into. Hence the explicit push below.
+    //
+    // Units: QInputMethod::keyboardRectangle is documented as window
+    // coordinates, but Android's platform plugin reports device pixels
+    // (which is why the old expression divided by devicePixelRatio) while
+    // iOS reports UIKit points, i.e. already-window coordinates. Rather
+    // than hardcode either assumption, normalise by the one thing that is
+    // true on both: a docked software keyboard spans the full width of
+    // the window, so width tells us the scale factor. A floating keyboard
+    // (Android) reports an empty rectangle, which falls through to 0.
+    readonly property int keyboardHeight: {
+        if (!Qt.inputMethod.visible) return 0;
+        var kr = Qt.inputMethod.keyboardRectangle;
+        if (!kr || kr.width <= 0 || kr.height <= 0) return 0;
+        var scale = root.width / kr.width;
+        // Guard against a keyboard that is not full-width after all
+        // (an iPad floating keyboard; we do not ship iPad, but a wrong
+        // scale here would shove the composer off-screen).
+        if (!(scale > 0.2 && scale < 1.5)) scale = 1;
+        return Math.ceil(Math.min(kr.height * scale, root.height * 0.7));
+    }
+
+    // How far the layout still has to move after everything else has
+    // already moved it. Three terms, all measured, which is why there is
+    // no per-platform branch here any more:
+    //
+    //   windowShrink    the window got shorter — Android's adjustResize
+    //                   does this, and on iOS MobileKeyboard does it by
+    //                   hand for the same reason.
+    //   platformScroll  the iOS plugin translated the whole scene up
+    //                   instead. Only happens now if the window resize
+    //                   was refused; see src/core/MobileKeyboard.h.
+    //   the remainder   is ours, and on a platform that does neither it
+    //                   is the whole keyboard.
+    //
+    // Getting this wrong in both directions is what the device caught:
+    // first a push added on top of the platform's scroll, which left the
+    // composer a whole keyboard height in the air over a void, and then
+    // one frame of the same before the correction landed.
+    readonly property int keyboardPush:
+        Math.max(0, keyboardHeight
+                    - mobileKeyboard.platformScroll
+                    - mobileKeyboard.windowShrink)
+
+    // The gap between the bottom of the content and the bottom of the
+    // window: the keyboard when it is up, the home indicator / gesture
+    // bar when it is not. They are alternatives, never a sum — the
+    // keyboard covers the home indicator.
+    readonly property int bottomGap:
+        Qt.inputMethod.visible ? keyboardPush : bottomInset
+
+    // Deliberately NOT animated. An eased push looks nicer in isolation
+    // and is actively harmful here: the platform measures where the
+    // cursor is at the moment it is asked, so a gap that is still
+    // travelling reads as a gap that is not there yet, and the plugin
+    // scrolls the scene to compensate for a push that was about to
+    // happen anyway. Instant also matches Android, where the window
+    // resize has never been animated.
+    onBottomGapChanged: keyboardSettle.kick()
+
+    // The platform recomputes its scroll from whatever it sees when
+    // asked, so asking once — before the QML layout pass, before the
+    // scene graph sync that republishes the cursor rectangle, and long
+    // before the keyboard has finished its own ~250ms slide — proves
+    // nothing. Ask across that whole window instead and let it converge.
+    Timer {
+        id: keyboardSettle
+        interval: 50
+        repeat: true
+        property int ticksLeft: 0
+        function kick() { ticksLeft = 8; restart(); }
+        onTriggered: {
+            mobileKeyboard.settle(root._keyboardState());
+            if (--ticksLeft <= 0) stop();
+        }
+    }
+
+    // What gets logged next to the platform's own numbers under
+    // `bsfchat.mobile.keyboard`. This is the only place the real values
+    // can be seen: the keyboard rectangle's units differ per platform and
+    // the insets belong to the device, so neither can be checked by
+    // reading this file.
+    function _keyboardState() {
+        var kr = Qt.inputMethod.keyboardRectangle;
+        var cr = Qt.inputMethod.cursorRectangle;
+        return {
+            "imVisible":  Qt.inputMethod.visible,
+            // Position is NOT trustworthy — the platform converts this
+            // rectangle through its own translated layer, so the y moves
+            // with the scroll. Logged anyway precisely so that stays
+            // visible. Only the size is load-bearing.
+            "kbRect":     Math.round(kr.x) + "," + Math.round(kr.y)
+                          + "," + Math.round(kr.width) + "x" + Math.round(kr.height),
+            "kbScale":    (kr.width > 0 ? (root.width / kr.width).toFixed(3) : "n/a"),
+            "kbHeight":   root.keyboardHeight,
+            // The actual input to the platform's own decision, in Qt
+            // window coordinates. If this is above the keyboard's true
+            // top and it still scrolls, the containment test is comparing
+            // spaces that do not line up.
+            "curRect":    Math.round(cr.x) + "," + Math.round(cr.y)
+                          + "," + Math.round(cr.width) + "x" + Math.round(cr.height),
+            "push":       root.keyboardPush,
+            "bottomGap":  root.bottomGap,
+            "insetsTRBL": root.topInset + "/" + root.rightInset + "/"
+                          + root.bottomInset + "/" + root.leftInset,
+            "window":     Math.round(root.width) + "x" + Math.round(root.height),
+            // Where the window sits on the screen, which is the offset
+            // between the two coordinate spaces above.
+            "winOrigin":  Math.round(root.x) + "," + Math.round(root.y),
+            "screen":     Math.round(Screen.width) + "x" + Math.round(Screen.height),
+            "dpr":        Screen.devicePixelRatio
+        };
+    }
 
     // Android hardware-back should cascade through the UI: close the
     // nearest drawer/popup, not blow past everything and quit the
@@ -124,8 +270,30 @@ ApplicationWindow {
     }
     readonly property bool _noServers: _serverCount === 0
 
+    // Every global popup positions itself against THIS item rather than
+    // against Overlay.overlay directly. A Popup's `parent` is only its
+    // positioning frame — the popup item itself still lives in the
+    // overlay, so the modal dim still covers the whole window — which
+    // means shrinking the frame is all it takes for `anchors.centerIn:
+    // parent` (LoginDialog, SearchPopup, ReportDialog, …) to centre in
+    // what the user can actually see — above the keyboard and inside the
+    // notch — without every one of those files growing its own copy of
+    // the arithmetic. On Android the window resize does most of this
+    // already; on iOS nothing did, so the sign-in dialog, which is the
+    // first screen a reviewer sees, centred its password field behind
+    // the keyboard.
+    Item {
+        id: popupSurface
+        parent: Overlay.overlay
+        anchors.fill: parent
+        anchors.topMargin: root.topInset
+        anchors.leftMargin: root.leftInset
+        anchors.rightMargin: root.rightInset
+        anchors.bottomMargin: root.bottomGap
+    }
+
     // Toast host for every subsystem — reachable via Window.window.toast().
-    ToastHost { id: toastHostGlobal; parent: Overlay.overlay }
+    ToastHost { id: toastHostGlobal; parent: popupSurface }
     // ToastHost's API is toast()/info()/success()/warn()/error(). This
     // called a `show()` that has never existed, so EVERY toast on mobile
     // threw a TypeError and nothing was ever shown (U-C2). Kept
@@ -140,7 +308,11 @@ ApplicationWindow {
     // ── Top bar ──────────────────────────────────────────────────
     // Minimal: channel name + burger (drawers). Title taps open the
     // channel list drawer; the avatar on the right opens the member
-    // list drawer. Status-bar padding via topInset.
+    // list drawer. The bar's background extends up behind the status
+    // bar / notch (height includes topInset) while its CONTENT is
+    // inset by it, so the cutout sits on Theme.bg1 rather than on the
+    // wallpaper-coloured window background. Left/right insets matter
+    // in landscape, where the notch eats one side of the screen.
     header: Rectangle {
         color: Theme.bg1
         height: 48 + root.topInset
@@ -153,14 +325,21 @@ ApplicationWindow {
         RowLayout {
             anchors.fill: parent
             anchors.topMargin: root.topInset
-            anchors.leftMargin: Theme.sp.s4
-            anchors.rightMargin: Theme.sp.s4
+            // Theme.mobileGutter, not s4 — the header, the timeline and
+            // the composer are all full-width surfaces on a phone and all
+            // three now keep the same margin clear of the display's
+            // rounded corners. See the token's comment for the arithmetic.
+            // The insets are additive rather than alternative: the gutter
+            // clears the corner radius, the inset clears a landscape
+            // notch, and a device can present both.
+            anchors.leftMargin: Theme.mobileGutter + root.leftInset
+            anchors.rightMargin: Theme.mobileGutter + root.rightInset
             spacing: Theme.sp.s3
 
             // Burger → left drawer
             Rectangle {
-                Layout.preferredWidth: 40
-                Layout.preferredHeight: 40
+                Layout.preferredWidth: Theme.touchTarget
+                Layout.preferredHeight: Theme.touchTarget
                 radius: Theme.r1
                 color: burgerMouse.pressed ? Theme.bg3 : "transparent"
                 // TalkBack / VoiceOver read this as "Channels, button".
@@ -220,8 +399,8 @@ ApplicationWindow {
             }
 
             Rectangle {
-                Layout.preferredWidth: 40
-                Layout.preferredHeight: 40
+                Layout.preferredWidth: Theme.touchTarget
+                Layout.preferredHeight: Theme.touchTarget
                 radius: Theme.r1
                 color: membersMouse.pressed ? Theme.bg3 : "transparent"
                 Accessible.role: Accessible.Button
@@ -237,8 +416,8 @@ ApplicationWindow {
             }
 
             Rectangle {
-                Layout.preferredWidth: 40
-                Layout.preferredHeight: 40
+                Layout.preferredWidth: Theme.touchTarget
+                Layout.preferredHeight: Theme.touchTarget
                 radius: Theme.r1
                 color: overflowMouse.pressed ? Theme.bg3 : "transparent"
                 Icon {
@@ -315,6 +494,17 @@ ApplicationWindow {
                         iconName: "search"
                         onTriggered: root.openSearch()
                     }
+                    // The desktop chat header carries a pin button; that
+                    // whole header is hidden on mobile, which left the
+                    // pinned list — and the only unpin control anywhere in
+                    // the app — with no way in on a phone.
+                    OverflowItem {
+                        text: "Pinned messages"
+                        iconName: "pin"
+                        enabled: serverManager.activeServer !== null
+                              && serverManager.activeServer.activeRoomId !== ""
+                        onTriggered: root.openPinnedMessages()
+                    }
                     OverflowItem {
                         text: "Client settings"
                         iconName: "settings"
@@ -365,6 +555,14 @@ ApplicationWindow {
     Rectangle {
         id: mainArea
         anchors.fill: parent
+        // This is where the keyboard push lands: shrinking the content
+        // area from the bottom lifts the composer (and the thread
+        // composer, and the VoiceDock) clear of the keyboard, rather than
+        // leaving Qt's iOS fallback to scroll the entire root view — which
+        // takes the header off the top of the screen with it.
+        anchors.bottomMargin: root.bottomGap
+        anchors.leftMargin: root.leftInset
+        anchors.rightMargin: root.rightInset
         color: Theme.bg0
 
         ColumnLayout {
@@ -463,6 +661,16 @@ ApplicationWindow {
         // Swipe-from-edge gesture area — Qt's Drawer defaults to a
         // 20-px hot edge which feels natural.
 
+        // A drawer covers the whole window height, notch included, so it
+        // carries its own safe-area padding: without it the first server
+        // tile in the rail sits under the Dynamic Island and the last
+        // channel row under the home indicator. Padding rather than
+        // margins so the background still paints edge to edge.
+        topPadding: root.topInset
+        bottomPadding: root.bottomInset
+        leftPadding: root.leftInset
+        rightPadding: 0
+
         background: Rectangle { color: Theme.bg1 }
 
         RowLayout {
@@ -506,18 +714,22 @@ ApplicationWindow {
         width: Math.min(root.width * 0.75, 280)
         height: root.height
         edge: Qt.RightEdge
+        topPadding: root.topInset
+        bottomPadding: root.bottomInset
+        leftPadding: 0
+        rightPadding: root.rightInset
         background: Rectangle { color: Theme.bg1 }
 
         MemberList { anchors.fill: parent }
     }
 
     // Global popups — reachable via Window.window.openXyz() helpers.
-    UserSettings   { id: userSettingsGlobal;   parent: Overlay.overlay }
-    ClientSettings { id: clientSettingsGlobal; parent: Overlay.overlay }
-    RoleAssignPopup { id: roleAssignGlobal;    parent: Overlay.overlay }
+    UserSettings   { id: userSettingsGlobal;   parent: popupSurface }
+    ClientSettings { id: clientSettingsGlobal; parent: popupSurface }
+    RoleAssignPopup { id: roleAssignGlobal;    parent: popupSurface }
     SearchPopup {
         id: searchPopupGlobal
-        parent: Overlay.overlay
+        parent: popupSurface
         onResultActivated: (roomId, eventId) => {
             // Switches channel first — a server-side hit is usually not in the
             // room currently on screen.
@@ -527,7 +739,7 @@ ApplicationWindow {
     }
     StatusPicker {
         id: statusPickerGlobal
-        parent: Overlay.overlay
+        parent: popupSurface
     }
 
     // ── Safety surfaces: block, report, delete account ──
@@ -537,9 +749,9 @@ ApplicationWindow {
     // this is the shell the stores actually review, so a helper that exists
     // only on the desktop side would be a TypeError exactly where it matters
     // most (U-C2).
-    ReportDialog        { id: reportDialogGlobal; parent: Overlay.overlay }
-    BlockedUsersDialog  { id: blockedUsersGlobal; parent: Overlay.overlay }
-    DeleteAccountDialog { id: deleteAccountGlobal; parent: Overlay.overlay }
+    ReportDialog        { id: reportDialogGlobal; parent: popupSurface }
+    BlockedUsersDialog  { id: blockedUsersGlobal; parent: popupSurface }
+    DeleteAccountDialog { id: deleteAccountGlobal; parent: popupSurface }
 
     function openUserSettings()   { userSettingsGlobal.open(); }
     function openClientSettings() { clientSettingsGlobal.open(); }
@@ -553,6 +765,11 @@ ApplicationWindow {
         leftDrawer.open();
     }
     function openShortcutsDialog() { /* no-op on mobile */ }
+    // Forwarded to the chat view, which owns the popover — same shape as
+    // threadPanelOpen()/closeThread() above.
+    function openPinnedMessages() {
+        if (chatView && chatView.openPinnedMessages) chatView.openPinnedMessages();
+    }
     function openRoleAssignment(userId, displayName) {
         roleAssignGlobal.openFor(userId, displayName);
     }
@@ -585,7 +802,7 @@ ApplicationWindow {
     // time when it could not complete on either platform.
     LoginDialog {
         id: loginDialogGlobal
-        parent: Overlay.overlay
+        parent: popupSurface
     }
     Component.onCompleted: {
         if (!serverManager || !serverManager.servers

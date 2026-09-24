@@ -21,6 +21,14 @@ Item {
     // Root of the thread — populated when opened. Empty ⇒ panel hidden.
     property string rootEventId: ""
 
+    // Edge of the composer's send button. Declared up here, away from the
+    // layout that uses it, because the composer strip sizes itself from
+    // this number AND contains the button: reading the button's own
+    // laid-out height from its container would close a binding loop.
+    // 44 on touch is the Apple HIG / Material minimum; desktop stays
+    // compact, matching MessageInput.
+    readonly property int sendButtonSize: Theme.isMobile ? 44 : 28
+
     // A @mention anchor inside a reply was clicked. The drawer has no
     // profile card of its own, so the host (MessageView) opens the one
     // it already owns.
@@ -112,7 +120,7 @@ Item {
             // Header — title + close button.
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 48
+                Layout.preferredHeight: Theme.isMobile ? 52 : 48
                 color: Theme.bg1
 
                 RowLayout {
@@ -132,8 +140,11 @@ Item {
                         Layout.fillWidth: true
                     }
                     Rectangle {
-                        Layout.preferredWidth: 28
-                        Layout.preferredHeight: 28
+                        // The panel is full-screen on mobile, so this is
+                        // the only way out of it; at 28 px it was well
+                        // under the 44 pt minimum.
+                        Layout.preferredWidth: Theme.isMobile ? Theme.touchTarget : 28
+                        Layout.preferredHeight: Theme.isMobile ? Theme.touchTarget : 28
                         radius: Theme.r1
                         color: closeMouse.containsMouse ? Theme.bg3 : "transparent"
                         Icon {
@@ -307,7 +318,16 @@ Item {
             // Thread-scoped composer — posts replies into the thread.
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: composerField.implicitHeight
+                // Whichever of the field and the send button is taller.
+                // On a phone the button is 44 pt and the field is not, so
+                // binding this to the field alone clipped the button.
+                //
+                // Against `threadPanel.sendButtonSize`, NOT against the
+                // button's own `height`: the button is inside a RowLayout
+                // that fills this rectangle, so reading its laid-out height
+                // here would be a binding loop (height → layout → height).
+                Layout.preferredHeight: Math.max(composerField.implicitHeight,
+                                                 threadPanel.sendButtonSize)
                     + Theme.sp.s4 * 2
                 color: Theme.bg2
                 border.width: 0
@@ -319,12 +339,21 @@ Item {
 
                 RowLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.sp.s3
+                    anchors.topMargin: Theme.sp.s3
+                    anchors.bottomMargin: Theme.sp.s3
+                    // The panel is full-width on a phone, so this composer is
+                    // a full-width surface and keeps the same gutter as the
+                    // main one — see Theme.mobileGutter.
+                    anchors.leftMargin: Theme.isMobile ? Theme.mobileGutter
+                                                       : Theme.sp.s3
+                    anchors.rightMargin: Theme.isMobile ? Theme.mobileGutter
+                                                        : Theme.sp.s3
                     spacing: Theme.sp.s3
 
                     TextField {
                         id: composerField
                         Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
                         placeholderText: "Reply in thread…"
                         color: Theme.fg0
                         placeholderTextColor: Theme.fg3
@@ -342,6 +371,78 @@ Item {
                         topPadding: Theme.sp.s3
                         bottomPadding: Theme.sp.s3
                         Keys.onReturnPressed: threadPanel._send()
+                        // The numeric keypad's Enter is a different key and
+                        // raises a different signal; on a hardware keyboard
+                        // it is the one a lot of people actually press.
+                        Keys.onEnterPressed: threadPanel._send()
+                    }
+
+                    // Send — the ONLY visible way to post a thread reply.
+                    //
+                    // There was none: the composer's entire send path was
+                    // Keys.onReturnPressed. That is fine on a desktop, where
+                    // the main composer has taught you that Return sends and
+                    // shows a send button next to it anyway. On a phone it is
+                    // a dead end — the software keyboard's return key is a
+                    // newline glyph, this is a single-line TextField so
+                    // pressing it does something invisible, and there is
+                    // nothing on screen that says "post this". A reviewer
+                    // opening a thread finds a text box they cannot submit.
+                    //
+                    // Same shape, same arming rule and the same accent
+                    // fade-in as MessageInput's send button, so the two read
+                    // as the same control: preeditText counts, because an
+                    // Android IME holds the first characters there and a
+                    // button that stays greyed out while you type reads as
+                    // broken.
+                    Rectangle {
+                        id: sendReplyBtn
+                        readonly property bool armed:
+                            (composerField.text.trim().length > 0
+                             || composerField.preeditText.length > 0)
+                            && threadPanel.rootEventId !== ""
+                        Layout.preferredWidth: threadPanel.sendButtonSize
+                        Layout.preferredHeight: threadPanel.sendButtonSize
+                        Layout.alignment: Qt.AlignVCenter
+                        radius: Theme.r1
+                        color: sendReplyMouse.containsMouse && armed
+                            ? Theme.accentDim : Theme.accent
+                        Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                        // Faded rather than hidden so the row does not
+                        // pop-reflow on the first keystroke.
+                        opacity: armed ? 1.0 : 0.0
+                        scale:   armed ? 1.0 : 0.8
+                        Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
+                        Behavior on scale {
+                            NumberAnimation { duration: Theme.motion.fastMs
+                                              easing.type: Easing.BezierSpline
+                                              easing.bezierCurve: Theme.motion.bezier }
+                        }
+
+                        Accessible.role: Accessible.Button
+                        Accessible.name: "Send reply"
+                        Accessible.description: sendReplyBtn.armed
+                            ? "Post this reply into the thread"
+                            : "Nothing to send yet"
+                        Accessible.onPressAction: if (sendReplyBtn.armed)
+                            threadPanel._send()
+
+                        Icon {
+                            anchors.centerIn: parent
+                            name: "send"
+                            size: 14
+                            color: Theme.onAccent
+                        }
+
+                        MouseArea {
+                            id: sendReplyMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: sendReplyBtn.armed
+                                ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            enabled: sendReplyBtn.armed
+                            onClicked: threadPanel._send()
+                        }
                     }
                 }
             }

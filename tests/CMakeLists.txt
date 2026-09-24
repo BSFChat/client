@@ -708,6 +708,40 @@ endif()
 # ServerManager's connection-list lifecycle (U-C1). Header-only logic
 # (src/net/ServerRoster.h) lifted out of ServerManager precisely so this
 # needs no Settings, no ServerConnection, no event loop and no network.
+# "Are we already connected to this server?" — the rule that stops a second
+# ServerConnection, and with it a second /sync long poll, being built for a
+# homeserver the client is already signed into. A real client was found
+# running two sync chains on one token because three of the four add paths
+# never asked; see tests/test_server_dedup.cpp and src/net/ServerDedup.h.
+# Header-only policy: no Settings, no ServerConnection, no event loop.
+qt_add_executable(test_server_dedup test_server_dedup.cpp)
+target_include_directories(test_server_dedup PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_server_dedup PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_server_dedup COMMAND test_server_dedup)
+
+# One /sync outstanding per connection, ever. Unlike the dedup test above
+# this one is about a SINGLE SyncLoop: stop() used to leave the in-flight
+# poll running, so a re-authentication inside the 30s window left two
+# self-sustaining chains behind. Needs a real MatrixClient and a real event
+# loop, because the bug only exists against a server that PARKS the poll —
+# so the test brings its own loopback homeserver that does exactly that. No
+# outbound network.
+qt_add_executable(test_sync_single_flight
+    test_sync_single_flight.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
+)
+target_include_directories(test_sync_single_flight PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_sync_single_flight PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Network Qt6::Test
+)
+add_test(NAME test_sync_single_flight COMMAND test_sync_single_flight)
+
 qt_add_executable(test_server_roster test_server_roster.cpp)
 target_include_directories(test_server_roster PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_server_roster PRIVATE Qt6::Core Qt6::Test)
@@ -736,6 +770,7 @@ qt_add_executable(test_identity_provider_url
     ${CMAKE_SOURCE_DIR}/src/model/ChannelInviteModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BlockedUsersModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/TimelineTrace.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
@@ -793,6 +828,7 @@ qt_add_executable(test_error_surface_guards
     ${CMAKE_SOURCE_DIR}/src/model/ChannelInviteModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BlockedUsersModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/TimelineTrace.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
     ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
@@ -840,6 +876,7 @@ qt_add_executable(test_composer_upload_lock
     ${CMAKE_SOURCE_DIR}/src/model/ChannelInviteModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BlockedUsersModel.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/TimelineTrace.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
     ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
@@ -883,7 +920,13 @@ add_test(NAME test_snapshot_gate COMMAND test_snapshot_gate)
 qt_add_executable(test_read_state test_read_state.cpp)
 target_include_directories(test_read_state PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_definitions(test_read_state PRIVATE
-    BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml")
+    BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml"
+    # The read marker has a C++ half as well as a QML one, and the half a
+    # phone depends on lives in main.cpp's application-state handler. Scanned
+    # rather than linked: pulling ServerConnection in here would drag the
+    # whole app — multimedia, identity, voice — into a test about two
+    # integers.
+    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test_read_state PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_read_state COMMAND test_read_state)
 
@@ -959,6 +1002,7 @@ set_tests_properties(test_media_cache_key PROPERTIES
 qt_add_executable(test_redaction_result
     test_redaction_result.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/TimelineTrace.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
     ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
@@ -975,6 +1019,7 @@ add_test(NAME test_redaction_result COMMAND test_redaction_result)
 qt_add_executable(test_token_rejection
     test_token_rejection.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/TimelineTrace.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
     ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
@@ -1044,7 +1089,10 @@ set_tests_properties(test_video_registry PROPERTIES
 qt_add_executable(test_qml_hygiene test_qml_hygiene.cpp)
 target_compile_definitions(test_qml_hygiene PRIVATE
     BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml"
-    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
+    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src"
+    # The orientation guard reads ios/Info.plist.in and
+    # android/AndroidManifest.xml, which are neither QML nor src.
+    BSFCHAT_ROOT_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(test_qml_hygiene PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_qml_hygiene COMMAND test_qml_hygiene)
 
@@ -1258,3 +1306,30 @@ if(BSFCHAT_ENABLE_VOICE)
     set_tests_properties(test_mobile_video PROPERTIES
         TIMEOUT 60 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
+
+# Android runtime-correctness guards. Everything they protect runs on a
+# phone against a platform this machine does not have, so the checks are
+# structural: the MediaProjection start ordering, the foreground-service
+# start window, the Android 15 dataSync timeout handler, the API-30 gate on
+# the mic/camera FGS types, the manifest's launchMode and intent filters,
+# and the two constructors that were bringing Qt Multimedia up (and with it
+# the camera/microphone prompts) on the sign-in screen.
+#
+# Structural, in the spirit of test_qml_hygiene: each case fails on the
+# commit before its fix. They are NOT a substitute for hardware
+# verification and do not claim any of this works on a device.
+#
+# AndroidNotifier.cpp is linked rather than only scanned so the
+# degradation state machine (backgroundSyncActive / the timeout path) is
+# actually executed; off Android every JNI body compiles out and the
+# policy logic is what is left.
+qt_add_executable(test_android_runtime
+    test_android_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AndroidNotifier.cpp
+)
+target_include_directories(test_android_runtime PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_android_runtime PRIVATE
+    BSFCHAT_ANDROID_DIR="${CMAKE_SOURCE_DIR}/android"
+    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test_android_runtime PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_android_runtime COMMAND test_android_runtime)

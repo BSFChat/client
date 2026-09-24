@@ -175,4 +175,25 @@ void exitVoiceMode()
 #endif
 }
 
+void refreshVoiceService()
+{
+#ifdef Q_OS_ANDROID
+    if (!g_inVoiceMode) return;   // nothing to refresh
+    QJniObject ctx = appContext();
+    if (!ctx.isValid()) return;
+    QJniObject::callStaticMethod<void>(
+        "com/bsfchat/client/VoiceService",
+        "refreshForegroundType",
+        "(Landroid/content/Context;)V",
+        ctx.object());
+    QJniEnvironment env;
+    if (env.checkAndClearExceptions()) {
+        qWarning("[audio-routing] VoiceService type refresh threw; the "
+                 "camera will not survive backgrounding this call");
+        return;
+    }
+    qInfo("[audio-routing] VoiceService foreground types refreshed");
+#endif
+}
+
 } // namespace bsfchat::audio_routing

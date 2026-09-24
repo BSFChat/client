@@ -705,8 +705,8 @@ Rectangle {
 
         // Attachment button — hidden if user lacks ATTACH_FILES.
         Rectangle {
-            Layout.preferredWidth: Theme.isMobile ? 40 : 28
-            Layout.preferredHeight: Theme.isMobile ? 40 : 28
+            Layout.preferredWidth: Theme.isMobile ? Theme.touchTarget : 28
+            Layout.preferredHeight: Theme.isMobile ? Theme.touchTarget : 28
             Layout.alignment: Qt.AlignVCenter
             radius: Theme.r1
             color: attachHover.containsMouse ? Theme.bg2 : "transparent"
@@ -890,8 +890,8 @@ Rectangle {
 
         // Emoji button
         Rectangle {
-            Layout.preferredWidth: Theme.isMobile ? 40 : 28
-            Layout.preferredHeight: Theme.isMobile ? 40 : 28
+            Layout.preferredWidth: Theme.isMobile ? Theme.touchTarget : 28
+            Layout.preferredHeight: Theme.isMobile ? Theme.touchTarget : 28
             Layout.alignment: Qt.AlignVCenter
             radius: Theme.r1
             color: emojiHover.containsMouse || emojiPopup.visible ? Theme.bg2 : "transparent"
@@ -985,8 +985,8 @@ Rectangle {
             // 44 px on mobile to meet Apple / Material touch-target
             // guidelines. Desktop stays compact since it's driven by
             // Enter in most cases anyway.
-            Layout.preferredWidth: Theme.isMobile ? 44 : 28
-            Layout.preferredHeight: Theme.isMobile ? 44 : 28
+            Layout.preferredWidth: Theme.isMobile ? Theme.touchTarget : 28
+            Layout.preferredHeight: Theme.isMobile ? Theme.touchTarget : 28
             Layout.alignment: Qt.AlignVCenter
             radius: Theme.r1
             // Screen readers: a "Send" button at all times — the

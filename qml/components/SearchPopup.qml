@@ -19,7 +19,11 @@ Popup {
     // Near-fullscreen on mobile where a 70% popup leaves too little
     // room for results + the on-screen keyboard.
     width: Theme.isMobile
-        ? (parent ? parent.width - 16 : 640)
+        // Theme.mobileGutter on each side, the same margin the chat column
+        // and the shell header keep. `- 16` was 8 pt a side, which is the
+        // gutter that put the composer's border inside the display's corner
+        // radius; see the token's comment.
+        ? (parent ? parent.width - 2 * Theme.mobileGutter : 640)
         : Math.min(parent ? parent.width * 0.7 : 640, 640)
     height: Theme.isMobile
         ? (parent ? parent.height - 80 : 520)
@@ -254,7 +258,7 @@ Popup {
             clip: true
             spacing: 2
             model: searchPopup.results
-            ScrollBar.vertical: ThemedScrollBar {}
+            ScrollBar.vertical: ThemedScrollBar { id: resultsScrollBar }
             boundsBehavior: Flickable.StopAtBounds
             // Pagination: pull the next page as the user reaches the bottom.
             //
@@ -281,7 +285,11 @@ Popup {
             }
 
             delegate: Rectangle {
-                width: ListView.view.width
+                // Minus the bar's reserved width, same rule the settings
+                // panes follow: an overlaid ScrollBar gets no layout box, so
+                // a row bound to the full viewport width has its right edge —
+                // here the timestamp — sitting underneath it.
+                width: ListView.view.width - resultsScrollBar.reservedWidth
                 height: 62
                 radius: Theme.r1
                 color: resultMouse.containsMouse ? Theme.bg2 : "transparent"

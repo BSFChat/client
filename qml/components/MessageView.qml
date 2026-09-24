@@ -48,6 +48,16 @@ Rectangle {
         if (threadPanel) threadPanel.closePanel();
     }
 
+    // Pinned messages, for the mobile shell's overflow menu. The only
+    // other way in is the pin button in the chat header, and that header
+    // is `visible: !Theme.isMobile` — so on a phone the pinned list, and
+    // with it the only unpin control in the app, could not be opened at
+    // all. Same forwarder shape as the two above: the shell asks this
+    // component for a behaviour, it does not reach into its children.
+    function openPinnedMessages() {
+        pinnedPopover.openCentred();
+    }
+
     // Drag-and-drop file uploads. Anchored over the whole MessageView
     // so dropping anywhere in the chat pane — message list, composer,
     // empty state — uploads the files into the current channel. Only
@@ -455,8 +465,12 @@ Rectangle {
             id: timelineArea
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.leftMargin: Theme.sp.s7
-            Layout.rightMargin: Theme.sp.s7
+            // On a phone this is the same number the composer and the
+            // shell's header row use — see Theme.mobileGutter. It happens
+            // to equal the desktop s7, and is written as the token anyway
+            // so the three of them stay locked together.
+            Layout.leftMargin: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7
+            Layout.rightMargin: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7
 
             ListView {
                 id: messageListView
@@ -568,7 +582,7 @@ Rectangle {
                     // up its history stamped the newest LOADED message as
                     // read and the unread divider never came back.
                     if (!atBottom) return;
-                    var ts = mm.newestTimestampMs();
+                    var ts = mm.newestServerTimestampMs();
                     if (ts > 0) _markRead(ts);
                 }
 
@@ -599,7 +613,7 @@ Rectangle {
                     var mm = messageModelRef;   // never the view's `model`
                     if (!mm) return;
                     if (mm !== _currentModel) return;   // see above
-                    var ts = mm.newestTimestampMs();
+                    var ts = mm.newestServerTimestampMs();
                     if (ts > 0) _markRead(ts);
                 }
 
@@ -700,6 +714,18 @@ Rectangle {
                     _jumpAttemptsLeft = 10;
                     settleTimer.stop();
                     scrollTimer.restart();
+
+                    // The model may ALREADY hold rows. ServerConnection
+                    // replays the room's cached window synchronously inside
+                    // setActiveRoom (store/RoomTimelineCache.h), so a warm
+                    // channel is populated before this handler runs and there
+                    // is no later countChanged to trigger the first
+                    // positioning — without this the list would sit at
+                    // opacity 0 until the 2-second fallback timer, which is
+                    // the opposite of what the cache is for. `_scrollToEndSoon`
+                    // is a guarded callLater, so doing it here as well as from
+                    // onCountChanged is harmless whichever order they run in.
+                    if (count > 0) _scrollToEndSoon();
                 }
 
                 // Initial-load: pick up whichever room is already active
@@ -708,6 +734,81 @@ Rectangle {
                 Component.onCompleted: {
                     _ready = true;
                     _enterRoomContext();
+                }
+
+                // ── Resume from the background is the end of one visit
+                //    and the start of another ────────────────────────────
+                //
+                // `unreadBoundaryMs` is snapshotted exactly once per visit,
+                // in `_enterRoomContext`, and that entry is keyed on the
+                // (server, room, model) triple. A phone comes back from the
+                // background into the SAME triple — same connection, same
+                // room, same model object — so nothing above re-ran and the
+                // frozen boundary, and the "New messages" divider drawn from
+                // it, survived from the previous visit. Not for a moment:
+                // until the user switched rooms and came back, which on a
+                // one-channel server may be never. The divider sat parked
+                // above messages the user had read hours ago.
+                //
+                // Freezing the boundary FOR a visit is right and stays. What
+                // was missing is that backgrounding ends a visit. So:
+                //
+                //   suspended → persist what was read, exactly as leaving a
+                //               room does (no-op unless the user was parked
+                //               at the bottom — `_persistLastReadForCurrent`
+                //               owns that rule, and it is the same rule here)
+                //   activated → re-read the marker and recompute the anchor,
+                //               so the divider means "arrived while I was
+                //               away" again.
+                //
+                // Deliberately NOT a re-entry: no scroll, no initialLoad, no
+                // followEnd/atBottom reset. The user's viewport is theirs;
+                // coming back to your phone should not yank you somewhere
+                // else in the history. Only the divider moves.
+                //
+                // Suspended/Hidden ONLY, never Inactive. Inactive is a
+                // transient loss of focus — the notification shade, an
+                // incoming-call banner, a permission sheet, and on the
+                // desktop every single click on another window. Re-reading
+                // the marker on those would clear the divider every time the
+                // user alt-tabbed, which is the opposite of what the divider
+                // is for. iOS reports Inactive on the way out AND on the way
+                // back in (resignActive → background → foreground →
+                // becomeActive), so the flag is what tells the two apart.
+                property bool _wasBackgrounded: false
+                function _onApplicationStateChanged(appState) {
+                    if (!_ready) return;
+                    if (appState === Qt.ApplicationSuspended
+                        || appState === Qt.ApplicationHidden) {
+                        _wasBackgrounded = true;
+                        _persistLastReadForCurrent();
+                    } else if (appState === Qt.ApplicationActive
+                               && _wasBackgrounded) {
+                        _wasBackgrounded = false;
+                        _resnapshotUnreadBoundary();
+                    }
+                }
+                function _resnapshotUnreadBoundary() {
+                    unreadBoundaryMs = _currentRoomId
+                        ? appSettings.lastReadTs(_currentRoomId) : 0;
+                    // The model has not changed, so nothing will fire
+                    // onCountChanged for us — recompute here or the new
+                    // boundary sits unread until the next message lands.
+                    _recomputeUnreadDivider();
+                }
+                // `Application`, QtQuick's singleton, rather than
+                // `Qt.application`. The two are the same object at runtime,
+                // but the JS handle is typed as QQmlApplication by the
+                // linter while `state` is declared on the QtQuick subclass,
+                // so the working form reports as a missing property. (Do not
+                // start a comment line in this file with the linter's own
+                // name, either — it reads that as a directive.)
+                Connections {
+                    target: Application
+                    function onStateChanged() {
+                        messageListView._onApplicationStateChanged(
+                            Application.state);
+                    }
                 }
 
                 // ── TWO FLAGS, DELIBERATELY. DO NOT MERGE THEM AGAIN. ─────
@@ -745,6 +846,20 @@ Rectangle {
                 property bool followEnd: true
                 property bool atBottom: true
                 property bool initialLoad: true
+
+                // First paint, reported to C++ for the channel-switch trace
+                // (util/TimelineTrace.h). `initialLoad` going false is the
+                // exact instant the `opacity: initialLoad ? 0 : 1` fade above
+                // starts — i.e. the first moment the user can read anything —
+                // and it is cleared from three places (the deferred first
+                // positioning, the 2 s fallback timer, and a user gesture), so
+                // the one handler on the property is the only way to catch all
+                // three. The connection latches it to one line per switch.
+                onInitialLoadChanged: {
+                    if (initialLoad) return;
+                    var s = serverManager.activeServer;
+                    if (s && s.noteTimelineVisible) s.noteTimelineVisible(count);
+                }
                 // Tolerance for "near the bottom" — wider on mobile so a
                 // touch flick's kinetic overshoot doesn't flap `atBottom`
                 // false and flicker the jump-to-latest button.
@@ -892,7 +1007,19 @@ Rectangle {
                 function _isAtEnd() {
                     var mm = messageModelRef;   // never the view's `model`
                     if (!mm) return true;
-                    return mm.isPinnedToEnd(contentHeight, contentY,
+                    // `contentY - originY`, not `contentY`. The end of the
+                    // content is at `originY + contentHeight - height` —
+                    // that is literally what `_jumpToEnd()` assigns — so a
+                    // test written against a bare contentY is off by
+                    // originY, and answers "no" at the exact position the
+                    // jump just put us in. originY is 0 until a
+                    // back-pagination prepends rows, at which point Qt moves
+                    // it by the height of everything it inserted: hundreds
+                    // or thousands of pixels, i.e. far outside the tolerance
+                    // band either way. The read marker rides on this answer,
+                    // so getting it wrong means a channel the user has
+                    // scrolled back through is never marked read again.
+                    return mm.isPinnedToEnd(contentHeight, contentY - originY,
                                             height, bottomTolerance);
                 }
 
@@ -1501,6 +1628,7 @@ Rectangle {
                         replyToSender: model.replyToSender || ""
                         replyPreview: model.replyPreview || ""
                         reactions: model.reactions || []
+                        deliveryState: model.deliveryState || 0
                         threadRootId: model.threadRootId || ""
                         threadReplyCount: model.threadReplyCount || 0
                         // Row-level mention highlight, so a message naming you is
@@ -1852,22 +1980,27 @@ Rectangle {
         MessageInput {
             id: messageInput
             Layout.fillWidth: true
-            // Tighter left/right margins on mobile so the composer
-            // gets the full viewport width minus a small gutter.
-            Layout.leftMargin: Theme.isMobile ? Theme.sp.s3 : Theme.sp.s7
-            Layout.rightMargin: Theme.isMobile ? Theme.sp.s3 : Theme.sp.s7
+            // The composer used to take a TIGHTER gutter than the timeline
+            // above it (s3 = 8 against s7 = 16) on the theory that it
+            // should have "the full viewport width minus a small gutter".
+            // That made its rounded border the outermost thing on the
+            // screen, and at 8 pt in — with the keyboard up, so its bottom
+            // margin is small — the bottom-right corner of that border
+            // falls inside the display's own corner radius and is cut off.
+            // The arithmetic is in Theme.mobileGutter. Same number as the
+            // timeline and the shell header now; the chat column reads as
+            // one column instead of three ragged ones.
+            Layout.leftMargin: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7
+            Layout.rightMargin: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7
             Layout.topMargin: Theme.sp.s3
-            // Extra bottom margin on mobile for the home-indicator /
-            // gesture bar so the composer isn't hugging the edge.
-            // When the software keyboard is up `adjustResize` has
-            // already shrunk the window — in that state the bar
-            // below us is the keyboard itself, not the gesture
-            // strip, so the home-indicator inset would waste space.
-            // Drop to a small gap so the send button doesn't sit
-            // flush against the top row of keys.
-            Layout.bottomMargin: Theme.isMobile
-                ? (Qt.inputMethod.visible ? Theme.sp.s2 : Theme.sp.s7 + 16)
-                : Theme.sp.s7
+            // On mobile this is only the gap between the composer and
+            // whatever is below it — a small constant. The home
+            // indicator / gesture bar and the software keyboard are both
+            // the shell's business now (MobileMain's bottomGap shrinks
+            // the whole content area), because they are also the thread
+            // composer's and the VoiceDock's business and this file
+            // cannot see either of them.
+            Layout.bottomMargin: Theme.isMobile ? Theme.sp.s3 : Theme.sp.s7
             Layout.minimumHeight: Theme.isMobile ? 56 : 48
             visible: serverManager.activeServer !== null && serverManager.activeServer.activeRoomId !== ""
             roomName: serverManager.activeServer ? serverManager.activeServer.activeRoomName : ""
@@ -1924,7 +2057,8 @@ Rectangle {
     Popup {
         id: pinnedPopover
         parent: Overlay.overlay
-        width: 380
+        // 380 overflows a phone; clamp to the viewport with a gutter.
+        width: Math.min(380, (parent ? parent.width : 380) - 2 * Theme.sp.s7)
         height: Math.min(420, contentColumn.implicitHeight + 24)
         padding: 0
         modal: false
@@ -1936,6 +2070,23 @@ Rectangle {
             x = Math.max(8, p.x - width);
             y = p.y;
             open();
+        }
+
+        // Mobile has no chat header to hang this off, so it opens as a
+        // plain centred sheet from the overflow menu instead. Centred
+        // twice: `height` is bound to the content column, which has not
+        // been laid out yet on the first open of a room with pins, so the
+        // first sum is against a stale height. The callLater runs after
+        // that layout pass.
+        function openCentred() {
+            open();
+            _recentre();
+            Qt.callLater(_recentre);
+        }
+        function _recentre() {
+            if (!parent) return;
+            x = Math.max(8, (parent.width - width) / 2);
+            y = Math.max(8, (parent.height - height) / 2);
         }
 
         // Reactive list of pinned ids, rebuilt when the server signals a
@@ -2045,18 +2196,27 @@ Rectangle {
                                 font.pixelSize: Theme.fontSize.xs
                                 color: Theme.fg3
                             }
-                            // Unpin — reveal on hover.
+                            // Unpin — reveal on hover on desktop, always
+                            // shown on mobile, where there is no hover and an
+                            // opacity-0 control is simply a missing one: the
+                            // pinned-messages popover was the only place to
+                            // unpin, so on a phone nothing could be unpinned.
                             Icon {
                                 name: "x"
                                 size: 12
                                 color: unpinMouse.containsMouse
                                     ? Theme.danger : Theme.fg3
-                                opacity: pinRowHover.containsMouse ? 1.0 : 0.0
+                                opacity: (Theme.isMobile || pinRowHover.containsMouse)
+                                    ? 1.0 : 0.0
                                 Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
                                 MouseArea {
                                     id: unpinMouse
                                     anchors.fill: parent
-                                    anchors.margins: -6
+                                    // Negative margins grow the hit area past
+                                    // the 12 px glyph: to the 44 pt minimum on
+                                    // touch, to a comfortable 24 on desktop.
+                                    anchors.margins: Theme.isMobile
+                                        ? -(Theme.touchTarget - 12) / 2 : -6
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: {

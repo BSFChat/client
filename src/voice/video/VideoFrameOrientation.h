@@ -92,3 +92,47 @@ constexpr bool mirrorForWire(bool presentationMirrored) {
 }
 
 } // namespace videoorient
+
+// ---------------------------------------------------------------------
+// Reading the angle off a QVideoFrame, across Qt versions
+// ---------------------------------------------------------------------
+// Everything above is pure arithmetic with no Qt dependency, which is
+// what makes it testable. This part is the bridge to Qt, and it lives
+// here rather than at the three call sites because the API was renamed
+// mid-6.x and getting it wrong only shows up on the kit that has the
+// other spelling:
+//
+//   Qt < 6.7   QVideoFrame::rotationAngle() -> QVideoFrame::RotationAngle
+//   Qt >= 6.7  QVideoFrame::rotation()      -> QtVideo::Rotation
+//
+// Both enumerations are valued in degrees, so the int conversion is
+// exact either way. This matters in practice rather than in theory: the
+// Android kit is Qt 6.5.3 while the iOS and macOS kits are 6.10, so a
+// single-spelling version of this compiled on two platforms out of three
+// and broke the one the camera-prompt bug came from.
+//
+// (The deprecated 6.7+ `rotationAngle()` is deliberately not used for
+// both: it is deprecated precisely so that it can be removed.)
+
+#include <QVideoFrame>
+#include <QtGlobal>
+
+namespace videoorient {
+
+// The presentation rotation Qt stamped on a captured frame, in degrees.
+// Zero on every desktop capture source.
+inline int presentationRotation(const QVideoFrame& f) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+    return int(f.rotation());
+#else
+    return int(f.rotationAngle());
+#endif
+}
+
+// Whether Qt asked for the frame to be mirrored when PRESENTED. Only
+// ever fed to mirrorForWire(), which ignores it — see the note there.
+inline bool presentationMirrored(const QVideoFrame& f) {
+    return f.mirrored();
+}
+
+} // namespace videoorient

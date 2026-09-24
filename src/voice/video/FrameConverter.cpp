@@ -142,17 +142,6 @@ PlanarFrame rotateI420(const PlanarFrame& in, int deg) {
     return out;
 }
 
-// The presentation rotation Qt stamped on a captured frame, in degrees.
-// Zero on every desktop capture source; non-zero on a phone whenever the
-// device is not held in the sensor's native orientation.
-int presentationRotation(const QVideoFrame& f) {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-    return int(f.rotation());
-#else
-    return int(f.surfaceFormat().rotationAngle());
-#endif
-}
-
 PlanarFrame scaleI420(const PlanarFrame& in, int dstW, int dstH) {
     PlanarFrame out = makeI420(dstW, dstH, in.captureTimeUs);
     libyuv::I420Scale(
@@ -225,7 +214,8 @@ PlanarFrame toI420(const QVideoFrame& in, int maxLongEdge, qint64 captureTimeUs)
     // the receiver's, and why the mirror flag is deliberately not
     // applied. Zero on every desktop source, so this is a refcount on
     // the screen-share path.
-    return rotateI420(full, videoorient::wireRotation(presentationRotation(in)));
+    return rotateI420(full,
+        videoorient::wireRotation(videoorient::presentationRotation(in)));
 }
 
 PlanarFrame toI444Identity(const QVideoFrame& in, qint64 captureTimeUs) {

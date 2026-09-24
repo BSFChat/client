@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QJsonArray>
 #include <QMap>
@@ -9,6 +10,7 @@
 #include <QString>
 #include <QTimer>
 
+#include "store/RoomTimelineCache.h"
 #include "util/HistoryFill.h"
 #include "util/MentionRenderer.h"
 #include "net/SessionAuth.h"
@@ -114,9 +116,10 @@ class ServerConnection : public QObject {
     // account may do, and it is the control a user reaches for when a
     // moderator is not around.
     //
-    // It is NOT fed by /sync: this server sends no account_data there, so the
-    // list changes only when something asks. See BlockedUsersModel's header
-    // for where those asks happen and what the UI is allowed to claim.
+    // Fed by /sync as well as by its own reads: an account_data section
+    // carries a block made on another device here within a poll (server
+    // schema v30). The explicit reads are still what ESTABLISH the list, since
+    // the section is a delta — see BlockedUsersModel's header.
     Q_PROPERTY(BlockedUsersModel* blockedUsersModel READ blockedUsersModel CONSTANT)
     // Bumped whenever the set of known bot user ids changes, so QML that
     // asks isBot(userId) directly (the profile card, which has a user id and
@@ -397,6 +400,29 @@ public:
     Q_INVOKABLE void markRoomRead(const QString& roomId, qint64 tsMs);
     Q_INVOKABLE void setTimelineAtBottom(bool atBottom);
 
+    // "The room on screen has been read", asked at a moment the VIEW cannot
+    // see — specifically the application leaving the foreground.
+    //
+    // Every other read-marker trigger in this client is a desktop shape: a
+    // row arriving while the list happens to be parked at its end, or a
+    // right-click menu item. A phone spends most of its life suspended and
+    // the user's last act before that is to swipe away, which produces no
+    // row, no scroll and no click — so on a phone the marker had no reliable
+    // way forward at all. main.cpp calls this from
+    // applicationStateChanged, the same hook the foreground re-poll uses.
+    //
+    // Honours the view's last at-bottom sample for the same reason
+    // setActiveRoom does (U-M3): somebody reading halfway up their history
+    // when the phone locks has not read what is below them.
+    void markActiveRoomRead();
+
+    // "The channel is on screen." Called by MessageView the moment it stops
+    // hiding the list behind its `opacity: initialLoad ? 0 : 1` fade, which
+    // is the first instant the user can actually read anything. It closes the
+    // one span no C++ timer can see: the gap between the model receiving its
+    // rows and QML having laid them out. See util/TimelineTrace.h.
+    Q_INVOKABLE void noteTimelineVisible(int rows);
+
     // Open the channel the user last had open on THIS server, falling back to
     // its first text channel. No-op if a channel is already open, so it is
     // safe to call from every "this server came to the foreground" path.
@@ -406,6 +432,11 @@ public:
     // on a fallback would also overwrite the memory, which is how the
     // remembered channel gets forgotten permanently.
     Q_INVOKABLE void restoreLastTextRoom();
+    // Drop a poll that suspension is likely to have killed and issue a
+    // fresh one. Called when the app returns to the foreground — see
+    // SyncLoop::refreshNow().
+    void resyncNow();
+
     Q_INVOKABLE void sendMessage(const QString& body);
     // Send an m.emote message (the /me slash command). Renders in
     // italics + "<sender> <body>" form on the receiving side.
@@ -1366,6 +1397,50 @@ public:
     // someone is typing. Set entries are user IDs minus self.
     QMap<QString, QStringList> m_roomTyping;
     int m_typingGeneration = 0;
+
+    // roomId → when /members was last fetched for it, and how long that
+    // answer is trusted. See loadMembersForRoom: the fetch is a repair for
+    // members older than our sync window, not the source of the list, so it
+    // does not need to run on every switch.
+    QHash<QString, qint64> m_membersFetchedAt;
+    static constexpr qint64 kMembersRefetchMs = 10 * 60 * 1000;
+
+    // The newest slice of each room's timeline, so a channel switch can paint
+    // from memory instead of from the network. See store/RoomTimelineCache.h
+    // for the freshness rule that decides when a window may be replayed.
+    bsfchat::client::RoomTimelineCache m_timelines;
+
+    // ── Channel-switch timing (util/TimelineTrace.h) ──────────────────────
+    //
+    // All three clocks are restarted by setActiveRoom(), so every line of a
+    // switch is stamped against the same t=0: the tap.
+    //
+    // `m_roomOpenTimer` is that t=0. `m_historyPageTimer` is restarted every
+    // time a /messages request goes out, so its elapsed() is that ONE page's
+    // round trip rather than the whole fill's — the distinction the whole
+    // exercise turns on, because an open fill is allowed to make up to
+    // kHistoryMaxPagesPerFill serial requests before the model, and therefore
+    // the view, has anything to show. `m_membersTimer` does the same for the
+    // /members request the switch also fires.
+    //
+    // Timing lives here rather than in MatrixClient because this object is
+    // what issues every /messages request of a fill (the continuation is the
+    // FetchMore branch of the messagesResult handler), so it can time them
+    // without the client growing a diagnostics parameter on a signal.
+    QElapsedTimer m_roomOpenTimer;
+    QElapsedTimer m_historyPageTimer;
+    QElapsedTimer m_membersTimer;
+    // One "visible" line per switch. Cleared by setActiveRoom().
+    bool m_timelineVisibleLogged = false;
+    // Milliseconds since the switch that is being traced, or -1 outside one.
+    qint64 sinceRoomOpenMs() const;
+    // Raw events the current fill has been handed, across all its pages —
+    // "how much did the server send to produce N rows?", which is the ratio
+    // that decides whether a room costs one request or ten.
+    int m_fillRawEvents = 0;
+    // Milliseconds this fill has spent WAITING, summed over its pages. The
+    // rest of `sinceOpen` at the end of a fill is local work.
+    qint64 m_fillNetMs = 0;
 
     // In-flight search state. `m_searchTerm` is the most recently REQUESTED
     // term; a response naming anything else is stale and dropped (the search box

@@ -75,8 +75,32 @@ public:
         // rides on m.room.member — so the sender's membership is the source
         // and this model reads it through ServerConnection the same way it
         // reads display names.
-        SenderIsBotRole
+        SenderIsBotRole,
+        // Delivery state of a message this client sent, for the tick/retry
+        // affordance on the bubble. Always DeliveryConfirmed for anything
+        // that arrived over /sync — see DeliveryState.
+        DeliveryStateRole
     };
+
+    // Where a row is between "the user pressed Enter" and "the server has
+    // it". Only rows this client created locally are ever anything but
+    // Confirmed; an event that came down /sync is, by definition, on the
+    // server already.
+    //
+    // This exists because the client had no local echo at all: sendMessage()
+    // POSTed and returned, and the row appeared only when the event came
+    // back down the long poll. So the whole visible latency of sending was
+    // "PUT round trip, then wait for a 30-second poll to be woken and
+    // answered" — and any hiccup in that second half (a stalled poll, a
+    // suspended phone, a duplicated sync loop) showed up to the user as the
+    // message they just sent simply not being there, with no spinner and no
+    // error, because the PUT itself had succeeded.
+    enum DeliveryState {
+        DeliveryConfirmed = 0, // the server has it (or it came from the server)
+        DeliverySending   = 1, // PUT in flight
+        DeliveryFailed    = 2  // PUT rejected or the network gave up
+    };
+    Q_ENUM(DeliveryState)
 
     // A live, role-preserving view of one thread over this model (U-M8),
     // for the thread drawer to bind its ListView to. One proxy per model,
@@ -165,10 +189,31 @@ public:
 
     // Unread-divider helpers. `firstEventIdAfterTs` returns the oldest
     // loaded event whose ts is strictly greater than `tsMs` (empty if
-    // none). `newestTimestampMs` returns the newest loaded event's ts
-    // or 0 if empty.
+    // none).
     Q_INVOKABLE QString firstEventIdAfterTs(qint64 tsMs) const;
-    Q_INVOKABLE qint64 newestTimestampMs() const;
+
+    // THE NEWEST TIMESTAMP THAT IS SAFE TO WRITE INTO A READ MARKER.
+    //
+    // Every read marker in this client — the QSettings one and the POST that
+    // follows it — is compared against `origin_server_ts`, i.e. the SERVER's
+    // clock. A local echo does not have one: appendLocalEcho stamps the row
+    // with QDateTime::currentMSecsSinceEpoch() because the bubble has to show
+    // a time before any round trip, and confirmLocalEcho deliberately does
+    // NOT rewrite it (re-sorting a row under the user's cursor at the moment
+    // it is confirmed would be worse than a few ms of skew).
+    //
+    // So the newest LOADED row's timestamp is in the client's clock whenever
+    // the user was the last to speak — which, in a chat app, is most of the
+    // time. Writing that into the marker is the same defect
+    // test_read_state's `markAsReadInServerClockSurvivesSkew` covers for the
+    // QML side, arriving through C++ instead: a client running fast hides the
+    // next messages behind a marker in the future, and one running slow can
+    // never clear the dot.
+    //
+    // This scans back to the newest row that carries a server event id and
+    // returns ITS timestamp — 0 when the model holds nothing but unsent
+    // echoes, which every caller already treats as "nothing to mark".
+    Q_INVOKABLE qint64 newestServerTimestampMs() const;
 
     // THE ANCHOR THE UNREAD DIVIDER IS ALLOWED TO USE.
     //
@@ -305,9 +350,45 @@ public:
     // arrives, which in a busy room is often.
     void refreshBotFlags();
 
+    // --- local echo -------------------------------------------------------
+    //
+    // Put the message on screen the instant the user sends it, in the
+    // Sending state, and reconcile it when the server answers.
+    //
+    // `localId` is the transaction id the send used; it is the handle for
+    // both outcomes. `body`/`formattedBody` are what was typed.
+    void appendLocalEcho(const QString& localId, const QString& body,
+                         const QString& formattedBody, const QString& ownUserId,
+                         const QString& replyToEventId = {},
+                         const QString& threadRootId = {});
+    // The server accepted the send and assigned `eventId`. The echo row
+    // adopts it and becomes Confirmed — and, crucially, registers that id in
+    // m_indexByEventId, so when the same event arrives over /sync moments
+    // later appendEvent's existing dedupe drops it instead of rendering the
+    // message twice.
+    void confirmLocalEcho(const QString& localId, const QString& eventId);
+    // The send failed. The row stays, marked Failed, so the text is not lost
+    // and the user can see WHICH message did not go.
+    void failLocalEcho(const QString& localId);
+    // Drop a failed echo (the user retried or dismissed it).
+    Q_INVOKABLE void discardLocalEcho(const QString& localId);
+    // Body of a pending/failed echo, for a retry that re-sends the text.
+    Q_INVOKABLE QString localEchoBody(const QString& localId) const;
+
     void appendEvent(const bsfchat::RoomEvent& event, const QString& ownUserId);
     void appendEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);
     void prependEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);
+    // One /messages page (or a whole buffered fill) into the timeline: the
+    // rows through append or prepend as the model's state demands, and then
+    // the reactions, redactions and edits the same page carried. Public
+    // because it is also how a cached window is replayed on a room switch.
+    void ingestHistoryEvents(const QVector<bsfchat::RoomEvent>& chronological,
+                             const QString& ownUserId);
+    // A whole cached window into an empty (or newer-only) model, as ONE
+    // insertion rather than one per event. Used by the room switch, where the
+    // per-event path's cost is paid at the moment the user is waiting.
+    void ingestCachedWindow(const QVector<bsfchat::RoomEvent>& chronological,
+                            const QString& ownUserId);
     void clear();
 
     // Take a message out of the timeline (U-H5). Returns true if a row was
@@ -477,6 +558,27 @@ private:
         // user has reacted, and (c) find the reaction event id to redact when
         // toggling off.
         QHash<QString, QVector<QPair<QString, QString>>> reactionsByEmoji;
+        // Local echo bookkeeping. `localId` is the transaction id this client
+        // minted for the send; it is empty for every row that came from the
+        // server. `delivery` is what the bubble renders.
+        //
+        // An echo row starts with an EMPTY eventId — the server has not
+        // assigned one yet — which is why m_indexByEventId cannot hold it
+        // and why reconciliation has to find it by localId (or, in the race
+        // where /sync beats the PUT reply, by sender+body).
+        QString localId;
+        DeliveryState delivery = DeliveryConfirmed;
+        // origin_server_ts, or 0 while the server has not named this row.
+        //
+        // A SECOND timestamp because `timestamp` cannot answer this
+        // question: on a row this device authored it is the local send
+        // time, set before the network is touched so the bubble can show a
+        // time immediately, and confirmation deliberately leaves it alone
+        // (it is also the sort key — see adoptEventId). Everything that
+        // reasons about the server's clock — the read marker above all —
+        // reads this instead, and gets 0 rather than a plausible-looking
+        // number off the wrong clock.
+        qint64 serverTimestamp = 0;
     };
 
     // Reaction events that arrived before their target message. Keyed by
@@ -596,6 +698,25 @@ private:
     QString resolveDisplayName(const QString& userId) const;
     bool resolveIsBot(const QString& userId) const;
     QVariantList buildReactionsList(const MessageEntry& entry) const;
+    // Row index of the echo with this transaction id, or -1. Linear, over
+    // the handful of rows that can be un-reconciled at once.
+    int indexOfLocalEcho(const QString& localId) const;
+    // How many rows are echoes with no server event id yet. Kept so the
+    // match below can answer "none" without walking the timeline: it runs
+    // on EVERY inbound event, and the dedupe index exists precisely because
+    // a full scan per inbound message was worth removing once already.
+    int m_unreconciledEchoes = 0;
+    // Row index of an echo that `event` is plainly the server's copy of:
+    // same sender, same body, still carrying no event id. The fallback for
+    // the race where /sync delivers the event before the PUT reply lands —
+    // without it that ordering renders the message twice.
+    int indexOfEchoMatching(const bsfchat::RoomEvent& event) const;
+    // Adopt a server event id into the echo at `row`, register it for
+    // dedupe, and mark the row Confirmed.
+    // `serverTsMs` is origin_server_ts when the caller has the event in
+    // hand, 0 when it only has the id (the PUT reply names an event without
+    // dating it). See MessageEntry::serverTimestamp.
+    void adoptEventId(int row, const QString& eventId, qint64 serverTsMs = 0);
     // Apply a single reaction record to the target message. Returns the row
     // index so the caller can emit dataChanged, or -1 if the target wasn't
     // found (caller should stash as pending).

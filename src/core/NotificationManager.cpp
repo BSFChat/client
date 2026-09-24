@@ -39,9 +39,11 @@ NotificationManager::NotificationManager(ServerManager* serverManager,
 
     // Spin up the Android SyncService once the first connection
     // appears so /sync keeps pumping when the app is backgrounded.
-    // Stopped lazily — there's no sign-out hook here, but
-    // application-exit hits aboutToQuit which the C++ side already
-    // uses to tear the process down.
+    // This only records the intent: AndroidNotifier decides when the
+    // platform will actually permit the start (this signal can fire
+    // during a restore, before the activity is resumed, and starting a
+    // foreground service from the background is fatal on Android 12+).
+    // Torn down in onServerRemoved once the last connection goes.
     connect(serverManager, &ServerManager::serverAdded, this,
         [this](int /*index*/) {
             if (m_androidNotifier) m_androidNotifier->startSyncService();
@@ -119,7 +121,20 @@ void NotificationManager::onServerAdded(int index)
 void NotificationManager::onServerRemoved(int /*index*/)
 {
     // ServerConnection is deleteLater()'d by ServerManager, which
-    // auto-disconnects our slot — nothing to do here.
+    // auto-disconnects our slot — nothing else to do for the wiring.
+    //
+    // The Android sync service is the exception. It was started when the
+    // first connection appeared and nothing ever stopped it: the header
+    // said "called at sign-in / sign-out" but stopSyncService() had no
+    // caller anywhere in the tree, so a signed-out app went on holding a
+    // dataSync foreground service, a wake-ish process anchor and a
+    // permanent notification for nothing — and burned the Android 15
+    // six-hour budget doing it. With no servers left there is nothing to
+    // sync, so put it down.
+    if (m_androidNotifier && m_serverManager
+        && m_serverManager->connectionCount() == 0) {
+        m_androidNotifier->stopSyncService();
+    }
 }
 
 void NotificationManager::wireConnection(ServerConnection* conn)

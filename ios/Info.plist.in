@@ -60,16 +60,43 @@
 	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
+	<!-- PORTRAIT ONLY, deliberately, for the first release.
+	     ==================================================
+	     This used to list LandscapeLeft and LandscapeRight as well, which
+	     meant the app rotated — into a layout nobody had ever drawn.
+
+	     There is no orientation-aware code anywhere in qml/: not one
+	     binding reads Screen.orientation, primaryOrientation or compares
+	     width against height. Every phone surface is a single vertical
+	     stack sized for a portrait viewport, and the arithmetic in
+	     landscape does not work out:
+
+	       iPhone 15 landscape viewport        393 pt tall
+	       − header                             48
+	       − composer (56 min + its margins)    ~76
+	       − software keyboard                 ~200
+	       = message list                       ~69 pt — one row, or none.
+
+	     Even with the keyboard down it is ~270 pt, and the drawers,
+	     every Popup that clamps to `parent.height * 0.85`, and the
+	     voice room's participant grid are all sized against a viewport
+	     more than twice that tall. A reviewer who rotates the device is
+	     doing something entirely ordinary, and what they would see is
+	     a chat app with no chat in it.
+
+	     Portrait-only is a normal shipping answer for a phone chat app,
+	     it is honest about what has actually been laid out, and it is
+	     reversible in this one array the day a landscape layout exists.
+	     Android's half of this decision is android/AndroidManifest.xml's
+	     screenOrientation.
+
+	     Upside-down is still not listed: iPhone never auto-rotates to it,
+	     and it would only matter on iPad, which we do not target
+	     (TARGETED_DEVICE_FAMILY=1 in CMakeLists.txt). -->
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<!-- The chat layout has no upside-down variant worth having and
-	     iPhone never auto-rotates to it anyway; listing it would only
-	     matter on iPad, which we do not target (TARGETED_DEVICE_FAMILY=1
-	     in CMakeLists.txt). -->
 
 	<!-- ===== TCC usage descriptions =====
 	     Apple rejects boilerplate here ("needs microphone access"): the
@@ -149,17 +176,21 @@
 	     proprietary column, so no CCATS is required, only the French
 	     encryption declaration and only for distribution in France.
 
-	     Note that BSFCHAT_ENABLE_VOICE is currently OFF for iOS, so the
-	     FIRST submitted build genuinely links no crypto but Apple's.
-	     The declaration is still YES on purpose: the day voice is turned
-	     on for iOS the answer changes, and an export-compliance answer
-	     that silently goes stale between releases is precisely the
-	     failure mode this key exists to prevent. YES is never a false
-	     statement; NO would become one without anyone editing this file.
+	     (Historic note: this key was set to YES while
+	     BSFCHAT_ENABLE_VOICE was still OFF for iOS, on the reasoning
+	     that an answer which silently goes stale between releases is
+	     the failure mode the key exists to prevent. Voice turned on for
+	     iOS on 2026-09-23, so the reasoning above is no longer
+	     hypothetical — the shipped binary really does link DTLS-SRTP
+	     against our own OpenSSL.)
 
-	     Once Apple has reviewed the uploaded documentation it issues a
-	     code — add it here as ITSEncryptionExportComplianceCode and the
-	     questionnaire disappears for good. -->
+	     CORRECTION to what an earlier version of this comment claimed:
+	     setting this key YES does NOT stop App Store Connect asking.
+	     It is NO that skips the questionnaire. YES means App Store
+	     Connect will ask for export-compliance information — once per
+	     version, not per build — until an ITSEncryptionExportComplianceCode
+	     is pasted in here. Expect the questions; the honest answer is
+	     still YES. docs/ios-release.md §3 has the walkthrough. -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<true/>
 

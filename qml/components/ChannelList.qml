@@ -783,6 +783,14 @@ Rectangle {
                     MouseArea {
                         id: settingsGearMouse
                         anchors.fill: parent
+                        // The glyph is 18 px. On a phone this is the ONLY
+                        // route into Server Settings — the drawer's channel
+                        // header is where it lives and the overflow menu does
+                        // not carry it — so the hit area is grown to the 44 pt
+                        // minimum around it rather than the icon being drawn
+                        // bigger, which would unbalance a 48 px header row.
+                        // Same idiom as the pinned list's unpin control.
+                        anchors.margins: Theme.isMobile ? -(44 - 18) / 2 : 0
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         // Opened in both cases. The popup decides what to show;
@@ -1070,7 +1078,10 @@ Rectangle {
                         Item {
                             id: catHeader
                             width: parent.width
-                            height: modelData.categoryId !== "" ? 32 : 0
+                            // Tall enough on mobile to hold a 44 pt "+"
+                            // and to be a collapse target a finger can hit.
+                            height: modelData.categoryId !== ""
+                                ? (Theme.isMobile ? Theme.touchTarget : 32) : 0
                             visible: modelData.categoryId !== ""
 
                             // Backdrop click handler — left-click toggles
@@ -1093,6 +1104,14 @@ Rectangle {
                                     } else {
                                         toggleCategoryCollapsed(modelData.categoryId);
                                     }
+                                }
+                                // Touch path to the same create menu.
+                                onPressAndHold: (mouse) => {
+                                    if (typeof haptics !== "undefined")
+                                        haptics.longPress();
+                                    var ph = mapToItem(channelListRoot, mouse.x, mouse.y);
+                                    channelListRoot.openCreateMenu(
+                                        ph.x, ph.y, modelData.categoryId);
                                 }
                             }
 
@@ -1137,13 +1156,23 @@ Rectangle {
                                 // vocabulary used in ServerSettings.
                                 Rectangle {
                                     id: catPlus
-                                    Layout.preferredWidth: 22
-                                    Layout.preferredHeight: 22
+                                    // Full touch target on mobile: at 22 px this
+                                    // is half Apple's 44 pt minimum, and it is
+                                    // the only always-visible way to create a
+                                    // channel once reveal-on-hover is gone.
+                                    Layout.preferredWidth: Theme.isMobile
+                                        ? Theme.touchTarget : 22
+                                    Layout.preferredHeight: Theme.isMobile
+                                        ? Theme.touchTarget : 22
                                     Layout.alignment: Qt.AlignVCenter
                                     radius: Theme.r1
                                     color: catPlusMouse.containsMouse
                                         ? Theme.bg3 : "transparent"
-                                    opacity: catHeaderMouse.containsMouse
+                                    // Reveal-on-hover keeps the desktop list
+                                    // quiet at rest; on touch there is no hover,
+                                    // so an opacity-0 control is an absent one.
+                                    opacity: Theme.isMobile
+                                          || catHeaderMouse.containsMouse
                                           || catPlusMouse.containsMouse ? 1.0 : 0.0
                                     Behavior on color   { ColorAnimation { duration: Theme.motion.fastMs } }
                                     Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
@@ -1524,9 +1553,33 @@ Rectangle {
                                             hoverEnabled: true
                                             cursorShape: Qt.PointingHandCursor
                                             acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                            drag.target: dragProxy
+                                            // No drag-to-reorder on touch. A
+                                            // MouseArea with a YAxis drag target
+                                            // inside a Flickable wins the vertical
+                                            // grab at 6 px, which on a phone means
+                                            // scrolling the channel list either
+                                            // does nothing or silently reorders the
+                                            // channel you started the swipe on.
+                                            // Reordering stays a desktop gesture;
+                                            // the long press below is what touch
+                                            // gets instead.
+                                            drag.target: Theme.isMobile ? null : dragProxy
                                             drag.axis: Drag.YAxis
                                             drag.threshold: 6
+
+                                            // Long press → the same menu the right
+                                            // click opens. Follows MemberList's
+                                            // precedent: without it "Mute channel",
+                                            // "Copy link", "Mark as read" and
+                                            // "Delete channel" are right-click-only,
+                                            // i.e. unreachable on a phone.
+                                            onPressAndHold: {
+                                                if (typeof haptics !== "undefined")
+                                                    haptics.longPress();
+                                                roomContextMenu.roomId = modelData.roomId;
+                                                roomContextMenu.roomName = modelData.displayName;
+                                                roomContextMenu.popup();
+                                            }
 
                                             // Scene-Y of the press point — invariant to the
                                             // row's own lift via anchor.topMargin (which

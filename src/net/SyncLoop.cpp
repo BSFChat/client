@@ -1,6 +1,7 @@
 #include "net/SyncLoop.h"
 #include "net/MatrixClient.h"
 
+#include <QDateTime>
 #include <QDebug>
 #include <QLoggingCategory>
 #include <QNetworkInformation>
@@ -59,7 +60,34 @@ void SyncLoop::stop()
     if (!m_running) return;
     m_running = false;
     m_retryTimer.stop();
+    // The outstanding poll goes with it. Clearing m_running only made this
+    // object IGNORE the reply; the request itself kept running, kept a
+    // socket open, and — this is the bug — was still in the air when a
+    // re-authentication called start() again moments later. It then landed
+    // with m_running back to true, was treated as an ordinary reply, and
+    // scheduled its own successor. From then on the connection had two
+    // independent poll chains on one token, forever: two requests out, two
+    // replies back, each writing m_since over the other's.
+    m_client->abortSync();
+    m_inFlight = false;
     emit runningChanged();
+}
+
+void SyncLoop::refreshNow()
+{
+    if (!m_running) return;
+    m_retryTimer.stop();
+    // The outstanding poll is presumed dead, not merely slow — that is the
+    // whole premise of being called. Dropping it is what makes the next
+    // doSync() actually issue a request rather than be swallowed by the
+    // single-flight guard.
+    m_client->abortSync();
+    m_inFlight = false;
+    // Coming back to the foreground is a fresh start, not a continuation of
+    // whatever backoff the suspended app had accumulated.
+    m_consecutiveFailures = 0;
+    m_noProgressReplies = 0;
+    doSync();
 }
 
 void SyncLoop::scheduleSync(int delayMs)
@@ -75,6 +103,15 @@ void SyncLoop::scheduleSync(int delayMs)
 void SyncLoop::doSync()
 {
     if (!m_running) return;
+    // Single flight. doSync() is reachable from four places — start(), the
+    // retry timer, onSyncSuccess's reschedule and the reachability handler —
+    // and the last of those used to fire straight into a poll that was
+    // already outstanding. MatrixClient::sync() now supersedes rather than
+    // duplicates, so this is belt and braces; it is also the invariant worth
+    // stating, because "one /sync per connection" is the property the whole
+    // of this class depends on and nothing used to assert it.
+    if (m_inFlight) return;
+    m_inFlight = true;
     m_requestTimer.start();
     qCDebug(logSync).nospace()
         << "/sync -> since=" << (m_since.isEmpty() ? QStringLiteral("(full)") : m_since)
@@ -84,6 +121,10 @@ void SyncLoop::doSync()
 
 void SyncLoop::onSyncSuccess(const bsfchat::SyncResponse& response)
 {
+    // Cleared before the m_running gate, not after: a reply that arrives
+    // while stopped still ends the flight, or a later start() would find
+    // m_inFlight stuck true and never poll again.
+    m_inFlight = false;
     if (!m_running) return;
 
     m_consecutiveFailures = 0;
@@ -116,10 +157,31 @@ void SyncLoop::onSyncSuccess(const bsfchat::SyncResponse& response)
     // apart from one answering 200 unconditionally. See isNoProgressReply().
     int events = 0;
     int ephemeral = 0;
+    // Age of the OLDEST timeline event in this reply, by the server's own
+    // origin_server_ts. This is the one number that tells a poll answered
+    // late apart from a poll answered on time about a late event, and its
+    // absence is why "25% of the polls that carried events came back at the
+    // 30-second deadline" could be measured but not explained:
+    //
+    //   age ~= rt   the event existed for the whole poll and the wake was
+    //               missed — the server had it and did not say so.
+    //   age ~= 0    the event genuinely arrived as the poll expired. A
+    //               coincidence, and at this sample size an unremarkable one.
+    //
+    // Signed, and clamped only at the log site: a negative age is clock skew
+    // between this machine and the server, which is worth seeing rather than
+    // hiding, because it would also invalidate the number next to it.
+    qint64 oldestAgeMs = -1;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     for (const auto& [roomId, room] : response.rooms.join) {
         Q_UNUSED(roomId)
         events += static_cast<int>(room.timeline.events.size());
         if (room.ephemeral) ephemeral += static_cast<int>(room.ephemeral->events.size());
+        for (const auto& e : room.timeline.events) {
+            if (e.origin_server_ts <= 0) continue;
+            const qint64 age = nowMs - e.origin_server_ts;
+            if (oldestAgeMs < 0 || age > oldestAgeMs) oldestAgeMs = age;
+        }
     }
     const int presence = response.presence
         ? static_cast<int>(response.presence->events.size()) : 0;
@@ -136,6 +198,8 @@ void SyncLoop::onSyncSuccess(const bsfchat::SyncResponse& response)
             << " events=" << events << " ephemeral=" << ephemeral
             << " presence=" << presence
             << " progressed=" << progressed
+            << (oldestAgeMs >= 0 ? QStringLiteral(" oldestAge=%1ms").arg(oldestAgeMs)
+                                 : QString())
             << (noProgress
                     ? QStringLiteral(" NO-PROGRESS (backoff #%1)").arg(m_noProgressReplies)
                     : QString());
@@ -159,6 +223,7 @@ void SyncLoop::onSyncSuccess(const bsfchat::SyncResponse& response)
 
 void SyncLoop::onSyncError(const QString& error)
 {
+    m_inFlight = false;
     if (!m_running) return;
     emit syncError(error);
     if (!m_running) return;

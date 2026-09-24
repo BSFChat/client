@@ -60,11 +60,39 @@ inline constexpr int kHistoryMoreTargetRows = 20;
 // a bigger page means fewer round trips for the same rows.
 inline constexpr int kHistoryFirstPageLimit = 50;
 inline constexpr int kHistoryFollowPageLimit = 100;
-// One fill fetches at most this many pages: 50 + 9 x 100 = 950 raw events on
-// an open. #notifications (832 events, 46 visible) fits inside one open.
+// One fill fetches at most this many pages: 50 + 9 x 100 = 950 raw events.
 inline constexpr int kHistoryMaxPagesPerFill = 10;
-// Pages the client may fetch on its OWN in one room visit (see above).
-inline constexpr int kHistoryMaxAutoPagesPerOpen = 20;
+// ── The second incident (2026-09-23) ─────────────────────────────────────
+//
+// An OPEN gets a much smaller cap than that, and here is why. Production,
+// measured: two channels of 1300+ events each contained ZERO renderable rows
+// in their newest 150 — they are voice channels, and the server writes an
+// m.call.member on every join, leave and reap sweep, 791 of them in the
+// newest 2000 events server-wide. Opening either ran the fill to the 10-page
+// cap, then MessageView's "the list does not fill the viewport" trigger spent
+// the rest of a 20-page budget, and after up to TWENTY serial round trips
+// (p50 117 ms, p90 679 ms) the channel displayed nothing at all. The owner
+// reported it as "slow to load" from a phone.
+//
+// The cap cannot be "enough pages to crawl any room", because a room can
+// always be sparser than the cap. It has to be "enough for a room with a
+// normal message density", and the client has to be honest the moment it
+// stops: MessageView already shows "Nothing recent to show" with a "Load
+// older messages" button once the automatic budget is spent, so a SMALL
+// budget is what puts that in front of the user instead of a spinner.
+//
+// 3 pages is 50 + 100 + 100 = 250 raw events. #notifications — the room the
+// row-counting fill was written for — now renders 50 rows in its newest 50
+// and is satisfied by page one; at its worst (832 events, 46 visible) it
+// still had a visible row every ~18 events, so 250 covers it several times
+// over. A room that is sparser than that is not a room a further seven
+// requests would have rescued.
+inline constexpr int kHistoryOpenMaxPages = 3;
+// Pages the client may fetch on its OWN in one room visit: the open's three,
+// plus one top-up for a viewport the open did not fill. Past this only the
+// user can ask (scroll to the top, or the button), and the button appearing
+// IS the client admitting it stopped.
+inline constexpr int kHistoryMaxAutoPagesPerOpen = 4;
 
 enum class HistoryFillKind {
     Open,     // the room was just opened
@@ -117,6 +145,16 @@ public:
         m_firstLimit = firstPageLimit > 0 ? firstPageLimit : kHistoryFirstPageLimit;
     }
 
+    // Pages this fill may fetch. An open is capped far below a gesture's
+    // fill: it is on the critical path of a tap, and the two production
+    // channels that motivated the number would otherwise spend ten requests
+    // to display nothing (see kHistoryOpenMaxPages).
+    int pageCap() const
+    {
+        return m_kind == HistoryFillKind::Open ? kHistoryOpenMaxPages
+                                               : kHistoryMaxPagesPerFill;
+    }
+
     // Size of the next request in this fill.
     int nextPageLimit() const
     {
@@ -137,7 +175,7 @@ public:
         m_rows += newRows > 0 ? newRows : 0;
         if (reachedStart) return finish(HistoryFillStop::StartOfRoom);
         if (m_rows >= m_target) return finish(HistoryFillStop::Filled);
-        if (m_pages >= kHistoryMaxPagesPerFill) return finish(HistoryFillStop::PageCap);
+        if (m_pages >= pageCap()) return finish(HistoryFillStop::PageCap);
         if (m_kind != HistoryFillKind::Gesture && autoBudgetSpent())
             return finish(HistoryFillStop::PageCap);
         return true;

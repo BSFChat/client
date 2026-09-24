@@ -12,6 +12,10 @@
 
 #include "voice/video/VideoFrameOrientation.h"
 
+#ifdef Q_OS_ANDROID
+#include "voice/AndroidAudioRouting.h"
+#endif
+
 #ifdef Q_OS_MACOS
 #include "voice/MacCameraPermission.h"
 #include "voice/MacCameraCapturer.h"
@@ -28,6 +32,8 @@
 #endif
 
 #include <QDateTime>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QVariantMap>
 #include <QBuffer>
 #include <QImage>
@@ -77,6 +83,7 @@ CameraController::CameraController(QObject* parent)
                 vf.unmap();
                 m_sink->setVideoFrame(vf);
             }
+            logFirstFrameGeometry(vf);
             m_pendingFrame = vf;
         });
     connect(m_mac, &MacCameraCapturer::captureFailed, this,
@@ -85,12 +92,19 @@ CameraController::CameraController(QObject* parent)
             emit lastErrorChanged();
         });
 #else
-    // The QCamera / QMediaCaptureSession pair is built on first use in
-    // ensureCaptureSession(), NOT here. Only the sink wiring is safe at
-    // construction time — a QVideoSink is a frame destination and owns
-    // no device.
+    // A QVideoSink is a frame destination and owns no device, so wiring
+    // it is safe at construction time on every platform. The QCamera /
+    // QMediaCaptureSession pair is not — see ensureCaptureSession().
     connect(m_sink, &QVideoSink::videoFrameChanged, this,
-        [this](const QVideoFrame& f) { m_pendingFrame = f; });
+        [this](const QVideoFrame& f) {
+            logFirstFrameGeometry(f);
+            m_pendingFrame = f;
+        });
+#  if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    // Desktop: build the capture objects up front, exactly as before.
+    // On mobile this is deferred — see ensureCaptureSession().
+    ensureCaptureSession();
+#  endif
 #endif
 
     m_throttle->setInterval(kFrameIntervalMs);
@@ -121,10 +135,31 @@ CameraController::CameraController(QObject* parent)
     });
 }
 
+// Create QCamera + QMediaCaptureSession, once.
+//
+// This used to run in the constructor on every non-macOS target, and on
+// Android that is early enough to matter: constructing a QCamera resolves
+// the default video input, and handing it to a QMediaCaptureSession brings
+// up the platform camera object. Qt's Android backend asks for the CAMERA
+// runtime permission along the way, so a user who had only just installed
+// the app was shown a camera prompt on the sign-in screen, before any
+// camera feature had been touched. (Play treats an unprompted sensitive
+// permission request as a policy problem, and it is a bad first run
+// besides.) iOS has the same shape — the startup log carried two "Access to
+// camera not granted" lines for the same reason.
+//
+// So on mobile the objects are built at the first startForCamera(), which
+// is reached only once the permission has actually been asked for: by
+// VoiceDock's androidPerms.requestCamera() on Android, and by the
+// camperm block at the top of startForCamera() on iOS (which is also why
+// VoiceDock's Android branch short-circuits there — hasCamera() returns
+// true off Android). Desktop still builds them in the constructor: there
+// is no prompt to provoke there, and nothing should change for it.
 void CameraController::ensureCaptureSession()
 {
-#ifndef Q_OS_MACOS
+#if !defined(Q_OS_MACOS)
     if (m_camera) return;
+
     m_camera = new QCamera(this);
     m_session = new QMediaCaptureSession(this);
     m_session->setCamera(m_camera);
@@ -195,6 +230,46 @@ void CameraController::failWith(const QString& message)
 {
     m_lastError = message;
     emit lastErrorChanged();
+}
+
+// The one thing no build on this machine can answer.
+//
+// The orientation fix in FrameConverter rests entirely on Qt stamping a
+// presentation rotation onto captured frames. Reading the Qt 6.10.3 iOS
+// binaries gives no reason to think it does: the concrete backend is
+// AVFCameraSession (the shared Darwin one), and it has no orientation or
+// rotation method at all — no videoRotationAngle, no videoOrientation,
+// nothing that consults the screen. If that reading is right, rotation()
+// is always None on iOS, videoorient::wireRotation() returns 0, and the
+// far end gets a sideways picture with the fix in place and doing
+// nothing.
+//
+// So log it, once per start, rather than shipping a question. A single
+// device round trip then produces the whole mapping table — what Qt
+// reports, against what the screen says, against which way the phone was
+// physically held — and the follow-up (deriving the angle from the
+// screen when the frame carries none) becomes mechanical instead of a
+// guess about which way the sensor points.
+//
+// Once per start, not per frame: this is diagnostic, not telemetry, and
+// a 30 fps log line is its own bug.
+void CameraController::logFirstFrameGeometry(const QVideoFrame& frame)
+{
+    if (m_loggedFrameGeometry || !frame.isValid()) return;
+    m_loggedFrameGeometry = true;
+    const int rot = videoorient::presentationRotation(frame);
+    const bool mirrored = videoorient::presentationMirrored(frame);
+    int screenOrientation = -1;
+    int nativeOrientation = -1;
+    if (auto* screen = QGuiApplication::primaryScreen()) {
+        screenOrientation = int(screen->orientation());
+        nativeOrientation = int(screen->primaryOrientation());
+    }
+    qInfo("[camera] first frame: %dx%d rotation=%d mirrored=%d "
+          "screenOrientation=%d nativeOrientation=%d -> wire rotation %d",
+          frame.width(), frame.height(), rot, int(mirrored),
+          screenOrientation, nativeOrientation,
+          videoorient::wireRotation(rot));
 }
 
 QVariantList CameraController::availableCameras() const
@@ -311,9 +386,9 @@ void CameraController::startForCamera(int index)
         break;
     }
 
-    ensureCaptureSession();
     m_lastError.clear();
     emit lastErrorChanged();
+    m_loggedFrameGeometry = false;
 
 #ifdef Q_OS_MACOS
     m_mac->start(index);
@@ -321,11 +396,19 @@ void CameraController::startForCamera(int index)
     emit cameraDescriptionChanged();
     m_throttle->start();
 #else
-    // Enumeration happens here and not in the constructor. On iOS an
-    // AVCaptureDevice discovery does not itself raise the permission
-    // prompt, but it is still device work on the launch path, and the
-    // rule this class follows is the simple one: nothing before the
-    // button.
+    // First use on mobile is where the capture objects come into
+    // existence — and the first point at which touching the camera stack
+    // is legitimate, because the permission has just been granted: by
+    // VoiceDock on Android, and by the camperm block above on iOS. On
+    // desktop the constructor already primed them and this is a no-op.
+    ensureCaptureSession();
+    if (!m_camera) {
+        failWith(QStringLiteral("Camera is unavailable on this device."));
+        return;
+    }
+    // Enumeration is here and not in the constructor for the same
+    // reason. On iOS an AVCaptureDevice discovery does not itself raise
+    // the prompt, but it is still device work on the launch path.
     const auto cams = QMediaDevices::videoInputs();
     if (cams.isEmpty()) {
         failWith(QStringLiteral("No camera detected."));
@@ -365,6 +448,14 @@ void CameraController::setActiveState(bool active)
 {
     if (m_active == active) return;
     m_active = active;
+#ifdef Q_OS_ANDROID
+    // The call's foreground service claimed only `microphone` at join
+    // time, because Android 14+ refuses a `camera` type unless the CAMERA
+    // permission is already held — which it is not until VoiceDock asks
+    // for it, just before this. Tell the service to re-evaluate, or the
+    // camera is cut the first time the user leaves the app.
+    if (active) bsfchat::audio_routing::refreshVoiceService();
+#endif
     // S-11: the encode session outlives a stop/start, so the first
     // frame of a restarted camera would reference a picture no viewer
     // holds. Start clean.
@@ -543,12 +634,7 @@ void CameraController::pushFrameToPeers()
         // before the RTP track opens — see a sideways picture.
         // Zero-cost on desktop, where the angle is always 0.
         const int deg = videoorient::wireRotation(
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-            int(m_pendingFrame.rotation())
-#else
-            int(m_pendingFrame.surfaceFormat().rotationAngle())
-#endif
-        );
+            videoorient::presentationRotation(m_pendingFrame));
         if (deg != 0)
             img = img.transformed(QTransform().rotate(deg),
                                   Qt::SmoothTransformation);
