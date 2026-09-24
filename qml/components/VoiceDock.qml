@@ -7,10 +7,32 @@ import BSFChat
 // VoiceDock (SPEC §3.5) — persistent 64h call-controls bar anchored below
 // the main content. Visible only while in a voice channel.
 //
-// Layout is a single RowLayout with a `Layout.fillWidth: true` spacer on
-// both sides of the center cluster, which keeps it visually centered
-// regardless of the other clusters' content width and — crucially — never
-// overflows when the main column is narrow.
+// LEAVE IS ANCHORED TO THE DOCK'S RIGHT EDGE, NOT LAID OUT WITH THE REST.
+// Everything else lives in a RowLayout that ends where that button begins.
+// This is structural and it is the point of the arrangement, so do not
+// "tidy" the button back into the control cluster.
+//
+// The comment that used to be here claimed this layout "never overflows
+// when the main column is narrow". It was a single RowLayout with fixed
+// margins, and a RowLayout neither wraps nor clips: when its children's
+// preferred widths exceed the width available, it simply lays them out
+// past the edge. Measured on a 412 dp Pixel 6 Pro with the full desktop
+// control set, the row wanted 655 dp and the disconnect button — last
+// child of the centre cluster — started at x = 569. It was 197 dp off the
+// right of the screen. The owner reported a call he could not hang up.
+//
+// Three properties keep that from coming back, and each is load-bearing:
+//
+//   • the leave button's position is derived from the SCREEN EDGE, so no
+//     number of controls added to its left can move it;
+//   • the identity cluster is the only thing that grows, and it is the
+//     only thing allowed to shrink (fillWidth on a phone, minimumWidth 0,
+//     elided text), so it absorbs every squeeze;
+//   • the row clips, so a future overrun is a truncated control rather
+//     than one painted over the one control you always need.
+//
+// tests/test_qml_hygiene.cpp measures the worst-case width against the
+// narrowest phone we support and fails if it stops fitting.
 Rectangle {
     id: dock
     color: Theme.bg1
@@ -43,8 +65,10 @@ Rectangle {
         // handler and a right-click does nothing.
         signal rightClicked()
 
-        implicitWidth: 40
-        implicitHeight: 40
+        // 44 on touch — Apple HIG / Material minimum, and these are the
+        // controls a call is run from. Desktop stays at the compact 40.
+        implicitWidth: Theme.isMobile ? 44 : 40
+        implicitHeight: Theme.isMobile ? 44 : 40
         radius: Theme.r2
         color: danger     ? Theme.danger
              : toggled    ? Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.18)
@@ -80,10 +104,46 @@ Rectangle {
         ToolTip.delay: 500
     }
 
+    // Hang up. Declared BEFORE the row so the row can anchor to it.
+    //
+    // Anchored, not laid out: its right edge is one gutter in from the
+    // dock's, whatever else the dock contains. Nothing to its left can
+    // push it anywhere, which is the one guarantee this control needs.
+    DockButton {
+        id: leaveBtn
+        // Declared before the row, so paint order would put the row on top.
+        // The row clips short of this button and cannot reach it, but the
+        // whole point here is not depending on that arithmetic staying true.
+        z: 1
+        anchors.right: parent.right
+        anchors.rightMargin: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7
+        anchors.verticalCenter: parent.verticalCenter
+        icon: "phone-off"
+        danger: true
+        tooltip: "Disconnect"
+        // The one control in here a screen-reader user must be able to
+        // find by name. It had no Accessible block at all.
+        Accessible.role: Accessible.Button
+        Accessible.name: "Leave voice channel"
+        Accessible.description: "Disconnect from the call"
+        Accessible.onPressAction: leaveBtn.clicked()
+        onClicked: if (serverManager.activeServer)
+                       serverManager.activeServer.leaveVoiceChannel()
+    }
+
     RowLayout {
-        anchors.fill: parent
-        anchors.leftMargin: Theme.sp.s7
-        anchors.rightMargin: Theme.sp.s7
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        // Ends where the leave button begins — that button is not in this
+        // layout and this layout may not reach past it.
+        anchors.right: leaveBtn.left
+        anchors.leftMargin: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7
+        anchors.rightMargin: Theme.sp.s5
+        // A RowLayout does not wrap. If the controls ever outgrow the
+        // space again, they are cut off here rather than drawn over the
+        // hang-up button.
+        clip: true
         spacing: Theme.sp.s5
 
         // ─── Left cluster: self identity + connection line ──────────
@@ -94,7 +154,19 @@ Rectangle {
         Rectangle {
             id: leftCluster
             Layout.alignment: Qt.AlignVCenter
-            implicitWidth: leftClusterRow.implicitWidth + Theme.sp.s3 * 2
+            // THE compressible item. On a phone it takes the slack and
+            // gives it all back again when the controls need the room —
+            // down to nothing, which is correct: you are holding your own
+            // phone and already know who you are. On a desktop it keeps
+            // its natural width so the two spacers still centre the
+            // controls exactly as before.
+            Layout.fillWidth: Theme.isMobile
+            Layout.minimumWidth: 0
+            Layout.preferredWidth: leftClusterRow.implicitWidth + Theme.sp.s3 * 2
+            Layout.maximumWidth: Theme.isMobile
+                ? Number.POSITIVE_INFINITY
+                : leftClusterRow.implicitWidth + Theme.sp.s3 * 2
+            clip: true
             implicitHeight: leftClusterRow.implicitHeight + Theme.sp.s2 * 2
             radius: Theme.r1
             color: leftClusterHover.containsMouse
@@ -117,9 +189,18 @@ Rectangle {
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.left: parent.left
                 anchors.leftMargin: Theme.sp.s3
+                // Bounded on the right too. Anchored only on the left, this
+                // row kept its full implicit width and spilled straight out
+                // of the cluster that was supposed to be clipping it, so
+                // the elide below never engaged.
+                anchors.right: parent.right
+                anchors.rightMargin: Theme.sp.s3
                 spacing: Theme.sp.s3
 
                 Rectangle {
+                    Layout.preferredWidth: Theme.avatar.md
+                    Layout.preferredHeight: Theme.avatar.md
+                    Layout.minimumWidth: 0
                     width: Theme.avatar.md; height: Theme.avatar.md
                     // Rounded-square to match every other avatar in the
                     // app (ServerRail / MemberList / UserSettings / profile
@@ -147,8 +228,16 @@ Rectangle {
                 ColumnLayout {
                     spacing: 0
                     Layout.maximumWidth: 180
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
 
                     Text {
+                        // Your own name, on your own phone. It is the least
+                        // informative thing in the dock and the widest, so on
+                        // a phone it is the first thing to go — the channel
+                        // line below it is the part that answers "which call
+                        // am I in?" while you are off reading a text channel.
+                        visible: !Theme.isMobile
                         text: serverManager.activeServer
                               ? serverManager.activeServer.displayName : ""
                         font.family: Theme.fontSans
@@ -157,6 +246,7 @@ Rectangle {
                         color: Theme.fg0
                         elide: Text.ElideRight
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                     }
                     Text {
                         text: {
@@ -165,13 +255,19 @@ Rectangle {
                             var name = s.roomListModel
                                        ? s.roomListModel.roomDisplayName(s.activeVoiceRoomId)
                                        : s.activeVoiceRoomId;
-                            return "Connected to #" + name;
+                            // "Connected to #general" is three words of
+                            // preamble and one word of information. On a
+                            // phone the dock is only ever visible while you
+                            // ARE connected, so the preamble says nothing the
+                            // dock's own presence has not already said.
+                            return (Theme.isMobile ? "#" : "Connected to #") + name;
                         }
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
                         color: Theme.fg2
                         elide: Text.ElideRight
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                     }
                 }
 
@@ -187,8 +283,22 @@ Rectangle {
                 // badge once came to claim a protocol this client does not
                 // implement. See src/voice/IpPrivacy.h.
                 Rectangle {
-                    visible: ipShieldText.text.length > 0
+                    // Keyed off the PROPERTY, not off whether a sibling Text
+                    // happens to be rendering. It used to read
+                    // `ipShieldText.text.length > 0`, which coupled the
+                    // badge's existence to that one label and meant the label
+                    // could not simply be hidden on a phone — it had to be
+                    // squashed to zero width instead, which in turn read to
+                    // the touch-target scan as somebody sizing a 0 pt button.
+                    visible: serverManager.activeServer
+                             && serverManager.activeServer.voiceIpPrivacyBadge.length > 0
+                    // Icon-only on a phone. The badge's four words are what
+                    // made it wide; the tap-to-open detail below carries the
+                    // whole sentence either way, so the shield keeps its
+                    // meaning at a third of the width rather than being cut
+                    // from the one surface that answers "can they see my IP?".
                     implicitWidth: ipShieldRow.implicitWidth + Theme.sp.s3
+                    Layout.minimumWidth: 0
                     implicitHeight: 20
                     radius: Theme.r1
                     color: Theme.accentGlow
@@ -206,6 +316,7 @@ Rectangle {
                         }
                         Text {
                             id: ipShieldText
+                            visible: !Theme.isMobile
                             text: serverManager.activeServer
                                 ? serverManager.activeServer.voiceIpPrivacyBadge : ""
                             font.family: Theme.fontSans
@@ -255,9 +366,10 @@ Rectangle {
             }
         }
 
-        // Flexible spacer — pushes the center cluster toward true horizontal
-        // centering as long as the member list (to our right) stays fixed.
-        Item { Layout.fillWidth: true }
+        // Flexible spacers — these are what centre the control cluster on a
+        // desktop. Hidden on a phone: there is no slack to distribute there,
+        // and the identity cluster is the thing that flexes instead.
+        Item { Layout.fillWidth: true; visible: !Theme.isMobile }
 
         // ─── Center cluster ─────────────────────────────────────────
         RowLayout {
@@ -464,22 +576,17 @@ Rectangle {
                 }
             }
 
-            // Spacer before destructive action.
-            Item { implicitWidth: Theme.sp.s3; implicitHeight: 1 }
-
-            DockButton {
-                icon: "phone-off"
-                danger: true
-                tooltip: "Disconnect"
-                onClicked: if (serverManager.activeServer)
-                               serverManager.activeServer.leaveVoiceChannel()
-            }
         }
 
-        Item { Layout.fillWidth: true }
+        Item { Layout.fillWidth: true; visible: !Theme.isMobile }
 
         // ─── Right cluster: mic level meter ─────────────────────────
+        // Six 3 px bars. Informative on a desktop you are sitting back
+        // from; on a phone it is 38 dp of decoration competing with the
+        // hang-up button, and the mute control already carries the state
+        // that matters.
         RowLayout {
+            visible: !Theme.isMobile
             spacing: Theme.sp.s1
             Layout.alignment: Qt.AlignVCenter
 

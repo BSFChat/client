@@ -381,8 +381,14 @@ Rectangle {
 
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: Theme.sp.s8
-            anchors.rightMargin: Theme.sp.s8
+            anchors.leftMargin: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s8
+            anchors.rightMargin: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s8
+            // A RowLayout does not wrap. Everything to the right of the
+            // channel title is fixed-width, so the title is the one item
+            // allowed to flex — see its Layout attachments below. Clipped
+            // as a backstop: an overrun here should cut the title, not
+            // carry the fullscreen and encryption controls off the screen.
+            clip: true
             spacing: Theme.sp.s5
 
             Icon {
@@ -406,6 +412,17 @@ Rectangle {
                 font.letterSpacing: Theme.trackTight.xl
                 color: Theme.fg0
                 Layout.alignment: Qt.AlignVCenter
+                // Neither elided nor flexible before this, so a channel
+                // whose name is longer than the room to draw it simply made
+                // the row wider than the screen, and everything after it —
+                // including the fullscreen toggle and the encryption badge —
+                // went off the right edge. Same failure as the voice dock's,
+                // one component along. The title is the right thing to
+                // shorten: it is the only item here whose meaning survives
+                // being cut.
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                elide: Text.ElideRight
             }
 
             Text {
@@ -418,6 +435,8 @@ Rectangle {
                 font.pixelSize: Theme.fontSize.sm
                 color: Theme.fg2
                 Layout.alignment: Qt.AlignVCenter
+                Layout.minimumWidth: 0
+                elide: Text.ElideRight
             }
 
             Item { Layout.fillWidth: true }
@@ -427,8 +446,11 @@ Rectangle {
             // chat-header action cluster.
             Rectangle {
                 visible: room.isSharing
-                Layout.preferredWidth: 30
-                Layout.preferredHeight: 30
+                // 44 on touch. Both of these are ghost buttons sized for a
+                // pointer; on a phone they are how you hide the member strip
+                // and how you go full screen.
+                Layout.preferredWidth: Theme.isMobile ? 44 : 30
+                Layout.preferredHeight: Theme.isMobile ? 44 : 30
                 Layout.alignment: Qt.AlignVCenter
                 radius: Theme.r1
                 color: hideMemHover.containsMouse ? Theme.bg3 : "transparent"
@@ -454,8 +476,8 @@ Rectangle {
             }
 
             Rectangle {
-                Layout.preferredWidth: 30
-                Layout.preferredHeight: 30
+                Layout.preferredWidth: Theme.isMobile ? 44 : 30
+                Layout.preferredHeight: Theme.isMobile ? 44 : 30
                 Layout.alignment: Qt.AlignVCenter
                 radius: Theme.r1
                 color: fullscreenHover.containsMouse ? Theme.bg3 : "transparent"
