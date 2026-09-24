@@ -219,13 +219,33 @@ Rectangle {
                     // the protection badge in VoiceRoom — detail verbatim from
                     // the property, `contentWidth` so it wraps instead of
                     // laying out as one screen-wide line.
+                    //
+                    // Tappable on touch, where nothing hovers: this badge
+                    // is the client's answer to "can the other people in
+                    // this call see my IP address?", and on a phone the
+                    // answer itself — four words of badge — was all you
+                    // could get. Same tap-to-open / tap-or-timeout-to-close
+                    // treatment as VoiceRoom's protection badge.
                     MouseArea {
                         id: ipShieldHover
                         anchors.fill: parent
                         hoverEnabled: true
+                        onClicked: {
+                            if (!Theme.isMobile) return;
+                            ipShieldPin.pinned = !ipShieldPin.pinned;
+                            if (ipShieldPin.pinned) ipShieldPin.restart();
+                            else ipShieldPin.stop();
+                        }
+                    }
+                    Timer {
+                        id: ipShieldPin
+                        property bool pinned: false
+                        interval: 8000
+                        onTriggered: pinned = false
                     }
                     ToolTip {
-                        visible: ipShieldHover.containsMouse && text.length > 0
+                        visible: (ipShieldHover.containsMouse
+                                  || ipShieldPin.pinned) && text.length > 0
                         text: serverManager.activeServer
                             ? serverManager.activeServer.voiceIpPrivacyDetail : ""
                         delay: 400

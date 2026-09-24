@@ -59,7 +59,12 @@ Popup {
     readonly property string effectiveName:
         nickname !== "" ? nickname : (profileDisplayName || userId)
 
-    width: 320
+    // Clamped rather than a bare 320: this card opens from a message
+    // sender and from a member-list row, both of which are phone surfaces,
+    // and 320 is the full width of the narrowest phone we can be opened
+    // on. A dialog with no gutter reads as a rendering fault. On a desktop
+    // the Math.min always yields 320, so nothing there changes.
+    width: Math.min(320, (parent ? parent.width : 320) - 2 * Theme.mobileGutter)
     // Driven by content rather than a fixed 290, because the nickname row and its
     // editor appear conditionally and a hard-coded height would clip them. Floored
     // at 290 so the common card keeps the size it had, and derived from the

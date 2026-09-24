@@ -1074,7 +1074,10 @@ set_tests_properties(test_video_registry PROPERTIES
 qt_add_executable(test_qml_hygiene test_qml_hygiene.cpp)
 target_compile_definitions(test_qml_hygiene PRIVATE
     BSFCHAT_QML_DIR="${CMAKE_SOURCE_DIR}/qml"
-    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
+    BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src"
+    # The orientation guard reads ios/Info.plist.in and
+    # android/AndroidManifest.xml, which are neither QML nor src.
+    BSFCHAT_ROOT_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(test_qml_hygiene PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_qml_hygiene COMMAND test_qml_hygiene)
 

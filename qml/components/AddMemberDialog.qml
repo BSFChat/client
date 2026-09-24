@@ -40,7 +40,14 @@ Popup {
 
     parent: Overlay.overlay
     anchors.centerIn: Overlay.overlay
-    width: 460
+    // Was a bare `460`. This dialog opens from the member list and from a
+    // channel row — both of which live in a drawer on a phone — and 460 is
+    // wider than every iPhone in portrait, so it hung ~35 pt off each side
+    // of the screen with the title and the Cancel/Add buttons cut in half.
+    // Same clamp the rest of the dialogs in this directory use; the gutter
+    // is the phone chrome gutter (Theme.mobileGutter) so a dialog sits in
+    // line with everything else behind it.
+    width: Math.min(460, (parent ? parent.width : 460) - 2 * Theme.mobileGutter)
     modal: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
     padding: Theme.sp.s7

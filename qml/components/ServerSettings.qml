@@ -10,12 +10,23 @@ Popup {
     // Sized to what is actually in it. The locked panel is one banner and an
     // account id; rendering it inside an 85%-of-the-window modal would read as
     // a settings dialog that failed to load rather than as an answer.
+    //
+    // On a phone "85% of the window" is still a phone, and what it has to
+    // hold is a 200 pt nav rail plus a page of rows built for a desktop
+    // dialog. The unlocked pane takes the whole viewport there; the locked
+    // one — a banner and an account id — keeps its small size, because
+    // blowing THAT up to full screen is the "settings failed to load" read
+    // this sizing exists to avoid.
     width: {
-        var full = parent ? parent.width * 0.85 : 800;
+        var full = Theme.isMobile
+            ? (parent ? parent.width - 2 * Theme.mobileGutter : 360)
+            : (parent ? parent.width * 0.85 : 800);
         return serverSettingsPopup._mayOpen ? full : Math.min(full, 520);
     }
     height: {
-        var full = parent ? parent.height * 0.85 : 600;
+        var full = Theme.isMobile
+            ? (parent ? parent.height - 2 * Theme.mobileGutter : 600)
+            : (parent ? parent.height * 0.85 : 600);
         return serverSettingsPopup._mayOpen ? full : Math.min(full, 420);
     }
     modal: true
@@ -23,6 +34,18 @@ Popup {
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     property int selectedSection: 0
+    // One list, read by the desktop nav rail and by the phone's
+    // section dropdown. Two copies is how a section gets added to
+    // one and not the other.
+    //
+    // Bots sits after Members because it is a roster of accounts, not
+    // a server-shape setting, and before Channels for the same reason.
+    // The section is present for everyone but shows a "you don't have
+    // permission" state without MANAGE_BOTS — hiding the row entirely
+    // makes the feature undiscoverable to the owner who has not yet
+    // granted themselves the flag.
+    readonly property var sections: ["Overview", "Roles", "Members",
+                                     "Bots", "Channels", "Bans"]
 
     // Whether this account may use any page in here.
     //
@@ -445,7 +468,12 @@ Popup {
             anchors.right: parent.right
             anchors.topMargin: Theme.sp.s5
             anchors.rightMargin: Theme.sp.s5
-            width: 28; height: 28
+            // 44 pt on a phone. This pane takes the whole screen there,
+            // Esc does not exist and click-outside has nowhere to land,
+            // so this X is the ONLY way back out — at 28 it was well
+            // under the touch minimum.
+            width: Theme.isMobile ? 44 : 28
+            height: Theme.isMobile ? 44 : 28
             radius: Theme.r1
             color: closeXMouse.containsMouse ? Theme.bg3 : "transparent"
             z: 10
@@ -465,8 +493,15 @@ Popup {
         }
     }
 
-    contentItem: RowLayout {
-        spacing: 0
+    // GridLayout, not RowLayout, so this is a row on a desktop and a stack
+    // on a phone without the tree being written twice. Exactly two of the
+    // children below are ever visible at once — the locked panel replaces
+    // the nav AND the pages — and a layout skips invisible children, so
+    // `columns: 2` still pairs them the way it always did.
+    contentItem: GridLayout {
+        columns: Theme.isMobile ? 1 : 2
+        rowSpacing: 0
+        columnSpacing: 0
 
         // ── Locked ──────────────────────────────────────────────────
         //
@@ -484,7 +519,9 @@ Popup {
             visible: !serverSettingsPopup._mayOpen
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.margins: Theme.sp.s7 * 2
+            // 32 pt of gutter each side is a desktop dialog margin; on a
+            // phone it is a sixth of the screen. See Theme.mobileGutter.
+            Layout.margins: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7 * 2
             spacing: Theme.sp.s5
 
             TabHeader { title: "Server Settings"; Layout.fillWidth: true }
@@ -563,11 +600,15 @@ Popup {
             Item { Layout.fillHeight: true }
         }
 
-        // Left nav sidebar
+        // Left nav sidebar.
+        //
+        // Gone on a phone, where 200 pt of fixed rail out of a ~360 pt
+        // viewport is more than half the screen spent on navigation. The
+        // phone gets the dropdown below instead.
         Rectangle {
-            visible: serverSettingsPopup._mayOpen
+            visible: serverSettingsPopup._mayOpen && !Theme.isMobile
             Layout.fillHeight: true
-            Layout.preferredWidth: 200
+            Layout.preferredWidth: Theme.isMobile ? 0 : 200
             color: Theme.bg0
             radius: Theme.r2
 
@@ -597,14 +638,8 @@ Popup {
                 }
 
                 Repeater {
-                    // Bots sits after Members because it is a roster of
-                    // accounts, not a server-shape setting, and before
-                    // Channels for the same reason. The section is present
-                    // for everyone but shows a "you don't have permission"
-                    // state without MANAGE_BOTS — hiding the row entirely
-                    // makes the feature undiscoverable to the owner who has
-                    // not yet granted themselves the flag.
-                    model: ["Overview", "Roles", "Members", "Bots", "Channels", "Bans"]
+                    // Order and rationale live on the `sections` property.
+                    model: serverSettingsPopup.sections
                     delegate: Rectangle {
                         Layout.fillWidth: true
                         height: 36
@@ -644,6 +679,30 @@ Popup {
             }
         }
 
+        // Phone section picker — the replacement for the nav rail, and the
+        // reason the container above is a GridLayout. On a phone the rail is
+        // `visible: false`, a layout skips invisible children, and
+        // `columns: 1` stacks what is left: picker on top, pages below. On a
+        // desktop this one is the invisible child instead.
+        ThemedComboBox {
+            id: mobileSectionPicker
+            visible: Theme.isMobile && serverSettingsPopup._mayOpen
+            Layout.fillWidth: true
+            Layout.margins: Theme.mobileGutter
+            Layout.bottomMargin: 0
+            // The pane's close X floats over the top-right corner of the
+            // background at z:10 and does not participate in this layout, so
+            // the picker has to step around it by hand: 12 (its margin) + 44
+            // (its size) + a gap.
+            Layout.rightMargin: Theme.sp.s5 + 44 + Theme.sp.s3
+            // 44 pt: Apple HIG / Material touch minimum. Every other control
+            // in this pane is reached through this one.
+            implicitHeight: 44
+            model: serverSettingsPopup.sections
+            currentIndex: serverSettingsPopup.selectedSection
+            onActivated: serverSettingsPopup.selectedSection = currentIndex
+        }
+
         // Content area
         StackLayout {
             visible: serverSettingsPopup._mayOpen
@@ -661,7 +720,9 @@ Popup {
                 Flickable {
                     id: overviewFlick
                     anchors.fill: parent
-                    anchors.margins: Theme.sp.s7 * 2
+                    // 32 pt of gutter each side is a desktop dialog margin; on a
+                    // phone it is a sixth of the screen. See Theme.mobileGutter.
+                    anchors.margins: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7 * 2
                     contentHeight: overviewPane.implicitHeight
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
@@ -1084,7 +1145,9 @@ Popup {
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.sp.s7 * 2
+                    // 32 pt of gutter each side is a desktop dialog margin; on a
+                    // phone it is a sixth of the screen. See Theme.mobileGutter.
+                    anchors.margins: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7 * 2
                     spacing: Theme.sp.s7
 
                     TabHeader { title: "Roles" }
@@ -1697,7 +1760,9 @@ Popup {
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.sp.s7 * 2
+                    // 32 pt of gutter each side is a desktop dialog margin; on a
+                    // phone it is a sixth of the screen. See Theme.mobileGutter.
+                    anchors.margins: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7 * 2
                     spacing: Theme.sp.s7
 
                     TabHeader { title: "Members" }
@@ -2225,7 +2290,9 @@ Popup {
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.sp.s7 * 2
+                    // 32 pt of gutter each side is a desktop dialog margin; on a
+                    // phone it is a sixth of the screen. See Theme.mobileGutter.
+                    anchors.margins: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7 * 2
                     spacing: Theme.sp.s7
 
                     RowLayout {
@@ -2505,7 +2572,9 @@ Popup {
             Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: Theme.sp.s7 * 2
+                    // 32 pt of gutter each side is a desktop dialog margin; on a
+                    // phone it is a sixth of the screen. See Theme.mobileGutter.
+                    anchors.margins: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7 * 2
                     spacing: Theme.sp.s7
 
                     TabHeader { title: "Bans" }

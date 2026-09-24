@@ -499,9 +499,13 @@ Rectangle {
             // absent while connecting rather than asserting protection
             // the call does not have yet.
             Rectangle {
+                id: cryptoBadge
                 visible: cryptoText.text.length > 0
                 implicitWidth: cryptoText.implicitWidth + Theme.sp.s4
                 implicitHeight: 22
+                // Tapped-open state for touch, where there is no hover.
+                // See the MouseArea below.
+                property bool detailPinned: false
                 radius: Theme.r1
                 color: Theme.accentGlow
                 Layout.alignment: Qt.AlignVCenter
@@ -525,13 +529,41 @@ Rectangle {
                 // style's already-Text.Wrap content actually wrap; the
                 // detail strings are two paragraphs and would otherwise
                 // lay out as one screen-wide line.
+                //
+                // On touch there is no hover, so this badge said
+                // "E2EE" — or didn't — and the sentence explaining
+                // what that does and does not cover was unreachable.
+                // For a product whose entire pitch is that you host it
+                // yourself and nobody else is listening, the caveats on
+                // that claim are not an optional hover detail. Tap
+                // opens the same text, tap again or wait closes it.
                 MouseArea {
                     id: cryptoHover
                     anchors.fill: parent
+                    // The badge is 22 pt tall — half the touch minimum.
+                    // Grown vertically only: horizontally it is already
+                    // as wide as its text and it has neighbours.
+                    anchors.topMargin: Theme.isMobile ? -11 : 0
+                    anchors.bottomMargin: Theme.isMobile ? -11 : 0
                     hoverEnabled: true
+                    onClicked: {
+                        if (!Theme.isMobile) return;
+                        cryptoBadge.detailPinned = !cryptoBadge.detailPinned;
+                        if (cryptoBadge.detailPinned) cryptoPinTimer.restart();
+                        else cryptoPinTimer.stop();
+                    }
+                }
+                // Times out rather than waiting for a second tap the user
+                // may not think to make; a panel pinned open over the
+                // participant list is its own small bug.
+                Timer {
+                    id: cryptoPinTimer
+                    interval: 8000
+                    onTriggered: cryptoBadge.detailPinned = false
                 }
                 ToolTip {
-                    visible: cryptoHover.containsMouse && text.length > 0
+                    visible: (cryptoHover.containsMouse
+                              || cryptoBadge.detailPinned) && text.length > 0
                     text: serverManager.activeServer
                         ? serverManager.activeServer.voiceProtectionDetail : ""
                     delay: 400

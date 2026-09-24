@@ -783,6 +783,14 @@ Rectangle {
                     MouseArea {
                         id: settingsGearMouse
                         anchors.fill: parent
+                        // The glyph is 18 px. On a phone this is the ONLY
+                        // route into Server Settings — the drawer's channel
+                        // header is where it lives and the overflow menu does
+                        // not carry it — so the hit area is grown to the 44 pt
+                        // minimum around it rather than the icon being drawn
+                        // bigger, which would unbalance a 48 px header row.
+                        // Same idiom as the pinned list's unpin control.
+                        anchors.margins: Theme.isMobile ? -(44 - 18) / 2 : 0
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         // Opened in both cases. The popup decides what to show;

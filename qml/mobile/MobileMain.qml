@@ -325,8 +325,15 @@ ApplicationWindow {
         RowLayout {
             anchors.fill: parent
             anchors.topMargin: root.topInset
-            anchors.leftMargin: Theme.sp.s4 + root.leftInset
-            anchors.rightMargin: Theme.sp.s4 + root.rightInset
+            // Theme.mobileGutter, not s4 — the header, the timeline and
+            // the composer are all full-width surfaces on a phone and all
+            // three now keep the same margin clear of the display's
+            // rounded corners. See the token's comment for the arithmetic.
+            // The insets are additive rather than alternative: the gutter
+            // clears the corner radius, the inset clears a landscape
+            // notch, and a device can present both.
+            anchors.leftMargin: Theme.mobileGutter + root.leftInset
+            anchors.rightMargin: Theme.mobileGutter + root.rightInset
             spacing: Theme.sp.s3
 
             // Burger → left drawer

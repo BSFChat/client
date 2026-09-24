@@ -124,13 +124,41 @@
           promise. Was "true" (Qt's template default) until the Play
           hardening pass; it has never shipped to a store.
         -->
+        <!--
+          screenOrientation="portrait" — PORTRAIT ONLY, deliberately, for
+          the first release. This is the Android half of the decision
+          recorded at length in ios/Info.plist.in's
+          UISupportedInterfaceOrientations; read that comment for the
+          reasoning and the numbers.
+
+          Short version: there is no orientation-aware code in qml/ at
+          all, every phone surface is a vertical stack sized for a
+          portrait viewport, and with the software keyboard up a
+          landscape phone leaves well under a hundred dp for the message
+          list. "unspecified" (Qt's template default) let the device
+          rotate into a layout that had never been looked at.
+
+          Two things this does NOT do, both fine for a phone-first first
+          release but worth knowing:
+
+            • targetSdk is 36 (CMakeLists.txt BSFCHAT_ANDROID_TARGET_SDK).
+              From Android 16, screenOrientation is IGNORED on displays
+              whose smallest width is >= 600dp, so tablets, unfolded
+              foldables and Chromebooks will still rotate this app. They
+              are not a launch target; when they become one the answer is
+              a landscape layout, not a manifest attribute.
+            • configChanges below still lists orientation|screenSize, so
+              a rotation that does happen anyway is handled in-process
+              rather than by recreating the activity — which would take
+              the live voice session down with it.
+        -->
         <activity
             android:name="com.bsfchat.client.BSFChatActivity"
             android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density|fontWeightAdjustment"
             android:label="BSFChat"
             android:theme="@style/Theme.BSFChat.Splash"
             android:launchMode="singleTask"
-            android:screenOrientation="unspecified"
+            android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustResize"
             android:exported="true">
             <!--
