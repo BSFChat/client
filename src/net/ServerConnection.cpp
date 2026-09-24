@@ -1256,6 +1256,22 @@ void ServerConnection::loginWithOidc(const QString& providerUrl)
     if (!m_identityClient) {
         m_identityClient = new IdentityClient(this);
     } else {
+        // One browser flow per connection, the same rule beginReauth() has
+        // always applied — but this path never consulted it. beginReauth()
+        // guards re-authentication through SessionAuth; the FIRST sign-in
+        // does not go through SessionAuth at all (a new ServerConnection is
+        // in the Authenticated phase until something rejects a token it does
+        // not have), so nothing stopped a second loginWithOidc from landing
+        // on a connection whose browser flow was still open. startLogin()
+        // begins with cancel(), so what that did was silently abandon the
+        // page the user was looking at and open another — the client half of
+        // the superseded-consent 403.
+        if (m_identityClient->isActive()) {
+            qWarning().noquote()
+                << "[ServerConnection] a BSFChat ID sign-in for" << serverUrl()
+                << "is already in flight; not starting a second one";
+            return;
+        }
         // Same asymmetry as awaitLoginReply(): the SingleShotConnection that
         // did not fire is still attached, so a second OIDC attempt on one
         // connection — i.e. every re-authentication — would report twice.

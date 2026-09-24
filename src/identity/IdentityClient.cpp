@@ -20,17 +20,67 @@
 #  include <QTcpSocket>
 #endif
 
+namespace {
+
+// Who owns the browser, and who is waiting for it. See the long note on
+// IdentityClient::startLogin: there is one browser and one user, several
+// IdentityClients exist at once by design, and before 2026-09-24 nothing
+// said so — which is how a single tap on "Sign in with BSFChat ID" opened
+// Chrome twice and left the provider refusing a superseded consent token.
+//
+// QPointer throughout: a queued attempt whose owner is destroyed while it
+// waits becomes null and is skipped rather than resurrected.
+QPointer<IdentityClient> g_browserOwner;
+QList<QPointer<IdentityClient>> g_browserQueue;
+
+// Null in production; see setPagePresenterForTesting.
+std::function<void(const QUrl&)> g_pagePresenter;
+
+// Is some other live attempt already signing in to the same place? Two
+// authorizations differing only in `resource` are two different sign-ins and
+// both are needed; two with the SAME resource are the same sign-in twice.
+bool sameSignInAlreadyRunning(const IdentityClient* self, const QString& providerUrl,
+                              const QString& resource)
+{
+    const auto matches = [&](const IdentityClient* other) {
+        return other && other != self && other->providerUrl() == providerUrl
+            && other->resource() == resource;
+    };
+    if (matches(g_browserOwner)) return true;
+    for (const auto& waiting : g_browserQueue) {
+        if (matches(waiting)) return true;
+    }
+    return false;
+}
+
+} // namespace
+
 #ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
 namespace {
 // The sign-in an OS-delivered `bsfchat://oauth/callback` belongs to.
 //
-// There is at most one at a time (both call sites — ServerConnection and
-// ServerManager — own a single IdentityClient and cancel() before reusing
-// it), and a QPointer so a deleted client cannot be called into. Cleared in
-// cancel(), which every terminal path runs through.
+// At most one at a time, and now that is enforced rather than assumed:
+// g_browserOwner above guarantees only one attempt has a page open, so this
+// pointer cannot be stolen from an attempt still waiting on its redirect.
+// A QPointer so a deleted client cannot be called into. Cleared in cancel(),
+// which every terminal path runs through.
 QPointer<IdentityClient> g_awaitingCallback;
 } // namespace
 #endif
+
+void IdentityClient::setPagePresenterForTesting(std::function<void(const QUrl&)> presenter)
+{
+    g_pagePresenter = std::move(presenter);
+}
+
+int IdentityClient::waitingForBrowserCount()
+{
+    int waiting = 0;
+    for (const auto& client : g_browserQueue) {
+        if (client) ++waiting;
+    }
+    return waiting;
+}
 
 IdentityClient::IdentityClient(QObject* parent)
     : QObject(parent)
@@ -49,11 +99,40 @@ IdentityClient::~IdentityClient()
 
 bool IdentityClient::isActive() const
 {
+    // Waiting for the browser counts. A caller that asked for a sign-in and
+    // has been told nothing yet must not be able to read "not active" here
+    // and start a second one — that is the shape of the bug this file's
+    // serialisation exists to stop.
+    if (m_queued) return true;
 #ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
     return m_sessionActive;
 #else
     return m_server && m_server->isListening();
 #endif
+}
+
+void IdentityClient::releaseBrowser()
+{
+    m_queued = false;
+    g_browserQueue.removeAll(QPointer<IdentityClient>(this));
+    if (g_browserOwner != this) return;
+
+    g_browserOwner = nullptr;
+    while (!g_browserQueue.isEmpty()) {
+        QPointer<IdentityClient> next = g_browserQueue.takeFirst();
+        if (!next) continue;   // its owner was destroyed while it waited
+        g_browserOwner = next;
+        // Through the event loop, not straight down the stack. This runs from
+        // cancel(), which runs from destructors and from inside signal
+        // handlers; opening the next page from there would re-enter this
+        // function on a half-torn-down object. A zero timer costs nothing and
+        // makes the ordering obvious.
+        QTimer::singleShot(0, next, [next]() {
+            if (!next || g_browserOwner != next) return;
+            next->openAuthorizationPage();
+        });
+        return;
+    }
 }
 
 QString IdentityClient::redirectUri() const
@@ -67,13 +146,43 @@ QString IdentityClient::redirectUri() const
 
 void IdentityClient::startLogin(const QString& providerUrl, const QString& resource)
 {
-    // Clean up any previous attempt
+    // Clean up any previous attempt. Also drops us from the queue and, if we
+    // held the browser, hands it on — so a caller restarting its own sign-in
+    // never counts as two.
     cancel();
 
     m_providerUrl = providerUrl;
     while (m_providerUrl.endsWith('/'))
         m_providerUrl.chop(1);
     m_resource = resource;
+
+    if (sameSignInAlreadyRunning(this, m_providerUrl, m_resource)) {
+        // Refused rather than queued: making the user approve the same server
+        // twice in a row is not a fix for asking twice.
+        qWarning().noquote()
+            << "[IdentityClient] refusing a second sign-in for" << m_providerUrl
+            << (m_resource.isEmpty() ? QStringLiteral("(account)") : m_resource)
+            << "- one is already in flight";
+        emit loginFailed(tr("A BSFChat ID sign-in for this server is already open. "
+                            "Finish it in your browser, or cancel it and try again."));
+        return;
+    }
+
+    if (g_browserOwner && g_browserOwner != this) {
+        // Wait our turn. Nothing is generated and no timeout starts until the
+        // page is actually shown — see openAuthorizationPage.
+        m_queued = true;
+        g_browserQueue.append(this);
+        return;
+    }
+
+    g_browserOwner = this;
+    openAuthorizationPage();
+}
+
+void IdentityClient::openAuthorizationPage()
+{
+    m_queued = false;
 
     // Generate PKCE parameters
     m_codeVerifier = generateCodeVerifier();
@@ -85,9 +194,12 @@ void IdentityClient::startLogin(const QString& providerUrl, const QString& resou
     // Start local HTTP server
     m_server = new QTcpServer(this);
     if (!m_server->listen(QHostAddress::LocalHost, 0)) {
-        emit loginFailed("Failed to start local callback server");
         delete m_server;
         m_server = nullptr;
+        // Give the browser up before reporting, or an attempt that never
+        // opened a page would hold the turn it could not use.
+        releaseBrowser();
+        emit loginFailed("Failed to start local callback server");
         return;
     }
     m_port = m_server->serverPort();
@@ -146,7 +258,11 @@ void IdentityClient::startLogin(const QString& providerUrl, const QString& resou
     // to an ACTION_VIEW intent, and the redirect comes back the same way —
     // see the intent-filter in android/AndroidManifest.xml and
     // UrlHandler::checkAndroidLaunchIntent().
-    QDesktopServices::openUrl(authUrl);
+    if (g_pagePresenter) {
+        g_pagePresenter(authUrl);
+    } else {
+        QDesktopServices::openUrl(authUrl);
+    }
 #endif
 
     // Start 5-minute timeout
@@ -180,6 +296,9 @@ void IdentityClient::cancel()
     // after a timeout, a cancel, or a completed sign-in — cannot be replayed
     // into a second token exchange.
     m_state.clear();
+    // Last, so everything above is already torn down before the next attempt
+    // can be handed the browser.
+    releaseBrowser();
 }
 
 #ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
@@ -238,6 +357,11 @@ void IdentityClient::handleCallback(const QUrl& callbackUrl)
         m_server = nullptr;
     }
 #endif
+    // The browser has done its part. Release it HERE rather than after the
+    // token exchange: what has to be serialised is the page in front of the
+    // user, not the HTTP call behind it, and on mobile the next sign-in is
+    // usually the one this code was fetched to make possible.
+    releaseBrowser();
 
     exchangeCodeForTokens(parsed.code);
 }
