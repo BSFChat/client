@@ -1695,6 +1695,24 @@ jobs:
               -e "s/@EXPORT_DESTINATION@/export/" \
             ios/ExportOptions.plist.in > "$RUNNER_TEMP/ExportOptions.plist"
           plutil -lint "$RUNNER_TEMP/ExportOptions.plist"
+          # A `sed` that did not substitute leaves the placeholder
+          # LITERALLY in the file — a valid plist with teamID
+          # "@APPLE_TEAM_ID@", which is what an unset/renamed
+          # APPLE_TEAM_ID secret produces. plutil -lint is happy with it
+          # and xcodebuild then fails much later with a signing error
+          # that says nothing about the secret. Catch it here.
+          if grep -q '@[A-Z_]\{1,\}@' "$RUNNER_TEMP/ExportOptions.plist"; then
+            echo "::error::ExportOptions.plist still contains unsubstituted" \
+                 "@PLACEHOLDER@ values — check the APPLE_TEAM_ID secret."
+            exit 1
+          fi
+          # Printed because it is the first thing anyone debugging an
+          # export failure asks to see, and it carries no secret that is
+          # not already masked: teamID comes from a secret, so the
+          # runner redacts it, and method/signingStyle/destination are
+          # exactly the values in the committed template.
+          echo "Rendered ExportOptions.plist:"
+          plutil -p "$RUNNER_TEMP/ExportOptions.plist"
           AUTH=()
           if [ "${{ steps.asc.outputs.available }}" = "true" ]; then
             AUTH=(-allowProvisioningUpdates
@@ -1702,11 +1720,39 @@ jobs:
                   -authenticationKeyID "${{ secrets.ASC_KEY_ID }}"
                   -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}")
           fi
+          # exportArchive prints a two-line summary on failure and puts
+          # the ACTUAL reason in an .xcdistributionlogs bundle in
+          # $TMPDIR, which dies with the runner. That is how a "Cloud
+          # signing permission error / No profiles for 'com.bsfchat.app'
+          # were found" pair reached us with no way to tell an
+          # API-key-permission problem from a missing App ID from an
+          # unaccepted licence agreement — three different fixes, none
+          # of them in this repo. Dump the bundle before exiting so the
+          # next failure is diagnosable from the log alone.
+          set +e
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/BSFChat.xcarchive" \
             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
             -exportPath "$RUNNER_TEMP/export" \
             "${AUTH[@]}"
+          EXPORT_RC=$?
+          set -e
+          if [ "$EXPORT_RC" -ne 0 ]; then
+            echo "::group::exportArchive distribution logs"
+            LOGS=$(ls -dt "${TMPDIR:-/tmp}"/*.xcdistributionlogs 2>/dev/null | head -1)
+            if [ -n "${LOGS:-}" ] && [ -d "$LOGS" ]; then
+              echo "Log bundle: $LOGS"
+              find "$LOGS" -type f
+              find "$LOGS" -type f -name '*.log' | while read -r f; do
+                echo "----- $f -----"
+                tail -n 300 "$f"
+              done
+            else
+              echo "No .xcdistributionlogs bundle under ${TMPDIR:-/tmp}"
+            fi
+            echo "::endgroup::"
+            exit "$EXPORT_RC"
+          fi
           # Resolved-and-UNIQUE, not `head -1`. The .ipa is named after
           # the product rather than the scheme so it has to be resolved,
           # but taking the first of several would be worse than failing:
@@ -1781,6 +1827,18 @@ jobs:
               -e "s/@EXPORT_DESTINATION@/upload/" \
             ios/ExportOptions.plist.in > "$RUNNER_TEMP/ExportOptions-upload.plist"
           plutil -lint "$RUNNER_TEMP/ExportOptions-upload.plist"
+          if grep -q '@[A-Z_]\{1,\}@' "$RUNNER_TEMP/ExportOptions-upload.plist"; then
+            echo "::error::ExportOptions-upload.plist still contains" \
+                 "unsubstituted @PLACEHOLDER@ values."
+            exit 1
+          fi
+          echo "Rendered ExportOptions-upload.plist:"
+          plutil -p "$RUNNER_TEMP/ExportOptions-upload.plist"
+          # Same .xcdistributionlogs dump as the "Export .ipa" step —
+          # see the comment there. This is the step that actually hands
+          # the build to Apple, so an undiagnosable failure here is the
+          # most expensive one in the job.
+          set +e
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/BSFChat.xcarchive" \
             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions-upload.plist" \
@@ -1789,6 +1847,24 @@ jobs:
             -authenticationKeyPath "$ASC_KEY_PATH" \
             -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
             -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}"
+          UPLOAD_RC=$?
+          set -e
+          if [ "$UPLOAD_RC" -ne 0 ]; then
+            echo "::group::exportArchive distribution logs"
+            LOGS=$(ls -dt "${TMPDIR:-/tmp}"/*.xcdistributionlogs 2>/dev/null | head -1)
+            if [ -n "${LOGS:-}" ] && [ -d "$LOGS" ]; then
+              echo "Log bundle: $LOGS"
+              find "$LOGS" -type f
+              find "$LOGS" -type f -name '*.log' | while read -r f; do
+                echo "----- $f -----"
+                tail -n 300 "$f"
+              done
+            else
+              echo "No .xcdistributionlogs bundle under ${TMPDIR:-/tmp}"
+            fi
+            echo "::endgroup::"
+            exit "$UPLOAD_RC"
+          fi
           {
             echo "### TestFlight"
             echo ""
