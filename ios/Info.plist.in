@@ -58,6 +58,33 @@
 
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+
+	<!-- App icon, named rather than inherited.
+	     ======================================
+	     This is the key whose absence is ITMS-90713 ("Missing Info.plist
+	     value - A value for the Info.plist key CFBundleIconName is
+	     missing"), which is rejected by the upload validator AFTER the
+	     upload, so it costs a full round trip to find out.
+
+	     It has to be written here, and having a compiled asset catalog
+	     is NOT enough on its own. actool does run, does produce
+	     Assets.car, and does hand Xcode a partial Info.plist — but that
+	     partial only carries the NESTED spelling,
+	     CFBundleIcons -> CFBundlePrimaryIcon -> CFBundleIconName. The
+	     TOP-LEVEL key is added by Xcode only for targets that let it
+	     synthesise the whole plist (GENERATE_INFOPLIST_FILE=YES). This
+	     target cannot: Qt has to read a real file at configure time (see
+	     the note at the top), so we supply an INFOPLIST_FILE and Xcode
+	     synthesises nothing.
+
+	     The value must match ASSETCATALOG_COMPILER_APPICON_NAME, i.e.
+	     the name of the .appiconset in ios/Assets.xcassets. Both come
+	     from BSFCHAT_IOS_APPICON_NAME in CMakeLists.txt so they cannot
+	     drift apart; a name that points at no icon set passes the build
+	     and fails the same way at upload. -->
+	<key>CFBundleIconName</key>
+	<string>@BSFCHAT_IOS_APPICON_NAME@</string>
+
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<!-- PORTRAIT ONLY, deliberately, for the first release.
