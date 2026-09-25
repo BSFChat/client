@@ -217,9 +217,41 @@
 	     Connect will ask for export-compliance information — once per
 	     version, not per build — until an ITSEncryptionExportComplianceCode
 	     is pasted in here. Expect the questions; the honest answer is
-	     still YES. docs/ios-release.md §3 has the walkthrough. -->
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<true/>
+	     still YES. docs/ios-release.md §3 has the walkthrough.
+
+	     DEADLOCK, 2026-09-25, and why this key is currently ABSENT.
+
+	     `true` with no ITSEncryptionExportComplianceCode does not park
+	     the build in "Missing Compliance" as the paragraphs above and
+	     docs/ios-release.md both predicted. It is FATAL AT UPLOAD:
+
+	         UPLOAD FAILED with 1 error
+	         Invalid Export Compliance Code. The export compliance key
+	         value [] in the app's Info.plist doesn't match the key
+	         value of the app's export compliance documentation.
+
+	     and that code can only be obtained by answering the
+	     questionnaire, which App Store Connect only shows against an
+	     UPLOADED BUILD. No build can be uploaded, so no questionnaire
+	     appears, so no code exists. v0.0.48-rc.4 died exactly here,
+	     with TestFlight showing "No Builds".
+
+	     ABSENT breaks that circle and is not a false statement: an
+	     absent key means "not answered yet, ask me". That is the
+	     default for most apps and is what produces the "Missing
+	     Compliance" prompt on the build. The answer given there must
+	     still be the honest one — non-exempt, industry-standard
+	     algorithms (TLS, DTLS-SRTP, AES), no CCATS, French declaration
+	     only if France is in the territory list.
+
+	     RESTORE once Apple issues the code, and restore BOTH keys
+	     together, never the first alone — the first alone is the state
+	     that caused this:
+	         <key>ITSAppUsesNonExemptEncryption</key><true/>
+	         <key>ITSEncryptionExportComplianceCode</key><string>CODE</string>
+	     check-ios-plist and the CI archive check both enforce exactly
+	     that pairing, so a half-restore fails the build rather than a
+	     twenty-minute archive. -->
 
 	<!-- Invite links. bsfchat://invite/... is delivered to the same
 	     QFileOpenEvent filter as on macOS (src/core/UrlHandler.cpp);

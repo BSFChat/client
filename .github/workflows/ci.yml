@@ -1932,7 +1932,24 @@ jobs:
         if: steps.profile.outputs.available == 'true'
         run: |
           APP="$RUNNER_TEMP/BSFChat.xcarchive/Products/Applications/bsfchat-app.app"
-          /usr/libexec/PlistBuddy -c "print ITSAppUsesNonExemptEncryption" "$APP/Info.plist"
+          # The export-compliance PAIRING, not the presence of one key.
+          # true with no code is fatal at upload and unrecoverable (the
+          # code comes only from a build that uploaded); absent is fine
+          # and makes App Store Connect ask on the build. See
+          # ios/Info.plist.in for the full account.
+          ENC=$(/usr/libexec/PlistBuddy -c "print ITSAppUsesNonExemptEncryption" \
+                  "$APP/Info.plist" 2>/dev/null || true)
+          CODE=$(/usr/libexec/PlistBuddy -c "print ITSEncryptionExportComplianceCode" \
+                  "$APP/Info.plist" 2>/dev/null || true)
+          echo "export compliance: ITSAppUsesNonExemptEncryption='${ENC:-<absent>}'" \
+               "ITSEncryptionExportComplianceCode='${CODE:-<absent>}'"
+          if [ "$ENC" = "true" ] && [ -z "$CODE" ]; then
+            echo "::error::ITSAppUsesNonExemptEncryption is true with no" \
+                 "ITSEncryptionExportComplianceCode. Apple rejects this at" \
+                 "upload, after the archive. Restore both keys together or" \
+                 "neither — see ios/Info.plist.in."
+            exit 1
+          fi
           /usr/libexec/PlistBuddy -c "print NSMicrophoneUsageDescription" "$APP/Info.plist" > /dev/null
           /usr/libexec/PlistBuddy -c "print NSLocalNetworkUsageDescription" "$APP/Info.plist" > /dev/null
           ID=$(/usr/libexec/PlistBuddy -c "print CFBundleIdentifier" "$APP/Info.plist")
