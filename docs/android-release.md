@@ -20,17 +20,41 @@ internal testing.
 | Upload key | generated once, see §3 | Play binds the upload certificate to the listing. Losing it means a support request to Google to reset it. |
 | `versionCode` | derived, see §2 | Burned permanently the moment *any* track sees it, including internal testing. |
 
-The application id is set in exactly two places, both derived from
-`BSFCHAT_BUNDLE_ID` in `CMakeLists.txt`:
+The application id comes from exactly one place: `BSFCHAT_BUNDLE_ID` in
+`CMakeLists.txt`, which is set on the target as `QT_ANDROID_PACKAGE_NAME`
+and reaches the artefact as `androidPackageName` in
+`gradle.properties` (AGP 8 takes the namespace from there).
 
-* `android/AndroidManifest.xml` → `package=` (Qt ≤ 6.7 / AGP 7.x)
-* `QT_ANDROID_PACKAGE_NAME` target property (Qt ≥ 6.8 / AGP 8.x, where
-  the manifest attribute is ignored)
+`android/AndroidManifest.xml` must **not** carry a `package=` attribute.
+androiddeployqt resolves the id in this order — established by building
+and reading the APK, not from the docs:
+
+1. the `package` attribute of the manifest in
+   `QT_ANDROID_PACKAGE_SOURCE_DIR`, if present — **it wins**
+2. otherwise `android-package-name` from the deployment settings, i.e.
+   the `QT_ANDROID_PACKAGE_NAME` property
+3. otherwise `org.qtproject.example.<target>`
+
+That attribute *was* in the manifest, commented as a harmless fallback
+for Qt ≤ 6.7 / AGP 7.x. It was not a fallback, it was an override:
+`-DBSFCHAT_BUNDLE_ID` had no effect on Android at all, and a debug
+sideload came out as `com.bsfchat.app` and refused to install over a
+release build instead of sitting beside it. It has been removed. Adding
+it back silently takes the id away from the build again.
+
+Because step 1 is gone, the `QT_ANDROID_PACKAGE_NAME` property is the
+only thing between a build and step 3. It is therefore set
+unconditionally, and Qt < 6.8 (which does not read it) is a hard
+configure error rather than a quiet fallback — the property used to be
+guarded on `QT_VERSION`, which `find_package(Qt6)` does not set, and the
+empty comparison is exactly how the no-op above went unnoticed. The
+variable is `Qt6_VERSION`.
 
 CI asserts the built artefact's id with `aapt2 dump badging` and fails
 the job if it is anything but `com.bsfchat.app`. Do not weaken that
 check; it is the last thing standing between a typo and a permanently
-wrong listing.
+wrong listing. `tests/test_android_runtime.cpp`
+(`applicationIdComesOnlyFromTheBuild`) guards the source-level shape.
 
 ---
 
@@ -159,14 +183,16 @@ at least once if any is missing.
 
 ## 5. Building locally
 
-The local toolchain is older than CI's and that matters:
+The local toolchain now matches CI's (it used to be Qt 6.5.3 / NDK 25 /
+compileSdk 34, which is where several of the comments in this repo about
+"the Qt bump CI is mid-way through" came from):
 
 | | Local (this machine) | CI |
 |---|---|---|
-| Qt | 6.5.3 android_arm64_v8a | 6.10.3 |
-| AGP / Gradle | 7.4.1 / 8.0 | 8.10.1 / 8.14.3 |
-| compileSdk | 34 (newest platform installed) | 36 |
-| NDK | 25.1.8937393 | 27.2.12479018 |
+| Qt | 6.10.3 android_arm64_v8a | 6.10.3 |
+| AGP / Gradle | 8.10.1 / 8.14.3 | 8.10.1 / 8.14.3 |
+| compileSdk | 36 (newest platform installed) | 36 |
+| NDK | 27.2.12479018 | 27.2.12479018 |
 
 **JDK 17 is required**, not the system default — but the build now
 selects it for you, so there is nothing to export. `cmake/AndroidJdk.cmake`
@@ -198,15 +224,20 @@ brings an AGP whose dexer reads newer class files.
 
 ```sh
 cmake -B build-android -G Ninja -Wno-dev \
-  -DCMAKE_TOOLCHAIN_FILE=$HOME/Qt/6.5.3/android_arm64_v8a/lib/cmake/Qt6/qt.toolchain.cmake \
-  -DQT_HOST_PATH=$HOME/Qt/6.5.3/macos \
+  -DCMAKE_TOOLCHAIN_FILE=$HOME/Qt/6.10.3/android_arm64_v8a/lib/cmake/Qt6/qt.toolchain.cmake \
+  -DQT_HOST_PATH=$HOME/Qt/6.10.3/macos \
   -DANDROID_SDK_ROOT=$HOME/Library/Android/sdk \
-  -DANDROID_NDK_ROOT=$HOME/Library/Android/sdk/ndk/25.1.8937393 \
+  -DANDROID_NDK_ROOT=$HOME/Library/Android/sdk/ndk/27.2.12479018 \
   -DCMAKE_BUILD_TYPE=Release \
   -DQT_ANDROID_ABIS=arm64-v8a -DANDROID_ABI=arm64-v8a \
   -DGAMECHAT_CLIENT_BUILD_TESTS=OFF \
   -DFETCHCONTENT_SOURCE_DIR_BSFCHAT_PROTOCOL=$HOME/dev/gamechat/protocol \
   -DBSFCHAT_VERSION=0.0.52
+
+# ...and add -DBSFCHAT_BUNDLE_ID=com.bsfchat.app.dev for a sideload you
+# want to sit alongside a Play install. Without it a Release build uses
+# the production id and Android refuses to install a debug-signed APK
+# over the release-signed one.
 
 cmake --build build-android -j2                          # APK
 cmake --build build-android --target bsfchat-app_make_aab  # AAB
@@ -215,13 +246,13 @@ cmake --build build-android --target bsfchat-app_make_aab  # AAB
 Output lands at
 `build-android/android-build/build/outputs/{apk,bundle}/release/`.
 
-A local build produces `targetSdk 36` against `compileSdk 34`. That is
-fine for sideloading and is what the checked-in APK was built with, but
-it is **not** what should ever be uploaded: compiling against an older
-platform than you target means Android 15/16 behaviour changes apply to
-code that was never compiled against their headers. Install
-`platforms;android-36` (and a Qt ≥ 6.8 Android kit) before treating a
-local build as release-grade, or just let CI produce the bundle.
+A local build now produces `targetSdk 36` against `compileSdk 36`, so it
+is release-grade as far as the SDK levels go. (It did not used to:
+compiling against an older platform than you target means Android 15/16
+behaviour changes apply to code that was never compiled against their
+headers. If `aapt2 dump badging` ever reports a `compileSdkVersion` below
+the `targetSdkVersion`, install `platforms;android-36` rather than
+uploading it.)
 
 ### Sideloading
 
