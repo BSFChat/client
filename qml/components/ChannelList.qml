@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import QtQuick.Window
 import BSFChat
 import "../js/ChannelSelection.js" as ChannelSelection
+import "../js/VoiceRosterView.js" as VoiceRosterView
 
 Rectangle {
     id: channelListRoot
@@ -1218,6 +1219,45 @@ Rectangle {
                                     height: channelItemContent.implicitHeight + 4
 
                                     readonly property int channelIndex: index
+
+                                    // The people in this voice channel — the
+                                    // ONE list both the count badge and the
+                                    // nested participant rows are drawn from.
+                                    //
+                                    // For every channel but the one we are
+                                    // connected to this is simply the room
+                                    // model's sync-folded roster, exactly as
+                                    // it always was. For that one it is the
+                                    // poll-fed roster the call header counts,
+                                    // because the drawer was photographed
+                                    // badging `1` and omitting the local user
+                                    // while the header said "2 in call".
+                                    // VoiceRosterView.js has which source is
+                                    // authoritative and why, and is explicit
+                                    // about the delivery question this does
+                                    // NOT answer.
+                                    //
+                                    // Computed once here rather than at each
+                                    // of the three use sites: the badge's
+                                    // visibility, its number and the list
+                                    // below have to be the same vector or the
+                                    // count starts disagreeing with the names
+                                    // underneath it — the invariant
+                                    // RoomListModel keeps for its own roster
+                                    // and the one VoiceParticipantList.qml's
+                                    // header promises.
+                                    readonly property var voiceRoster: {
+                                        var s = serverManager.activeServer;
+                                        return VoiceRosterView.rosterFor({
+                                            roomId: modelData.roomId || "",
+                                            activeVoiceRoomId:
+                                                s ? s.activeVoiceRoomId : "",
+                                            connectedRoster:
+                                                s ? s.voiceMembers : [],
+                                            foldedRoster: modelData.voiceMembers
+                                        });
+                                    }
+
                                     // Live mute + unread flags. Gated by
                                     // muteGeneration / unreadGeneration so
                                     // QSettings changes flow into bindings.
@@ -1482,10 +1522,18 @@ Rectangle {
                                                 // Voice participant count pill — subtle
                                                 // bg3 chip with a `users` icon + count.
                                                 // Only shown on voice channels with at
-                                                // least one member; live-updates via
-                                                // voiceMemberCount from the room model.
+                                                // least one member. Sized from
+                                                // channelDelegate.voiceRoster — the same
+                                                // vector the participant rows below are
+                                                // drawn from, never a separately tracked
+                                                // integer. It used to read the room
+                                                // model's voiceMemberCount directly,
+                                                // which is the roster this badge showed
+                                                // `1` from while the call header said
+                                                // "2 in call".
                                                 Rectangle {
-                                                    visible: modelData.isVoice && modelData.voiceMemberCount > 0
+                                                    visible: modelData.isVoice
+                                                             && channelDelegate.voiceRoster.length > 0
                                                     Layout.preferredWidth: voiceCountRow.implicitWidth + 10
                                                     Layout.preferredHeight: 18
                                                     radius: 9
@@ -1513,7 +1561,7 @@ Rectangle {
                                                         }
                                                         Text {
                                                             anchors.verticalCenter: parent.verticalCenter
-                                                            text: modelData.voiceMemberCount
+                                                            text: channelDelegate.voiceRoster.length
                                                             font.family: Theme.fontMono
                                                             font.pixelSize: 11
                                                             font.weight: Theme.fontWeight.semibold
@@ -1535,7 +1583,7 @@ Rectangle {
                                             // visible before you join.
                                             VoiceParticipantList {
                                                 width: parent.width
-                                                participants: modelData.voiceMembers || []
+                                                participants: channelDelegate.voiceRoster
                                                 connection: serverManager.activeServer
                                             }
                                         }

@@ -2685,6 +2685,200 @@ private slots:
         }
     }
 
+    // ── Nothing the user has to READ goes on top of a feed ───────────────
+    //
+    // The owner photographed an iPhone 16 Pro Max in a voice channel with
+    // his own camera live, and the yellow "No one else is in the channel"
+    // warning printed across the top-left corner of his own face. It was a
+    // Rectangle inside VideoFeedTile.qml, anchored top/left with a margin,
+    // drawn over the VideoOutput.
+    //
+    // This is the same family of mistake as two that already have rules in
+    // this file — the "No channel selected" empty state painted over live
+    // video (theMobileMainColumnHasExactlyOneWriter) and the connection
+    // banner that had to become a layout row rather than an overlay
+    // (theConnectionBannerIsAShellRow). qml/js/ConnectionBanner.js states
+    // the shared rule outright: "A row and not an overlay: an item anchored
+    // over the column composites over live video."
+    //
+    // The distinction this rule draws, and the reason it is about the
+    // WORDING and not about overlays in general: a tile legitimately draws
+    // chrome in its corners — the identity pill, the hover buttons, the
+    // diagnostics readout, the POPPED OUT badge. Those are controls and
+    // labels FOR that tile, they are small, and a user who wants the
+    // picture can ignore them. A sentence about the state of the call is
+    // not that. It has to be read, it is as wide as the tile, and it is
+    // about the room rather than the feed it happens to land on. It gets a
+    // row.
+    //
+    // So: the two sentences live in the tested .js, VideoFeedTile.qml
+    // contains neither, and VoiceRoom mounts the banner as a row that the
+    // stage is anchored BELOW.
+    void theTransmitWarningIsNotDrawnOnTheVideo()
+    {
+        const QString alone = QStringLiteral("No one else is in the channel");
+        const QString unseen = QStringLiteral("Not visible to others");
+
+        // (a) The wording has one home, and it is the one a test can reach.
+        const QString js = readAll(QStringLiteral(BSFCHAT_QML_DIR
+                                                  "/js/VideoStage.js"));
+        QVERIFY2(!js.isEmpty(), "qml/js/VideoStage.js not found");
+        QVERIFY2(js.contains(alone) && js.contains(unseen),
+                 "VideoStage.js no longer carries the transmit-warning"
+                 " wording. transmitWarning() is where it belongs — it is"
+                 " the only form of it tests/qml/tst_videostage.qml can"
+                 " exercise.");
+
+        // (b) Not in the tile. This is the rule that fails on the commit
+        //     before the fix.
+        const QString tile = withoutComments(
+            readQml(QStringLiteral("/components/VideoFeedTile.qml")));
+        QVERIFY2(!tile.isEmpty(), "VideoFeedTile.qml not found");
+        for (const QString& phrase : { alone, unseen }) {
+            QVERIFY2(!tile.contains(phrase),
+                     qPrintable(QStringLiteral(
+                         "VideoFeedTile.qml contains \"%1\". Everything in"
+                         " that file is drawn ON the video, and this is a"
+                         " sentence about the call, not chrome for one tile —"
+                         " it was photographed lying across the corner of the"
+                         " owner's own live camera preview. It belongs in"
+                         " VideoStage.transmitWarning(), rendered by"
+                         " VoiceRoom as a row above the stage.").arg(phrase)));
+        }
+
+        // (c) And a row it must stay. The stage anchors its top to the
+        //     banner's bottom, which is what makes the stage SHORTER while
+        //     the banner is up instead of covered by it. An anchors.top of
+        //     `parent.top` here means somebody put the banner back on top
+        //     of the stage, which looks identical until there is a feed
+        //     under it.
+        const QString room = withoutComments(
+            readQml(QStringLiteral("/components/VoiceRoom.qml")));
+        QVERIFY2(room.contains(QStringLiteral("VideoStage.transmitWarning(")),
+                 "VoiceRoom.qml no longer asks VideoStage for the transmit"
+                 " warning; the wording has drifted out of the tested file");
+        const QString stage = blockBody(
+            room, QStringLiteral(R"(\bItem\s*\{\s*\n\s*id:\s*feedArea\b)"));
+        QVERIFY2(!stage.isEmpty(),
+                 "could not find feedArea's body in VoiceRoom.qml — this"
+                 " rule has stopped matching the file's shape and needs"
+                 " retargeting rather than deleting");
+        QVERIFY2(stage.contains(QStringLiteral("anchors.top: transmitBanner.bottom")),
+                 "the video stage no longer anchors below the transmit"
+                 " banner. If the banner is not taking height off the stage"
+                 " then it is painting over it, which is the whole defect:"
+                 " an item anchored over live video composites onto it."
+                 " See qml/js/ConnectionBanner.js.");
+    }
+
+    // ── Red on the call bar means destructive, not "on" ──────────────────
+    //
+    // Photographed on the same phone: the camera button was tinted the SAME
+    // red as the disconnect button beside it, while the camera was RUNNING.
+    // Red on a call bar reads as off, muted, or about to end the call.
+    //
+    // The cause was one property doing two opposite jobs. VoiceDock's
+    // DockButton.toggled means "a suppressing state is engaged" and paints
+    // the danger tint, which is right for mute and deafen — and screen-share
+    // and camera were using that same property to say "this capture is
+    // LIVE", which is the opposite kind of fact. There is now a separate
+    // `active` for that, painted with Theme.accent.
+    //
+    // The evidence that this was a trap and not a one-off slip is that the
+    // push-to-talk button had ALREADY hit it and worked around it inline,
+    // with a comment saying it was overriding the red — and, because an
+    // inline `color:` cannot reach the Icon, that button spent its held
+    // state drawing a danger-red glyph on an accent background. A workaround
+    // in one of four buttons is exactly the shape of thing that comes back.
+    //
+    // Mechanical form: no `toggled:` binding in the dock may read the
+    // `.active` of a capture controller. That is precisely the confusion —
+    // a controller's `active` is "this is live", and `toggled` is the
+    // property that paints red.
+    void liveCaptureOnTheCallBarIsNotPaintedDanger()
+    {
+        const QString src = withoutComments(
+            readQml(QStringLiteral("/components/VoiceDock.qml")));
+        QVERIFY2(!src.isEmpty(), "VoiceDock.qml not found");
+
+        // The state exists and is distinct from `toggled`.
+        QVERIFY2(src.contains(QStringLiteral("property bool   active:"))
+                 || src.contains(QStringLiteral("property bool active:")),
+                 "DockButton has no `active` property any more. Without it"
+                 " there is nowhere for \"this capture is live\" to go except"
+                 " `toggled`, which paints the disconnect red.");
+
+        // Fold continuations the way visibleBindings() does: these bindings
+        // routinely wrap after `&&`.
+        const QStringList lines = src.split(QLatin1Char('\n'));
+        for (int i = 0; i < lines.size(); ++i) {
+            if (!lines[i].trimmed().startsWith(QLatin1String("toggled:"))) continue;
+            QString binding = lines[i].trimmed();
+            for (int j = i + 1; j < lines.size(); ++j) {
+                const QString next = lines[j].trimmed();
+                if (!next.startsWith(QLatin1String("&&"))
+                    && !next.startsWith(QLatin1String("||"))) break;
+                binding += QLatin1Char(' ') + next;
+            }
+            for (const char* controller : { "camera.active", "screenShare.active",
+                                            "pttPressed" }) {
+                QVERIFY2(!binding.contains(QLatin1String(controller)),
+                         qPrintable(QStringLiteral(
+                             "a DockButton binds `toggled:` to %1. `toggled`"
+                             " is the danger tint — it means a SUPPRESSING"
+                             " state is engaged, like mute or deafen. A live"
+                             " capture is the opposite kind of fact and wants"
+                             " `active:`, which paints Theme.accent. Binding"
+                             " it here is how the camera button came to wear"
+                             " the same red as the hang-up button next to it"
+                             " while the camera was on. Binding: %2")
+                             .arg(QLatin1String(controller), binding)));
+            }
+        }
+
+        // And the accent must actually be what `active` paints. A future
+        // edit that routes `active` back through Theme.danger would pass
+        // everything above and reinstate the defect exactly.
+        const QString button = blockBody(
+            src, QStringLiteral(R"(\bcomponent DockButton\s*:\s*Rectangle\s*\{)"));
+        QVERIFY2(!button.isEmpty(), "could not read DockButton's body");
+        // Only the arms that name a theme COLOUR. `active` legitimately
+        // drives non-colour properties too — the ring is
+        // `border.width: active ? 1 : 0` — and those have nothing to say
+        // about which colour the state wears.
+        static const QRegularExpression activeBranch(
+            QStringLiteral(R"(active\s*\?\s*([^\n]*))"));
+        int branches = 0;
+        for (auto it = activeBranch.globalMatch(button); it.hasNext();) {
+            const QString arm = it.next().captured(1);
+            if (!arm.contains(QStringLiteral("Theme."))) continue;
+            ++branches;
+            QVERIFY2(!arm.contains(QStringLiteral("Theme.danger")),
+                     qPrintable(QStringLiteral(
+                         "DockButton paints its `active` state with"
+                         " Theme.danger: %1. That is the defect — a live"
+                         " camera must not wear the disconnect colour.")
+                         .arg(arm)));
+            QVERIFY2(arm.contains(QStringLiteral("Theme.accent")),
+                     qPrintable(QStringLiteral(
+                         "DockButton's `active` state is painted with"
+                         " something other than Theme.accent: %1. Accent is"
+                         " what this app already uses for \"this is on\" —"
+                         " see VoiceRoom's header toggles.").arg(arm)));
+        }
+        // Fill and glyph, at least. If the count drops, one of them stopped
+        // distinguishing the state and that half of the button went back to
+        // reading as inactive — or as danger.
+        QVERIFY2(branches >= 2,
+                 qPrintable(QStringLiteral(
+                     "DockButton distinguishes its `active` state in only %1"
+                     " place(s). Both the fill and the icon colour have to"
+                     " say it: the old inline workaround on the PTT button"
+                     " could only reach the fill, which left a danger-red"
+                     " glyph sitting on an accent background.")
+                     .arg(branches)));
+    }
+
 private:
     // The text between the braces of the first block whose opening matches
     // `opener` (which must end at that block's `{`). Null when there is none.
