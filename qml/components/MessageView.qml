@@ -1744,10 +1744,33 @@ Rectangle {
                 // automatic fills: with budget left and nothing on screen,
                 // the viewport check is about to ask again, and flashing
                 // "Nothing recent to show" for that instant would be a lie.
+                // Channels across every category, so "no channel is selected"
+                // can be told apart from "there is nothing to select". A
+                // category with nothing in it is not a channel, which is why
+                // this sums the groups rather than counting them.
+                //
+                // `undefined` until the first sync has landed, which
+                // emptyStateKind reads as "not known" and answers as it always
+                // did. An empty room list before then is not an empty server,
+                // it is a question nobody has asked yet, and reporting 0 would
+                // put "No channels yet" on screen for a round trip on every
+                // cold start. Undefined for "no server" too: that case is
+                // already answered by "no-server", and a 0 here would be a
+                // claim about a server that is not there.
+                readonly property var _channelCount: {
+                    var s = serverManager.activeServer;
+                    if (!s) return undefined;
+                    if (!s.initialSyncComplete) return undefined;
+                    var groups = s.categorizedRooms || [];
+                    var n = 0;
+                    for (var i = 0; i < groups.length; i++)
+                        n += (groups[i].channels || []).length;
+                    return n;
+                }
                 readonly property string _emptyKind: Overlay.emptyStateKind(
                     _hasServer, _roomId, messageListView.count,
                     _loadingHistory || (_hasMoreHistory && !_autoFillSpent),
-                    _hasMoreHistory)
+                    _hasMoreHistory, _channelCount)
 
                 // Back-pagination loading indicator at the top of the list.
                 // Visible while a /messages request is in flight; stays tiny

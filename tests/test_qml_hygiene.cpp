@@ -1643,6 +1643,96 @@ private slots:
         }
     }
 
+    void aServerWithNoChannelsSaysSoRatherThanPointingAtAnEmptyList()
+    {
+        // A brand-new BSFChat server used to hand its first user an empty
+        // shell, and both shells then told them to go and pick a channel out
+        // of a list that had none in it: the desktop timeline said "Pick a
+        // channel / Choose one from the sidebar" and the phone said "Tap the
+        // menu button to pick a server and channel". Advice that cannot be
+        // followed is worse than no advice, because the reader spends the next
+        // minute assuming they have missed something.
+        //
+        // The server now creates #general and a voice channel on a first run,
+        // so this state should be rare — but "rare" is exactly when nobody
+        // looks, and an admin who deletes every channel, or a member who can
+        // see none of them, still lands here.
+        //
+        // Source scan, not behaviour: the rule is that BOTH shells distinguish
+        // the two situations and that the phone's version offers a way
+        // forward. What that way forward does when tapped is not something a
+        // scan can know.
+        const QString js = withoutComments(
+            readQml(QStringLiteral("/js/TimelineOverlay.js")));
+        QVERIFY2(js.contains(QStringLiteral("no-channels")),
+                 "TimelineOverlay no longer distinguishes 'no channel selected'"
+                 " from 'this server has none'");
+        QVERIFY2(js.contains(QStringLiteral("channelCount")),
+                 "emptyStateKind cannot tell the two apart without being told"
+                 " how many channels there are");
+
+        // The desktop timeline has to actually ASK the question. The kind
+        // exists in the library either way; a caller that never passes a count
+        // gets the old answer forever, which is how this rule fails silently.
+        const QString view = withoutComments(
+            readQml(QStringLiteral("/components/MessageView.qml")));
+        QVERIFY2(view.contains(QStringLiteral("_channelCount")),
+                 "MessageView never counts the server's channels, so the"
+                 " desktop timeline can never reach the no-channels state");
+        QVERIFY2(view.contains(QStringLiteral("emptyStateKind(")) &&
+                     view.contains(QStringLiteral("_channelCount)")),
+                 "MessageView counts channels but does not pass the count to"
+                 " emptyStateKind");
+
+        // Neither shell may make the claim before it has the answer. An empty
+        // room list is ambiguous until the first sync lands, and reporting it
+        // as zero would put "No channels yet" on screen for a round trip on
+        // every cold start — a common wrong message traded for a rare one.
+        // This is the arm most likely to be lost to a later simplification,
+        // because the code reads perfectly well without it.
+        QVERIFY2(view.contains(QStringLiteral("initialSyncComplete")),
+                 "MessageView reports a channel count before the first sync has"
+                 " landed, so an unsynced server reads as an empty one");
+
+        // The phone shell draws its own empty state rather than the
+        // timeline's — MessageView is a StackLayout page and is not the
+        // current one when no room is selected — so the same distinction has
+        // to be made a second time, over there.
+        const QString mobile = withoutComments(
+            readQml(QStringLiteral("/mobile/MobileMain.qml")));
+        QVERIFY2(mobile.contains(QStringLiteral("_noChannels")),
+                 "the phone shell still shows one 'no channel selected' state"
+                 " for both situations");
+        QVERIFY2(mobile.contains(QStringLiteral("No channels yet")),
+                 "the phone shell never says the server has no channels");
+        QVERIFY2(mobile.contains(QStringLiteral("initialSyncComplete")),
+                 "the phone shell decides the server has no channels without"
+                 " waiting for the first sync");
+
+        // And it offers a way out. Being told there are no channels and given
+        // nothing to press is the same dead end as before, one sentence better
+        // informed — and on a phone the channel list, and the "+" that creates
+        // one, is behind a drawer the reader has no reason to open.
+        QVERIFY2(mobile.contains(QStringLiteral("leftDrawer.open()")),
+                 "nothing on the phone's empty state opens the channel list");
+        const int btn = mobile.indexOf(QStringLiteral("visible: !_noServers && _noChannels"));
+        QVERIFY2(btn > 0,
+                 "the empty state's button is no longer shown when the server"
+                 " has no channels — retarget this rule rather than deleting it");
+
+        // The button lives on the empty-state PAGE of the main column, which
+        // is the structure fix/mobile-voice-overlays put in place: three
+        // mutually exclusive StackLayout pages, none of which may carry its
+        // own `visible:`. A control added here as another floating overlay
+        // instead would be the exact regression that rule exists to stop, so
+        // say so here too rather than leaving it to a reader to notice.
+        QVERIFY2(mobile.contains(QStringLiteral("emptyOpenChannelsCta")),
+                 "the empty state's channel-list button is gone");
+        QVERIFY2(mobile.contains(QStringLiteral("MainSurface.mainPage(")),
+                 "the mobile empty state is no longer a page of the main"
+                 " column — see theMobileMainColumnHasExactlyOneWriter()");
+    }
+
     void thePinnedListHasAWayInOnAPhone()
     {
         // The pin button lives in MessageView's chat header, and that whole
