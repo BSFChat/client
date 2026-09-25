@@ -2,9 +2,9 @@
 
 #include "ReleaseSelection.h"
 #include "AppProfile.h"
+#include "util/ExternalBrowser.h"
 
 #include <QCoreApplication>
-#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -313,7 +313,11 @@ void Updater::applyUpdate()
 void Updater::openReleasePage()
 {
     if (m_releaseHtmlUrl.isEmpty()) return;
-    QDesktopServices::openUrl(QUrl(m_releaseHtmlUrl));
+    // openExternalUrl logs the refusal; there is no in-app surface for this
+    // one to report to, and unlike a sign-in nothing is left half-finished
+    // by it — but the log line is the difference between "the button is
+    // broken" and a diagnosable machine.
+    bsfchat::openExternalUrl(QUrl(m_releaseHtmlUrl));
 }
 
 #if defined(Q_OS_MACOS)

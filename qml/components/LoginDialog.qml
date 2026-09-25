@@ -31,6 +31,16 @@ Dialog {
     // True while we wait for the identity-first sync flow (browser OIDC +
     // /api/servers fetch + per-server auto-login).
     property bool identitySyncInProgress: false
+    // Set when the app could not open a browser for a sign-in it has
+    // already started (ServerManager::browserOpenFailed). Holds the
+    // authorize URL, which the user opens by hand to finish: the attempt is
+    // still live and the loopback callback still listening, so a link
+    // pasted into any browser completes the sign-in normally.
+    //
+    // It cannot be retyped or rebuilt — it carries this attempt's PKCE
+    // challenge, its CSRF state and the port the callback comes back to —
+    // so showing it, selectable and copyable, IS the recovery.
+    property string manualAuthUrl: ""
 
     // --- Which of the dialog's four screens is up.
     //
@@ -318,6 +328,11 @@ Dialog {
             dialog.identitySyncInProgress = false;
             dialog.errorMessage = "Identity login failed: " + error;
         }
+        // Neither spinner is cleared: the sign-in really is still in
+        // progress, waiting for the browser the user is about to open.
+        function onBrowserOpenFailed(authUrl) {
+            dialog.manualAuthUrl = authUrl;
+        }
     }
 
     // Every re-open starts clean. Without this a failure that arrived
@@ -330,6 +345,7 @@ Dialog {
         dialog.isConnecting = false;
         dialog.oidcInProgress = false;
         dialog.identitySyncInProgress = false;
+        dialog.manualAuthUrl = "";
         dialog.checkingFlows = false;
         dialog.awaitingSingleJoin = false;
         dialog.joinedUrls = [];
@@ -354,6 +370,7 @@ Dialog {
         dialog.joinedUrls = [];
         dialog.browserSessionNote = false;
         dialog.identitySyncInProgress = false;
+        dialog.manualAuthUrl = "";
         dialog.probed = false;
         dialog.resolvedUrl = "";
         dialog.probeOutcome = "";
@@ -429,6 +446,7 @@ Dialog {
                 onClicked: {
                     dialog.errorMessage = "";
                     dialog.browserSessionNote = false;
+                    dialog.manualAuthUrl = "";
                     dialog.identitySyncInProgress = true;
                     serverManager.loginWithIdentityAndSync(identityUrlField.text.trim());
                 }
@@ -846,6 +864,7 @@ Dialog {
                 }
                 onClicked: {
                     dialog.errorMessage = "";
+                    dialog.manualAuthUrl = "";
                     dialog.oidcInProgress = true;
                     dialog.awaitingSingleJoin = true;
                     serverManager.addServerWithOidc(dialog.targetUrl());
@@ -977,6 +996,88 @@ Dialog {
                 visible: dialog.errorMessage !== ""
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
+            }
+
+            // "We couldn't open your browser — here is the link."
+            //
+            // THE surface for a sign-in that cannot hand off to a browser.
+            // Before it existed, the Linux release tarball's failure to
+            // launch xdg-open produced a click that did nothing, said
+            // nothing and logged nothing, for five minutes, and then timed
+            // out. Warning-coloured rather than danger-coloured on purpose:
+            // nothing has failed yet, there is just one step the app cannot
+            // take for the user.
+            //
+            // The one block in this file with no `mode` in its visibility,
+            // and deliberately: a browser that will not open is a property
+            // of the machine, not of the screen. It can strike the ID
+            // button on "choose", the OIDC button on "address", and a
+            // per-server sign-in running behind "signedIn" — and the
+            // answer is the same link in all three. It sits with the error
+            // text, below whichever screen is up, so it cannot be scrolled
+            // off by a screen that does not know about it.
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: Theme.sp.s2
+                visible: dialog.manualAuthUrl !== ""
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "Couldn't open a browser on this computer. Open this "
+                          + "link yourself to finish signing in — this window "
+                          + "keeps waiting for it."
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.sm
+                    color: Theme.warn
+                    wrapMode: Text.Wrap
+                }
+
+                // Selectable, and wrapping, because the whole point is that
+                // the user gets these ~400 characters out of the app intact.
+                // Read-only TextEdit rather than Text: Text cannot be
+                // selected with the mouse, and a link nobody can select is
+                // a link nobody can use.
+                TextArea {
+                    id: manualUrlField
+                    Layout.fillWidth: true
+                    text: dialog.manualAuthUrl
+                    readOnly: true
+                    wrapMode: TextEdit.WrapAnywhere
+                    font.family: Theme.fontMono
+                    font.pixelSize: Theme.fontSize.xs
+                    color: Theme.fg1
+                    leftPadding: Theme.sp.s3
+                    rightPadding: Theme.sp.s3
+                    topPadding: Theme.sp.s2
+                    bottomPadding: Theme.sp.s2
+                    background: Rectangle {
+                        color: Theme.bg0
+                        radius: Theme.r2
+                        border.color: Theme.line
+                        border.width: 1
+                    }
+                }
+
+                Button {
+                    id: copyLinkButton
+                    Layout.alignment: Qt.AlignRight
+                    contentItem: Text {
+                        text: "Copy link"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        font.weight: Theme.fontWeight.semibold
+                        color: Theme.onAccent
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: copyLinkButton.hovered ? Theme.accentDim : Theme.accent
+                        radius: Theme.r2
+                        implicitHeight: 32
+                        implicitWidth: 110
+                    }
+                    onClicked: serverManager.copyToClipboard(dialog.manualAuthUrl)
+                }
             }
 
             // Connecting indicator

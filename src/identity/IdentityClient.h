@@ -140,6 +140,21 @@ public:
 signals:
     void loginCompleted(const QString& idToken, const QString& accessToken, const QString& refreshToken);
     void loginFailed(const QString& error);
+    // The browser would not open, and `authUrl` is the page it would have
+    // shown. NOT a failure: the attempt is still armed and still listening,
+    // so a user who opens this link by hand completes the sign-in normally.
+    // Whoever relays it owes the user two things — the news, and the link in
+    // a form they can copy.
+    //
+    // Separate from loginFailed precisely because loginFailed is terminal:
+    // ServerManager tears the half-added connection down on it, which would
+    // take the loopback listener — and with it the pasted link's only way
+    // home — away.
+    // Only the attempt holding the browser can emit this: an attempt still
+    // waiting its turn has no authorize URL to offer, having minted no PKCE
+    // material yet. Those are answered with loginFailed instead — see
+    // failWaitersWithNoBrowser.
+    void browserOpenFailed(const QString& authUrl);
 
 private:
 #ifndef BSFCHAT_NATIVE_OIDC_REDIRECT
@@ -162,6 +177,22 @@ private:
     // releases as soon as it has the code rather than holding on through the
     // token exchange.
     void releaseBrowser();
+    // `head` holds the browser and could not open one. Tell everything
+    // queued behind it so, instead of leaving it waiting for a turn that is
+    // now worth nothing: the head is not going to release the browser until
+    // the user finishes its link by hand or its five minutes run out, and a
+    // machine that could not open a browser once will not open one for the
+    // waiters either. Each waiter gets a loginFailed — the only answer they
+    // can be given, since a queued attempt has no URL of its own to offer.
+    //
+    // The head keeps the browser and keeps its own attempt alive; this is
+    // about the silence behind it, which is the same bug as the one in
+    // front.
+    static void failWaitersWithNoBrowser(IdentityClient* head);
+    // What a sign-in is told when the attempt in front of it has no browser.
+    // One sentence, one place, whether it was already queued or arrived
+    // afterwards.
+    static QString noBrowserForWaiterMessage();
     // The redirect_uri this attempt asked for — loopback with the live port
     // on desktop, the private-use scheme on iOS. /authorize and /token must
     // send the identical string, so both read it from here.
@@ -188,4 +219,10 @@ private:
     // Asked for, but another attempt owns the browser. Nothing has been
     // shown, no PKCE material exists yet, and no timeout is running.
     bool m_queued = false;
+    // This attempt holds the browser and no browser could be opened for it:
+    // its link is with the user, to open by hand. Anything that would queue
+    // behind it is refused instead of parked, because the turn it would be
+    // waiting for is not coming until this one's five minutes are up — and
+    // a machine with no browser will not produce one for the waiter either.
+    bool m_browserUnavailable = false;
 };

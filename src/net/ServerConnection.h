@@ -1018,6 +1018,11 @@ signals:
     // right for a server being added and catastrophic for one the user has
     // been using for months.
     void reauthFailed(const QString& error);
+    // Relayed straight from IdentityClient: no browser could be opened for
+    // this server's sign-in, and `authUrl` is the page the user has to open
+    // themselves. Not a failure — the attempt is still live (see
+    // IdentityClient::browserOpenFailed).
+    void browserOpenFailed(const QString& authUrl);
     void connectionStatusChanged();
     void syncErrorMessageChanged();
     void activeRoomTopicChanged();

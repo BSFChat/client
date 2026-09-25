@@ -269,6 +269,7 @@ qt_add_executable(bsfchat-app
     src/model/ChannelInviteModel.cpp
     src/model/SelfRoleModel.cpp
     src/store/LocalCache.cpp
+    src/util/ExternalBrowser.cpp
     src/util/FileLogger.cpp
     src/util/MarkdownParser.cpp
     src/util/MentionRenderer.cpp
