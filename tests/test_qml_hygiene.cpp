@@ -2096,6 +2096,129 @@ private slots:
                      .arg(worstCase).arg(narrowestPhoneDp).arg(inRow)));
     }
 
+    // A JS import qualifier must not be the name of an attached type the same
+    // file uses.
+    //
+    //     import "../js/TimelineOverlay.js" as Overlay
+    //
+    // is what MessageView.qml said, and it made `Overlay.overlay` — the
+    // QtQuick.Controls attached property that gives a Popup the window-wide
+    // overlay item — evaluate to `undefined` for the whole file. A JS import
+    // qualifier is a real binding in the file's import scope and it wins over
+    // the type name; `Overlay.<jsFunction>` kept resolving, so nothing looked
+    // wrong.
+    //
+    // Nothing reports this. Qt logs no warning: `parent: <undefined>` on a
+    // Popup is not an error, it is a no-op — the popup silently keeps its
+    // DECLARATION parent, so `parent: Overlay.overlay` inside MessageView.qml
+    // meant "parent: messageViewRoot", which is what it would have meant with
+    // the line deleted. qmllint does not flag it either.
+    //
+    // The consequences, measured in a scene built on this exact shape:
+    //
+    //   parent:               the chat column, not the window overlay — so
+    //                         every x/y is in the wrong coordinate space and
+    //                         every `parent.width` clamp measures the column
+    //   anchors.centerIn:     bound to undefined is also a no-op, so the two
+    //                         modals that used it were not centred at all;
+    //                         they sat at 0,0 of the chat column, i.e. pinned
+    //                         to its top-left corner instead of mid-window
+    //   mapToItem(undefined): returns SCENE coordinates (same as passing
+    //                         null). Correct numbers, wrong frame: assigning
+    //                         them to an x/y that is read against the chat
+    //                         column shifts the popover left and up by the
+    //                         sidebars' width.
+    //
+    // qml/main.qml uses the identical `parent: Overlay.overlay` idiom and has
+    // no JS import, which is why it was right there and wrong one file over.
+    //
+    // The check is deliberately narrow: it does not try to know every
+    // attached type in Qt. It pairs each file's JS import qualifiers against
+    // the attached-property expressions that same file actually relies on, so
+    // a qualifier only offends when the file would really have used the type.
+    // A file that imports a JS lib `as Overlay` and never says
+    // `Overlay.overlay` is not reported — there is nothing to shadow.
+    void aJsImportQualifierNeverShadowsAnAttachedTypeTheFileUses()
+    {
+        // attached type -> the member accesses that prove the file wanted the
+        // TYPE rather than the qualifier. Grow this as more get used.
+        static const QList<QPair<QString, QStringList>> attached = {
+            { QStringLiteral("Overlay"),   { QStringLiteral("overlay") } },
+            { QStringLiteral("ToolTip"),   { QStringLiteral("text"), QStringLiteral("visible"),
+                                             QStringLiteral("delay"), QStringLiteral("timeout") } },
+            { QStringLiteral("Window"),    { QStringLiteral("window"), QStringLiteral("width"),
+                                             QStringLiteral("height"), QStringLiteral("visibility") } },
+            { QStringLiteral("Screen"),    { QStringLiteral("width"), QStringLiteral("height"),
+                                             QStringLiteral("pixelDensity"),
+                                             QStringLiteral("devicePixelRatio") } },
+            { QStringLiteral("Layout"),    { QStringLiteral("fillWidth"), QStringLiteral("fillHeight"),
+                                             QStringLiteral("preferredWidth"),
+                                             QStringLiteral("preferredHeight"),
+                                             QStringLiteral("alignment"), QStringLiteral("margins") } },
+            { QStringLiteral("StackView"), { QStringLiteral("view"), QStringLiteral("index"),
+                                             QStringLiteral("status") } },
+            { QStringLiteral("SplitView"), { QStringLiteral("fillWidth"), QStringLiteral("fillHeight"),
+                                             QStringLiteral("minimumWidth"),
+                                             QStringLiteral("preferredWidth") } },
+            { QStringLiteral("Drag"),      { QStringLiteral("active"), QStringLiteral("source"),
+                                             QStringLiteral("hotSpot") } },
+            { QStringLiteral("Keys"),      { QStringLiteral("onPressed"), QStringLiteral("enabled"),
+                                             QStringLiteral("forwardTo") } },
+        };
+
+        // `import "<anything>.js" as Qualifier`. Only .js imports create a
+        // qualifier that can collide with a type name — a directory import
+        // (`import "../components" as X`) namespaces types, not values, and
+        // does not shadow.
+        //
+        // The quotes are \x22 rather than literal `"` on purpose. moc does not
+        // understand raw string literals; it counts quote characters. An odd
+        // number of them inside an R"(...)" — which the literal spelling of
+        // this pattern needs — flips moc's idea of whether it is inside a
+        // string and it silently gives up on the whole file ("No relevant
+        // classes found"), leaving an empty .moc and a vtable link error. PCRE
+        // reads \x22 as `"`, so the pattern is unchanged and moc sees none.
+        static const QRegularExpression jsImport(
+            QStringLiteral(R"(^\s*import\s+\x22[^\x22]*\.js\x22\s+as\s+([A-Za-z_]\w*))"),
+            QRegularExpression::MultilineOption);
+
+        const QStringList qml = filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
+                                           QStringLiteral("*.qml"));
+        QVERIFY2(!qml.isEmpty(), "no QML found under BSFCHAT_QML_DIR");
+
+        QStringList offenders;
+        int qualifiersSeen = 0;
+        for (const QString& path : qml) {
+            const QString src = withoutComments(readAll(path));
+            for (auto it = jsImport.globalMatch(src); it.hasNext();) {
+                const QRegularExpressionMatch m = it.next();
+                const QString qualifier = m.captured(1);
+                ++qualifiersSeen;
+                for (const auto& [type, members] : attached) {
+                    if (qualifier != type) continue;
+                    for (const QString& member : members) {
+                        // `Overlay.overlay` anywhere but the import line.
+                        const QRegularExpression use(
+                            QStringLiteral(R"(\b%1\s*\.\s*%2\b)").arg(type, member));
+                        if (!use.match(src).hasMatch()) continue;
+                        offenders << QStringLiteral("%1:%2: `as %3` shadows the %3 "
+                                                    "attached type, which this file reads "
+                                                    "as %3.%4 — rename the qualifier")
+                                        .arg(QFileInfo(path).fileName())
+                                        .arg(lineOf(src, m.capturedStart()))
+                                        .arg(type, member);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // If this trips, the regex stopped matching the import syntax and the
+        // scan has been silently passing on nothing.
+        QVERIFY2(qualifiersSeen > 0, "no `import \"*.js\" as X` found — scan is broken");
+        QVERIFY2(offenders.isEmpty(), qPrintable(offenders.join(QStringLiteral("\n"))));
+    }
+
 private:
     // The text between the braces of the first block whose opening matches
     // `opener` (which must end at that block's `{`). Null when there is none.

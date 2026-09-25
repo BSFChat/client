@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import BSFChat
-import "../js/TimelineOverlay.js" as Overlay
+import "../js/TimelineOverlay.js" as TimelineOverlay
 
 // Message view (playing the role of SPEC §3.6 ChatPanel while we're
 // still text-first). bg0 backdrop — matches the VoiceRoom and the
@@ -1744,7 +1744,7 @@ Rectangle {
                 // automatic fills: with budget left and nothing on screen,
                 // the viewport check is about to ask again, and flashing
                 // "Nothing recent to show" for that instant would be a lie.
-                readonly property string _emptyKind: Overlay.emptyStateKind(
+                readonly property string _emptyKind: TimelineOverlay.emptyStateKind(
                     _hasServer, _roomId, messageListView.count,
                     _loadingHistory || (_hasMoreHistory && !_autoFillSpent),
                     _hasMoreHistory)
@@ -1760,7 +1760,7 @@ Rectangle {
                     width: 20; height: 20; radius: 10
                     color: Theme.bg3
                     opacity: 0.9
-                    visible: Overlay.spinnerVisible(timelineOverlay._loadingHistory)
+                    visible: TimelineOverlay.spinnerVisible(timelineOverlay._loadingHistory)
                     Text {
                         anchors.centerIn: parent
                         text: "\u21BB"
@@ -1790,7 +1790,7 @@ Rectangle {
                     color: loadOlderMouse.containsMouse ? Theme.accent : Theme.bg1
                     border.color: loadOlderMouse.containsMouse ? Theme.accent : Theme.line
                     border.width: 1
-                    visible: Overlay.loadOlderVisible(
+                    visible: TimelineOverlay.loadOlderVisible(
                         timelineOverlay._hasMoreHistory, timelineOverlay._loadingHistory,
                         messageListView.contentHeight > messageListView.height,
                         timelineOverlay._autoFillSpent)
@@ -1842,8 +1842,8 @@ Rectangle {
                         ? Theme.bg0
                         : (scrollBottomMouse.containsMouse ? Theme.accent : Theme.line)
                     border.width: Theme.isMobile ? 2 : 1
-                    visible: Overlay.chevronVisible(messageListView.atBottom,
-                                                    messageListView.count)
+                    visible: TimelineOverlay.chevronVisible(messageListView.atBottom,
+                                                            messageListView.count)
 
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                     Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
@@ -1890,7 +1890,7 @@ Rectangle {
                         color: Theme.bg3
                         Icon {
                             anchors.centerIn: parent
-                            name: Overlay.emptyStateIcon(timelineOverlay._emptyKind)
+                            name: TimelineOverlay.emptyStateIcon(timelineOverlay._emptyKind)
                             size: 28
                             color: Theme.fg3
                         }
@@ -1899,7 +1899,7 @@ Rectangle {
                     Text {
                         Layout.alignment: Qt.AlignHCenter
                         horizontalAlignment: Text.AlignHCenter
-                        text: Overlay.emptyStateTitle(timelineOverlay._emptyKind)
+                        text: TimelineOverlay.emptyStateTitle(timelineOverlay._emptyKind)
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xl
                         font.weight: Theme.fontWeight.semibold
@@ -1909,7 +1909,7 @@ Rectangle {
                     Text {
                         Layout.alignment: Qt.AlignHCenter
                         horizontalAlignment: Text.AlignHCenter
-                        text: Overlay.emptyStateBody(timelineOverlay._emptyKind)
+                        text: TimelineOverlay.emptyStateBody(timelineOverlay._emptyKind)
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md
                         color: Theme.fg3
