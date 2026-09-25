@@ -8,7 +8,8 @@
 | It now compiles one, links `libmediandk`, and carries both classes | **Certain** — verified on the built `arm64-v8a` `.so` |
 | `h264EncodeProfiles()` / `h264DecodeProfiles()` come back non-empty on a device | **High** — the code path is compiled in and the probes are the only gate; not run on hardware |
 | The buffer-geometry and Annex-B logic is correct | **High** — 11 host-run cases, mutation-checked |
-| A frame actually encodes on a Pixel 6 Pro | **Unverified.** Not one frame has been encoded or decoded on a phone |
+| The encoder comes up on a Pixel 6 Pro | **Certain** — it did, on the first device run |
+| A frame actually encodes on a Pixel 6 Pro | **Unverified.** The first device run refused every frame; §3.1 is the fix, not yet re-run on hardware |
 
 ## 1. The failure this closes
 
@@ -89,6 +90,70 @@ formats that *are* plain NV12, and a linear row copy of it is confetti.
 
 The decoder emits `Format_NV12` `QVideoFrame`s, the same pixel format
 `MacVTDecoder` emits, so the `QVideoSink` playout path needs no Android branch.
+
+### 3.1 The 62 bytes — reported geometry is not the allocation
+
+The first device run (Pixel 6 Pro, Tensor G1) came up and then refused every
+single frame:
+
+```
+W bsfchat.video.mediacodec: input pack refused (capacity 614338, need 614400)
+```
+
+`614400` is `640 × 640 × 3/2`: the codec resolved to stride 640, slice-height
+640. The buffer it actually handed back was **62 bytes short of that**.
+
+The shortfall is not a rounding quirk to clamp away. `614338` is **not
+divisible by 3**, so it is not a 4:2:0 frame size at all — a 4:2:0 buffer is
+`3 × (w·h/2)` and is always divisible by 3. It is whatever the Codec2 graphic
+allocator rounded to. **A codec's reported geometry and its allocation are two
+different facts**, and requiring them to agree was never justified.
+
+What *is* justified is that every byte written lands inside the buffer. libyuv
+writes `width` bytes per row over `height` rows — never the row padding, never
+the rows between `height` and `slice-height`. The frame here is **480×640**:
+`FrameConverter` rotates the 640×480 sensor frame upright and
+`VideoSendPipeline` sizes the encoder from the rotated dimensions (see
+`FrameConverter.h`). So the last byte actually touched is
+
+```
+NV12:  640·640 + (640/2 − 1)·640 + 480 − 1  =  614239   → needs 614240
+```
+
+which fits in 614338 with 98 bytes to spare. The old rule over-demanded by 160
+bytes and was refused by 62. `BufferLayout::requiredBytes(w, h)` is that number;
+`sizeBytes()` is kept for the plane extent and is no longer used as a bound.
+
+Two things follow, both implemented:
+
+* **The bound is now the bytes written, on both sides.** The decoder's output
+  buffer is sized by the same allocator and can be short for the same reason.
+* **The encoder measures a real input buffer before accepting a colour format.**
+  `probeInputCapacity()` dequeues one buffer at session open, reads its
+  capacity, and hands it back via `flush()`. If it cannot hold
+  `requiredBytes()`, that rung of the ladder is rejected and the next colour
+  format is tried; if none fits, `init()` **fails**. A codec that starts and
+  then drops every frame is the worst available outcome — see §3.2.
+
+`AMEDIAFORMAT_KEY_MAX_INPUT_SIZE` was considered and not used: for raw encoder
+input under Codec2 the buffer is a graphic block, not a linear one, so the key
+is generally ignored — and guessing a value that a codec *did* honour could make
+the allocation smaller rather than larger.
+
+### 3.2 Why "comes up, then refuses everything" is worse than failing
+
+There is no JPEG safety net underneath a broken encoder. `CameraController`'s
+legacy path is gated on `voice->hasLegacyOpenPeers(VideoStreamId::Camera)`,
+which is true only while a peer *cannot* receive RTP video or its track has not
+opened. Once the phone advertises `h264` — which is the whole point of this port
+— the desktop's track opens, `hasLegacyOpenPeers` goes false, and the JPEG
+branch correctly stops running.
+
+So a phone that advertises H.264 and then produces no access units sends
+**nothing at all**, which is strictly worse than the JPEG slideshow it replaced.
+That is what the owner saw. The answer is not to re-arm JPEG behind a working
+advertisement — that would put the mesh back on 6 Mbps stills — but to make the
+encoder either work or refuse to start, which is what the probe does.
 
 ## 4. Pipeline depth
 
@@ -179,11 +244,13 @@ Nothing in them opens a codec, a camera or a network socket.
 
 ## 8. What only a device can answer
 
-1. **Which colour format a Tensor G1 encoder resolves Flexible to**, and
-   whether it reports `stride`/`slice-height` at all. The `[mediacodec] input
-   format:` log line answers this in one glance.
-2. **Whether a frame encodes.** Nothing above proves the hardware accepts what
-   is packed for it.
+1. ~~Which colour format a Tensor G1 encoder resolves Flexible to~~ —
+   **answered**: it resolves, at stride 640 / slice-height 640 for a 480×640
+   frame, and reports both keys. What is still open is whether the resolved
+   family is NV12 or I420; the run predates the log line that says so.
+2. **Whether a frame encodes.** The first run got as far as a started codec and
+   no further (§3.1). The bound is fixed and the probe is in, but nothing here
+   proves the hardware accepts what is packed for it — only a device does.
 3. **Real pipeline depth.** The FIFO copes with any depth, but a deep encoder
    costs latency the rate controller was not tuned for.
 4. **Reclaim on background.** Needs the app backgrounded mid-call and brought

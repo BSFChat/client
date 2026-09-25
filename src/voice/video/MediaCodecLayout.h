@@ -89,13 +89,48 @@ struct BufferLayout {
     Plane plane = Plane::Unsupported;
     int stride = 0;       // bytes per luma row
     int sliceHeight = 0;  // luma rows before the chroma planes begin
-    // Bytes the codec buffer must hold for `plane` at this stride and
-    // slice height. Both families come to the same number: the Y plane
-    // is stride*sliceHeight and the chroma is exactly half of it.
+
+    // The FULL theoretical plane extent: every row of every plane at
+    // full stride, padding included. Both families come to the same
+    // number — the Y plane is stride*sliceHeight and the chroma is
+    // exactly half of it.
+    //
+    // This is what the buffer would hold if the codec allocated the
+    // geometry it reported, and it is NOT a safe requirement to impose
+    // on a real buffer. See requiredBytes().
     size_t sizeBytes() const {
         if (plane == Plane::Unsupported) return 0;
         return size_t(stride) * size_t(sliceHeight) * 3 / 2;
     }
+
+    // Bytes that must actually be addressable to hold a width x height
+    // picture in this layout — the offset one past the LAST BYTE
+    // WRITTEN, not the extent of the planes.
+    //
+    // The distinction is not academic; it was worth 62 bytes and all of
+    // the video on a Pixel 6 Pro. That device's encoder resolved to
+    // stride 640 / slice-height 640 for a 480x640 portrait frame (a
+    // rotated 640x480 camera frame — FrameConverter swaps the axes, see
+    // its header) and handed back an input buffer of 614338 bytes.
+    // sizeBytes() is 640*640*3/2 = 614400, so every single frame was
+    // refused by 62 bytes and the phone sent nothing at all for the
+    // whole call.
+    //
+    // 614338 is not divisible by 3, so it is not a 4:2:0 frame size in
+    // the first place — it is whatever the Codec2 graphic allocator
+    // rounded to, and demanding that it equal the reported geometry was
+    // never justified. What IS justified is that every byte libyuv
+    // writes lands inside it. libyuv writes `width` bytes per row over
+    // `height` rows, never the row padding and never the rows between
+    // `height` and `sliceHeight`, so the true requirement here is
+    // 614240 — which fits, with 98 bytes to spare.
+    //
+    // Returns 0 for an unresolved layout, or for a picture that does not
+    // fit the geometry at all (width > stride, height > sliceHeight),
+    // which callers must treat as a refusal rather than as "needs
+    // nothing".
+    size_t requiredBytes(int width, int height) const;
+
     bool isValid() const { return plane != Plane::Unsupported; }
 };
 
@@ -115,9 +150,10 @@ BufferLayout layoutFor(int32_t colorFormat, int stride, int sliceHeight,
                        int width, int height);
 
 // Tightly-packed I420 (what FrameConverter produces) -> a codec INPUT
-// buffer in `layout`. Writes `layout.sizeBytes()` bytes; refuses if
-// `dstCapacity` is smaller, if any pointer is null, or if a source
-// stride cannot hold its row.
+// buffer in `layout`. Refuses if `dstCapacity` is below
+// `layout.requiredBytes(width, height)` (NOT below sizeBytes() — see
+// the note there), if any pointer is null, or if a source stride cannot
+// hold its row.
 //
 // Odd width/height are rounded DOWN to even, as in NV12Pack: 4:2:0 has
 // no meaning otherwise, and the caller may pass the frame's real size.

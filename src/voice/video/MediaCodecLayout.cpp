@@ -37,6 +37,29 @@ ChromaGeometry chromaFor(const BufferLayout& l) {
 
 } // namespace
 
+size_t BufferLayout::requiredBytes(int width, int height) const {
+    if (plane == Plane::Unsupported) return 0;
+    const int w = width & ~1;
+    const int h = height & ~1;
+    if (w <= 0 || h <= 0) return 0;
+    // A picture that does not fit the geometry is not a smaller
+    // requirement, it is a refusal. Saying 0 here and letting the caller
+    // compare "capacity >= 0" would turn the one case that MUST fail
+    // into the one case that always passes.
+    if (w > stride || h > sliceHeight) return 0;
+
+    const BufferLayout& l = *this;
+    const ChromaGeometry g = chromaFor(l);
+    // Luma always ends inside the chroma offset (h <= sliceHeight and
+    // w <= stride), so only the chroma tail can be the far end.
+    if (plane == Plane::NV12) {
+        // One interleaved plane: h/2 rows of w bytes at full stride.
+        return g.offsetU + size_t(h / 2 - 1) * size_t(g.strideU) + size_t(w);
+    }
+    // Three planes, V last: h/2 rows of w/2 bytes at half stride.
+    return g.offsetV + size_t(h / 2 - 1) * size_t(g.strideV) + size_t(w / 2);
+}
+
 BufferLayout layoutFor(int32_t colorFormat, int stride, int sliceHeight,
                        int width, int height) {
     BufferLayout out;
@@ -98,7 +121,11 @@ bool packInput(const BufferLayout& layout,
     // The codec's own buffer must be at least as tall and wide as the
     // frame, or the layout was resolved against a different size.
     if (layout.stride < w || layout.sliceHeight < h) return false;
-    if (dstCapacity < layout.sizeBytes()) return false;
+    // Bound the write by what is actually written, not by the plane
+    // extent. requiredBytes() returns 0 for anything it will not vouch
+    // for, and 0 must not read as "needs nothing".
+    const size_t need = layout.requiredBytes(w, h);
+    if (need == 0 || dstCapacity < need) return false;
 
     const ChromaGeometry g = chromaFor(layout);
     if (layout.plane == BufferLayout::Plane::NV12) {
@@ -128,7 +155,12 @@ bool unpackOutputToNV12(const BufferLayout& layout,
     if (!src || !dstY || !dstUV) return false;
     if (dstStrideY < w || dstStrideUV < w) return false;
     if (layout.stride < w || layout.sliceHeight < h) return false;
-    if (srcSize < layout.sizeBytes()) return false;
+    // Symmetrically, only the bytes actually READ have to exist. A
+    // decoder's output buffer is sized by the same allocator that sized
+    // the encoder's input one, so it can be short of the plane extent
+    // for exactly the same reason.
+    const size_t need = layout.requiredBytes(w, h);
+    if (need == 0 || srcSize < need) return false;
 
     const ChromaGeometry g = chromaFor(layout);
     if (layout.plane == BufferLayout::Plane::I420) {

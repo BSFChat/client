@@ -98,6 +98,10 @@ public:
 private:
     void destroy();
     bool openSession(const EncoderConfig& config);
+    // Dequeue one input buffer from a freshly started codec purely to
+    // read its real capacity, then hand it back. Returns 0 if no buffer
+    // came back in time, which means "unmeasured", not "zero".
+    static size_t probeInputCapacity(void* codecPtr);
     // Queue one frame; false means the input could not be handed over.
     bool queueInput(const PlanarFrame& in, bool forceKeyframe, int* outStatus);
     // Move every output buffer that is ready into m_ready. `blockUs`
@@ -113,6 +117,14 @@ private:
     void* m_codec = nullptr;            // opaque AMediaCodec*
     EncoderConfig m_config;
     mediacodec::BufferLayout m_inputLayout;
+    // What an input buffer actually measured at session open. NOT
+    // derivable from m_inputLayout: a codec's reported geometry and its
+    // allocation are different facts and can disagree — see
+    // BufferLayout::requiredBytes().
+    size_t m_inputCapacity = 0;
+    // The per-frame pack refusal is logged once per session; at frame
+    // rate it buries the one line that explains it.
+    bool m_packRefusalLogged = false;
     // SPS+PPS as Annex-B, captured from the codec-config output buffer
     // and prepended to keyframes that do not already carry them. A
     // receiver joining mid-stream has no other source for them.

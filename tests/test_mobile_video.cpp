@@ -170,6 +170,9 @@ private slots:
     void packInputRefusesAnUndersizedCodecBuffer();
     void unpackOutputDropsCodecPadding();
     void unpackOutputRoundTripsThroughBothFamilies();
+    void requiredBytesIsWhatIsWrittenNotThePlaneExtent();
+    void pixel6ProShortInputBufferIsAccepted();
+    void requiredBytesRefusesAPictureBiggerThanItsGeometry();
     void annexBFindsSliceTypesAndParameterSets();
     void annexBHandlesThreeByteStartCodes();
     void annexBTakesTheLastParameterSetPair();
@@ -913,6 +916,130 @@ void TestMobileVideo::unpackOutputRoundTripsThroughBothFamilies() {
         QVERIFY2(outY == refY, "luma differs from the NV12Pack reference");
         QVERIFY2(outUV == refUV, "chroma differs from the NV12Pack reference");
     }
+}
+
+void TestMobileVideo::requiredBytesIsWhatIsWrittenNotThePlaneExtent() {
+    // The distinction that cost all of the video on a Pixel 6 Pro.
+    //
+    // sizeBytes() is the geometry the codec REPORTED: every row of every
+    // plane at full stride. requiredBytes() is the offset one past the
+    // last byte libyuv actually writes, which is smaller whenever the
+    // picture is narrower than the stride or shorter than the slice
+    // height — i.e. almost always.
+    const auto nv12 = mediacodec::layoutFor(
+        mediacodec::kFormatYUV420SemiPlanar, 640, 640, 480, 640);
+    QCOMPARE(nv12.sizeBytes(), size_t(614400));
+    // Y: rows 0..639 x 480 bytes at stride 640, all below the chroma
+    // offset. UV: base 640*640, rows 0..319 x 480 bytes at stride 640.
+    // Last byte index 409600 + 319*640 + 480 - 1 = 614239.
+    QCOMPARE(nv12.requiredBytes(480, 640), size_t(614240));
+    QVERIFY(nv12.requiredBytes(480, 640) < nv12.sizeBytes());
+
+    const auto i420 = mediacodec::layoutFor(
+        mediacodec::kFormatYUV420Planar, 640, 640, 480, 640);
+    // V plane base is 640*640 + 320*320; last row 319 x 240 bytes at
+    // chroma stride 320.
+    QCOMPARE(i420.requiredBytes(480, 640), size_t(614320));
+    QVERIFY(i420.requiredBytes(480, 640) < i420.sizeBytes());
+
+    // With no padding anywhere the two converge to within one row's
+    // worth of padding — requiredBytes is never LARGER than the extent.
+    for (int32_t cf : {mediacodec::kFormatYUV420SemiPlanar,
+                       mediacodec::kFormatYUV420Planar}) {
+        const auto tight = mediacodec::layoutFor(cf, 640, 480, 640, 480);
+        QVERIFY(tight.requiredBytes(640, 480) <= tight.sizeBytes());
+    }
+}
+
+void TestMobileVideo::pixel6ProShortInputBufferIsAccepted() {
+    // The exact device case, pinned.
+    //
+    // Pixel 6 Pro (Tensor G1), camera portrait: FrameConverter rotates
+    // the 640x480 sensor frame upright to 480x640 and VideoSendPipeline
+    // sizes the encoder from the ROTATED dimensions. The codec resolved
+    // to stride 640 / slice-height 640 and handed back an input buffer
+    // of 614338 bytes.
+    //
+    // 614338 is not divisible by 3, so it is not a 4:2:0 frame size at
+    // all — it is whatever the Codec2 graphic allocator rounded to, and
+    // requiring it to equal stride*sliceHeight*3/2 = 614400 was never
+    // justified. Every frame was refused by 62 bytes, for the length of
+    // the call, and because the desktop peer CAN receive H.264 the JPEG
+    // fallback stayed off: the phone sent nothing at all.
+    constexpr size_t kDeviceCapacity = 614338;
+    const int w = 480, h = 640;
+
+    for (int32_t cf : {mediacodec::kFormatYUV420SemiPlanar,
+                       mediacodec::kFormatYUV420Planar}) {
+        const auto layout = mediacodec::layoutFor(cf, 640, 640, w, h);
+        QVERIFY(layout.isValid());
+        QVERIFY2(layout.sizeBytes() > kDeviceCapacity,
+                 "the plane extent must still EXCEED the device's buffer — "
+                 "if it stopped doing so this test would pass for the wrong "
+                 "reason and stop guarding anything");
+        QVERIFY2(layout.requiredBytes(w, h) <= kDeviceCapacity,
+                 "this is the regression: the bytes actually written must "
+                 "fit in the buffer the Pixel 6 Pro really hands back");
+
+        // And the pack must genuinely succeed against a buffer of
+        // exactly that size, writing nothing past its end.
+        const SourceI420 src = makeSource(w, h);
+        std::vector<uint8_t> buf(kDeviceCapacity + 1, kPad);
+        QVERIFY2(mediacodec::packInput(layout, src.yp(), w, src.up(), w / 2,
+                                       src.vp(), w / 2, buf.data(),
+                                       kDeviceCapacity, w, h),
+                 "packInput refused the real device buffer");
+        // The guard byte one past the declared capacity is untouched.
+        QCOMPARE(buf[kDeviceCapacity], kPad);
+        // Spot-check that the picture really landed: first and last
+        // luma row, and the last chroma row, which is the one the
+        // 62-byte shortfall sat in.
+        QCOMPARE(buf[0], src.yAt(0, 0));
+        QCOMPARE(buf[size_t(h - 1) * 640], src.yAt(h - 1, 0));
+        if (layout.plane == mediacodec::BufferLayout::Plane::NV12) {
+            const size_t lastUvRow = size_t(640) * 640 + size_t(h / 2 - 1) * 640;
+            QCOMPARE(buf[lastUvRow], src.uAt(h / 2 - 1, 0));
+            QCOMPARE(buf[lastUvRow + 1], src.vAt(h / 2 - 1, 0));
+        }
+    }
+
+    // One byte less than needed is still refused. The relaxation must
+    // be exactly "what is written", not "near enough".
+    const auto layout = mediacodec::layoutFor(
+        mediacodec::kFormatYUV420SemiPlanar, 640, 640, w, h);
+    const SourceI420 src = makeSource(w, h);
+    std::vector<uint8_t> buf(layout.sizeBytes(), kPad);
+    QVERIFY(!mediacodec::packInput(layout, src.yp(), w, src.up(), w / 2,
+                                   src.vp(), w / 2, buf.data(),
+                                   layout.requiredBytes(w, h) - 1, w, h));
+}
+
+void TestMobileVideo::requiredBytesRefusesAPictureBiggerThanItsGeometry() {
+    // A picture that does not fit is not a SMALLER requirement. If this
+    // returned a plausible-looking number instead of 0, the one case
+    // that must fail would be the one case that always passes — the
+    // caller's test is `capacity < need`, and every capacity is >= 0.
+    const auto layout = mediacodec::layoutFor(
+        mediacodec::kFormatYUV420SemiPlanar, 640, 480, 640, 480);
+    // Note the even-rounding happens FIRST, exactly as it does in
+    // packInput: 641 becomes 640 and genuinely does fit, so the
+    // oversize cases have to be oversize after the round-down.
+    QCOMPARE(layout.requiredBytes(641, 480), layout.requiredBytes(640, 480));
+    QCOMPARE(layout.requiredBytes(642, 480), size_t(0));
+    QCOMPARE(layout.requiredBytes(640, 482), size_t(0));
+    QCOMPARE(layout.requiredBytes(0, 0), size_t(0));
+    QCOMPARE(mediacodec::BufferLayout().requiredBytes(640, 480), size_t(0));
+
+    // And packInput must refuse those outright, however big the buffer.
+    const SourceI420 src = makeSource(640, 480);
+    std::vector<uint8_t> huge(4u * 1024 * 1024, kPad);
+    QVERIFY(!mediacodec::packInput(layout, src.yp(), 640, src.up(), 320,
+                                   src.vp(), 320, huge.data(), huge.size(),
+                                   642, 480));
+    QVERIFY(!mediacodec::unpackOutputToNV12(mediacodec::BufferLayout(),
+                                            huge.data(), huge.size(),
+                                            huge.data(), 640, huge.data(), 640,
+                                            640, 480));
 }
 
 void TestMobileVideo::annexBFindsSliceTypesAndParameterSets() {

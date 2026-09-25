@@ -105,6 +105,8 @@ void MediaCodecEncoder::destroy() {
     m_ready.clear();
     m_csd.clear();
     m_inputLayout = {};
+    m_inputCapacity = 0;
+    m_packRefusalLogged = false;
     m_primed = false;
 }
 
@@ -198,14 +200,49 @@ bool MediaCodecEncoder::openSession(const EncoderConfig& config) {
             continue;
         }
 
+        // Measure a REAL input buffer before accepting this rung.
+        //
+        // The reported geometry and the allocated buffer are not the
+        // same fact, and on a Pixel 6 Pro they disagreed: stride 640 /
+        // slice-height 640 was reported, and the buffer that came back
+        // was 614338 bytes — 62 short of the 614400 that geometry
+        // implies. Without this probe the encoder came up, logged
+        // success, and then refused every single frame for the whole
+        // call: no video at all, and not even the JPEG fallback, which
+        // is gated on the PEER being unable to receive H.264 and so
+        // stays off once we have advertised that we can send it.
+        //
+        // A codec that starts and then drops everything is the worst of
+        // both outcomes. Measure here, while there is still another
+        // colour format to try and still the option of failing init()
+        // honestly.
+        const size_t capacity = probeInputCapacity(codec);
+        const size_t need = layout.requiredBytes(config.width, config.height);
+        if (capacity > 0 && need > 0 && capacity < need) {
+            qCWarning(logMCEnc,
+                     "color-format 0x%x rejected: input buffer is %zu bytes, "
+                     "%dx%d at stride %d slice %d needs %zu (plane extent "
+                     "would be %zu) — trying the next format",
+                     unsigned(wanted), capacity, config.width, config.height,
+                     layout.stride, layout.sliceHeight, need,
+                     layout.sizeBytes());
+            AMediaCodec_stop(codec);
+            AMediaCodec_delete(codec);
+            continue;
+        }
+
         m_codec = codec;
         m_inputLayout = layout;
+        m_inputCapacity = capacity;
         m_config = config;
         qCInfo(logMCEnc,
-              "MediaCodec H.264 encoder up: %dx%d@%dfps %d kbps (stride %d, "
-              "slice %d)",
+              "MediaCodec H.264 encoder up: %dx%d@%dfps %d kbps, %s "
+              "stride=%d slice=%d need=%zu extent=%zu capacity=%zu",
               config.width, config.height, config.fps, config.targetBitrateKbps,
-              layout.stride, layout.sliceHeight);
+              layout.plane == mediacodec::BufferLayout::Plane::NV12
+                  ? "NV12" : "I420",
+              layout.stride, layout.sliceHeight, need, layout.sizeBytes(),
+              capacity);
         return true;
     }
     qCWarning(logMCEnc,
@@ -213,6 +250,31 @@ bool MediaCodecEncoder::openSession(const EncoderConfig& config) {
              "or reported a layout this build cannot pack",
              config.width, config.height);
     return false;
+}
+
+size_t MediaCodecEncoder::probeInputCapacity(void* codecPtr) {
+    auto* codec = static_cast<AMediaCodec*>(codecPtr);
+    // Generous: this runs once per session, off the hot path, and a
+    // freshly started encoder normally has every input buffer free.
+    const ssize_t idx = AMediaCodec_dequeueInputBuffer(codec, 50000);
+    if (idx < 0) {
+        // Could not measure. Proceed rather than refuse — a codec that
+        // will not yield an input buffer within 50 ms has a problem this
+        // probe is not the right place to diagnose, and the per-frame
+        // check still bounds every write.
+        qCWarning(logMCEnc, "input capacity probe: no buffer (%d)", int(idx));
+        return 0;
+    }
+    size_t capacity = 0;
+    AMediaCodec_getInputBuffer(codec, size_t(idx), &capacity);
+    // Hand the buffer back WITHOUT queueing it. Queueing a zero-length
+    // input would submit an empty frame to the encoder; flush() is the
+    // documented way to reclaim dequeued buffers, and in synchronous
+    // mode (unlike async) it needs no start() afterwards.
+    const media_status_t st = AMediaCodec_flush(codec);
+    if (st != AMEDIA_OK)
+        qCWarning(logMCEnc, "flush after capacity probe failed: %d", int(st));
+    return capacity;
 }
 
 bool MediaCodecEncoder::init(const EncoderConfig& config) {
@@ -266,14 +328,42 @@ bool MediaCodecEncoder::queueInput(const PlanarFrame& in, bool forceKeyframe,
             reinterpret_cast<const uint8_t*>(in.u.constData()), in.strideU,
             reinterpret_cast<const uint8_t*>(in.v.constData()), in.strideV,
             dst, capacity, in.width, in.height)) {
-        qCWarning(logMCEnc, "input pack refused (capacity %zu, need %zu)",
-                 capacity, m_inputLayout.sizeBytes());
+        // Everything needed to diagnose this from one line, because the
+        // first time it happened the line said only "capacity 614338,
+        // need 614400" and answering "why 62" cost a device round trip.
+        //
+        // Once per session, not once per frame: the old one repeated at
+        // frame rate for the length of the call and buried the format
+        // line that explains it.
+        if (!m_packRefusalLogged) {
+            m_packRefusalLogged = true;
+            qCWarning(logMCEnc,
+                     "input pack refused — buffer idx %d capacity %zu; frame "
+                     "%dx%d (src strides %d/%d/%d); layout %s stride %d slice "
+                     "%d; chroma at %zu; needs %zu; plane extent %zu; probe "
+                     "measured %zu. Suppressing further copies of this line.",
+                     int(idx), capacity, in.width, in.height,
+                     in.strideY, in.strideU, in.strideV,
+                     m_inputLayout.plane
+                             == mediacodec::BufferLayout::Plane::NV12
+                         ? "NV12" : "I420",
+                     m_inputLayout.stride, m_inputLayout.sliceHeight,
+                     size_t(m_inputLayout.stride)
+                         * size_t(m_inputLayout.sliceHeight),
+                     m_inputLayout.requiredBytes(in.width, in.height),
+                     m_inputLayout.sizeBytes(), m_inputCapacity);
+        }
         AMediaCodec_queueInputBuffer(codec, size_t(idx), 0, 0, 0, 0);
         return false;
     }
 
+    // Declare a length that actually exists. The full plane extent is
+    // what a codec whose geometry matched its allocation would want, but
+    // queueing a size larger than the buffer is invalid, and this
+    // allocation can legitimately be smaller than the geometry implies.
+    const size_t declared = qMin(m_inputLayout.sizeBytes(), capacity);
     const media_status_t st = AMediaCodec_queueInputBuffer(
-        codec, size_t(idx), /*offset=*/0, m_inputLayout.sizeBytes(),
+        codec, size_t(idx), /*offset=*/0, declared,
         uint64_t(in.captureTimeUs), /*flags=*/0);
     if (st != AMEDIA_OK) {
         *outStatus = int(st);
@@ -332,8 +422,22 @@ void MediaCodecEncoder::drainOutput(int64_t blockUs, int* outStatus) {
                 } else {
                     p.data = std::move(au);
                 }
+                const bool first = !m_primed;
                 m_ready.push_back(std::move(p));
                 m_primed = true;
+                if (first) {
+                    // Deliberately a bare qInfo, like ScreenShareController's
+                    // "[screenshare] broadcast N-byte JPEG": always on, no
+                    // logging rules needed, once per session. It is the
+                    // positive half of the test for "are we still falling
+                    // back to JPEG" — the JPEG line must stop and this one
+                    // must appear.
+                    qInfo("[mediacodec] first H.264 access unit: %d bytes, "
+                          "%s, %dx%d",
+                          int(m_ready.back().data.size()),
+                          m_ready.back().keyframe ? "keyframe" : "delta",
+                          m_config.width, m_config.height);
+                }
             }
         }
         AMediaCodec_releaseOutputBuffer(codec, size_t(idx), /*render=*/false);
