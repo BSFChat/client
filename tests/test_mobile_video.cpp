@@ -1,5 +1,6 @@
-// The parts of the iOS camera-video port that can be tested without
-// hardware, a camera, or a phone.
+// The parts of the MOBILE camera-video ports — iOS/VideoToolbox first,
+// then Android/MediaCodec — that can be tested without hardware, a
+// camera, or a phone.
 //
 // Deliberately narrow. Nothing here pretends to exercise VideoToolbox,
 // an AVCaptureSession or a TCC prompt — a unit test cannot answer a
@@ -19,8 +20,16 @@
 //      host this runs through the same BSFCHAT_HAVE_VIDEOTOOLBOX path an
 //      iOS build takes, which is the closest a desktop test can get to
 //      "the phone advertises h264".
+//   5. The two platform-free halves of the Android MediaCodec backend:
+//      the buffer-geometry resolution (MediaCodecLayout.h) and the
+//      Annex-B inspection (MediaCodecAnnexB.h). These get NO other
+//      coverage anywhere — the Android CI job builds no tests and there
+//      is no device in CI — and they are where the arithmetic that
+//      silently shears a picture lives. Every case here runs on the
+//      desktop host, with no NDK involved.
 //
-// The device-only half is listed in docs/ios-voice.md.
+// The device-only half is listed in docs/ios-voice.md and
+// docs/android-video.md.
 
 #include <QtTest/QtTest>
 #include <QImage>
@@ -31,12 +40,15 @@
 #include "voice/CameraPermissionPolicy.h"
 #include "voice/PeerCaps.h"
 #include "voice/video/FrameConverter.h"
+#include "voice/video/MediaCodecAnnexB.h"
+#include "voice/video/MediaCodecLayout.h"
 #include "voice/video/NV12Pack.h"
 #include "voice/video/VideoCodec.h"
 #include "voice/video/VideoDecoder.h"
 #include "voice/video/VideoEncoder.h"
 #include "voice/video/VideoFrameOrientation.h"
 
+#include <algorithm>
 #include <vector>
 
 // A missing platform branch in this target must break the BUILD, not one
@@ -57,6 +69,7 @@
 // build configuration.
 #if !defined(BSFCHAT_HAVE_VIDEOTOOLBOX) \
     && !defined(BSFCHAT_HAVE_MEDIAFOUNDATION) \
+    && !defined(BSFCHAT_HAVE_MEDIACODEC) \
     && !defined(BSFCHAT_HAVE_OPENH264)
 #error "test_mobile_video has no video backend on this platform. Its target \
 in tests/CMakeLists.txt is missing this platform's arm of the backend \
@@ -147,6 +160,19 @@ private slots:
     void buildAdvertisesH264BothWays();
     void advertisedCodecsAreWhatPeersNegotiateOn();
     void softwareH264IsNotCompiledInOnApple();
+
+    // ---- 5. Android MediaCodec: buffer geometry + bitstream ---------
+    void layoutResolvesTheTwoPlanarFamilies();
+    void layoutRefusesWhatCannotBeCopiedLinearly();
+    void layoutDefaultsAbsentAndNonsensePadding();
+    void packInputWritesNV12AtCodecStride();
+    void packInputWritesI420AtCodecStride();
+    void packInputRefusesAnUndersizedCodecBuffer();
+    void unpackOutputDropsCodecPadding();
+    void unpackOutputRoundTripsThroughBothFamilies();
+    void annexBFindsSliceTypesAndParameterSets();
+    void annexBHandlesThreeByteStartCodes();
+    void annexBTakesTheLastParameterSetPair();
 };
 
 // =====================================================================
@@ -540,6 +566,430 @@ void TestMobileVideo::softwareH264IsNotCompiledInOnApple() {
              "Apple host — check the create() ordering before shipping "
              "this to a phone");
 #endif
+}
+
+// =====================================================================
+// 5. Android MediaCodec: buffer geometry + bitstream inspection
+//
+// Nothing below touches the NDK. MediaCodecLayout.cpp and
+// MediaCodecAnnexB.cpp are the two halves of the Android backend that
+// are pure arithmetic and memory, and they are the halves most likely to
+// be quietly wrong — a stride mistaken for a width is a green band down
+// one side, a slice height mistaken for a height is garbage across the
+// bottom eighth of every 1080p frame, and both survive a code review.
+//
+// These run on the desktop host precisely because the Android build
+// gets no test run anywhere: the CI job passes
+// -DGAMECHAT_CLIENT_BUILD_TESTS=OFF and a hosted runner has no phone.
+// =====================================================================
+
+namespace {
+
+// A source frame in the exact shape FrameConverter produces: tightly
+// packed I420, strideY == w, strideU == strideV == w/2. Every plane
+// gets a distinct, position-dependent ramp so a plane swap, a row
+// offset or a stride confusion all show up as a value mismatch rather
+// than as a test that still passes on uniform grey.
+struct SourceI420 {
+    std::vector<uint8_t> y, u, v;
+    int w = 0, h = 0;
+    const uint8_t* yp() const { return y.data(); }
+    const uint8_t* up() const { return u.data(); }
+    const uint8_t* vp() const { return v.data(); }
+    uint8_t yAt(int r, int c) const { return y[size_t(r) * size_t(w) + size_t(c)]; }
+    uint8_t uAt(int r, int c) const { return u[size_t(r) * size_t(w / 2) + size_t(c)]; }
+    uint8_t vAt(int r, int c) const { return v[size_t(r) * size_t(w / 2) + size_t(c)]; }
+};
+
+SourceI420 makeSource(int w, int h) {
+    SourceI420 f;
+    f.w = w;
+    f.h = h;
+    f.y.resize(size_t(w) * size_t(h));
+    f.u.resize(size_t(w / 2) * size_t(h / 2));
+    f.v.resize(size_t(w / 2) * size_t(h / 2));
+    for (int r = 0; r < h; ++r)
+        for (int c = 0; c < w; ++c)
+            f.y[size_t(r) * size_t(w) + size_t(c)] = uint8_t((r * 7 + c * 3) % 200);
+    for (int r = 0; r < h / 2; ++r) {
+        for (int c = 0; c < w / 2; ++c) {
+            f.u[size_t(r) * size_t(w / 2) + size_t(c)] = uint8_t((r * 5 + c * 11) % 200);
+            f.v[size_t(r) * size_t(w / 2) + size_t(c)] = uint8_t((r * 13 + c * 2) % 200);
+        }
+    }
+    return f;
+}
+
+// The byte a MediaCodec buffer's padding is filled with before a test
+// writes into it. Chosen above every ramp value above, so "did the
+// padding leak into the picture" is a value comparison and not a guess.
+constexpr uint8_t kPad = 0xFF;
+
+QByteArray nal(uint8_t type, int payloadBytes = 3, bool shortStartCode = false) {
+    QByteArray b;
+    if (shortStartCode) b.append(QByteArray::fromHex("000001"));
+    else                b.append(QByteArray::fromHex("00000001"));
+    b.append(char(type & 0x1F));           // forbidden_zero=0, nal_ref_idc=0
+    for (int i = 0; i < payloadBytes; ++i) b.append(char(0x40 + i));
+    return b;
+}
+
+} // namespace
+
+void TestMobileVideo::layoutResolvesTheTwoPlanarFamilies() {
+    using mediacodec::BufferLayout;
+
+    // Standard OMX planar and its "packed" sibling are both I420.
+    QCOMPARE(mediacodec::layoutFor(mediacodec::kFormatYUV420Planar,
+                                   640, 480, 640, 480).plane,
+             BufferLayout::Plane::I420);
+    QCOMPARE(mediacodec::layoutFor(mediacodec::kFormatYUV420PackedPlanar,
+                                   640, 480, 640, 480).plane,
+             BufferLayout::Plane::I420);
+
+    // Standard semiplanar and the vendor spellings of it are all NV12.
+    for (int32_t cf : {mediacodec::kFormatYUV420SemiPlanar,
+                       mediacodec::kFormatYUV420PackedSemiPlanar,
+                       mediacodec::kFormatTiYUV420PackedSemiPlanar,
+                       mediacodec::kFormatQcomYUV420SemiPlanar,
+                       mediacodec::kFormatQcomYUV420PackedSemiPlanar32m}) {
+        QCOMPARE(mediacodec::layoutFor(cf, 640, 480, 640, 480).plane,
+                 BufferLayout::Plane::NV12);
+    }
+
+    // Both families come to the same buffer size: Y is stride*slice and
+    // chroma is exactly half of it, however it is arranged.
+    const auto i420 = mediacodec::layoutFor(mediacodec::kFormatYUV420Planar,
+                                            704, 488, 640, 480);
+    const auto nv12 = mediacodec::layoutFor(mediacodec::kFormatYUV420SemiPlanar,
+                                            704, 488, 640, 480);
+    QCOMPARE(i420.sizeBytes(), size_t(704 * 488 * 3 / 2));
+    QCOMPARE(nv12.sizeBytes(), i420.sizeBytes());
+}
+
+void TestMobileVideo::layoutRefusesWhatCannotBeCopiedLinearly() {
+    using mediacodec::BufferLayout;
+
+    // Qualcomm's 64x32 tiled layout sits numerically BETWEEN two vendor
+    // semiplanar formats that are plain NV12, so the risk is not that
+    // someone adds it deliberately — it is that a range check or a
+    // careless default sweeps it in. A linear row copy of a tiled buffer
+    // is confetti.
+    QCOMPARE(mediacodec::layoutFor(
+                 mediacodec::kFormatQcomYUV420PackedSemiPlanarTiled,
+                 640, 480, 640, 480).plane,
+             BufferLayout::Plane::Unsupported);
+
+    // Flexible is the ASK, never an answer. A codec that echoes it back
+    // has not told us what it chose, and guessing is how you ship a
+    // backend that works on the reviewer's phone and nobody else's.
+    QCOMPARE(mediacodec::layoutFor(mediacodec::kFormatYUV420Flexible,
+                                   640, 480, 640, 480).plane,
+             BufferLayout::Plane::Unsupported);
+
+    // Surface/opaque and anything unrecognised.
+    QCOMPARE(mediacodec::layoutFor(0x7F000789, 640, 480, 640, 480).plane,
+             BufferLayout::Plane::Unsupported);
+    QVERIFY(!mediacodec::layoutFor(0x7F000789, 640, 480, 640, 480).isValid());
+    QCOMPARE(mediacodec::layoutFor(0x7F000789, 640, 480, 640, 480).sizeBytes(),
+             size_t(0));
+
+    // A degenerate picture is not a layout either.
+    QVERIFY(!mediacodec::layoutFor(mediacodec::kFormatYUV420SemiPlanar,
+                                   0, 0, 0, 0).isValid());
+}
+
+void TestMobileVideo::layoutDefaultsAbsentAndNonsensePadding() {
+    // AMediaFormat_getInt32 leaves the out-param at 0 when the codec did
+    // not set the key. Absent means "no padding", which is width and
+    // height — not zero, which would make every buffer look empty.
+    auto absent = mediacodec::layoutFor(mediacodec::kFormatYUV420SemiPlanar,
+                                        /*stride=*/0, /*slice=*/0, 640, 480);
+    QCOMPARE(absent.stride, 640);
+    QCOMPARE(absent.sliceHeight, 480);
+
+    // A key SMALLER than the picture is a codec reporting nonsense.
+    // Honouring it would read or write outside the frame, so it is
+    // treated exactly like an absent key.
+    auto tooSmall = mediacodec::layoutFor(mediacodec::kFormatYUV420SemiPlanar,
+                                          320, 240, 640, 480);
+    QCOMPARE(tooSmall.stride, 640);
+    QCOMPARE(tooSmall.sliceHeight, 480);
+
+    // Real padding IS honoured — this is the 1080 -> 1088 case, the one
+    // that puts a band of garbage across the bottom of every frame when
+    // it is missed.
+    auto padded = mediacodec::layoutFor(mediacodec::kFormatYUV420SemiPlanar,
+                                        1920, 1088, 1920, 1080);
+    QCOMPARE(padded.stride, 1920);
+    QCOMPARE(padded.sliceHeight, 1088);
+    QCOMPARE(padded.sizeBytes(), size_t(1920) * 1088 * 3 / 2);
+
+    // The planar family halves the luma stride for its chroma planes, so
+    // an odd stride would lose a column's worth of addressing.
+    auto oddStride = mediacodec::layoutFor(mediacodec::kFormatYUV420Planar,
+                                           641, 480, 640, 480);
+    QCOMPARE(oddStride.stride % 2, 0);
+}
+
+void TestMobileVideo::packInputWritesNV12AtCodecStride() {
+    const int w = 64, h = 32;
+    const SourceI420 src = makeSource(w, h);
+    // Padding on BOTH axes, and different amounts, so a test that passes
+    // cannot be passing because the two happened to be interchangeable.
+    const auto layout = mediacodec::layoutFor(
+        mediacodec::kFormatYUV420SemiPlanar, /*stride=*/w + 32,
+        /*slice=*/h + 8, w, h);
+    QVERIFY(layout.isValid());
+
+    std::vector<uint8_t> buf(layout.sizeBytes(), kPad);
+    QVERIFY(mediacodec::packInput(layout, src.yp(), w, src.up(), w / 2,
+                                  src.vp(), w / 2, buf.data(), buf.size(),
+                                  w, h));
+
+    // Luma sits at the codec's stride, not the frame's width.
+    for (int r = 0; r < h; ++r)
+        for (int c = 0; c < w; ++c)
+            QCOMPARE(buf[size_t(r) * size_t(layout.stride) + size_t(c)],
+                     src.yAt(r, c));
+
+    // Chroma begins after stride*sliceHeight — NOT after stride*height,
+    // which is the same number only when the codec asked for no vertical
+    // padding.
+    const size_t uv = size_t(layout.stride) * size_t(layout.sliceHeight);
+    for (int r = 0; r < h / 2; ++r) {
+        for (int c = 0; c < w / 2; ++c) {
+            const size_t base = uv + size_t(r) * size_t(layout.stride)
+                              + size_t(c) * 2;
+            QCOMPARE(buf[base], src.uAt(r, c));       // U then V, NV12
+            QCOMPARE(buf[base + 1], src.vAt(r, c));
+        }
+    }
+
+    // The row padding was not written through.
+    QCOMPARE(buf[size_t(layout.stride) - 1], kPad);
+}
+
+void TestMobileVideo::packInputWritesI420AtCodecStride() {
+    const int w = 64, h = 32;
+    const SourceI420 src = makeSource(w, h);
+    const auto layout = mediacodec::layoutFor(
+        mediacodec::kFormatYUV420Planar, w + 16, h + 4, w, h);
+    QVERIFY(layout.isValid());
+
+    std::vector<uint8_t> buf(layout.sizeBytes(), kPad);
+    QVERIFY(mediacodec::packInput(layout, src.yp(), w, src.up(), w / 2,
+                                  src.vp(), w / 2, buf.data(), buf.size(),
+                                  w, h));
+
+    const size_t lumaBytes = size_t(layout.stride) * size_t(layout.sliceHeight);
+    const int chromaStride = layout.stride / 2;
+    const size_t uOff = lumaBytes;
+    const size_t vOff = lumaBytes
+                      + size_t(chromaStride) * size_t(layout.sliceHeight / 2);
+
+    for (int r = 0; r < h; ++r)
+        for (int c = 0; c < w; ++c)
+            QCOMPARE(buf[size_t(r) * size_t(layout.stride) + size_t(c)],
+                     src.yAt(r, c));
+    for (int r = 0; r < h / 2; ++r) {
+        for (int c = 0; c < w / 2; ++c) {
+            QCOMPARE(buf[uOff + size_t(r) * size_t(chromaStride) + size_t(c)],
+                     src.uAt(r, c));
+            // V after U, and at the HALF slice height. Swapping these
+            // two planes is the classic I420/YV12 mix-up and shows up as
+            // a picture with the blues and reds exchanged.
+            QCOMPARE(buf[vOff + size_t(r) * size_t(chromaStride) + size_t(c)],
+                     src.vAt(r, c));
+        }
+    }
+}
+
+void TestMobileVideo::packInputRefusesAnUndersizedCodecBuffer() {
+    const int w = 64, h = 32;
+    const SourceI420 src = makeSource(w, h);
+    const auto layout = mediacodec::layoutFor(
+        mediacodec::kFormatYUV420SemiPlanar, w, h, w, h);
+    std::vector<uint8_t> buf(layout.sizeBytes(), kPad);
+
+    // One byte short of what the layout needs. The codec handing back a
+    // buffer smaller than its own declared geometry should be
+    // impossible; writing past the end of it if it happens must not be.
+    QVERIFY(!mediacodec::packInput(layout, src.yp(), w, src.up(), w / 2,
+                                   src.vp(), w / 2, buf.data(),
+                                   layout.sizeBytes() - 1, w, h));
+    // An unresolved layout takes nothing on trust either.
+    const mediacodec::BufferLayout unusable;
+    QVERIFY(!mediacodec::packInput(unusable, src.yp(), w, src.up(), w / 2,
+                                   src.vp(), w / 2, buf.data(), buf.size(),
+                                   w, h));
+    // A source stride too small for its own row.
+    QVERIFY(!mediacodec::packInput(layout, src.yp(), w - 1, src.up(), w / 2,
+                                   src.vp(), w / 2, buf.data(), buf.size(),
+                                   w, h));
+    // Nulls.
+    QVERIFY(!mediacodec::packInput(layout, nullptr, w, src.up(), w / 2,
+                                   src.vp(), w / 2, buf.data(), buf.size(),
+                                   w, h));
+}
+
+void TestMobileVideo::unpackOutputDropsCodecPadding() {
+    // The decoder side of the 1080 -> 1088 problem, at test scale: the
+    // codec hands back a buffer taller and wider than the picture, and
+    // everything outside the picture is whatever was in that memory
+    // before. If the unpack reads at the buffer's geometry instead of
+    // the picture's, the padding lands on screen.
+    const int w = 48, h = 24;
+    const int stride = w + 24, slice = h + 6;
+    const auto layout = mediacodec::layoutFor(
+        mediacodec::kFormatYUV420SemiPlanar, stride, slice, w, h);
+    QVERIFY(layout.isValid());
+
+    std::vector<uint8_t> codecBuf(layout.sizeBytes(), kPad);
+    // Write a picture into the valid region only; the padding stays kPad.
+    for (int r = 0; r < h; ++r)
+        for (int c = 0; c < w; ++c)
+            codecBuf[size_t(r) * size_t(stride) + size_t(c)] =
+                uint8_t((r * 7 + c * 3) % 200);
+    const size_t uv = size_t(stride) * size_t(slice);
+    for (int r = 0; r < h / 2; ++r)
+        for (int c = 0; c < w; ++c)
+            codecBuf[uv + size_t(r) * size_t(stride) + size_t(c)] =
+                uint8_t((r * 5 + c * 11) % 200);
+
+    std::vector<uint8_t> dstY(size_t(w) * size_t(h), 0);
+    std::vector<uint8_t> dstUV(size_t(w) * size_t(h / 2), 0);
+    QVERIFY(mediacodec::unpackOutputToNV12(layout, codecBuf.data(),
+                                           codecBuf.size(), dstY.data(), w,
+                                           dstUV.data(), w, w, h));
+
+    for (int r = 0; r < h; ++r) {
+        for (int c = 0; c < w; ++c) {
+            QCOMPARE(dstY[size_t(r) * size_t(w) + size_t(c)],
+                     uint8_t((r * 7 + c * 3) % 200));
+        }
+    }
+    for (int r = 0; r < h / 2; ++r) {
+        for (int c = 0; c < w; ++c) {
+            QCOMPARE(dstUV[size_t(r) * size_t(w) + size_t(c)],
+                     uint8_t((r * 5 + c * 11) % 200));
+        }
+    }
+    // Belt and braces: not one padding byte reached the output.
+    QVERIFY(std::find(dstY.begin(), dstY.end(), kPad) == dstY.end());
+    QVERIFY(std::find(dstUV.begin(), dstUV.end(), kPad) == dstUV.end());
+}
+
+void TestMobileVideo::unpackOutputRoundTripsThroughBothFamilies() {
+    // Pack a frame the way the ENCODER would, unpack it the way the
+    // DECODER would, and require the result to equal what NV12Pack —
+    // the independently written Apple-side packer already under test
+    // above — produces from the same source. Both MediaCodec families
+    // must land on the same pixels, or a call between two Android phones
+    // whose codecs chose different formats shows one of them a different
+    // picture.
+    const int w = 32, h = 16;
+    const SourceI420 src = makeSource(w, h);
+
+    std::vector<uint8_t> refY(size_t(w) * size_t(h));
+    std::vector<uint8_t> refUV(size_t(w) * size_t(h / 2));
+    QVERIFY(nv12::packFromI420(src.yp(), w, src.up(), w / 2, src.vp(), w / 2,
+                               refY.data(), w, refUV.data(), w, w, h));
+
+    for (int32_t cf : {mediacodec::kFormatYUV420SemiPlanar,
+                       mediacodec::kFormatYUV420Planar}) {
+        const auto layout = mediacodec::layoutFor(cf, w + 8, h + 2, w, h);
+        QVERIFY(layout.isValid());
+        std::vector<uint8_t> codecBuf(layout.sizeBytes(), kPad);
+        QVERIFY(mediacodec::packInput(layout, src.yp(), w, src.up(), w / 2,
+                                      src.vp(), w / 2, codecBuf.data(),
+                                      codecBuf.size(), w, h));
+
+        std::vector<uint8_t> outY(size_t(w) * size_t(h), 0);
+        std::vector<uint8_t> outUV(size_t(w) * size_t(h / 2), 0);
+        QVERIFY(mediacodec::unpackOutputToNV12(layout, codecBuf.data(),
+                                               codecBuf.size(), outY.data(), w,
+                                               outUV.data(), w, w, h));
+        QVERIFY2(outY == refY, "luma differs from the NV12Pack reference");
+        QVERIFY2(outUV == refUV, "chroma differs from the NV12Pack reference");
+    }
+}
+
+void TestMobileVideo::annexBFindsSliceTypesAndParameterSets() {
+    // The shape MediaCodec delivers at the head of a stream: SPS+PPS in
+    // a codec-config buffer, then bare IDRs. The encoder has to notice
+    // the keyframe carries no parameter sets, or a receiver joining
+    // mid-call never gets them and stares at a black tile.
+    const QByteArray config = nal(7) + nal(8);
+    const annexb::Summary c = annexb::scan(config);
+    QVERIFY(c.hasSps);
+    QVERIFY(c.hasPps);
+    QVERIFY(!c.hasIdr);
+    QVERIFY(!c.hasSlice);
+
+    const annexb::Summary bareIdr = annexb::scan(nal(5));
+    QVERIFY(bareIdr.hasIdr);
+    QVERIFY(bareIdr.hasSlice);
+    QVERIFY2(!bareIdr.hasSps,
+             "a bare IDR must report NO parameter sets — this is the test "
+             "the encoder uses to decide whether to prepend its stashed "
+             "SPS/PPS, and a false positive here is a keyframe no "
+             "mid-call joiner can decode");
+
+    // The other device behaviour: parameter sets inlined before every
+    // IDR. Prepending again would put two copies on the wire.
+    const annexb::Summary inlined = annexb::scan(nal(7) + nal(8) + nal(5));
+    QVERIFY(inlined.hasSps);
+    QVERIFY(inlined.hasIdr);
+
+    // A P-frame is a slice but not a keyframe.
+    const annexb::Summary p = annexb::scan(nal(1));
+    QVERIFY(p.hasSlice);
+    QVERIFY(!p.hasIdr);
+
+    // Nothing at all.
+    const annexb::Summary empty = annexb::scan(QByteArray());
+    QVERIFY(!empty.hasSlice && !empty.hasSps && !empty.hasIdr);
+}
+
+void TestMobileVideo::annexBHandlesThreeByteStartCodes() {
+    // Annex-B allows both 3- and 4-byte start codes and encoders mix
+    // them. A parser that only knows the 4-byte form silently sees one
+    // giant NAL and reports whatever the first byte happened to be.
+    const annexb::Summary mixed =
+        annexb::scan(nal(7, 3, /*shortStartCode=*/true) + nal(8) + nal(5, 3, true));
+    QVERIFY(mixed.hasSps);
+    QVERIFY(mixed.hasPps);
+    QVERIFY(mixed.hasIdr);
+
+    QByteArray sps, pps;
+    QVERIFY(annexb::parameterSets(nal(7, 3, true) + nal(8, 3, true), sps, pps));
+    // Normalised to the 4-byte form csd-0/csd-1 take, whatever came in.
+    QCOMPARE(sps.left(4), QByteArray::fromHex("00000001"));
+    QCOMPARE(pps.left(4), QByteArray::fromHex("00000001"));
+    QCOMPARE(uint8_t(sps[4]) & 0x1F, 7u);
+    QCOMPARE(uint8_t(pps[4]) & 0x1F, 8u);
+}
+
+void TestMobileVideo::annexBTakesTheLastParameterSetPair() {
+    QByteArray sps, pps;
+
+    // A half pair configures nothing: the decoder needs both, and
+    // starting a codec on one is worse than waiting for the keyframe
+    // that carries the other.
+    QVERIFY(!annexb::parameterSets(nal(7), sps, pps));
+    QVERIFY(!annexb::parameterSets(nal(8), sps, pps));
+    QVERIFY(!annexb::parameterSets(nal(5), sps, pps));
+
+    // When a resolution change puts two SPSs in one access unit, the
+    // LAST one describes the picture that follows it. Taking the first
+    // configures the decoder for the size the stream just left.
+    const QByteArray oldSps = nal(7, /*payloadBytes=*/2);
+    const QByteArray newSps = nal(7, /*payloadBytes=*/6);
+    QVERIFY(annexb::parameterSets(oldSps + nal(8) + newSps + nal(8) + nal(5),
+                                  sps, pps));
+    QCOMPARE(sps, newSps);
+    QVERIFY(sps != oldSps);
 }
 
 QTEST_GUILESS_MAIN(TestMobileVideo)

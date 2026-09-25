@@ -1276,6 +1276,15 @@ if(BSFCHAT_ENABLE_VOICE)
         ${CMAKE_SOURCE_DIR}/src/voice/video/VideoCodecFactory.cpp
         ${CMAKE_SOURCE_DIR}/src/voice/video/FrameConverter.cpp
         ${CMAKE_SOURCE_DIR}/src/voice/video/NV12Pack.cpp
+        # The platform-free halves of the Android MediaCodec backend:
+        # buffer geometry and Annex-B inspection. Unconditional, exactly
+        # like NV12Pack.cpp above — they touch no NDK header, and a Mac
+        # or a Linux runner is the ONLY place they get executed at all,
+        # since the Android job builds no tests and there is no device in
+        # CI. Guarding them behind if(ANDROID) would mean shipping the
+        # riskiest arithmetic in the port with zero coverage.
+        ${CMAKE_SOURCE_DIR}/src/voice/video/MediaCodecLayout.cpp
+        ${CMAKE_SOURCE_DIR}/src/voice/video/MediaCodecAnnexB.cpp
     )
     # PeerCaps.h parses the caps JSON, so the negotiation cases need the
     # same header-only json the app builds against.
@@ -1323,6 +1332,20 @@ if(BSFCHAT_ENABLE_VOICE)
             BSFCHAT_HAVE_MEDIAFOUNDATION)
         target_link_libraries(test_mobile_video PRIVATE
             mfplat mfuuid mf mfreadwrite wmcodecdspuuid ole32 oleaut32)
+    elseif(ANDROID)
+        # Mirrors the ANDROID arm of the top-level chain. Not reached by
+        # any CI job today — the Android workflow passes
+        # -DGAMECHAT_CLIENT_BUILD_TESTS=OFF and a hosted runner has no
+        # device — but the #error at the top of test_mobile_video.cpp
+        # fires the moment someone turns tests on for Android, and this
+        # is the arm it is telling them to write. MediaCodecLayout.cpp
+        # and MediaCodecAnnexB.cpp are already in the source list above.
+        target_sources(test_mobile_video PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MediaCodecEncoder.cpp
+            ${CMAKE_SOURCE_DIR}/src/voice/video/MediaCodecDecoder.cpp)
+        target_compile_definitions(test_mobile_video PRIVATE
+            BSFCHAT_HAVE_MEDIACODEC)
+        target_link_libraries(test_mobile_video PRIVATE mediandk log)
     endif()
     if(BSFCHAT_HAVE_AOM)
         target_sources(test_mobile_video PRIVATE
