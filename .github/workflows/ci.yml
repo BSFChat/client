@@ -1371,6 +1371,56 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Apple refuses an upload built against an SDK older than iOS 26:
+      #
+      #   Validation failed. SDK version issue. This app was built with
+      #   the iOS 18.5 SDK. All iOS and iPadOS apps must be built with
+      #   the iOS 26 SDK or later, included in Xcode 26 or later, in
+      #   order to be uploaded to App Store Connect.
+      #
+      # The runner image ships several Xcodes and DEFAULTS TO 16.4,
+      # whose SDK is iOS 18.5 — so doing nothing here produced an
+      # archive that built, signed and exported perfectly and was then
+      # rejected at the last step, which is the most expensive place to
+      # find out.
+      #
+      # Chooses the newest Xcode 26.x present rather than pinning an
+      # exact version: the image rotates these (26.0.1, 26.1.1, 26.2,
+      # 26.3 at the time of writing) and a hard pin would break on the
+      # next rotation, in this same expensive way. Sorted with `sort -V`
+      # so 26.10 would beat 26.9.
+      #
+      # Fails loudly if no Xcode 26 exists rather than silently falling
+      # back to the default — a silent fallback is exactly how the
+      # rejection above reached Apple.
+      - name: Select Xcode 26 (iOS 26 SDK — required for upload)
+        run: |
+          set -euo pipefail
+          XC=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "${XC:-}" ]; then
+            echo "::error::No Xcode 26 on this runner. Apple requires the" \
+                 "iOS 26 SDK or later for App Store Connect uploads, and" \
+                 "the image default is too old. Available:"
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Selected $XC"
+          "$XC/Contents/Developer/usr/bin/xcodebuild" -version
+          # Assert the SDK actually is >= 26, rather than trusting the
+          # app bundle's name to describe what is inside it.
+          SDK=$("$XC/Contents/Developer/usr/bin/xcodebuild" -showsdks \
+                | sed -n 's/.*-sdk iphoneos\([0-9][0-9.]*\).*/\1/p' \
+                | sort -V | tail -1)
+          echo "Newest iphoneos SDK in this Xcode: ${SDK:-none}"
+          case "${SDK:-0}" in
+            2[6-9]*|[3-9][0-9]*) ;;
+            *) echo "::error::Xcode at $XC provides iphoneos SDK" \
+                    "'${SDK:-none}', which is below the iOS 26 Apple" \
+                    "requires for uploads."
+               exit 1 ;;
+          esac
+
       # Same grammar as the build job's "Derive version", plus one extra
       # output. CFBundleVersion must STRICTLY INCREASE across uploads
       # for a given CFBundleShortVersionString, and a number is burned
