@@ -1,17 +1,27 @@
 <?xml version="1.0"?>
 <!--
-  Application id: com.bsfchat.app.
+  Application id: NOT set here. Deliberately.
 
   Google Play locks the application id PERMANENTLY at first upload —
-  it can never be changed for the life of the listing. It therefore
-  has to match BSFCHAT_BUNDLE_ID (CMakeLists.txt) before anything is
-  pushed to the Play Console, not after.
+  it can never be changed for the life of the listing. The single
+  source of truth is BSFCHAT_BUNDLE_ID in CMakeLists.txt, which
+  reaches androiddeployqt as the QT_ANDROID_PACKAGE_NAME target
+  property and lands in gradle.properties as androidPackageName; AGP 8
+  takes the namespace from there.
 
-  This `package` attribute is how Qt 6.5-era androiddeployqt (AGP
-  7.x) learns the id. AGP 8 (Qt 6.8+) ignores it and reads
-  `namespace` out of gradle.properties instead, which is why
-  CMakeLists.txt also sets QT_ANDROID_PACKAGE_NAME on Qt >= 6.8.
-  Both must stay in sync; the CI job asserts the built artefact's id.
+  There used to be a `package="com.bsfchat.app"` attribute on the
+  manifest element below, described as a belt-and-braces default for
+  Qt 6.5-era androiddeployqt (AGP 7.x). It was not a default. Verified
+  by building: androiddeployqt 6.10 prefers this attribute OVER the
+  deployment settings, so its presence made -DBSFCHAT_BUNDLE_ID a
+  no-op on Android and a debug sideload collided with a release
+  install rather than sitting beside it. Do not put it back — adding
+  it silently overrides the build.
+
+  (Consequence: nothing here carries the id, so a Qt older than 6.8,
+  which does not read QT_ANDROID_PACKAGE_NAME, would produce
+  org.qtproject.example.bsfchat_app. CMakeLists.txt makes that a hard
+  configure error, and the CI job asserts the built artefact's id.)
 
   Note the Java classes stay in package com.bsfchat.client. The
   application id and the Java package are independent, no app-level
@@ -34,7 +44,6 @@
   Gradle ever sees it, so no comment in it may contain a double dash.)
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.bsfchat.app"
     android:installLocation="auto"
     android:versionCode="-- %%INSERT_VERSION_CODE%% --"
     android:versionName="-- %%INSERT_VERSION_NAME%% --">

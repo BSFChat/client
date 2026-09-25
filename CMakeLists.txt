@@ -553,20 +553,52 @@ if(ANDROID)
     # it is derived from the same BSFCHAT_BUNDLE_ID the macOS bundle
     # uses rather than being spelled out twice.
     #
-    # Two mechanisms because androiddeployqt changed under us:
-    #   Qt <= 6.7 / AGP 7.x — reads the `package` attribute out of
-    #       android/AndroidManifest.xml. Nothing to set here.
-    #   Qt >= 6.8 / AGP 8.x — the manifest `package` attribute is
-    #       ignored (AGP 8 took the namespace out of the manifest);
-    #       androiddeployqt writes gradle.properties' androidPackageName
-    #       from the QT_ANDROID_PACKAGE_NAME property instead.
-    # Setting both keeps one source of truth across the Qt bump that
-    # CI is already mid-way through (desktop is on 6.10, the local
-    # Android SDK install is still 6.5.3).
-    if(QT_VERSION VERSION_GREATER_EQUAL 6.8)
-        set_property(TARGET bsfchat-app PROPERTY
-            QT_ANDROID_PACKAGE_NAME "${BSFCHAT_BUNDLE_ID}")
+    # ONE mechanism, deliberately. androiddeployqt (6.10) resolves the
+    # id in this order, verified by building and reading the artefact:
+    #
+    #   1. the `package` attribute of the AndroidManifest.xml in
+    #      QT_ANDROID_PACKAGE_SOURCE_DIR, if present — it WINS,
+    #   2. otherwise android-package-name from the deployment settings,
+    #      i.e. this property,
+    #   3. otherwise `org.qtproject.example.<target>`.
+    #
+    # So the `package` attribute android/AndroidManifest.xml used to
+    # carry was not the belt-and-braces default its comment claimed: it
+    # was an override that made -DBSFCHAT_BUNDLE_ID a no-op on Android
+    # (a debug sideload collided with a release install instead of
+    # sitting beside it). It has been removed; AGP 8 takes the
+    # namespace from gradle.properties' androidPackageName, which
+    # androiddeployqt writes from the property below.
+    #
+    # That makes this property the ONLY thing standing between a build
+    # and step 3, so the two guards below are not ceremony:
+    #
+    #   * The version variable is `Qt6_VERSION` — the name
+    #     find_package(Qt6) actually sets, and the one the QTP0004
+    #     guard further up uses. This was written `QT_VERSION` until
+    #     2026-09-25, which find_package does NOT set; an empty string
+    #     compares false against every version, so the property was
+    #     never set at all. Rather than repeat a silent comparison, the
+    #     floor is now asserted and the property set unconditionally.
+    #   * Qt < 6.8 has no mechanism left now the manifest attribute is
+    #     gone, and is below the floor minSdk 28 implies anyway, so it
+    #     is a hard error rather than a quiet fallback.
+    if(NOT Qt6_VERSION)
+        message(FATAL_ERROR
+            "Qt6_VERSION is empty after find_package(Qt6) — the variable "
+            "name is wrong. Refusing to configure: the Android application "
+            "id is derived from it and Play locks that id permanently.")
     endif()
+    if(Qt6_VERSION VERSION_LESS 6.8)
+        message(FATAL_ERROR
+            "Qt ${Qt6_VERSION} cannot build this for Android: 6.8 is the "
+            "floor (minSdk 28), and below it androiddeployqt has no way to "
+            "learn the application id now that android/AndroidManifest.xml "
+            "no longer hardcodes a package attribute — the APK would come "
+            "out as org.qtproject.example.bsfchat_app.")
+    endif()
+    set_property(TARGET bsfchat-app PROPERTY
+        QT_ANDROID_PACKAGE_NAME "${BSFCHAT_BUNDLE_ID}")
 
     # SDK levels. Both are overridable so a machine whose SDK manager
     # only has an older platform installed can still produce a

@@ -1146,7 +1146,12 @@ jobs:
           # artefact, not off the source or off their memory of the tag.
           VC=$(echo "$BADGING" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")
           VN=$(echo "$BADGING" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
-          MIN=$(echo "$BADGING" | sed -n "s/^sdkVersion:'\([^']*\)'.*/\1/p" | head -1)
+          # aapt2 from build-tools 36 prints this as `minSdkVersion:'28'`;
+          # older ones printed a bare `sdkVersion:'28'`. Accept either —
+          # this one is display-only (the table below), but a blank cell
+          # is exactly the sort of thing a human reconciling the Console
+          # by hand should not have to guess at.
+          MIN=$(echo "$BADGING" | sed -n "s/^\(min\)\{0,1\}[sS]dkVersion:'\([^']*\)'.*/\2/p" | head -1)
           {
             echo "### Android artefact"
             echo ""

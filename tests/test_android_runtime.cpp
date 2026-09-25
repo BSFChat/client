@@ -121,6 +121,9 @@ private slots:
     // --- no sensor permission prompts at launch --------------------------
     void noMediaBackendIsBroughtUpInAConstructor();
     void audioInputEnumerationIsGatedOnTheMicPermission();
+
+    // --- application id (Play locks it permanently) ----------------------
+    void applicationIdComesOnlyFromTheBuild();
 };
 
 void TestAndroidRuntime::initTestCase()
@@ -576,6 +579,91 @@ void TestAndroidRuntime::audioInputEnumerationIsGatedOnTheMicPermission()
     // only runs once the permission has been asked for properly.
     const QString engine = code(readAll(srcDir() + "/voice/AudioEngine.cpp"));
     QVERIFY(engine.contains(QStringLiteral("QMediaDevices::audioInputs()")));
+}
+
+// ------------------------------------------------- application id
+
+// The one thing in this file that is irreversible if it goes wrong: Google
+// Play binds the application id to the listing FOREVER at first upload.
+//
+// androiddeployqt 6.10 resolves the id in this order (established by
+// building and reading the artefact with `aapt2 dump badging`, not by
+// reading Qt's docs):
+//
+//   1. the `package` attribute of the manifest in
+//      QT_ANDROID_PACKAGE_SOURCE_DIR, if present — it WINS,
+//   2. otherwise android-package-name from the deployment settings, which
+//      is the QT_ANDROID_PACKAGE_NAME target property,
+//   3. otherwise org.qtproject.example.<target>.
+//
+// Two ways that goes wrong, one of which shipped:
+//
+//   * A `package` attribute in android/AndroidManifest.xml overrides the
+//     build. It was there, described in a comment as a harmless default
+//     for old androiddeployqt, and it silently made -DBSFCHAT_BUNDLE_ID a
+//     no-op: a debug sideload came out as com.bsfchat.app and collided
+//     with a release install instead of sitting beside it.
+//   * The QT_ANDROID_PACKAGE_NAME property is guarded on a Qt version. It
+//     was guarded on `QT_VERSION`, which find_package(Qt6) does not set —
+//     the variable is `Qt6_VERSION`. An empty string compares false
+//     against every version, so the property was never set. With the
+//     manifest attribute now gone, that same mistake would not go
+//     unnoticed, it would produce org.qtproject.example.bsfchat_app.
+//
+// Neither is visible in a build log. Both are visible here.
+void TestAndroidRuntime::applicationIdComesOnlyFromTheBuild()
+{
+    const QString m = readAll(androidDir() + "/AndroidManifest.xml");
+    QVERIFY(!m.isEmpty());
+
+    // 1. No element in the manifest may carry a package attribute.
+    //    XML comments are stripped first: the comment above the manifest
+    //    element quotes the removed attribute verbatim, on purpose, so
+    //    that a future reader knows not to add it back. The lookbehind
+    //    then keeps `android:package=` or a `-package=` from matching, so
+    //    only a real `package=` attribute trips this.
+    QString markup = m;
+    static const QRegularExpression xmlComment(
+        QStringLiteral("<!--.*?-->"),
+        QRegularExpression::DotMatchesEverythingOption);
+    markup.remove(xmlComment);
+    static const QRegularExpression pkgAttr(
+        QStringLiteral("(?<![\\w:-])package\\s*=\\s*\""));
+    QVERIFY2(!markup.contains(pkgAttr),
+             "android/AndroidManifest.xml carries a package= attribute. "
+             "androiddeployqt prefers it over QT_ANDROID_PACKAGE_NAME, so "
+             "it overrides -DBSFCHAT_BUNDLE_ID and the application id stops "
+             "coming from the build. Remove it.");
+
+    const QString cmake = readAll(srcDir() + "/../CMakeLists.txt");
+    QVERIFY(!cmake.isEmpty());
+
+    // 2. The property is set, from BSFCHAT_BUNDLE_ID and nothing else.
+    QVERIFY2(cmake.contains(QStringLiteral(
+                 "QT_ANDROID_PACKAGE_NAME \"${BSFCHAT_BUNDLE_ID}\"")),
+             "QT_ANDROID_PACKAGE_NAME must be set from BSFCHAT_BUNDLE_ID — "
+             "with no package= in the manifest it is the only thing "
+             "standing between the build and org.qtproject.example.*");
+
+    // 3. ...and it is not gated on a variable find_package(Qt6) never set.
+    //    `QT_VERSION` is empty at that point in the file and every
+    //    comparison against it is false.
+    static const QRegularExpression cmakeComment(QStringLiteral("#[^\n]*"));
+    QString cmakeCode = cmake;
+    cmakeCode.remove(cmakeComment);
+    static const QRegularExpression bareQtVersion(
+        QStringLiteral("(?<![\\w${])QT_VERSION(?![\\w}])"));
+    QVERIFY2(!cmakeCode.contains(bareQtVersion),
+             "CMakeLists.txt tests the CMake variable QT_VERSION, which "
+             "find_package(Qt6) does not set. Use Qt6_VERSION.");
+
+    // 4. The release default is still the id Play has. This is the value a
+    //    Release build with no -DBSFCHAT_BUNDLE_ID produces, and it can
+    //    never change for the life of the listing.
+    QVERIFY2(cmake.contains(
+                 QStringLiteral("set(BSFCHAT_BUNDLE_ID \"com.bsfchat.app\")")),
+             "the Release default application id must stay com.bsfchat.app "
+             "— Play locks it permanently at first upload");
 }
 
 QTEST_GUILESS_MAIN(TestAndroidRuntime)
