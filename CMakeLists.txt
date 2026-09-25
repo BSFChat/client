@@ -1232,6 +1232,16 @@ qt_add_qml_module(bsfchat-app
         # shows. Shared by ConnectionBanner.qml and
         # tests/qml/tst_connectionbanner.qml.
         qml/js/ConnectionBanner.js
+        # Which of the two voice rosters the sidebar shows under a channel —
+        # the sync-folded one, or, for the room we are actually connected to,
+        # the poll-fed one the call header counts. Out of ChannelList.qml so
+        # tests/qml/tst_voicerosterview.qml can pin the rule that stopped the
+        # drawer badging `1` while the header said "2 in call".
+        qml/js/VoiceRosterView.js
+        # What the signed-in-account row says about who you are, so an OIDC
+        # homeserver's opaque subject never renders as the user's handle.
+        # Shared by ChannelList.qml and tests/qml/tst_useridentity.qml.
+        qml/js/UserIdentity.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt

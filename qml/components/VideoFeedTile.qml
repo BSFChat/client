@@ -86,6 +86,30 @@ Rectangle {
 
     readonly property bool isScreen: feed && feed.kind === VideoStage.SCREEN
 
+    // The shape of the picture this tile is actually carrying — width
+    // over height — or 0 while nothing has arrived yet. VoiceRoom reads
+    // it to shrink-wrap the tile to its content instead of leaving the
+    // difference as black inside the tile (VideoStage.fitToAspect).
+    //
+    // `sourceRect`, NOT `contentRect`. They sound interchangeable and
+    // are not: sourceRect is the frame's own rectangle in SOURCE
+    // coordinates and changes only when the stream's resolution does,
+    // while contentRect is where the picture lands in ITEM coordinates
+    // and therefore depends on how big this tile is. Feeding contentRect
+    // to something that decides the tile's size is a binding loop, and a
+    // silent one — QML would settle on whatever value it reached first
+    // and the tile would size itself off stale geometry.
+    //
+    // VideoOutput.orientation is deliberately not consulted: nothing in
+    // this app ever sets it, and a stream that arrives already rotated
+    // reports the rotated rectangle here, which is the shape we want. If
+    // anything ever does set it, this has to fold it in — a 90° rotation
+    // inverts the ratio and the tile would wrap to the wrong shape.
+    readonly property real contentAspect:
+        (output.sourceRect.width > 0 && output.sourceRect.height > 0)
+            ? output.sourceRect.width / output.sourceRect.height
+            : 0
+
     // Our own preview is live as soon as the controller is active — the
     // local sink is already producing frames by then. For a remote peer
     // this is the S-7 distinction: the roster can announce a stream
@@ -166,7 +190,10 @@ Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             width: tile.compact ? Theme.avatar.md : Theme.avatar.xl
             height: width
-            radius: width / 2
+            // Rounded square like every other avatar; the radius tracks the
+            // size band the tile is in, r2 for avatar.md and r3 for avatar.xl,
+            // which is the pairing the rest of the tree already uses.
+            radius: tile.compact ? Theme.r2 : Theme.r3
             color: Theme.senderColor(tile.feed ? tile.feed.userId : "")
             Text {
                 anchors.centerIn: parent
@@ -221,60 +248,22 @@ Rectangle {
         }
     }
 
-    // ── "Nobody is receiving this" ───────────────────────────────────
+    // ── "Nobody is receiving this" — NOT HERE ANY MORE ───────────────
     //
-    // We are capturing but no peer channel is carrying the frames.
-    // `=== false` keeps this hidden on builds whose controller does not
-    // expose `transmitting`.
-    Rectangle {
-        id: notVisibleBadge
-        visible: !tile.compact && tile.feed && tile.feed.isSelf === true
-                 && (tile.isScreen
-                     ? (typeof screenShare !== "undefined" && screenShare
-                        && screenShare.active
-                        && screenShare.transmitting === false)
-                     : (typeof camera !== "undefined" && camera
-                        && camera.active
-                        && camera.transmitting === false))
-        anchors.top: parent.top
-        anchors.left: parent.left
-        anchors.margins: Theme.sp.s3
-        width: notVisibleRow.implicitWidth + Theme.sp.s3 * 2
-        height: 22
-        radius: Theme.r1
-        color: Theme.bg1
-        border.color: Theme.warn
-        border.width: 1
-        Row {
-            id: notVisibleRow
-            anchors.centerIn: parent
-            spacing: Theme.sp.s2
-            Icon {
-                anchors.verticalCenter: parent.verticalCenter
-                name: "bolt"
-                size: 10
-                color: Theme.warn
-            }
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                // Alone in the channel is not a fault, it is an empty
-                // room. Only claim a transmission problem when there is
-                // somebody who should be seeing this.
-                text: {
-                    var s = serverManager.activeServer;
-                    var members = s && s.voiceMembers ? s.voiceMembers.length : 0;
-                    return members <= 1
-                        ? "No one else is in the channel"
-                        : "Not visible to others";
-                }
-                font.family: Theme.fontSans
-                font.pixelSize: 10
-                font.weight: Theme.fontWeight.semibold
-                font.letterSpacing: Theme.trackWide.sm
-                color: Theme.warn
-            }
-        }
-    }
+    // This tile used to carry that warning itself, as a yellow pill
+    // anchored top-left INSIDE the picture. On the owner's iPhone it
+    // came out across the corner of his own live camera preview. It is
+    // now a row above the whole stage, built by VoiceRoom from
+    // VideoStage.transmitWarning(), which is also where the reasoning
+    // and the `=== false` guard now live.
+    //
+    // Do not put it back. Nothing that is a message to the user belongs
+    // over a feed: the identity pill and the hover buttons are chrome
+    // FOR this tile and have earned their corners, but a sentence about
+    // the state of the call has a row of its own and no claim on the
+    // picture. tests/test_qml_hygiene.cpp
+    // (theTransmitWarningIsNotDrawnOnTheVideo) fails if the wording
+    // reappears in this file.
 
     // ── Diagnostics overlay (Settings → Advanced) ────────────────────
     //
@@ -361,17 +350,17 @@ Rectangle {
 
     // ── "Popped out" badge ───────────────────────────────────────────
     //
-    // Top-left, under the "not visible to others" warning when that is
-    // also up (our own feed can be popped out too). Never on a strip
-    // thumbnail: there is no room, and the pop-out window itself is the
-    // more obvious evidence.
+    // Top-left. It used to have to dodge downwards when the "not visible
+    // to others" warning was also up; that warning is a stage row now
+    // (see above), so this corner is its own and the offset is gone.
+    // Never on a strip thumbnail: there is no room, and the pop-out
+    // window itself is the more obvious evidence.
     Rectangle {
         visible: tile.poppedOut && !tile.compact
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.leftMargin: Theme.sp.s3
         anchors.topMargin: Theme.sp.s3
-            + (notVisibleBadge.visible ? 22 + Theme.sp.s2 : 0)
         width: poppedRow.implicitWidth + Theme.sp.s3 * 2
         height: 22
         radius: Theme.r1

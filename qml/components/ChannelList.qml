@@ -4,6 +4,8 @@ import QtQuick.Layouts
 import QtQuick.Window
 import BSFChat
 import "../js/ChannelSelection.js" as ChannelSelection
+import "../js/VoiceRosterView.js" as VoiceRosterView
+import "../js/UserIdentity.js" as UserIdentity
 
 Rectangle {
     id: channelListRoot
@@ -1218,6 +1220,45 @@ Rectangle {
                                     height: channelItemContent.implicitHeight + 4
 
                                     readonly property int channelIndex: index
+
+                                    // The people in this voice channel — the
+                                    // ONE list both the count badge and the
+                                    // nested participant rows are drawn from.
+                                    //
+                                    // For every channel but the one we are
+                                    // connected to this is simply the room
+                                    // model's sync-folded roster, exactly as
+                                    // it always was. For that one it is the
+                                    // poll-fed roster the call header counts,
+                                    // because the drawer was photographed
+                                    // badging `1` and omitting the local user
+                                    // while the header said "2 in call".
+                                    // VoiceRosterView.js has which source is
+                                    // authoritative and why, and is explicit
+                                    // about the delivery question this does
+                                    // NOT answer.
+                                    //
+                                    // Computed once here rather than at each
+                                    // of the three use sites: the badge's
+                                    // visibility, its number and the list
+                                    // below have to be the same vector or the
+                                    // count starts disagreeing with the names
+                                    // underneath it — the invariant
+                                    // RoomListModel keeps for its own roster
+                                    // and the one VoiceParticipantList.qml's
+                                    // header promises.
+                                    readonly property var voiceRoster: {
+                                        var s = serverManager.activeServer;
+                                        return VoiceRosterView.rosterFor({
+                                            roomId: modelData.roomId || "",
+                                            activeVoiceRoomId:
+                                                s ? s.activeVoiceRoomId : "",
+                                            connectedRoster:
+                                                s ? s.voiceMembers : [],
+                                            foldedRoster: modelData.voiceMembers
+                                        });
+                                    }
+
                                     // Live mute + unread flags. Gated by
                                     // muteGeneration / unreadGeneration so
                                     // QSettings changes flow into bindings.
@@ -1482,10 +1523,18 @@ Rectangle {
                                                 // Voice participant count pill — subtle
                                                 // bg3 chip with a `users` icon + count.
                                                 // Only shown on voice channels with at
-                                                // least one member; live-updates via
-                                                // voiceMemberCount from the room model.
+                                                // least one member. Sized from
+                                                // channelDelegate.voiceRoster — the same
+                                                // vector the participant rows below are
+                                                // drawn from, never a separately tracked
+                                                // integer. It used to read the room
+                                                // model's voiceMemberCount directly,
+                                                // which is the roster this badge showed
+                                                // `1` from while the call header said
+                                                // "2 in call".
                                                 Rectangle {
-                                                    visible: modelData.isVoice && modelData.voiceMemberCount > 0
+                                                    visible: modelData.isVoice
+                                                             && channelDelegate.voiceRoster.length > 0
                                                     Layout.preferredWidth: voiceCountRow.implicitWidth + 10
                                                     Layout.preferredHeight: 18
                                                     radius: 9
@@ -1513,7 +1562,7 @@ Rectangle {
                                                         }
                                                         Text {
                                                             anchors.verticalCenter: parent.verticalCenter
-                                                            text: modelData.voiceMemberCount
+                                                            text: channelDelegate.voiceRoster.length
                                                             font.family: Theme.fontMono
                                                             font.pixelSize: 11
                                                             font.weight: Theme.fontWeight.semibold
@@ -1535,7 +1584,7 @@ Rectangle {
                                             // visible before you join.
                                             VoiceParticipantList {
                                                 width: parent.width
-                                                participants: modelData.voiceMembers || []
+                                                participants: channelDelegate.voiceRoster
                                                 connection: serverManager.activeServer
                                             }
                                         }
@@ -2071,8 +2120,18 @@ Rectangle {
                             Layout.fillWidth: true
                             spacing: 0
 
+                            // Both lines go through UserIdentity so the row
+                            // never renders a truncated OIDC subject as if it
+                            // were the user's handle — see that file for the
+                            // whole argument and for where the full mxid
+                            // still lives (the account menu below, and
+                            // Settings → Account → USER ID).
                             Text {
-                                text: serverManager.activeServer ? serverManager.activeServer.displayName : ""
+                                text: serverManager.activeServer
+                                    ? UserIdentity.accountTitle(
+                                          serverManager.activeServer.userId,
+                                          serverManager.activeServer.displayName)
+                                    : ""
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.md
                                 font.weight: Theme.fontWeight.semibold
@@ -2082,11 +2141,21 @@ Rectangle {
                             }
 
                             Text {
-                                text: serverManager.activeServer ? serverManager.activeServer.userId : ""
+                                text: serverManager.activeServer
+                                    ? UserIdentity.accountSubtitle(
+                                          serverManager.activeServer.userId)
+                                    : ""
                                 font.family: Theme.fontMono
                                 font.pixelSize: Theme.fontSize.xs
                                 color: Theme.fg3
-                                elide: Text.ElideRight
+                                // Middle, not right. Whatever ends up here is
+                                // worth more at its ends than at its start: a
+                                // handle that does not fit is still recognised
+                                // from "@josh…:bsfchat.com", and eliding right
+                                // is what produced "@oidc_fe982c2…" in the
+                                // first place.
+                                elide: Text.ElideMiddle
+                                visible: text.length > 0
                                 Layout.fillWidth: true
                             }
                         }

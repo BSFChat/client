@@ -62,6 +62,7 @@
 #include <QFile>
 #include <QRegularExpression>
 #include <QSet>
+#include <cmath>
 
 namespace {
 
@@ -127,6 +128,85 @@ int lineOf(const QString& src, qsizetype offset)
     return static_cast<int>(QStringView(src).left(offset).count(QLatin1Char('\n'))) + 1;
 }
 
+// ─── Colour maths, for the sender-palette rule below ────────────────────
+//
+// Two different questions are asked of those swatches and they need two
+// different spaces, which is the whole reason this is here rather than a
+// pair of hex comparisons.
+//
+//   * "can it be read?" is WCAG relative luminance, which is what an
+//     accessibility audit and an App Store reviewer measure;
+//   * "can it be told apart from that one?" is OKLab, because sRGB distance
+//     says two blues are far apart and two yellows are close when a reader
+//     sees the opposite.
+//
+// A palette level in one is NOT level in the other — WCAG weights green
+// about ten times as heavily as blue — so neither substitutes for the other.
+struct Rgb { double r, g, b; };
+
+bool parseHexColor(const QString& hex, Rgb* out)
+{
+    static const QRegularExpression re(QStringLiteral("^#([0-9a-fA-F]{6})$"));
+    const auto m = re.match(hex);
+    if (!m.hasMatch()) return false;
+    bool ok = false;
+    const uint v = m.captured(1).toUInt(&ok, 16);
+    if (!ok) return false;
+    out->r = ((v >> 16) & 0xFF) / 255.0;
+    out->g = ((v >> 8) & 0xFF) / 255.0;
+    out->b = (v & 0xFF) / 255.0;
+    return true;
+}
+
+double toLinear(double c)
+{
+    return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+}
+
+double relativeLuminance(const Rgb& c)
+{
+    return 0.2126 * toLinear(c.r) + 0.7152 * toLinear(c.g) + 0.0722 * toLinear(c.b);
+}
+
+double contrastRatio(const Rgb& a, const Rgb& b)
+{
+    const double la = relativeLuminance(a), lb = relativeLuminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+struct Oklab { double L, a, b; };
+
+Oklab toOklab(const Rgb& c)
+{
+    const double r = toLinear(c.r), g = toLinear(c.g), bl = toLinear(c.b);
+    const double l = std::cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * bl);
+    const double m = std::cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * bl);
+    const double s = std::cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * bl);
+    return { 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+             1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+             0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s };
+}
+
+double chroma(const Oklab& c) { return std::hypot(c.a, c.b); }
+
+double hueDegrees(const Oklab& c)
+{
+    double h = std::atan2(c.b, c.a) * 180.0 / M_PI;
+    return h < 0 ? h + 360.0 : h;
+}
+
+double hueSeparation(const Oklab& x, const Oklab& y)
+{
+    const double d = std::fabs(hueDegrees(x) - hueDegrees(y));
+    return std::min(d, 360.0 - d);
+}
+
+double deltaE(const Oklab& x, const Oklab& y)
+{
+    return std::sqrt((x.L - y.L) * (x.L - y.L) + (x.a - y.a) * (x.a - y.a)
+                     + (x.b - y.b) * (x.b - y.b));
+}
+
 } // namespace
 
 class QmlHygieneTest : public QObject {
@@ -152,6 +232,286 @@ private slots:
         QVERIFY2(offenders.isEmpty(),
                  qPrintable(QStringLiteral("signal-handler-shaped theme tokens (rename them): ")
                             + offenders.join(QStringLiteral(", "))));
+    }
+
+    // Two people in a channel must not be the same colour, and every colour
+    // must be readable on the surface it is drawn on.
+    //
+    // The store screenshots showed four different people whose names all read
+    // as "red": two #e5534b and two #f47067. That was the palette, not the
+    // hash. In OKLCH the old ten were #f47067 at hue 26 deg and #e5534b at 27,
+    // #e0823d at 54 and #f69d50 at 59 — two pairs differing only in
+    // LIGHTNESS at one hue, which is the axis a reader does not name; both
+    // members of such a pair are simply "red". A tenth entry (#768390) had
+    // chroma 0.025, i.e. was grey, and so was indistinguishable from the fg2
+    // secondary text beside it.
+    //
+    // Hex strings are not eyeballed in review and "these two are both
+    // reddish" is not a thing a reviewer reliably notices, so the property is
+    // measured here instead. Thresholds are set well below what the shipped
+    // palette achieves (35 deg separation, dE 0.059) and well above what the
+    // old one did (0.4 deg, dE 0.035): this is a floor for "somebody can tell
+    // these apart", not a restatement of the current values, and re-tuning
+    // the palette should not require touching it.
+    //
+    // Both arrays are read out of Theme.qml along with bg0, so the rule
+    // re-evaluates itself if the surfaces are ever re-themed underneath it.
+    void senderColoursAreTellableApartAndLegible()
+    {
+        const QString src = readAll(QStringLiteral(BSFCHAT_QML_DIR "/theme/Theme.qml"));
+        QVERIFY2(!src.isEmpty(), "Theme.qml not found");
+
+        // bg0: what the timeline and the channel drawer both paint, so it is
+        // what a sender name and an avatar swatch are read against.
+        static const QRegularExpression bgRe(
+            QStringLiteral(R"RX(property\s+color\s+bg0\s*:\s*isDark\s*\?\s*"(#[0-9a-fA-F]{6})"\s*:\s*"(#[0-9a-fA-F]{6})")RX"));
+        const auto bgM = bgRe.match(src);
+        QVERIFY2(bgM.hasMatch(), "could not read bg0 out of Theme.qml");
+        Rgb bg[2];
+        QVERIFY(parseHexColor(bgM.captured(1), &bg[0]));   // dark
+        QVERIFY(parseHexColor(bgM.captured(2), &bg[1]));   // light
+
+        const qsizetype at = src.indexOf(QLatin1String("property var senderColors"));
+        QVERIFY2(at >= 0, "senderColors not found in Theme.qml");
+        static const QRegularExpression arrayRe(QStringLiteral(R"(\[([^\]]*)\])"));
+        static const QRegularExpression swatchRe(QStringLiteral(R"(#[0-9a-fA-F]{6})"));
+
+        QList<QStringList> palettes;
+        auto it = arrayRe.globalMatch(src, at);
+        while (it.hasNext() && palettes.size() < 2) {
+            QStringList one;
+            for (auto sw = swatchRe.globalMatch(it.next().captured(1)); sw.hasNext();)
+                one << sw.next().captured(0);
+            palettes << one;
+        }
+        QCOMPARE(palettes.size(), 2);
+
+        // Same length in both themes, or `senderColor()`'s `hash % length`
+        // lands on a different index in dark and light and a user's colour
+        // changes when they flip the theme. The hash is supposed to be the
+        // one thing about this that is stable.
+        QCOMPARE(palettes[0].size(), palettes[1].size());
+        QVERIFY2(palettes[0].size() >= 8,
+                 qPrintable(QStringLiteral("only %1 sender colours").arg(palettes[0].size())));
+
+        const QStringList themeName{ QStringLiteral("dark"), QStringLiteral("light") };
+        QStringList problems;
+        for (int t = 0; t < 2; ++t) {
+            QList<Oklab> lab;
+            for (const QString& hex : palettes[t]) {
+                Rgb c;
+                if (!parseHexColor(hex, &c)) { problems << hex + " is not #rrggbb"; continue; }
+                lab << toOklab(c);
+
+                // Readable as a sender name on bg0, and as `onAccent`
+                // initials on the same fill used as an avatar background.
+                const double cr = contrastRatio(c, bg[t]);
+                if (cr < 4.5)
+                    problems << QStringLiteral("%1 %2 contrast %3 on bg0 (need 4.5)")
+                                    .arg(themeName[t], hex).arg(cr, 0, 'f', 2);
+
+                // A swatch with no chroma is a grey, which reads as disabled
+                // text rather than as somebody's colour — and leaves its hue
+                // meaningless, so the separation check below cannot see it.
+                const double ch = chroma(lab.last());
+                if (ch < 0.05)
+                    problems << QStringLiteral("%1 %2 chroma %3 is grey (need 0.05)")
+                                    .arg(themeName[t], hex).arg(ch, 0, 'f', 3);
+            }
+            for (int i = 0; i < lab.size(); ++i) {
+                for (int j = i + 1; j < lab.size(); ++j) {
+                    const double hs = hueSeparation(lab[i], lab[j]);
+                    const double de = deltaE(lab[i], lab[j]);
+                    if (hs < 25.0)
+                        problems << QStringLiteral("%1 %2 and %3 are %4 deg apart in hue (need 25)")
+                                        .arg(themeName[t], palettes[t][i], palettes[t][j])
+                                        .arg(hs, 0, 'f', 1);
+                    if (de < 0.05)
+                        problems << QStringLiteral("%1 %2 and %3 are dE %4 apart (need 0.05)")
+                                        .arg(themeName[t], palettes[t][i], palettes[t][j])
+                                        .arg(de, 0, 'f', 3);
+                }
+            }
+        }
+        QVERIFY2(problems.isEmpty(),
+                 qPrintable(QStringLiteral("sender palette:\n  ")
+                            + problems.join(QStringLiteral("\n  "))));
+    }
+
+    // A history shorter than the viewport has to sit on the composer.
+    //
+    // Five messages rendered against the header with ~900pt of dead space
+    // below them, on the phone the store screenshots were taken on. A
+    // ListView lays out from the top and `positionViewAtEnd()` cannot help:
+    // with contentHeight below the viewport height there is no scroll range,
+    // so the end and the start are the same position. MessageView takes the
+    // slack up as the flickable's top margin instead.
+    //
+    // Two call sites, neither of which a value test can see — the QML test
+    // beside this one (tests/qml/tst_timelineoverlay.qml) proves the margin
+    // does what it claims on a real ListView, but it builds a replica,
+    // because MessageView.qml imports the BSFChat module and no test binary
+    // can instantiate it. This is what keeps the replica and the real file
+    // in agreement.
+    void theTimelineBottomAnchorsAShortHistory()
+    {
+        const QString src = withoutComments(
+            readAll(QStringLiteral(BSFCHAT_QML_DIR "/components/MessageView.qml")));
+        QVERIFY2(!src.isEmpty(), "MessageView.qml not found");
+
+        QVERIFY2(src.contains(QLatin1String("topMargin: TimelineOverlay.bottomAnchorSlack(")),
+                 "the message ListView no longer pads itself by the bottom-anchor slack, "
+                 "so a channel with a few messages in it renders them against the header "
+                 "with dead space down to the composer");
+
+        // `_jumpToEnd` runs on every count change. Its old un-scrollable
+        // branch assigned `contentY = originY`, which with a top margin is
+        // one whole margin ABOVE where the list rests: it pulled the rows
+        // back under the header and put the gap straight back the moment
+        // anybody said anything.
+        QVERIFY2(src.contains(QLatin1String("TimelineOverlay.restingContentY(")),
+                 "_jumpToEnd no longer routes through restingContentY");
+        static const QRegularExpression bareJump(
+            QStringLiteral(R"(contentY\s*=\s*originY\s*;)"));
+        QVERIFY2(!src.contains(bareJump),
+                 "`contentY = originY` ignores the bottom-anchor top margin and undoes it");
+
+        // The margin assumes rows run downward from index 0. Flipping to
+        // BottomToTop is the other way to bottom-anchor a list, and it
+        // inverts the sign of every scroll statement in this file — the
+        // pagination trigger, the originY term in _isAtEnd(), the jump
+        // target, the prepend anchor. If somebody does take that route they
+        // have to remove the margin in the same change, and this says so.
+        QVERIFY2(src.contains(QLatin1String("verticalLayoutDirection: ListView.TopToBottom")),
+                 "the timeline's layout direction changed; the bottom-anchor top margin "
+                 "above it is written for TopToBottom and must be revisited with it");
+    }
+
+    // One avatar shape across the app.
+    //
+    // Message-list avatars were circles (`radius: 20` on a 40x40) while the
+    // drawer, the member list and the voice strip drew rounded squares, so
+    // the same person was two different shapes on one screen. The rounded
+    // square wins on weight of precedent — fourteen of the eighteen
+    // `Theme.senderColor` fills already used a Theme.r* token, and
+    // UserSettings.qml states the choice outright ("64x64 rounded-square ...
+    // instead of a circle").
+    //
+    // Only fills that are avatars (`Theme.senderColor`) are in scope. Circles
+    // elsewhere — presence dots, the pill on the load-older button — are not
+    // avatars and are left alone.
+    void avatarSwatchesAreRoundedSquaresNotCircles()
+    {
+        // `radius: <expr> / 2` and `radius: N` where the width is 2N are the
+        // two ways to write a circle; both are looked for, on the nearest
+        // `radius:` above the fill.
+        static const QRegularExpression radiusRe(QStringLiteral(R"(radius\s*:\s*([^\n]*))"));
+        static const QRegularExpression halved(QStringLiteral(R"(/\s*2\s*$)"));
+        static const QRegularExpression bareInt(QStringLiteral(R"(^\d+$)"));
+        static const QRegularExpression widthRe(QStringLiteral(R"(width\s*:\s*(\d+)\b)"));
+
+        QStringList offenders;
+        const QStringList qml = filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
+                                           QStringLiteral("*.qml"));
+        QVERIFY2(!qml.isEmpty(), "no QML found under BSFCHAT_QML_DIR");
+
+        for (const QString& path : qml) {
+            const QString src = withoutComments(readAll(path));
+            const QString name = QFileInfo(path).fileName();
+            qsizetype from = 0;
+            for (;;) {
+                const qsizetype at = src.indexOf(QLatin1String("Theme.senderColor("), from);
+                if (at < 0) break;
+                from = at + 1;
+
+                // The declaration this fill belongs to starts somewhere just
+                // above it; 400 characters covers a Rectangle's geometry
+                // block without reaching the previous sibling.
+                const qsizetype start = std::max<qsizetype>(0, at - 400);
+                const QString window = src.mid(start, at - start);
+
+                QString radius;
+                for (auto it = radiusRe.globalMatch(window); it.hasNext();)
+                    radius = it.next().captured(1).trimmed();
+                if (radius.isEmpty()) continue;   // a square; nothing to say
+
+                bool circular = radius.contains(halved);
+                if (!circular && bareInt.match(radius).hasMatch()) {
+                    QString w;
+                    for (auto it = widthRe.globalMatch(window); it.hasNext();)
+                        w = it.next().captured(1);
+                    circular = !w.isEmpty() && w.toInt() == radius.toInt() * 2;
+                }
+                if (circular)
+                    offenders << QStringLiteral("%1:%2  radius: %3")
+                                     .arg(name).arg(lineOf(src, at)).arg(radius);
+            }
+        }
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "avatar swatches drawn as circles (use a Theme.r* token — the rest "
+                     "of the app draws rounded squares):\n  ")
+                     + offenders.join(QStringLiteral("\n  "))));
+    }
+
+    // The signed-in-account row must not render the raw mxid.
+    //
+    // Accounts here come from OIDC, so every localpart is the provider's
+    // opaque subject. The drawer's account row bound straight to
+    // `serverManager.activeServer.userId` with `elide: Text.ElideRight` in a
+    // 240px sidebar, and every user of this server saw
+    //
+    //     test
+    //     @oidc_fe982c2...
+    //
+    // in the corner of every screen. Eliding right is the worst cut
+    // available: it keeps the meaningless prefix and throws away the domain.
+    //
+    // The mxid is not being hidden — the account menu one tap away on that
+    // same row shows it in full and unelided, and so does Settings ->
+    // Account -> USER ID. Its own comment already called the footer's elided
+    // copy "worse than useless", which is this defect, written down before
+    // the screenshots found it. What is enforced here is that the row goes
+    // through the tested helper instead of formatting an mxid inline again.
+    void theAccountRowNeverShowsARawUserId()
+    {
+        const QString path = QStringLiteral(BSFCHAT_QML_DIR "/components/ChannelList.qml");
+        const QString raw = readAll(path);
+        QVERIFY2(!raw.isEmpty(), "ChannelList.qml not found");
+        const QString src = withoutComments(raw);
+
+        QVERIFY2(src.contains(QLatin1String("js/UserIdentity.js")),
+                 "ChannelList.qml no longer imports UserIdentity.js");
+        QVERIFY2(src.contains(QLatin1String("UserIdentity.accountTitle(")),
+                 "the account row's name line no longer goes through UserIdentity");
+        QVERIFY2(src.contains(QLatin1String("UserIdentity.accountSubtitle(")),
+                 "the account row's second line no longer goes through UserIdentity");
+
+        // The exact shape that shipped: a Text bound straight to the mxid
+        // that then elides it. The account menu's copy is deliberately
+        // unelided and wraps instead, so it is not caught by this and should
+        // not be.
+        const QStringList lines = src.split(QLatin1Char('\n'));
+        QStringList offenders;
+        for (int i = 0; i < lines.size(); ++i) {
+            if (!lines[i].contains(QLatin1String("text:"))) continue;
+            QString binding = lines[i];
+            if (i + 1 < lines.size()) binding += QLatin1Char(' ') + lines[i + 1].trimmed();
+            static const QRegularExpression bare(
+                QStringLiteral(R"(text\s*:[^\n]*activeServer\.userId)"));
+            if (!bare.match(binding).hasMatch()) continue;
+            for (int j = i; j < std::min<int>(i + 8, lines.size()); ++j) {
+                if (lines[j].contains(QLatin1String("elide:"))) {
+                    offenders << QStringLiteral("ChannelList.qml:%1").arg(i + 1);
+                    break;
+                }
+            }
+        }
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "a raw mxid is rendered and then elided (on an OIDC server that is a "
+                     "truncated GUID — route it through UserIdentity, or do not elide):\n  ")
+                     + offenders.join(QStringLiteral("\n  "))));
     }
 
     // moc records a private Q_INVOKABLE but the metaobject does not offer it
@@ -2683,6 +3043,200 @@ private slots:
                          " layout has nothing to stack against; a z here means"
                          " somebody made it an overlay.").arg(who)));
         }
+    }
+
+    // ── Nothing the user has to READ goes on top of a feed ───────────────
+    //
+    // The owner photographed an iPhone 16 Pro Max in a voice channel with
+    // his own camera live, and the yellow "No one else is in the channel"
+    // warning printed across the top-left corner of his own face. It was a
+    // Rectangle inside VideoFeedTile.qml, anchored top/left with a margin,
+    // drawn over the VideoOutput.
+    //
+    // This is the same family of mistake as two that already have rules in
+    // this file — the "No channel selected" empty state painted over live
+    // video (theMobileMainColumnHasExactlyOneWriter) and the connection
+    // banner that had to become a layout row rather than an overlay
+    // (theConnectionBannerIsAShellRow). qml/js/ConnectionBanner.js states
+    // the shared rule outright: "A row and not an overlay: an item anchored
+    // over the column composites over live video."
+    //
+    // The distinction this rule draws, and the reason it is about the
+    // WORDING and not about overlays in general: a tile legitimately draws
+    // chrome in its corners — the identity pill, the hover buttons, the
+    // diagnostics readout, the POPPED OUT badge. Those are controls and
+    // labels FOR that tile, they are small, and a user who wants the
+    // picture can ignore them. A sentence about the state of the call is
+    // not that. It has to be read, it is as wide as the tile, and it is
+    // about the room rather than the feed it happens to land on. It gets a
+    // row.
+    //
+    // So: the two sentences live in the tested .js, VideoFeedTile.qml
+    // contains neither, and VoiceRoom mounts the banner as a row that the
+    // stage is anchored BELOW.
+    void theTransmitWarningIsNotDrawnOnTheVideo()
+    {
+        const QString alone = QStringLiteral("No one else is in the channel");
+        const QString unseen = QStringLiteral("Not visible to others");
+
+        // (a) The wording has one home, and it is the one a test can reach.
+        const QString js = readAll(QStringLiteral(BSFCHAT_QML_DIR
+                                                  "/js/VideoStage.js"));
+        QVERIFY2(!js.isEmpty(), "qml/js/VideoStage.js not found");
+        QVERIFY2(js.contains(alone) && js.contains(unseen),
+                 "VideoStage.js no longer carries the transmit-warning"
+                 " wording. transmitWarning() is where it belongs — it is"
+                 " the only form of it tests/qml/tst_videostage.qml can"
+                 " exercise.");
+
+        // (b) Not in the tile. This is the rule that fails on the commit
+        //     before the fix.
+        const QString tile = withoutComments(
+            readQml(QStringLiteral("/components/VideoFeedTile.qml")));
+        QVERIFY2(!tile.isEmpty(), "VideoFeedTile.qml not found");
+        for (const QString& phrase : { alone, unseen }) {
+            QVERIFY2(!tile.contains(phrase),
+                     qPrintable(QStringLiteral(
+                         "VideoFeedTile.qml contains \"%1\". Everything in"
+                         " that file is drawn ON the video, and this is a"
+                         " sentence about the call, not chrome for one tile —"
+                         " it was photographed lying across the corner of the"
+                         " owner's own live camera preview. It belongs in"
+                         " VideoStage.transmitWarning(), rendered by"
+                         " VoiceRoom as a row above the stage.").arg(phrase)));
+        }
+
+        // (c) And a row it must stay. The stage anchors its top to the
+        //     banner's bottom, which is what makes the stage SHORTER while
+        //     the banner is up instead of covered by it. An anchors.top of
+        //     `parent.top` here means somebody put the banner back on top
+        //     of the stage, which looks identical until there is a feed
+        //     under it.
+        const QString room = withoutComments(
+            readQml(QStringLiteral("/components/VoiceRoom.qml")));
+        QVERIFY2(room.contains(QStringLiteral("VideoStage.transmitWarning(")),
+                 "VoiceRoom.qml no longer asks VideoStage for the transmit"
+                 " warning; the wording has drifted out of the tested file");
+        const QString stage = blockBody(
+            room, QStringLiteral(R"(\bItem\s*\{\s*\n\s*id:\s*feedArea\b)"));
+        QVERIFY2(!stage.isEmpty(),
+                 "could not find feedArea's body in VoiceRoom.qml — this"
+                 " rule has stopped matching the file's shape and needs"
+                 " retargeting rather than deleting");
+        QVERIFY2(stage.contains(QStringLiteral("anchors.top: transmitBanner.bottom")),
+                 "the video stage no longer anchors below the transmit"
+                 " banner. If the banner is not taking height off the stage"
+                 " then it is painting over it, which is the whole defect:"
+                 " an item anchored over live video composites onto it."
+                 " See qml/js/ConnectionBanner.js.");
+    }
+
+    // ── Red on the call bar means destructive, not "on" ──────────────────
+    //
+    // Photographed on the same phone: the camera button was tinted the SAME
+    // red as the disconnect button beside it, while the camera was RUNNING.
+    // Red on a call bar reads as off, muted, or about to end the call.
+    //
+    // The cause was one property doing two opposite jobs. VoiceDock's
+    // DockButton.toggled means "a suppressing state is engaged" and paints
+    // the danger tint, which is right for mute and deafen — and screen-share
+    // and camera were using that same property to say "this capture is
+    // LIVE", which is the opposite kind of fact. There is now a separate
+    // `active` for that, painted with Theme.accent.
+    //
+    // The evidence that this was a trap and not a one-off slip is that the
+    // push-to-talk button had ALREADY hit it and worked around it inline,
+    // with a comment saying it was overriding the red — and, because an
+    // inline `color:` cannot reach the Icon, that button spent its held
+    // state drawing a danger-red glyph on an accent background. A workaround
+    // in one of four buttons is exactly the shape of thing that comes back.
+    //
+    // Mechanical form: no `toggled:` binding in the dock may read the
+    // `.active` of a capture controller. That is precisely the confusion —
+    // a controller's `active` is "this is live", and `toggled` is the
+    // property that paints red.
+    void liveCaptureOnTheCallBarIsNotPaintedDanger()
+    {
+        const QString src = withoutComments(
+            readQml(QStringLiteral("/components/VoiceDock.qml")));
+        QVERIFY2(!src.isEmpty(), "VoiceDock.qml not found");
+
+        // The state exists and is distinct from `toggled`.
+        QVERIFY2(src.contains(QStringLiteral("property bool   active:"))
+                 || src.contains(QStringLiteral("property bool active:")),
+                 "DockButton has no `active` property any more. Without it"
+                 " there is nowhere for \"this capture is live\" to go except"
+                 " `toggled`, which paints the disconnect red.");
+
+        // Fold continuations the way visibleBindings() does: these bindings
+        // routinely wrap after `&&`.
+        const QStringList lines = src.split(QLatin1Char('\n'));
+        for (int i = 0; i < lines.size(); ++i) {
+            if (!lines[i].trimmed().startsWith(QLatin1String("toggled:"))) continue;
+            QString binding = lines[i].trimmed();
+            for (int j = i + 1; j < lines.size(); ++j) {
+                const QString next = lines[j].trimmed();
+                if (!next.startsWith(QLatin1String("&&"))
+                    && !next.startsWith(QLatin1String("||"))) break;
+                binding += QLatin1Char(' ') + next;
+            }
+            for (const char* controller : { "camera.active", "screenShare.active",
+                                            "pttPressed" }) {
+                QVERIFY2(!binding.contains(QLatin1String(controller)),
+                         qPrintable(QStringLiteral(
+                             "a DockButton binds `toggled:` to %1. `toggled`"
+                             " is the danger tint — it means a SUPPRESSING"
+                             " state is engaged, like mute or deafen. A live"
+                             " capture is the opposite kind of fact and wants"
+                             " `active:`, which paints Theme.accent. Binding"
+                             " it here is how the camera button came to wear"
+                             " the same red as the hang-up button next to it"
+                             " while the camera was on. Binding: %2")
+                             .arg(QLatin1String(controller), binding)));
+            }
+        }
+
+        // And the accent must actually be what `active` paints. A future
+        // edit that routes `active` back through Theme.danger would pass
+        // everything above and reinstate the defect exactly.
+        const QString button = blockBody(
+            src, QStringLiteral(R"(\bcomponent DockButton\s*:\s*Rectangle\s*\{)"));
+        QVERIFY2(!button.isEmpty(), "could not read DockButton's body");
+        // Only the arms that name a theme COLOUR. `active` legitimately
+        // drives non-colour properties too — the ring is
+        // `border.width: active ? 1 : 0` — and those have nothing to say
+        // about which colour the state wears.
+        static const QRegularExpression activeBranch(
+            QStringLiteral(R"(active\s*\?\s*([^\n]*))"));
+        int branches = 0;
+        for (auto it = activeBranch.globalMatch(button); it.hasNext();) {
+            const QString arm = it.next().captured(1);
+            if (!arm.contains(QStringLiteral("Theme."))) continue;
+            ++branches;
+            QVERIFY2(!arm.contains(QStringLiteral("Theme.danger")),
+                     qPrintable(QStringLiteral(
+                         "DockButton paints its `active` state with"
+                         " Theme.danger: %1. That is the defect — a live"
+                         " camera must not wear the disconnect colour.")
+                         .arg(arm)));
+            QVERIFY2(arm.contains(QStringLiteral("Theme.accent")),
+                     qPrintable(QStringLiteral(
+                         "DockButton's `active` state is painted with"
+                         " something other than Theme.accent: %1. Accent is"
+                         " what this app already uses for \"this is on\" —"
+                         " see VoiceRoom's header toggles.").arg(arm)));
+        }
+        // Fill and glyph, at least. If the count drops, one of them stopped
+        // distinguishing the state and that half of the button went back to
+        // reading as inactive — or as danger.
+        QVERIFY2(branches >= 2,
+                 qPrintable(QStringLiteral(
+                     "DockButton distinguishes its `active` state in only %1"
+                     " place(s). Both the fill and the icon colour have to"
+                     " say it: the old inline workaround on the PTT button"
+                     " could only reach the fill, which left a danger-red"
+                     " glyph sitting on an accent background.")
+                     .arg(branches)));
     }
 
 private:

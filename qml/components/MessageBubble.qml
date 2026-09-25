@@ -751,7 +751,14 @@ Item {
                 id: senderAvatar
                 width: 40
                 height: 40
-                radius: 20
+                // Rounded square, not a circle. Every other avatar in
+                // the tree is one — UserSettings.qml says so in as many
+                // words ("64x64 rounded-square ... instead of a circle")
+                // and fourteen of the eighteen `Theme.senderColor` fills
+                // already use a Theme.r* token. This was one of the four
+                // that did not, so the same person was a circle in the
+                // timeline and a squircle in the drawer, on one screen.
+                radius: Theme.r2
                 color: Theme.senderColor(bubble.sender)
                 scale: senderAvatarMouse.containsMouse ? 1.06 : 1.0
                 Behavior on scale {

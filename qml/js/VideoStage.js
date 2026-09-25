@@ -266,6 +266,54 @@ function gridCell(index, n, width, height, gap) {
     };
 }
 
+// ── Shrink-wrapping a cell to its picture ────────────────────────────
+//
+// gridCell() hands every feed a cell of the grid's shape, and the tile
+// then aspect-FITS the picture inside it. Whatever is left over is black
+// — and it is black INSIDE the tile, inside its border, under its name
+// pill and its fullscreen button. On a portrait phone showing one
+// landscape screen share that leftover is most of the tile: the owner
+// photographed an iPhone 16 Pro Max where a desktop share was a thin
+// strip of picture across the middle of a tall black rectangle, roughly
+// 60% of the tile drawing nothing. A 1×1 "grid" on a portrait stage is
+// simply the wrong shape for 16:9 content, and gridDims() cannot know
+// that: it assumes TILE_ASPECT for every feed because it is choosing a
+// SHAPE before anything has told it what the pictures actually are.
+//
+// So the leftover is given back. The tile shrinks to the picture's own
+// aspect and centres in the cell it was given, and the space it gives up
+// becomes ordinary stage background instead of tile interior. The grid
+// itself is untouched — same cells, same positions, same choice of
+// columns — which is what keeps this from being a phone fix that
+// rearranges the desktop. All it moves is the tile's own edge.
+//
+// This is NOT cropping and must not become cropping. A screen share is
+// the one feed where every pixel may carry text, and filling a portrait
+// phone with a landscape desktop means throwing away the sides of it.
+// The remaining background above and below a wrapped 16:9 tile on a
+// portrait phone is inherent to showing the whole picture; fullscreen is
+// the answer to wanting more, and there is a control for it.
+//
+// `contentAspect` of 0 means "no frame has arrived yet, we do not know".
+// The cell is then returned unchanged, so the not-yet-live placeholder
+// still centres in the full cell exactly as it did before, and the tile
+// resizes once when the first frame lands.
+function fitToAspect(cell, contentAspect) {
+    if (!cell) return { x: 0, y: 0, width: 0, height: 0 };
+    if (!(contentAspect > 0) || !(cell.width > 0) || !(cell.height > 0))
+        return cell;
+    var w = cell.width;
+    var h = cell.height;
+    if (contentAspect > w / h) h = w / contentAspect;
+    else                       w = h * contentAspect;
+    return {
+        x: cell.x + (cell.width - w) / 2,
+        y: cell.y + (cell.height - h) / 2,
+        width: w,
+        height: h
+    };
+}
+
 // Strip slots. The strip never scrolls: thumbnails shrink to fit so that
 // every feed stays clickable without a hidden overflow, which is the
 // whole point of the strip.
@@ -317,6 +365,55 @@ function focusKeyFor(feeds, selectedKey, hoveredKey) {
 function feedLabel(displayName, kind, isSelf) {
     var who = isSelf ? "You" : (displayName || "?");
     return who + " — " + (kind === SCREEN ? "SCREEN SHARE" : "CAMERA");
+}
+
+// ── "Nobody is receiving this" ───────────────────────────────────────
+//
+// We are capturing, and no peer channel is carrying the frames. Either
+// there is nobody there to carry them to, or there is and the transport
+// is not doing it — a real difference, and the wording is the only place
+// the user is told which.
+//
+// THIS USED TO BE DRAWN ON THE PICTURE. It was a Rectangle inside
+// VideoFeedTile anchored top-left with a margin, so on the owner's
+// iPhone the yellow "No one else is in the channel" pill sat across the
+// top-left corner of his own live camera preview — over his face, in the
+// screenshot meant for the App Store. It is the same family of mistake
+// as the one qml/js/ConnectionBanner.js was written for, and that file
+// already states the rule this now follows: "A row and not an overlay:
+// an item anchored over the column composites over live video." So
+// VoiceRoom mounts this as a row above the stage, the stage is that much
+// shorter, and nothing is painted over any feed.
+//
+// Hoisting it also deduplicates it. The badge was per-tile, so a user
+// sharing their screen AND their camera into an empty channel got the
+// identical pill twice, once on each tile — while the fact it states,
+// "there is nobody else here", is a property of the ROOM and was never
+// per-feed at all.
+//
+// `view` is a plain snapshot built in QML so the binding's dependencies
+// are captured there, the same shape and the same reason as
+// MainSurface.js's and ConnectionBanner.js's:
+//
+//     { screenCapturing, screenTransmitting,
+//       cameraCapturing, cameraTransmitting, voiceMemberCount }
+//
+// `=== false` on the transmitting flags is load-bearing and is carried
+// over verbatim from the old badge: not every build's capture controller
+// exposes `transmitting`, and on those it is undefined. Testing it
+// truthily would turn "this build cannot tell you" into a permanent
+// accusation that the transport is broken.
+function transmitWarning(view) {
+    if (!view) return "";
+    var stalled =
+        (view.screenCapturing === true && view.screenTransmitting === false)
+        || (view.cameraCapturing === true && view.cameraTransmitting === false);
+    if (!stalled) return "";
+    // Alone in the channel is not a fault, it is an empty room. Only
+    // claim a transmission problem when somebody should be seeing this.
+    return view.voiceMemberCount > 1
+        ? "Not visible to others"
+        : "No one else is in the channel";
 }
 
 // Placeholder wording while a stream is announced but not yet live

@@ -428,12 +428,76 @@ QtObject {
 
     // ─── Sender color hash (our extension) ───────────────────
     // Hue-stable palette for per-user chat colors; pick by a cheap string
-    // hash so the same @user always gets the same hue in any session.
+    // hash so the same @user always gets the same hue in any session. Used
+    // for sender names and for the fill behind avatar initials.
+    //
+    // ── Why these ten values and not the previous ten ──
+    //
+    // The store screenshots showed four different people in one channel and
+    // all four read as "red": two of them #e5534b and two #f47067. That was
+    // not bad luck and it was not the hash. Converting the OLD palette to
+    // OKLCH says what it was:
+    //
+    //   #f47067 h= 26°    #e5534b h= 27°     <- 0.6° apart
+    //   #e0823d h= 54°    #f69d50 h= 59°     <- 5° apart
+    //   #768390 C= 0.025                     <- grey, not a colour at all
+    //
+    // Ten slots holding seven distinguishable colours, four of them packed
+    // into the 26°–59° red-orange arc, and one entry so desaturated it was
+    // indistinguishable from `fg2` secondary text. Two of the pairs differed
+    // only in LIGHTNESS at the same hue, which is the one axis a reader does
+    // not name: both members of such a pair are just "red". Smallest gap
+    // between any two entries was ΔE(OKLab) 0.067 dark / 0.035 light.
+    //
+    // The hash was measured before the palette was touched, because it was
+    // the first suspect. It is fine: 20k synthetic OIDC mxids
+    // (`@oidc_<32 hex>:host`, the shape this server issues) spread over the
+    // ten buckets at 9.7%–10.5% each. `sender` is the Matrix event sender,
+    // i.e. the full mxid (MessageModel::SenderRole -> msg.sender), and every
+    // other call site passes a userId or peerId, so the whole tree hashes
+    // the same kind of string. Nothing to fix there.
+    //
+    // So these are generated rather than picked by eye: ten hues at exactly
+    // 36° around the OKLCH circle, each one's lightness solved by bisection
+    // for a FIXED WCAG contrast against the surface it is read on (`bg0`,
+    // which is what the timeline and the drawer both paint). Constant OKLab
+    // lightness would NOT have given constant contrast — WCAG relative
+    // luminance weights green about ten times as heavily as blue, so a
+    // perceptually level palette is a legibility cliff between the two.
+    //
+    // Measured, both themes, against bg0:
+    //   dark   contrast 6.96–7.06  (was 5.02–11.77)
+    //   light  contrast 5.55–5.66  (was 4.95–8.73), and 4.85–4.94 against
+    //          the hovered bubble, which darkens bg0 by 6% black
+    //   smallest hue gap  35.1°    (was 0.4°)
+    //   smallest ΔE OKLab  0.059   (was 0.035)
+    //
+    // The avatar fill has to carry `onAccent` initials as well: #0a0a0a on
+    // the dark fills is 7.09–7.19, #ffffff on the light fills is 6.06–6.18.
+    //
+    // Still TEN entries, deliberately. Widening to 12 or 16 was tried on
+    // paper and rejected: with ten colours and six people in a channel some
+    // pair collides 85% of the time, with sixteen it is still 66%, so no
+    // reachable palette size makes collisions rare and chasing them only
+    // buys a tighter hue spacing (30° at twelve, 22.5° at sixteen) — paying
+    // in the one property that was actually broken. Two users sharing a
+    // colour is a hash doing its job; two colours nobody can tell apart is
+    // the bug.
+    //
+    // A collision is also not silent: the sender's NAME is next to the
+    // swatch everywhere this is used. The colour is a scanning aid, never
+    // the identifier.
+    //
+    // Regenerating: hue_i = 25° + i*36°, bisect OKLab L for contrast 7.0
+    // (dark, on #0b0d11) or 5.6 (light, on #f3f5f8), chroma = min(cap,
+    // in-gamut max at that L) with cap 0.135 dark / 0.145 light. Entries
+    // that fall short of the cap are gamut-limited, not hand-edited: sRGB
+    // simply has no more chroma at that hue and lightness.
     readonly property var senderColors: isDark
-        ? ["#f47067", "#e0823d", "#c4a000", "#57ab5a", "#39c5cf",
-           "#6cb6ff", "#dcbdfb", "#f69d50", "#768390", "#e5534b"]
-        : ["#b42318", "#9a4a00", "#6b5200", "#2d6930", "#0a6c73",
-           "#1c5fb5", "#6a3fa0", "#a1570a", "#3f4650", "#8b1a14"]
+        ? ["#e87b74", "#da883a", "#b39a1d", "#76aa4d", "#00b087",
+           "#00acb9", "#3ba3e5", "#8994f0", "#bd85dc", "#de7cae"]
+        : ["#aa3c3a", "#935200", "#736100", "#3e6e00", "#007055",
+           "#006c76", "#00679c", "#5259b6", "#8349a1", "#a03d74"]
     function senderColor(name) {
         var hash = 0;
         for (var i = 0; i < name.length; i++) {

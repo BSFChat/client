@@ -540,7 +540,217 @@ TestCase {
         compare(s.width, 0);
     }
 
-    // ── 9. Wording ───────────────────────────────────────────────────
+    // ── 9. Shrink-wrapping a cell to its picture ─────────────────────
+    //
+    // The defect: a desktop screen share received on a portrait phone.
+    // gridDims() gives a lone feed a 1×1 grid, so its cell is the whole
+    // stage — tall and narrow — and the 16:9 picture was aspect-fit into
+    // the middle of it with the rest left black INSIDE the tile. The
+    // owner's iPhone 16 Pro Max photo is roughly 60% black tile.
+    //
+    // fitToAspect() gives that leftover back to the stage. These tests
+    // are about the two properties that matter: the picture never
+    // shrinks below what the cell could already show (so nothing is made
+    // worse), and it is never cropped (so nothing is lost).
+
+    // The phone case, to scale: a 390×620 stage, one 16:9 share.
+    function test_a_landscape_share_on_a_portrait_stage_wraps_to_its_picture() {
+        var cell = VideoStage.gridCell(0, 1, 390, 620, 12);
+        compare(cell.height, 620);   // the tile used to be this tall
+        var fit = VideoStage.fitToAspect(cell, 16 / 9);
+
+        // Full width, and exactly as tall as 16:9 needs — no more.
+        fuzzyCompare(fit.width, 390, 0.001);
+        fuzzyCompare(fit.height, 390 * 9 / 16, 0.001);
+        // Centred in the cell it was given.
+        fuzzyCompare(fit.x, 0, 0.001);
+        fuzzyCompare(fit.y, (620 - 390 * 9 / 16) / 2, 0.001);
+
+        // The point of the exercise, stated as the ratio the bug report
+        // is about: how much of the TILE is picture.
+        //
+        // The picture itself is the same size either way — this does not
+        // make the share any bigger, and it is not supposed to. What
+        // changes is how much black the tile wraps around it.
+        var pictureArea = fit.width * fit.height;
+        var before = pictureArea / (cell.width * cell.height);
+        var after = pictureArea / (fit.width * fit.height);
+        // ~35% — the photographed tile, about 60% of it black. If this
+        // figure ever climbs on its own, the grid changed shape and this
+        // test is measuring something else.
+        verify(before < 0.40, "the unwrapped tile was mostly black, was "
+                              + before);
+        compare(after, 1);
+    }
+
+    // The other orientation, which must work just as well — a portrait
+    // phone camera feed inside a wide desktop cell.
+    function test_a_portrait_camera_in_a_landscape_cell_wraps_too() {
+        var cell = { x: 0, y: 0, width: 800, height: 450 };
+        var fit = VideoStage.fitToAspect(cell, 9 / 16);
+        fuzzyCompare(fit.height, 450, 0.001);
+        fuzzyCompare(fit.width, 450 * 9 / 16, 0.001);
+        fuzzyCompare(fit.y, 0, 0.001);
+        fuzzyCompare(fit.x, (800 - 450 * 9 / 16) / 2, 0.001);
+    }
+
+    // Never bigger than the cell, never a different shape from the
+    // source, and always inside the cell it was handed. Swept across a
+    // range of cells and content shapes because the two branches of the
+    // comparison are easy to write the wrong way round and each one only
+    // shows up on one side of it.
+    function test_wrapping_never_crops_and_never_overflows() {
+        var cells = [
+            { x: 0,  y: 0,  width: 390, height: 620 },   // portrait phone
+            { x: 30, y: 12, width: 800, height: 450 },   // 16:9 desktop
+            { x: 5,  y: 7,  width: 300, height: 300 },   // square
+            { x: 0,  y: 0,  width: 1200, height: 260 }   // very wide
+        ];
+        var aspects = [16 / 9, 4 / 3, 1, 3 / 4, 9 / 16, 21 / 9];
+        for (var c = 0; c < cells.length; ++c) {
+            for (var a = 0; a < aspects.length; ++a) {
+                var cell = cells[c];
+                var fit = VideoStage.fitToAspect(cell, aspects[a]);
+                var where = "cell " + c + " aspect " + aspects[a];
+                verify(fit.width <= cell.width + 0.001, "fits across: " + where);
+                verify(fit.height <= cell.height + 0.001, "fits down: " + where);
+                verify(fit.x >= cell.x - 0.001, "inside left: " + where);
+                verify(fit.y >= cell.y - 0.001, "inside top: " + where);
+                verify(fit.x + fit.width <= cell.x + cell.width + 0.001,
+                       "inside right: " + where);
+                verify(fit.y + fit.height <= cell.y + cell.height + 0.001,
+                       "inside bottom: " + where);
+                // The shape is the SOURCE's. Any drift here is a crop or
+                // a stretch, which is the thing this must never do.
+                fuzzyCompare(fit.width / fit.height, aspects[a], 0.001);
+                // And it touches at least one pair of the cell's edges —
+                // it is the LARGEST such rectangle, not merely a smaller
+                // one of the right shape.
+                verify(Math.abs(fit.width - cell.width) < 0.001
+                       || Math.abs(fit.height - cell.height) < 0.001,
+                       "is maximal: " + where);
+            }
+        }
+    }
+
+    // A cell whose shape already matches the picture is returned as it
+    // was. This is the desktop case the fix must not disturb.
+    function test_a_matching_cell_is_left_alone() {
+        var cell = { x: 10, y: 20, width: 1600, height: 900 };
+        var fit = VideoStage.fitToAspect(cell, 16 / 9);
+        fuzzyCompare(fit.x, 10, 0.001);
+        fuzzyCompare(fit.y, 20, 0.001);
+        fuzzyCompare(fit.width, 1600, 0.001);
+        fuzzyCompare(fit.height, 900, 0.001);
+    }
+
+    // No frame has arrived, so there is no shape to wrap to. The cell
+    // must come back untouched — this is what keeps the "Starting
+    // share…" placeholder centred in the full cell exactly as it was
+    // before, and it is the state every tile is in for its first
+    // moments.
+    function test_an_unknown_aspect_leaves_the_cell_alone() {
+        var cell = { x: 3, y: 4, width: 390, height: 620 };
+        var zero = VideoStage.fitToAspect(cell, 0);
+        compare(zero.width, 390);
+        compare(zero.height, 620);
+        compare(zero.x, 3);
+        compare(zero.y, 4);
+        // The shapes a missing sourceRect can actually produce.
+        compare(VideoStage.fitToAspect(cell, undefined).height, 620);
+        compare(VideoStage.fitToAspect(cell, NaN).height, 620);
+        compare(VideoStage.fitToAspect(cell, -2).height, 620);
+    }
+
+    // A degenerate cell must not produce NaN geometry — a tile written
+    // NaN width disappears and never comes back.
+    function test_wrapping_a_collapsed_cell() {
+        var flat = VideoStage.fitToAspect(
+            { x: 0, y: 0, width: 0, height: 0 }, 16 / 9);
+        compare(flat.width, 0);
+        compare(flat.height, 0);
+        var none = VideoStage.fitToAspect(null, 16 / 9);
+        compare(none.width, 0);
+        compare(none.height, 0);
+    }
+
+    // ── 10. "Nobody is receiving this" ───────────────────────────────
+    //
+    // Hoisted out of VideoFeedTile, where it was drawn over the top-left
+    // corner of the live picture. The predicate is unchanged; what these
+    // pin down is the part that is easy to get wrong when moving it —
+    // the tri-state `transmitting` flag, and the fact that ONE room-level
+    // sentence now covers both feeds.
+
+    function warn(o) { return VideoStage.transmitWarning(o); }
+
+    function test_no_warning_when_nothing_is_being_captured() {
+        compare(warn({ screenCapturing: false, screenTransmitting: false,
+                       cameraCapturing: false, cameraTransmitting: false,
+                       voiceMemberCount: 1 }), "");
+        compare(warn(null), "");
+        compare(warn(undefined), "");
+    }
+
+    function test_no_warning_while_frames_are_going_out() {
+        compare(warn({ screenCapturing: true, screenTransmitting: true,
+                       cameraCapturing: true, cameraTransmitting: true,
+                       voiceMemberCount: 3 }), "");
+    }
+
+    function test_alone_in_the_channel_is_not_a_fault() {
+        compare(warn({ screenCapturing: true, screenTransmitting: false,
+                       cameraCapturing: false, cameraTransmitting: undefined,
+                       voiceMemberCount: 1 }),
+                "No one else is in the channel");
+        // A count of 0 is the same story — the roster has not landed yet.
+        compare(warn({ screenCapturing: true, screenTransmitting: false,
+                       cameraCapturing: false, cameraTransmitting: undefined,
+                       voiceMemberCount: 0 }),
+                "No one else is in the channel");
+    }
+
+    function test_somebody_is_there_and_is_not_getting_it() {
+        compare(warn({ screenCapturing: true, screenTransmitting: false,
+                       cameraCapturing: false, cameraTransmitting: undefined,
+                       voiceMemberCount: 2 }),
+                "Not visible to others");
+    }
+
+    // Either capture stalling is enough to raise it, and the camera must
+    // be able to raise it on its own — the old per-tile badge made that
+    // structurally obvious and a hoisted one can quietly lose it.
+    function test_the_camera_alone_can_raise_it() {
+        compare(warn({ screenCapturing: false, screenTransmitting: undefined,
+                       cameraCapturing: true, cameraTransmitting: false,
+                       voiceMemberCount: 2 }),
+                "Not visible to others");
+    }
+
+    // Both stalled at once is still ONE sentence. Sharing a screen and a
+    // camera into an empty channel used to print the identical pill on
+    // both tiles.
+    function test_two_stalled_feeds_are_one_banner() {
+        compare(warn({ screenCapturing: true, screenTransmitting: false,
+                       cameraCapturing: true, cameraTransmitting: false,
+                       voiceMemberCount: 1 }),
+                "No one else is in the channel");
+    }
+
+    // `transmitting` is undefined on builds whose capture controller does
+    // not report it. That is "cannot tell", not "broken", and it must
+    // stay silent — a permanent yellow banner accusing the transport on
+    // every such build is worse than no banner at all.
+    function test_a_controller_that_cannot_report_stays_silent() {
+        compare(warn({ screenCapturing: true, screenTransmitting: undefined,
+                       cameraCapturing: true, cameraTransmitting: undefined,
+                       voiceMemberCount: 1 }), "");
+        compare(warn({ screenCapturing: true, screenTransmitting: null,
+                       cameraCapturing: true, cameraTransmitting: null,
+                       voiceMemberCount: 1 }), "");
+    }
+
+    // ── 11. Wording ──────────────────────────────────────────────────
 
     function test_labels() {
         compare(VideoStage.feedLabel("Abe", VideoStage.SCREEN, false), "Abe — SCREEN SHARE");

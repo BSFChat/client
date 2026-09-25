@@ -90,7 +90,10 @@ Column {
                     Rectangle {
                         anchors.centerIn: parent
                         width: 16; height: 16
-                        radius: 8
+                        // Rounded square like every other avatar. r1 is the
+                        // token the other small swatches use (the DM
+                        // suggestion row's 22px, the composer's 20px).
+                        radius: Theme.r1
                         color: Theme.senderColor(participantRow.userId)
                         opacity: participantRow.muted || participantRow.deafened ? 0.5 : 1.0
                         Text {
