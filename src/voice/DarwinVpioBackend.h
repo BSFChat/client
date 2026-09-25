@@ -82,6 +82,7 @@
 
 #include "voice/AudioBackend.h"
 #include "voice/AudioRingBuffer.h"
+#include "voice/DarwinVoiceLifecycle.h"
 #include "voice/VpioFormat.h"
 
 #include <atomic>
@@ -163,6 +164,8 @@ public:
 
     bool restartForRouteChange() override;
 
+    bool healthy() const override { return !m_failed; }
+    QString diagnostics() const override;
     QString describe() const override;
 
     // True once an open has failed in a way that will not get better by
@@ -219,6 +222,16 @@ private:
     bool m_captureWanted = false;
     bool m_renderWanted = false;
 
+    // What AVAudioSession was running at when the unit was built (iOS;
+    // 0 on macOS, which has no session). restartForRouteChange()
+    // compares against it instead of rebuilding on faith.
+    double m_builtSessionRate = 0.0;
+    // Caps how often a rebuild may happen, whatever asks for one.
+    // See DarwinVoiceLifecycle.h — this is the backstop for the loop
+    // observed on a device on 2026-09-25.
+    RebuildLimiter m_rebuildLimiter;
+    int m_rebuildCount = 0;
+
     // The devices AudioDevicePolicy resolved, as Qt reported them.
     // Empty on iOS, where they are meaningless.
     QString m_captureDeviceId;
@@ -271,6 +284,19 @@ private:
     // nothing and less honest than saying so: these are counters for a
     // log line, and a torn read of one changes a number in a message.
     std::atomic<uint32_t> m_renderUnderrunFrames{0};
+    // Written by the CoreAudio callback thread, read by the audio
+    // thread for the end-of-session log. Relaxed: they are counters for
+    // a message, and the only thing that matters about them is whether
+    // the first two are zero.
+    std::atomic<uint32_t> m_inputCallbacks{0};
+    std::atomic<uint32_t> m_capturedFrames{0};
+    std::atomic<uint32_t> m_renderCallbacks{0};
+    // Largest |sample| the unit has ever handed us, so the log can
+    // distinguish "the microphone produced nothing" from "the
+    // microphone produced silence" from "it worked". Only meaningful
+    // when the capture plan is Direct (int16); left at 0 otherwise, and
+    // diagnostics() says so.
+    std::atomic<uint32_t> m_capturePeak{0};
 
     // One-shot: the "iOS ignores the device argument" note is true of
     // every open, and saying it on every headset change is noise.

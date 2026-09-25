@@ -103,6 +103,66 @@ enum class SessionEvent {
     MediaServicesReset,
 };
 
+// AVAudioSessionRouteChangeReason, mirrored so the decision below can be
+// unit-tested without AVFoundation. The values are AVFoundation's and
+// must not be renumbered.
+enum class RouteChangeReason : unsigned long {
+    Unknown = 0,
+    NewDeviceAvailable = 1,
+    OldDeviceUnavailable = 2,
+    // The app changed the session category — i.e. WE did, in
+    // enterVoiceMode(). See below for why this one matters so much.
+    CategoryChange = 3,
+    Override = 4,
+    WakeFromSleep = 6,
+    NoSuitableRouteForCategory = 7,
+    RouteConfigurationChange = 8,
+};
+
+// Which SessionEvent, if any, a route-change notification deserves.
+// Returns false when the notification must be SWALLOWED — not passed on,
+// not logged as interesting, not acted upon.
+//
+// Two reasons are swallowed, and the first of them is a bug fix rather
+// than an optimisation:
+//
+//   CategoryChange is posted BY OUR OWN enterVoiceMode(), and again
+//   whenever activating a VoiceProcessingIO unit moves the session's
+//   effective route. Treating it as "the route changed, rebuild the
+//   audio unit" is a loop with no exit: the rebuild reactivates the
+//   unit, that posts another CategoryChange, and so on. That loop was
+//   observed on an iPhone 16 Pro Max on 2026-09-25 — ten rebuilds in
+//   eight seconds, roughly one every 700 ms, ending when CoreAudio
+//   refused to start the unit again with AVAudioSessionErrorCodeUnspecified
+//   ('what'). Nothing was captured for the whole session, because a VPIO
+//   unit that is torn down ~100 ms after starting never gets far enough
+//   to deliver an input callback.
+//
+//   RouteConfigurationChange means, in Apple's own words, that the route
+//   did NOT change — only some property of it did. Acting on it is the
+//   same loop with a different label on it.
+//
+// Everything else is a real route change and is passed on.
+inline bool routeChangeToEvent(unsigned long reason, SessionEvent& out)
+{
+    switch (static_cast<RouteChangeReason>(reason)) {
+    case RouteChangeReason::CategoryChange:
+    case RouteChangeReason::RouteConfigurationChange:
+        return false;
+    case RouteChangeReason::OldDeviceUnavailable:
+        out = SessionEvent::RouteChangedDeviceLost;
+        return true;
+    default:
+        // Unknown, NewDeviceAvailable, Override, WakeFromSleep,
+        // NoSuitableRouteForCategory, and any reason a future iOS adds.
+        // Passing an unrecognised reason through is the safe default:
+        // the handler's own decision is now "re-evaluate", which is
+        // cheap and idempotent, rather than "rebuild".
+        out = SessionEvent::RouteChanged;
+        return true;
+    }
+}
+
 // Configure and activate the session for a voice call. Call this BEFORE
 // opening QAudioSource/QAudioSink — the category and mode determine the
 // signal path the unit is built on, and changing them afterwards does not

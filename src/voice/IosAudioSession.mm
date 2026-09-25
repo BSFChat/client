@@ -94,15 +94,19 @@ void installObservers()
                         usingBlock:^(NSNotification* note) {
             NSNumber* reason = note.userInfo[AVAudioSessionRouteChangeReasonKey];
             const NSUInteger code = reason ? reason.unsignedIntegerValue : 0;
+            // routeChangeToEvent() decides, and it swallows the two
+            // reasons our own audio-unit activity provokes. Before it
+            // existed this block forwarded everything, which meant
+            // enterVoiceMode()'s own category change came back to us as
+            // "the route changed" and drove an unbounded rebuild loop.
+            // See the comment on routeChangeToEvent() in the header.
+            SessionEvent event;
+            if (!routeChangeToEvent(code, event)) {
+                qCDebug(logIosAudio) << "route notification ignored, reason=" << code;
+                return;
+            }
             qCInfo(logIosAudio) << "route changed, reason=" << code;
-            // OldDeviceUnavailable is the one reason with different
-            // required behaviour — the device carrying the audio is
-            // gone, and iOS convention is to pause rather than fall
-            // back to the speaker. See the header and
-            // DarwinVoiceLifecycle.h.
-            emitEvent(code == AVAudioSessionRouteChangeReasonOldDeviceUnavailable
-                          ? SessionEvent::RouteChangedDeviceLost
-                          : SessionEvent::RouteChanged);
+            emitEvent(event);
         }]));
 
     g_resetToken = const_cast<void*>(CFBridgingRetain(

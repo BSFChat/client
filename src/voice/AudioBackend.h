@@ -124,6 +124,30 @@ public:
     // actually opened. Free-form.
     virtual QString describe() const = 0;
 
+    // False once the backend has failed in a way it will not recover
+    // from by itself. AudioWorker polls this from the pump and demotes
+    // to the Qt path when it goes false, which is what turns a dead
+    // audio unit into a working call rather than a silent one.
+    //
+    // It exists because the first version only demoted on an OPEN
+    // failure, so a unit that died mid-session — which is exactly what
+    // happened on a device on 2026-09-25 — left the pipeline up, both
+    // directions marked in-use, and nothing flowing in either. Silence
+    // with no error and no way back short of rejoining.
+    virtual bool healthy() const { return true; }
+
+    // Counters worth putting in the end-of-session log line: how much
+    // was actually captured and rendered, and how often anything had to
+    // be rebuilt. Free-form, empty when a backend has nothing to add.
+    //
+    // The specific question this has to answer is "did the microphone
+    // produce samples", because the level summary alone cannot: with
+    // platform voice processing the software AGC does not run, and the
+    // raw-level percentiles it reports are unmeasured rather than
+    // silent. Reading those as evidence of silence is a trap this went
+    // through once already.
+    virtual QString diagnostics() const { return QString(); }
+
     // Set by AudioWorker. Invoked ON THE AUDIO THREAD when capture data
     // has arrived; only push-shaped backends call it.
     void setCaptureReadyHandler(std::function<void()> handler)

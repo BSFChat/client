@@ -774,6 +774,11 @@ written. That changed the same day — see §9.
 
 ## 9. Device test, and the echo-cancellation backend (2026-09-23)
 
+> **This backend failed on its first real device run. See §11** — it
+> rebuilt itself in a loop, captured nothing for a whole session, and
+> froze the UI on leaving the call. Everything below describes what was
+> built and why; §11 describes what was wrong with it.
+
 ### What a real iPhone proved
 
 Voice was run on an **iPhone 16 Pro Max**. It works:
@@ -1115,3 +1120,97 @@ in a locked app). Tilt the phone to landscape while watching your own
 preview: if the preview rotates inside the portrait UI, Qt is keyed on
 the device and the wire angle moves with the user's wrist; if it stays
 put, the angle is constant and there is exactly one number to get right.
+
+---
+
+## 11. The rebuild loop, and what it cost (2026-09-25)
+
+The backend from §9 shipped to `main` and was run on the owner's iPhone.
+It failed, in three ways that turned out to be one bug.
+
+```
+14:40:28.022 VPIO started: … in=direct out=direct
+14:40:28.797 VPIO started: …          ← 775 ms later
+14:40:29.199 VPIO started: …          ← and again, ten times in eight seconds
+…
+14:40:35.196 VoiceProcessingIO unavailable: AudioOutputUnitStart failed: 'what'
+```
+
+`'what'` is **`AVAudioSessionErrorCodeUnspecified`** (`0x77686174`,
+`CoreAudioTypes/AudioSessionTypes.h`) — the session layer's generic
+refusal, surfaced through `AudioOutputUnitStart`. It is the *last* event
+here, not the first, and it is a consequence rather than a cause.
+
+### The loop
+
+`restartForRouteChange()` rebuilt the audio unit on **every** route
+change. Activating a VoiceProcessingIO unit moves the AVAudioSession
+route, which posts a route-change notification, which asked for another
+rebuild. Nothing external was needed to sustain it: the category change
+from our own `enterVoiceMode()` was enough to start it.
+
+The reasoning behind the unconditional rebuild — "a unit cannot be
+reconfigured in place, so it must be rebuilt" — was half right and
+wholly wrong. The premise is true; the conclusion does not follow,
+because a VPIO unit **follows the session's route by itself**, and with
+our client format pinned at 48 kHz mono int16 the unit's own converter
+absorbs whatever the hardware moves to. There was nothing to rebuild.
+
+### Why nothing was captured
+
+A rebuild every ~700 ms means the unit was alive for roughly 100 ms at a
+time — the gap between `AudioOutputUnitStart` and the route notification
+coming back. A VPIO unit does not deliver its first input callback that
+fast. The microphone path never got going at all.
+
+**The `-120 dBFS` line in that log is not evidence of this**, and reading
+it as such is a trap worth naming. Those percentiles are collected *by
+the software AGC*; the AGC stands down when the platform does the voice
+processing; `-120` there means **unmeasured**, not silent. The level
+summary now measures captured frames and peak sample on the raw capture
+frame on every path, and the backend reports input-callback and frame
+counts, so the next log can tell "the unit never ran" from "the unit ran
+and delivered silence". Those are different bugs.
+
+### Why the UI froze on leaving
+
+`AudioEngine` tears the pipeline down with a `BlockingQueuedConnection`,
+so the GUI thread waits behind everything already queued on the audio
+thread. That queue was full of route-change jobs, each costing a
+CoreAudio rebuild, and it was being refilled faster than it drained.
+
+Not a stale channel-membership state, which was the first guess.
+
+### The fix, in four independent layers
+
+1. **The notification is not forwarded.** `routeChangeToEvent()`
+   swallows `CategoryChange` (which is *our own* doing) and
+   `RouteConfigurationChange` (which Apple defines as "the route did not
+   change").
+2. **The rebuild is conditional.** Only when we own an `AudioConverter`
+   built for a unit rate that has since moved — the Bluetooth-HFP case —
+   is a rebuild necessary. Otherwise the unit is left alone.
+3. **Rebuilds are capped.** `RebuildLimiter`: three in ten seconds, then
+   the backend fails itself. A retry that cannot be exhausted is a bug
+   whatever provoked it, and this layer does not depend on having
+   correctly enumerated the ways a loop can start.
+4. **A dead backend demotes.** `IAudioBackend::healthy()`, polled from
+   the pump, moves the call to the Qt path. Previously only an *open*
+   failure demoted, so a unit that died mid-session left both directions
+   marked in-use with nothing flowing and no way back short of rejoining.
+
+Plus the freeze fix, and one unrelated crash found on the way:
+
+- `AudioWorker::requestStop()`, set directly from the GUI thread before
+  the blocking teardown, makes every queued job on the audio thread
+  return immediately.
+- The rings were being `resize()`d from `openRender()` **while the unit
+  was already running** — reallocating storage underneath a live
+  CoreAudio callback, on every single join. Sizing moved to the one
+  point where the unit is known to be stopped.
+
+### Still unverified
+
+Everything in §9's list, unchanged. The loop meant none of it was ever
+reached, so the next device run is the first real test of whether VPIO
+cancels echo — it is the first one where the unit will stay up.
