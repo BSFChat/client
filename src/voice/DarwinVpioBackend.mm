@@ -31,6 +31,8 @@
 #include <CoreAudio/CoreAudio.h>
 #endif
 
+#include <QDateTime>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -162,6 +164,19 @@ AudioDeviceID deviceForUid(const QString& uid)
     return kAudioObjectUnknown;
 }
 #endif  // TARGET_OS_OSX
+
+// The rate AVAudioSession is running at right now, or 0 where there is
+// no session to ask (macOS).
+double currentSessionRate()
+{
+#if TARGET_OS_IPHONE
+    @autoreleasepool {
+        return [AVAudioSession sharedInstance].sampleRate;
+    }
+#else
+    return 0.0;
+#endif
+}
 
 } // namespace
 
@@ -491,6 +506,22 @@ bool DarwinVpioBackend::configureUnit()
             * size_t(pipeFrameBytes),
         0);
 
+    // The rings are sized HERE, between AudioUnitInitialize and
+    // AudioOutputUnitStart, and nowhere else.
+    //
+    // They used to be sized in openCapture()/openRender(), which is a
+    // use-after-free waiting to happen: AudioWorker opens capture first,
+    // that starts the unit, and then openRender() called resize() —
+    // reallocating the playback ring's storage underneath a render
+    // callback that was already running on the CoreAudio thread. Every
+    // join went through that window.
+    //
+    // This is the only place in the object's life where the unit is
+    // known to be stopped and about to start, which is exactly the
+    // precondition AudioRingBuffer::resize() documents.
+    m_captureRing.resize(ringCapacityBytes(m_pipeline, kRingFrames));
+    m_playbackRing.resize(ringCapacityBytes(m_pipeline, kRingFrames));
+
     m_captureSource->channels = UInt32(m_capturePlan.unit.channels);
     m_captureSource->frameBytes = UInt32(bytesPerFrame(m_capturePlan.unit));
     m_renderSource->channels = UInt32(m_pipeline.channels);
@@ -504,6 +535,7 @@ bool DarwinVpioBackend::configureUnit()
         return false;
     }
     m_unitRunning = true;
+    m_builtSessionRate = currentSessionRate();
 
     qInfo("[voice] VPIO started: %s", qPrintable(describe()));
     return true;
@@ -671,7 +703,9 @@ bool DarwinVpioBackend::openCapture(const QAudioDevice& device,
     m_captureDeviceDesc = device.description();
     m_captureWanted = true;
 
-    m_captureRing.resize(ringCapacityBytes(m_pipeline, kRingFrames));
+    // No ring sizing here — see configureUnit(). By the time a second
+    // direction opens, the unit is already running and its callbacks are
+    // live, so touching the rings' storage from this thread is not safe.
     if (!ensureUnit()) {
         m_captureWanted = false;
         return false;
@@ -687,8 +721,18 @@ void DarwinVpioBackend::closeCapture()
     // canceller, and stopping it would stop cancellation for the
     // playback that is still going out. The input callback checks
     // m_captureWanted and simply stops filling the ring.
-    m_captureRing.reset();
-    if (!m_renderWanted) teardownUnit();
+    if (!m_renderWanted) {
+        // Nothing else needs the unit, so stop it FIRST and only then
+        // touch the ring. AudioRingBuffer::reset() is documented as
+        // valid only with both sides stopped, and teardownUnit() resets
+        // both rings itself once the unit is down.
+        teardownUnit();
+        return;
+    }
+    // The unit is still running, so the input callback is still live and
+    // the ring must not be reset underneath it. Draining is safe — this
+    // IS the consumer side — and achieves the same thing.
+    m_captureRing.discardAll();
 }
 
 qint64 DarwinVpioBackend::readCapture(char* dst, qint64 maxBytes)
@@ -719,7 +763,7 @@ bool DarwinVpioBackend::openRender(const QAudioDevice& device,
                               ? bufferBytes
                               : m_pipeline.frameBytes() * 5;
 
-    m_playbackRing.resize(ringCapacityBytes(m_pipeline, kRingFrames));
+    // No ring sizing here either — see configureUnit().
     if (!ensureUnit()) {
         m_renderWanted = false;
         return false;
@@ -731,8 +775,15 @@ void DarwinVpioBackend::closeRender()
 {
     if (!m_renderWanted) return;
     m_renderWanted = false;
-    m_playbackRing.reset();
-    if (!m_captureWanted) teardownUnit();
+    if (!m_captureWanted) {
+        teardownUnit();
+        return;
+    }
+    // Same rule as closeCapture(): the unit is still running for the
+    // echo canceller, so the render callback is still live and reset()
+    // is not ours to call. We are the PRODUCER on this ring, so we
+    // cannot drain it either; the callback will empty it within a
+    // buffer or two and then render silence, which is what we want.
 }
 
 qint64 DarwinVpioBackend::bytesFree()
@@ -752,12 +803,65 @@ qint64 DarwinVpioBackend::writeRender(const char* src, qint64 bytes)
 bool DarwinVpioBackend::restartForRouteChange()
 {
     if (!m_unitRunning || m_failed) return false;
-    // The unit is bound to whatever the session looked like when it was
-    // initialised — its bus formats, and on iOS the rate AVAudioSession
-    // was running at. A route change can move all of that (a Bluetooth
-    // HFP headset drops the session to 16 kHz), and a unit cannot be
-    // reconfigured in place: CurrentDevice and the stream formats are
-    // both uninitialised-only properties. So it is rebuilt.
+
+    // THE DEFAULT IS TO DO NOTHING, and that is the fix rather than a
+    // shortcut.
+    //
+    // This used to tear the unit down and rebuild it on every route
+    // change, on the reasoning that "a unit cannot be reconfigured in
+    // place". The reasoning is true and the conclusion was wrong: a
+    // VoiceProcessingIO unit follows the session's route by itself, and
+    // because we set our CLIENT format to 48 kHz mono int16, the unit's
+    // own converter absorbs whatever the hardware moves to. There is
+    // nothing for us to rebuild.
+    //
+    // Rebuilding anyway was actively harmful. Activating the unit moves
+    // the session's route, that posts a route notification, and the
+    // notification asks for another rebuild — ten of them in eight
+    // seconds on an iPhone 16 Pro Max on 2026-09-25, each one killing
+    // the unit roughly 100 ms after starting it, which is before a VPIO
+    // unit delivers its first input callback. Hence a whole session that
+    // captured nothing, and finally CoreAudio refusing to start the unit
+    // at all ('what' — AVAudioSessionErrorCodeUnspecified).
+    //
+    // The ONE case that genuinely needs a rebuild is a converter built
+    // against a rate that has since moved: if the unit refused our
+    // client format we own an AudioConverter for a specific unit rate,
+    // and a Bluetooth HFP headset dropping the session to 16 kHz makes
+    // that converter wrong. When the plan is Direct there is no such
+    // converter and nothing can be stale.
+    const bool haveConverter = m_capturePlan.action == FormatAction::Convert
+                               || m_renderPlan.action == FormatAction::Convert;
+    const double now = currentSessionRate();
+    const bool rateMoved =
+        m_builtSessionRate > 0.0 && now > 0.0
+        && std::abs(now - m_builtSessionRate) > 1.0;
+
+    if (!haveConverter || !rateMoved) {
+        if (rateMoved) {
+            qInfo("[voice] VPIO: session rate %.0f Hz -> %.0f Hz; the unit's "
+                  "own converter absorbs it, not rebuilding",
+                  m_builtSessionRate, now);
+            m_builtSessionRate = now;
+        }
+        return false;
+    }
+
+    if (!m_rebuildLimiter.allow(QDateTime::currentMSecsSinceEpoch())) {
+        // Three in ten seconds is not a user plugging things in, it is a
+        // loop. Fail rather than slow down: AudioWorker polls healthy()
+        // and moves the call to the Qt backend, which is a working call
+        // without echo cancellation instead of a spinning one with it.
+        fail(QStringLiteral("rebuilt %1 times in quick succession after route "
+                            "changes; giving up on VoiceProcessingIO")
+                 .arg(m_rebuildLimiter.maxRebuilds()));
+        return false;
+    }
+
+    qInfo("[voice] VPIO: rebuilding for a session rate change %.0f Hz -> %.0f Hz "
+          "(our converter was built for the old one)",
+          m_builtSessionRate, now);
+    ++m_rebuildCount;
     teardownUnit();
     if (!ensureUnit()) {
         qWarning("[voice] VPIO could not restart after a route change: %s",
@@ -765,6 +869,31 @@ bool DarwinVpioBackend::restartForRouteChange()
         return false;
     }
     return true;
+}
+
+QString DarwinVpioBackend::diagnostics() const
+{
+    const uint32_t frames = m_capturedFrames.load(std::memory_order_relaxed);
+    const uint32_t callbacks = m_inputCallbacks.load(std::memory_order_relaxed);
+    QString peak;
+    if (m_capturePlan.action == FormatAction::Direct) {
+        peak = QStringLiteral(", peak |sample| %1")
+                   .arg(m_capturePeak.load(std::memory_order_relaxed));
+    } else {
+        // The peak is only sampled on the direct path; saying "0" for a
+        // converted stream would read as silence when it means unmeasured.
+        peak = QStringLiteral(", peak not measured (converted capture)");
+    }
+    return QStringLiteral(
+               "VPIO: %1 input callbacks, %2 frames captured%3; %4 render "
+               "callbacks, %5 ring overruns, %6 underruns; %7 rebuilds")
+        .arg(callbacks)
+        .arg(frames)
+        .arg(peak)
+        .arg(m_renderCallbacks.load(std::memory_order_relaxed))
+        .arg(m_captureRing.overruns())
+        .arg(m_playbackRing.underruns())
+        .arg(m_rebuildCount);
 }
 
 QString DarwinVpioBackend::describe() const
@@ -841,8 +970,27 @@ OSStatus DarwinVpioBackend::onInput(AudioUnitRenderActionFlags* flags,
         AudioUnitRender(m_unit, flags, timeStamp, bus, frames, &abl);
     if (st != noErr) return st;
 
+    m_inputCallbacks.fetch_add(1, std::memory_order_relaxed);
+    m_capturedFrames.fetch_add(frames, std::memory_order_relaxed);
+
     // Post-AEC, post-NS, post-AGC. This is the point of the file.
     if (m_capturePlan.action == FormatAction::Direct) {
+        // Cheapest possible answer to "did the microphone produce
+        // anything", carried to the end-of-session log. A peak of 0 over
+        // a whole call means silence reached us; no callbacks at all
+        // means the unit never ran. Those are different bugs and the log
+        // has to tell them apart — it could not, before.
+        const int16_t* p =
+            reinterpret_cast<const int16_t*>(m_unitCaptureScratch.data());
+        const int count = int(frames) * m_capturePlan.unit.channels;
+        uint32_t peak = m_capturePeak.load(std::memory_order_relaxed);
+        for (int i = 0; i < count; ++i) {
+            const int16_t v = p[i];
+            const uint32_t a = uint32_t(v < 0 ? -(v + 1) : v);
+            if (a > peak) peak = a;
+        }
+        m_capturePeak.store(peak, std::memory_order_relaxed);
+
         m_captureRing.write(m_unitCaptureScratch.data(),
                             int(frames * unitFrameBytes));
         return noErr;
@@ -880,6 +1028,7 @@ OSStatus DarwinVpioBackend::onInput(AudioUnitRenderActionFlags* flags,
 
 OSStatus DarwinVpioBackend::onRender(UInt32 frames, AudioBufferList* ioData)
 {
+    m_renderCallbacks.fetch_add(1, std::memory_order_relaxed);
     if (!ioData || ioData->mNumberBuffers == 0) return noErr;
 
     // The client format was set interleaved, so there is exactly one

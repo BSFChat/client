@@ -31,6 +31,7 @@
 #include "voice/AudioBackendSelect.h"
 #include "voice/AudioRingBuffer.h"
 #include "voice/DarwinVoiceLifecycle.h"
+#include "voice/IosAudioSession.h"
 #include "voice/VpioFormat.h"
 
 #include <vector>
@@ -379,6 +380,116 @@ private slots:
                  VoiceAudioAction::Suspend);
         QCOMPARE(lc.onEvent(SessionEvent::InterruptionBegan),
                  VoiceAudioAction::None);
+    }
+
+    // ---- route-change filtering (the restart loop) ----
+    //
+    // The device defect of 2026-09-25: ten audio-unit rebuilds in eight
+    // seconds, no audio captured for the whole session, and a frozen UI
+    // on leaving the call. One cause — a rebuild moved the session's
+    // route, the route notification asked for a rebuild, repeat.
+
+    // The first link in the loop. enterVoiceMode() sets the category,
+    // and activating the unit changes it again; forwarding that as "the
+    // route changed" is what started it.
+    void ourOwnCategoryChangeIsSwallowed()
+    {
+        SessionEvent e = SessionEvent::InterruptionBegan;
+        QVERIFY(!bsfchat::ios_audio::routeChangeToEvent(
+            static_cast<unsigned long>(
+                bsfchat::ios_audio::RouteChangeReason::CategoryChange),
+            e));
+        // Untouched: the caller must not read it.
+        QCOMPARE(e, SessionEvent::InterruptionBegan);
+    }
+
+    // Apple's own description is that the route did NOT change.
+    void routeConfigurationChangeIsSwallowed()
+    {
+        SessionEvent e{};
+        QVERIFY(!bsfchat::ios_audio::routeChangeToEvent(
+            static_cast<unsigned long>(
+                bsfchat::ios_audio::RouteChangeReason::RouteConfigurationChange),
+            e));
+    }
+
+    void realRouteChangesStillGetThrough()
+    {
+        using R = bsfchat::ios_audio::RouteChangeReason;
+        for (R r : {R::Unknown, R::NewDeviceAvailable, R::Override,
+                    R::WakeFromSleep, R::NoSuitableRouteForCategory}) {
+            SessionEvent e{};
+            QVERIFY(bsfchat::ios_audio::routeChangeToEvent(
+                static_cast<unsigned long>(r), e));
+            QCOMPARE(e, SessionEvent::RouteChanged);
+        }
+        SessionEvent lost{};
+        QVERIFY(bsfchat::ios_audio::routeChangeToEvent(
+            static_cast<unsigned long>(R::OldDeviceUnavailable), lost));
+        QCOMPARE(lost, SessionEvent::RouteChangedDeviceLost);
+    }
+
+    // A reason a future iOS invents must not be swallowed silently — the
+    // handler's response is now cheap and idempotent, so passing it on
+    // is the safe default.
+    void anUnknownReasonIsPassedOn()
+    {
+        SessionEvent e{};
+        QVERIFY(bsfchat::ios_audio::routeChangeToEvent(9999, e));
+        QCOMPARE(e, SessionEvent::RouteChanged);
+    }
+
+    // ---- rebuild limiter ----
+
+    void rebuildLimiterAllowsAHumanPaceOfChanges()
+    {
+        RebuildLimiter lim(3, 10000);
+        // Plugging in headphones, then a headset an hour later.
+        QVERIFY(lim.allow(0));
+        QVERIFY(lim.allow(60000));
+        QVERIFY(lim.allow(3600000));
+        QVERIFY(!lim.exhausted());
+    }
+
+    // The observed failure, at its observed rate: one rebuild every
+    // ~700 ms. The fourth inside the window must be refused, and it must
+    // stay refused rather than recovering when the window rolls — a
+    // backend that needed three rebuilds in ten seconds is not one to
+    // keep.
+    void rebuildLimiterStopsTheObservedLoop()
+    {
+        RebuildLimiter lim(3, 10000);
+        QVERIFY(lim.allow(0));
+        QVERIFY(lim.allow(700));
+        QVERIFY(lim.allow(1400));
+        QVERIFY(!lim.allow(2100));
+        QVERIFY(lim.exhausted());
+        // Still refused long after the window would have rolled.
+        QVERIFY(!lim.allow(60000));
+        QVERIFY(!lim.allow(600000));
+    }
+
+    void rebuildLimiterResetsForANewSession()
+    {
+        RebuildLimiter lim(3, 10000);
+        for (int i = 0; i < 5; ++i) lim.allow(i * 100);
+        QVERIFY(lim.exhausted());
+        lim.reset();
+        QVERIFY(!lim.exhausted());
+        QVERIFY(lim.allow(0));
+    }
+
+    // Exactly at the boundary the window rolls and the count starts
+    // again, so a slow trickle of genuine changes never exhausts it.
+    void rebuildLimiterWindowRolls()
+    {
+        RebuildLimiter lim(2, 1000);
+        QVERIFY(lim.allow(0));
+        QVERIFY(lim.allow(500));
+        // 1001 ms is outside the window opened at 0.
+        QVERIFY(lim.allow(1001));
+        QVERIFY(lim.allow(1200));
+        QVERIFY(!lim.allow(1300));
     }
 
     // ---- backend selection ----

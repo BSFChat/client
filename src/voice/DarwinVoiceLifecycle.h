@@ -212,4 +212,81 @@ private:
     const char* m_reason = "";
 };
 
+// A cap on how often the audio backend may rebuild itself, so that a
+// rebuild which provokes the very notification that triggers it cannot
+// spin.
+//
+// This exists because that is exactly what happened. On an iPhone 16 Pro
+// Max on 2026-09-25 the VoiceProcessingIO unit rebuilt ten times in eight
+// seconds — activating the unit moved the AVAudioSession route, the route
+// notification came back as "rebuild", and round it went. The unit never
+// stayed up long enough to deliver a single input callback, so the whole
+// session captured silence, and CoreAudio eventually refused to start it
+// at all (AVAudioSessionErrorCodeUnspecified, 'what').
+//
+// The root cause is fixed in two places that are both correct on their
+// own — the notification is no longer forwarded (IosAudioSession.h's
+// routeChangeToEvent) and a rebuild is no longer unconditional
+// (DarwinVpioBackend::restartForRouteChange). This is the third line, and
+// it is the one that does not depend on having correctly enumerated the
+// ways a loop can start. A retry that cannot be exhausted is a bug
+// whatever provoked it.
+//
+// The clock is the caller's — a millisecond count, monotonic or not; it
+// is only ever subtracted from itself. Same convention as
+// AudioDevicePolicy.h's RestartDebounce, and for the same reason: it
+// keeps this testable against a fake clock instead of against sleeps.
+class RebuildLimiter {
+public:
+    // Three rebuilds in ten seconds. A genuine route change — plugging
+    // in headphones, a Bluetooth headset connecting — arrives at human
+    // speed, so three inside ten seconds is already not a human doing
+    // things; it is a feedback loop.
+    explicit RebuildLimiter(int maxRebuilds = 3, qint64 windowMs = 10000)
+        : m_max(maxRebuilds), m_windowMs(windowMs)
+    {
+    }
+
+    // Records a rebuild attempt at `nowMs` and says whether to go ahead.
+    // Once it answers false it keeps answering false until reset(): the
+    // caller is expected to give up on this backend rather than to slow
+    // down, because a backend that needs rebuilding three times in ten
+    // seconds is not one to keep.
+    bool allow(qint64 nowMs)
+    {
+        if (m_exhausted) return false;
+        if (m_windowStartMs < 0 || nowMs - m_windowStartMs > m_windowMs) {
+            m_windowStartMs = nowMs;
+            m_count = 0;
+        }
+        if (++m_count > m_max) {
+            m_exhausted = true;
+            return false;
+        }
+        return true;
+    }
+
+    bool exhausted() const { return m_exhausted; }
+    int countInWindow() const { return m_count; }
+    int maxRebuilds() const { return m_max; }
+
+    // A new session. Deliberately NOT called on a successful rebuild:
+    // the window is about how often rebuilds happen, and clearing it on
+    // success would make a loop of successful rebuilds — which is
+    // precisely the loop observed — invisible to it.
+    void reset()
+    {
+        m_windowStartMs = -1;
+        m_count = 0;
+        m_exhausted = false;
+    }
+
+private:
+    int m_max;
+    qint64 m_windowMs;
+    qint64 m_windowStartMs = -1;
+    int m_count = 0;
+    bool m_exhausted = false;
+};
+
 } // namespace bsfchat::voice

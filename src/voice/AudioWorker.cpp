@@ -65,6 +65,12 @@ AudioWorker::~AudioWorker() {
 bool AudioWorker::startDevices() {
     if (m_started) return true;
 
+    // A previous session's teardown flag must not abort this one's work
+    // before it has started. Cleared here rather than in stopDevices()
+    // so that it stays set for the whole of a teardown, including
+    // anything that was already queued behind it.
+    m_stopping.store(false, std::memory_order_relaxed);
+
     // Flip Android into VoIP mode + route to speakerphone BEFORE we
     // open QAudioSource. Done in MODE_NORMAL, Android routes capture
     // to a "normal" profile that prefers earpiece for playback and
@@ -163,6 +169,7 @@ bool AudioWorker::startDevices() {
 
     m_captureFrames = 0;
     m_captureLimitedFrames = 0;
+    m_captureSessionPeak = 0;
     m_playbackFrames = 0;
     m_playbackLimitedFrames = 0;
     m_levelSummaryLogged = false;
@@ -319,6 +326,17 @@ void AudioWorker::drainCapture() {
                     kFrameBytes);
         const int16_t* pcm = m_captureFrame.data();
 
+        // Largest sample this session, measured on the RAW frame and
+        // therefore true whoever is doing the gain control. This is the
+        // number that answers "is the microphone alive", and it is
+        // measured here rather than inferred from the AGC because the
+        // AGC does not run when the platform does the voice processing.
+        for (int i = 0; i < kFrameSamples; ++i) {
+            const int16_t v = pcm[i];
+            const int a = v < 0 ? -(v + 1) : v;
+            if (a > m_captureSessionPeak) m_captureSessionPeak = a;
+        }
+
         // ----- Gain control -----
         // AGC, input volume, limiter. See processCaptureFrame(). What is
         // encoded below is m_captureOut; the level meter still reads the
@@ -449,40 +467,84 @@ void AudioWorker::processCaptureFrame() {
     ++m_captureFrames;
     if (m_captureLimiter.lastBlockMinGain() < 0.999f) ++m_captureLimitedFrames;
 
-    // One line, once, ten seconds of speech into the call — the earliest
-    // point at which the numbers mean anything. Not per-frame logging:
-    // the flag makes it fire at most once per session.
-    if (!m_levelSummaryLogged && agcOn
-        && m_agc.speechFrames() >= kLevelSummarySpeechFrames) {
+    // One line, once, ten seconds in — the earliest point at which the
+    // numbers mean anything. Not per-frame logging: the flag makes it
+    // fire at most once per session.
+    //
+    // The trigger used to be the AGC's own speech-frame count, which
+    // meant that with platform voice processing — Android, and now
+    // macOS/iOS on the VPIO backend — it never fired at all. That is
+    // exactly the configuration where the log is most needed, because it
+    // is the one where nothing else reports whether the microphone is
+    // producing samples. Captured frames are counted on every path.
+    if (!m_levelSummaryLogged
+        && (agcOn ? m_agc.speechFrames() >= kLevelSummarySpeechFrames
+                  : m_captureFrames >= kLevelSummarySpeechFrames)) {
         m_levelSummaryLogged = true;
-        logLevelSummary("after 10 s of speech");
+        logLevelSummary(agcOn ? "after 10 s of speech" : "after 10 s of capture");
     }
 }
 
 void AudioWorker::logLevelSummary(const char* when) {
     // Levels only, to the local log. Nothing here leaves the machine.
-    //
-    // Raw speech percentiles are what the microphone delivered BEFORE any
-    // gain, over frames the AGC classified as speech — the number that
-    // answers "was the mic simply quiet". Only collected while the AGC
-    // runs; on Android, or with AGC switched off, they read -120.
     const double capLimited = m_captureFrames > 0
         ? 100.0 * double(m_captureLimitedFrames) / double(m_captureFrames) : 0.0;
     const double playLimited = m_playbackFrames > 0
         ? 100.0 * double(m_playbackLimitedFrames) / double(m_playbackFrames) : 0.0;
-    qInfo("[voice] levels (%s): %.1f s speech, raw speech p10/p50/p90 "
-          "%.0f/%.0f/%.0f dBFS, noise floor %.0f dBFS, AGC %s gain %+.1f dB, "
-          "input vol x%.2f, capture limiter active %.1f%% of frames; "
-          "output vol x%.2f, playback limiter active %.1f%% of frames",
-          when, double(m_agc.speechFrames()) * 0.02,
-          double(m_agc.rawSpeechPercentileDbfs(0.1f)),
-          double(m_agc.rawSpeechPercentileDbfs(0.5f)),
-          double(m_agc.rawSpeechPercentileDbfs(0.9f)),
-          double(m_agc.noiseFloorDbfs()),
-          m_platformVoiceProcessing ? "platform"
-              : (m_autoGain.load(std::memory_order_relaxed) ? "on" : "off"),
-          double(m_agc.gainDb()), double(m_appliedInputGain), capLimited,
-          double(m_appliedOutputGain), playLimited);
+
+    const bool agcRan = !m_platformVoiceProcessing
+                        && m_autoGain.load(std::memory_order_relaxed);
+
+    // FIRST, and unconditionally: did the microphone produce samples?
+    //
+    // This line is separate from the AGC line below because the two
+    // answer different questions and only one of them is always
+    // answerable. On 2026-09-25 a device log was read as proof that VPIO
+    // captured nothing, on the strength of "p10/p50/p90 -120 dBFS" — but
+    // those percentiles are collected BY the AGC, the AGC does not run
+    // when the platform does the voice processing, and -120 there means
+    // "not measured", not "silent". The frame count and peak below are
+    // measured on the raw capture frame on every path, so they mean what
+    // they say: zero frames is a dead capture path, zero peak over many
+    // frames is a live path delivering digital silence, and those are
+    // different bugs.
+    qInfo("[voice] capture (%s): %lld frames (%.1f s), peak |sample| %d "
+          "(0=silent, 32767=clip); voice processing: %s",
+          when, static_cast<long long>(m_captureFrames),
+          double(m_captureFrames) * 0.02, m_captureSessionPeak,
+          m_platformVoiceProcessing ? "platform (OS AEC/NS/AGC)" : "ours");
+    if (m_backend) {
+        const QString extra = m_backend->diagnostics();
+        if (!extra.isEmpty()) qInfo("[voice] backend (%s): %s", when,
+                                    qPrintable(extra));
+    }
+
+    // Raw speech percentiles are what the microphone delivered BEFORE
+    // any gain, over frames the AGC classified as speech. Only
+    // meaningful when the AGC actually ran, so they are only printed
+    // then.
+    if (agcRan) {
+        qInfo("[voice] levels (%s): %.1f s speech, raw speech p10/p50/p90 "
+              "%.0f/%.0f/%.0f dBFS, noise floor %.0f dBFS, AGC gain %+.1f dB, "
+              "input vol x%.2f, capture limiter active %.1f%% of frames; "
+              "output vol x%.2f, playback limiter active %.1f%% of frames",
+              when, double(m_agc.speechFrames()) * 0.02,
+              double(m_agc.rawSpeechPercentileDbfs(0.1f)),
+              double(m_agc.rawSpeechPercentileDbfs(0.5f)),
+              double(m_agc.rawSpeechPercentileDbfs(0.9f)),
+              double(m_agc.noiseFloorDbfs()),
+              double(m_agc.gainDb()), double(m_appliedInputGain), capLimited,
+              double(m_appliedOutputGain), playLimited);
+    } else {
+        qInfo("[voice] levels (%s): software AGC %s; input vol x%.2f, capture "
+              "limiter active %.1f%% of frames; output vol x%.2f, playback "
+              "limiter active %.1f%% of frames",
+              when,
+              m_platformVoiceProcessing ? "stood down for the platform's"
+                                        : "switched off",
+              double(m_appliedInputGain), capLimited,
+              double(m_appliedOutputGain), playLimited);
+    }
 }
 
 void AudioWorker::ingestQueuedPackets() {
@@ -617,6 +679,11 @@ void AudioWorker::pumpPlayback() {
     // pump, before deciding what to play. Doing it here rather than on
     // arrival is what keeps every JitterBuffer single-threaded.
     ingestQueuedPackets();
+
+    // A backend can die mid-session — an audio unit the OS refuses to
+    // restart, most concretely. The pump is the only thing still running
+    // when that happens, so it is where we notice. One bool per 10 ms.
+    checkBackendHealth();
 
     // A polled backend has no readyRead to hang capture off — a
     // CoreAudio input callback cannot call into a QObject — so the pump
@@ -972,6 +1039,35 @@ bool AudioWorker::demoteBackend(const QString& reason, Direction retrying) {
     return true;
 }
 
+void AudioWorker::checkBackendHealth() {
+    if (!m_started || !m_backend) return;
+    if (m_stopping.load(std::memory_order_relaxed)) return;
+    if (m_backend->healthy()) return;
+
+    // The backend has given up on itself. Demotion reopens whichever
+    // directions were in use on the Qt path, which is a call that works
+    // without echo cancellation — strictly better than the alternative
+    // this replaces, which was both directions marked in-use, nothing
+    // flowing, and no way back short of rejoining.
+    const QString capId = m_inputInUseId;
+    const QString outId = m_outputInUseId;
+
+    if (!demoteBackend(QStringLiteral("the audio unit stopped working"),
+                       Direction::Input)) {
+        return;  // already on Qt; nothing further to fall back to
+    }
+    // demoteBackend() carried the output direction across; input is the
+    // one it left for its caller, so reopen it here.
+    if (!capId.isEmpty()) {
+        if (const QAudioDevice* d = snapshotDevice(Direction::Input, capId))
+            openSource(*d);
+    }
+    if (!outId.isEmpty() && !m_backend->renderOpen()) {
+        if (const QAudioDevice* d = snapshotDevice(Direction::Output, outId))
+            openSink(*d);
+    }
+}
+
 // ---------------------------------------------------------------------
 // Interruption recovery
 // ---------------------------------------------------------------------
@@ -982,6 +1078,9 @@ bool AudioWorker::devicesOpen() const {
 
 void AudioWorker::suspendDevices() {
     if (!m_started) return;
+    // Not a bail-out: a teardown is queued, and closing the devices is
+    // what it is going to do anyway. Suspending first is harmless and
+    // keeps the UI honest for the moment in between.
 
     // Cancel anything armed: a device-change restart that fires while we
     // are suspended would reopen the microphone behind the user's back,
@@ -1011,6 +1110,10 @@ void AudioWorker::suspendDevices() {
 
 bool AudioWorker::resumeDevices() {
     if (!m_started) return false;
+    // A resume racing a teardown must lose. Reopening devices the
+    // teardown is about to close costs a CoreAudio round trip that the
+    // GUI thread is blocked waiting behind.
+    if (m_stopping.load(std::memory_order_relaxed)) return false;
     if (devicesOpen()) return true;
 
     if (!bsfchat::ios_audio::enterVoiceMode()) {
@@ -1035,6 +1138,12 @@ bool AudioWorker::resumeDevices() {
 
 void AudioWorker::reevaluateDevices() {
     if (!m_started) return;
+    // THE ONE THAT MATTERS for the leave-call freeze. Route-change work
+    // is queued, so several of these can already be sitting in front of
+    // the blocking stopDevices() the GUI thread is waiting on. Each one
+    // used to cost a full audio-unit rebuild. Returning here turns that
+    // backlog into nothing.
+    if (m_stopping.load(std::memory_order_relaxed)) return;
 
     // A VPIO unit is bound to the route it was built against, and on
     // iOS Qt's device snapshot will NOT have changed (it reports one

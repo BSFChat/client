@@ -226,6 +226,23 @@ public:
     void setOutputGain(float g) { m_outputGain.store(g, std::memory_order_relaxed); }
     void setAutoGain(bool on) { m_autoGain.store(on, std::memory_order_relaxed); }
 
+    // "Stop what you are doing; a teardown is queued behind you."
+    //
+    // Called DIRECTLY from the GUI thread, not marshalled — same route
+    // and same reasoning as setMuted() above, and here the reasoning is
+    // load-bearing rather than a latency nicety. AudioEngine tears the
+    // pipeline down with a BlockingQueuedConnection, which means the GUI
+    // thread waits behind everything already queued on the audio thread.
+    // When that queue was full of route-change work, each item costing a
+    // CoreAudio rebuild, leaving a call froze the app for as long as the
+    // backlog took to drain — and with a rebuild loop feeding it, that
+    // was indefinitely. Observed on a device on 2026-09-25.
+    //
+    // Setting this first makes every queued item return immediately, so
+    // the blocking stopDevices() is reached at once however much work is
+    // stacked in front of it. Cleared by startDevices().
+    void requestStop() { m_stopping.store(true, std::memory_order_relaxed); }
+
     // ---- audio-thread only, invoked via BlockingQueuedConnection ----
 
     // Opens the mic and speaker and starts the pump. Returns false only
@@ -334,6 +351,10 @@ private:
     // wires its capture notification. Called by startDevices() and by
     // demoteBackend().
     void createBackend();
+    // Polls the open backend and moves the call to the Qt path if it has
+    // died. Called from the pump, which is the only thing guaranteed to
+    // keep running when everything else has stopped working.
+    void checkBackendHealth();
     // A VPIO unit failed to start. Swap in the Qt backend for the rest
     // of the process and reopen whatever was open. Returns true if the
     // swap happened (so the caller can retry its open), false if we were
@@ -387,6 +408,14 @@ private:
     // Level-summary counters. Increments only on the frame path.
     int64_t m_captureFrames = 0;
     int64_t m_captureLimitedFrames = 0;
+    // Largest |sample| seen on the capture path this session, and
+    // whether the one-shot "is the microphone alive" line has gone out.
+    // Both exist because the level summary could not answer that
+    // question when the platform runs the voice processing: the AGC does
+    // not run then, so its raw-level percentiles report -120 dBFS
+    // meaning UNMEASURED, and that was read on 2026-09-25 as proof of a
+    // silent microphone. It was not proof of anything.
+    int m_captureSessionPeak = 0;
     int64_t m_playbackFrames = 0;
     int64_t m_playbackLimitedFrames = 0;
     bool m_levelSummaryLogged = false;
@@ -414,6 +443,10 @@ private:
     std::atomic<float> m_inputGain{1.0f};
     std::atomic<float> m_outputGain{1.0f};
     std::atomic<bool> m_autoGain{true};
+    // See requestStop(). Read on the audio thread, written from the GUI
+    // thread; relaxed is sufficient, because the only thing that races
+    // it is work we are trying to abandon anyway.
+    std::atomic<bool> m_stopping{false};
     uint16_t m_sequence = 0;
     bool m_started = false;
 

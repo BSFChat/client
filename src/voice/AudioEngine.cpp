@@ -207,8 +207,17 @@ void AudioEngine::stop() {
 void AudioEngine::teardownThread() {
     if (!m_thread) return;
 
-    // Before the worker goes away, so a late notification cannot arrive
-    // and try to reopen devices on a pipeline that is being destroyed.
+    // FIRST, before anything that waits. This is a direct atomic store
+    // rather than a queued call, so it takes effect even though the
+    // audio thread is busy — and it is what stops every queued
+    // route-change job on that thread from doing a CoreAudio rebuild
+    // while the GUI thread is blocked behind them. Without it, leaving a
+    // call froze the app for as long as the backlog took to drain, which
+    // with a rebuild loop feeding it was indefinitely.
+    if (m_worker) m_worker->requestStop();
+
+    // Then stop new ones arriving, so a late notification cannot try to
+    // reopen devices on a pipeline that is being destroyed.
     if (g_lifecycleOwner == this) {
         bsfchat::ios_audio::setEventHandler(nullptr);
         g_lifecycleOwner = nullptr;

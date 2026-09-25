@@ -158,6 +158,23 @@ public:
         return n;
     }
 
+    // Consumer side. Throws away everything currently readable and
+    // returns how much that was.
+    //
+    // This is what a consumer uses instead of reset() when the producer
+    // is still live — closing capture while the audio unit stays up for
+    // the echo canceller, for instance. reset() rewinds BOTH indices and
+    // is only valid with both sides stopped; this only moves the index
+    // this side owns, so it is safe against a concurrent writer.
+    int discardAll()
+    {
+        const uint32_t w = m_write.load(std::memory_order_acquire);
+        const uint32_t r = m_read.load(std::memory_order_relaxed);
+        const int n = static_cast<int>(w - r);
+        if (n > 0) m_read.store(w, std::memory_order_release);
+        return n;
+    }
+
     // Consumer side. Counts a render underrun; purely diagnostic.
     void noteUnderrun() { m_underruns.fetch_add(1, std::memory_order_relaxed); }
 
