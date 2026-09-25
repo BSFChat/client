@@ -1051,7 +1051,12 @@ private slots:
     // wrong: a banner that states the problem and offers no action.
     void expiredSessionBannerOffersAWayOut()
     {
-        for (const char* file : {"/components/MessageView.qml",
+        // ConnectionBanner.qml, not MessageView.qml: the banner moved out of
+        // the timeline and into the shells' main column, because as a child
+        // of MessageView it was a child of a StackLayout PAGE and went dark
+        // whenever the user flipped to the voice room. See
+        // theConnectionBannerIsAShellRow() below.
+        for (const char* file : {"/components/ConnectionBanner.qml",
                                  "/components/ServerSidebar.qml"}) {
             const QString src = readQml(QLatin1String(file));
             QVERIFY2(src.contains(QLatin1String("needsReauth")),
