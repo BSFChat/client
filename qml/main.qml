@@ -195,6 +195,23 @@ ApplicationWindow {
             Layout.fillWidth: true
             spacing: 0
 
+            // Connection / sync / re-auth strip, ABOVE the page swap.
+            //
+            // A ROW of this column, not an item anchored over it. It used to
+            // be the first row inside MessageView, which is page 0 of the
+            // StackLayout below — so flipping to the voice room hid it along
+            // with the timeline, and a user in a call got no word that their
+            // session had expired or the connection had dropped. The desktop
+            // shell had the same gap as the phone; the server rail's
+            // Reconnect item was the only other surface that says anything,
+            // and it cannot fix an expired token.
+            //
+            // It must stay a row: an item anchored over the column paints
+            // over live video (see qml/js/MainSurface.js).
+            ConnectionBanner {
+                Layout.fillWidth: true
+            }
+
             // View swap: MessageView vs. VoiceRoom. The voice CONNECTION
             // (inVoiceChannel) is orthogonal to the displayed VIEW
             // (viewingVoiceRoom) — you can be in voice and reading a text

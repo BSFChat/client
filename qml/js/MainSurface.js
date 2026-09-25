@@ -52,11 +52,19 @@
 // settings and profile popups, LoginDialog) or deliberately allowed over
 // everything (ToastHost, which is transient and self-dismissing). The
 // timeline's own overlays — the pagination spinner, the scroll-to-latest
-// chevron, the "It's quiet in here" state, the sync banner — are all real
-// children of MessageView, so the layout hides them along with the page and
-// they were never able to reach the video. The desktop shell was never
-// affected: qml/main.qml's StackLayout has no child carrying its own
-// `visible:` and no sibling empty state.
+// chevron, the "It's quiet in here" state — are all real children of
+// MessageView, so the layout hides them along with the page and they were
+// never able to reach the video. The desktop shell was never affected:
+// qml/main.qml's StackLayout has no child carrying its own `visible:` and no
+// sibling empty state.
+//
+// The sync banner was in that list too, and it turned out to be the one thing
+// there that SHOULD reach past the page. Being hidden with the timeline meant
+// a user in a call was told nothing when their session expired or the socket
+// dropped. It is now qml/components/ConnectionBanner.qml, mounted by each
+// shell as a ROW of the main column above this StackLayout — a row and not an
+// overlay, precisely so it cannot do what the empty state did. See
+// qml/js/ConnectionBanner.js.
 //
 // This lives out here, rather than inline in MobileMain.qml, for the reason
 // ChannelSelection.js does: MobileMain.qml imports the BSFChat module, which

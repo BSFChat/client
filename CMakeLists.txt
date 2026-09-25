@@ -1032,6 +1032,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/ThemedComboBox.qml
         qml/components/ThemedCheckBox.qml
         qml/components/ThemedSlider.qml
+        qml/components/ConnectionBanner.qml
         qml/components/InfoBanner.qml
         qml/components/MemberList.qml
         qml/components/LoginDialog.qml
@@ -1120,6 +1121,19 @@ qt_add_qml_module(bsfchat-app
         # Shared by ThemedComboBox.qml and
         # tests/qml_models/tst_comboboxmodel.qml.
         qml/js/ComboBoxText.js
+        # Which of the three surfaces owns the mobile shell's main column.
+        # Shared by MobileMain.qml and tests/qml/tst_mainsurface.qml.
+        #
+        # (Missing from this list when it landed. Everything is loaded from
+        # qrc:/qt/qml/BSFChat/ — see src/main.cpp — so a qml/js file that is
+        # not in RESOURCES is not in the binary, its `import` fails, and the
+        # shell that imports it never loads at all. Enforced from here on by
+        # everyQmlJsImportIsInTheBinary() in tests/test_qml_hygiene.cpp.)
+        qml/js/MainSurface.js
+        # What the connection / sync / re-auth banner says and whether it
+        # shows. Shared by ConnectionBanner.qml and
+        # tests/qml/tst_connectionbanner.qml.
+        qml/js/ConnectionBanner.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt

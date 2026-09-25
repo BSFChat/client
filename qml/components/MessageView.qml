@@ -186,105 +186,11 @@ Rectangle {
         anchors.fill: parent
         spacing: 0
 
-        // Sync error banner — 28h strip above the channel header when the
-        // connection isn't healthy. Reconnecting = amber warn; disconnected
-        // = danger red. Small animated dot on the left signals live state.
-        Rectangle {
-            id: syncBanner
-            Layout.fillWidth: true
-            Layout.preferredHeight: visible ? 28 : 0
-            color: {
-                if (!serverManager.activeServer) return "transparent";
-                if (serverManager.activeServer.connectionStatus === 2) return Theme.warn;
-                // 3 = session expired. Red, like disconnected: it is a
-                // permanent state until the user signs in again, not a
-                // transient one the client can recover from by waiting.
-                if (serverManager.activeServer.connectionStatus === 0
-                    || serverManager.activeServer.connectionStatus === 3) return Theme.danger;
-                return "transparent";
-            }
-            visible: serverManager.activeServer !== null && serverManager.activeServer.connectionStatus !== 1
-
-            RowLayout {
-                anchors.centerIn: parent
-                spacing: Theme.sp.s3
-
-                // Pulse dot — loops opacity so the banner reads as "live
-                // state, not static warning."
-                Rectangle {
-                    Layout.alignment: Qt.AlignVCenter
-                    width: 6; height: 6; radius: 3
-                    color: Theme.onAccent
-                    SequentialAnimation on opacity {
-                        loops: Animation.Infinite
-                        running: syncBanner.visible
-                        NumberAnimation { to: 0.3; duration: 600; easing.type: Easing.InOutQuad }
-                        NumberAnimation { to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
-                    }
-                }
-
-                Text {
-                    Layout.alignment: Qt.AlignVCenter
-                    text: {
-                        if (!serverManager.activeServer) return "";
-                        if (serverManager.activeServer.connectionStatus === 2)
-                            return "Reconnecting to server…";
-                        if (serverManager.activeServer.connectionStatus === 3)
-                            return serverManager.activeServer.syncErrorMessage;
-                        if (serverManager.activeServer.connectionStatus === 0)
-                            return "Disconnected — messages won't send until the server is reachable";
-                        return "";
-                    }
-                    font.family: Theme.fontSans
-                    font.pixelSize: Theme.fontSize.sm
-                    font.weight: Theme.fontWeight.semibold
-                    font.letterSpacing: Theme.trackTight.sm
-                    // onAccent works here because warn/danger are both
-                    // high-saturation colours that contrast with both the
-                    // dark-mode near-black and the light-mode white.
-                    color: Theme.onAccent
-                }
-
-                // The way out. Until this existed the banner named the
-                // problem ("Sign in again to reconnect") and offered nothing
-                // to press: the only affordance in the product was the server
-                // rail's Reconnect, which redialled /sync with the same dead
-                // token and never reached /login. Recovery meant removing the
-                // server and adding it back.
-                Button {
-                    id: reauthButton
-                    Layout.alignment: Qt.AlignVCenter
-                    visible: serverManager.activeServer !== null
-                             && serverManager.activeServer.needsReauth
-                    enabled: visible
-                             && !serverManager.activeServer.reauthInProgress
-                    text: (serverManager.activeServer
-                           && serverManager.activeServer.reauthInProgress)
-                          ? "Signing in…" : "Sign in again"
-                    padding: 0
-                    background: null
-                    contentItem: Text {
-                        text: reauthButton.text
-                        font.family: Theme.fontSans
-                        font.pixelSize: Theme.fontSize.sm
-                        font.weight: Theme.fontWeight.semibold
-                        font.underline: reauthButton.enabled
-                                        && reauthButton.hovered
-                        color: Theme.onAccent
-                        opacity: reauthButton.enabled ? 1.0 : 0.6
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                    onClicked: serverManager.reauthenticateServer(
-                                   serverManager.activeServerIndex)
-                }
-            }
-
-            Behavior on Layout.preferredHeight {
-                NumberAnimation { duration: Theme.motion.normalMs
-                                  easing.type: Easing.BezierSpline
-                                  easing.bezierCurve: Theme.motion.bezier }
-            }
-        }
+        // (The sync / re-auth banner that used to be the first row here now
+        // lives in qml/components/ConnectionBanner.qml, mounted by each
+        // shell as a row of its own main column. It was a child of this
+        // component, so a StackLayout hid it along with the timeline every
+        // time the user flipped to the voice room — see ConnectionBanner.js.)
 
         // Header bar (SPEC §3.6 top, 40-48h) — hash + channel name, inline
         // topic, right-aligned action cluster, bottom divider. Hidden on

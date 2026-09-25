@@ -1050,7 +1050,12 @@ private slots:
     // wrong: a banner that states the problem and offers no action.
     void expiredSessionBannerOffersAWayOut()
     {
-        for (const char* file : {"/components/MessageView.qml",
+        // ConnectionBanner.qml, not MessageView.qml: the banner moved out of
+        // the timeline and into the shells' main column, because as a child
+        // of MessageView it was a child of a StackLayout PAGE and went dark
+        // whenever the user flipped to the voice room. See
+        // theConnectionBannerIsAShellRow() below.
+        for (const char* file : {"/components/ConnectionBanner.qml",
                                  "/components/ServerSidebar.qml"}) {
             const QString src = readQml(QLatin1String(file));
             QVERIFY2(src.contains(QLatin1String("needsReauth")),
@@ -2215,6 +2220,215 @@ private slots:
                  "the main column no longer picks its page through"
                  " MainSurface.mainPage(); qml/js/MainSurface.js is the only"
                  " place that answer is allowed to be computed");
+    }
+
+
+    // The connection banner is a ROW OF EACH SHELL, and it is on screen
+    // during a voice call.
+    //
+    // It used to be `syncBanner`, the first row of the ColumnLayout inside
+    // qml/components/MessageView.qml. MessageView is page 0 of the main
+    // column's StackLayout on BOTH shells:
+    //
+    //     StackLayout { MessageView { }   // page 0 — the banner lived here
+    //                   VoiceRoom { }     // page 1
+    //                   Item { } }        // page 2, mobile only
+    //
+    // and a StackLayout writes `visible` on each of its children every time
+    // currentIndex changes. So tapping the voice channel took the banner off
+    // the screen along with the timeline, and a user sitting in a call whose
+    // session expired — or whose socket simply dropped — was told nothing at
+    // all, on the one surface where a silent disconnect is least explicable:
+    // the tiles just stop moving, and there is no message list to notice has
+    // gone quiet. Neither shell had a banner of its own; grepping either for
+    // `connectionStatus` found nothing.
+    //
+    // That mattered more than the missing strip suggests. The "Sign in again"
+    // button inside it is the only way out of an expired session from the
+    // main column — the client had no re-auth path at all until
+    // fix/reauth-recovery, and the documented workaround was to remove the
+    // server and add it back. The server rail offers a Reconnect that
+    // redials /sync with the same dead token, and on a phone the rail is
+    // behind a drawer.
+    //
+    // Four halves, and (b) is the one that fails on the commit before the fix:
+    //
+    //   (a) both shells mount ConnectionBanner.
+    //   (b) MessageView does not — the banner is not allowed back inside a
+    //       page, however it is spelled.
+    //   (c) in each shell it is a SIBLING of the StackLayout, in the same
+    //       main ColumnLayout, and ABOVE it in the source — a layout row,
+    //       which takes its 28px off the top of whichever surface is showing.
+    //   (d) it carries no `anchors`. An item anchored over the column
+    //       composites over live video, which is exactly the defect
+    //       fix/mobile-voice-overlays closed for the empty state. A banner
+    //       is not a toast; ToastHost is the only thing allowed over the
+    //       column and it is transient and self-dismissing.
+    //
+    // What this does NOT catch: a banner mounted as a row that is then given
+    // a zero height, or one whose `visible:` is gated on something that is
+    // false during a call. The rules it reads are in qml/js/ConnectionBanner.js
+    // and pinned in tests/qml/tst_connectionbanner.qml, which also measures
+    // both structures against a real StackLayout.
+    void theConnectionBannerIsAShellRow()
+    {
+        // ── (b) ──────────────────────────────────────────────────────
+        const QString view = withoutComments(
+            readQml(QStringLiteral("/components/MessageView.qml")));
+        QVERIFY2(!view.contains(QStringLiteral("ConnectionBanner")),
+                 "the connection banner is back inside MessageView.qml."
+                 " MessageView is a page of the main column's StackLayout on"
+                 " both shells, so the layout hides the banner along with the"
+                 " timeline every time the user flips to the voice room — and"
+                 " a session expiring mid-call is then announced to nobody."
+                 " It belongs to the shell, above the StackLayout.");
+        QVERIFY2(!view.contains(QStringLiteral("connectionStatus")),
+                 "MessageView.qml reads connectionStatus again — the"
+                 " connection's state is the shell's to report, in"
+                 " ConnectionBanner.qml, or it is invisible during a call");
+
+        struct Shell { const char* file; const char* what; };
+        const Shell shells[] = {
+            {"/main.qml",                "the desktop shell"},
+            {"/mobile/MobileMain.qml",   "the mobile shell"},
+        };
+        for (const auto& sh : shells) {
+            const QString src = withoutComments(readQml(QString::fromUtf8(sh.file)));
+            const QString who = QString::fromUtf8(sh.what);
+
+            // ── (a) ──────────────────────────────────────────────────
+            static const QRegularExpression mount(
+                QStringLiteral(R"(\bConnectionBanner\s*\{)"));
+            const auto m = mount.match(src);
+            QVERIFY2(m.hasMatch(),
+                     qPrintable(QStringLiteral(
+                         "%1 does not mount ConnectionBanner, so nothing on"
+                         " it reports a dropped connection or an expired"
+                         " session while the voice room is showing")
+                         .arg(who)));
+
+            // ── (c) ──────────────────────────────────────────────────
+            // The main column is the ColumnLayout that holds the one
+            // StackLayout; the banner has to be in it, and before it.
+            static const QRegularExpression stackDecl(
+                QStringLiteral(R"(\bStackLayout\s*\{)"));
+            const auto sm = stackDecl.match(src);
+            QVERIFY2(sm.hasMatch(),
+                     qPrintable(QStringLiteral("%1 has no StackLayout — this"
+                                               " rule is aimed at a shape the"
+                                               " file no longer has").arg(who)));
+            QVERIFY2(m.capturedStart() < sm.capturedStart(),
+                     qPrintable(QStringLiteral(
+                         "%1 mounts ConnectionBanner after the StackLayout."
+                         " The banner is the top row of the main column; below"
+                         " the pages it is either inside one of them or under"
+                         " the VoiceDock.").arg(who)));
+
+            // Siblings, not merely both present: the text from the banner's
+            // opening brace to the StackLayout's must close every block it
+            // opens. If it does not, one of them is nested inside something
+            // the other is not, and the banner is somewhere the page swap
+            // can reach.
+            const QString between = src.mid(
+                m.capturedStart(), sm.capturedStart() - m.capturedStart());
+            QVERIFY2(between.count(QLatin1Char('{')) == between.count(QLatin1Char('}')),
+                     qPrintable(QStringLiteral(
+                         "in %1 the ConnectionBanner and the StackLayout are"
+                         " not siblings — something opens or closes a block"
+                         " between them, so the banner is nested somewhere"
+                         " that the page swap can reach").arg(who)));
+
+            // ── (d) ──────────────────────────────────────────────────
+            const QString body = blockBody(
+                src.mid(m.capturedStart()),
+                QStringLiteral(R"(\bConnectionBanner\s*\{)"));
+            QVERIFY2(!body.contains(QStringLiteral("anchors")),
+                     qPrintable(QStringLiteral(
+                         "%1 anchors the ConnectionBanner. That makes it an"
+                         " overlay over the main column, and an overlay over"
+                         " the main column paints over the voice room's live"
+                         " video — the defect fix/mobile-voice-overlays just"
+                         " closed for the empty state. It is a LAYOUT ROW:"
+                         " let the ColumnLayout place it.").arg(who)));
+            QVERIFY2(!body.contains(QStringLiteral("z:")),
+                     qPrintable(QStringLiteral(
+                         "%1 gives the ConnectionBanner a z-order. A row in a"
+                         " layout has nothing to stack against; a z here means"
+                         " somebody made it an overlay.").arg(who)));
+        }
+    }
+
+    // Every `.js` a QML file imports is actually in the binary.
+    //
+    // src/main.cpp loads both shells from qrc:/qt/qml/BSFChat/, so a relative
+    // `import "../js/Thing.js"` resolves inside the resource. A qml/js file
+    // that is not listed in CMakeLists.txt is not in the resource — the
+    // import fails, the importing component becomes unavailable, and if that
+    // component is a shell the app opens no window at all.
+    //
+    // This is not hypothetical. qml/js/MainSurface.js landed with
+    // MobileMain.qml importing it and was never added to RESOURCES; ctest
+    // stayed green the whole time, because the QML tests load their .js from
+    // the source tree by relative path and never go near the resource. Only
+    // running the app on a device would have shown it, and the whole point of
+    // this file is the class of bug that only shows up there.
+    void everyQmlJsImportIsInTheBinary()
+    {
+        const QString cmake = [] {
+            QFile f(QStringLiteral(BSFCHAT_ROOT_DIR) + QStringLiteral("/CMakeLists.txt"));
+            [&] { QVERIFY2(f.open(QIODevice::ReadOnly | QIODevice::Text),
+                           qPrintable(f.fileName())); }();
+            return QString::fromUtf8(f.readAll());
+        }();
+        QVERIFY2(!cmake.isEmpty(), "CMakeLists.txt not found");
+
+        // Escapes rather than a raw string: moc's own lexer does not
+        // understand a custom R"tag( ... )tag" delimiter, and one here makes
+        // it swallow the rest of the file and emit no meta-object at all —
+        // which fails at LINK time with a missing vtable, several hundred
+        // lines away from the cause.
+        static const QRegularExpression jsImport(
+            QStringLiteral("import\\s+\"([^\"]*\\.js)\""));
+
+        const QDir root(QStringLiteral(BSFCHAT_ROOT_DIR));
+
+        int checked = 0;
+        QDirIterator it(QStringLiteral(BSFCHAT_QML_DIR), QStringList{QStringLiteral("*.qml")},
+                        QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString path = it.next();
+            const QString who = QFileInfo(path).fileName();
+            const QString src = withoutComments(readAll(path));
+            for (auto m = jsImport.globalMatch(src); m.hasNext();) {
+                // The import is relative to the IMPORTING file's directory,
+                // and these do not all live in qml/js — qml/data has one too.
+                // Resolve it rather than assume, or this rule reports a file
+                // that is listed under a path it did not guess.
+                const QString rel = root.relativeFilePath(QDir::cleanPath(
+                    QFileInfo(path).absolutePath() + QLatin1Char('/')
+                    + m.next().captured(1)));
+                ++checked;
+
+                // On disk at all. A typo'd path is the same failure and says
+                // even less at runtime.
+                QVERIFY2(QFileInfo::exists(root.filePath(rel)),
+                         qPrintable(QStringLiteral(
+                             "%1 imports %2, which does not exist")
+                             .arg(who, rel)));
+
+                QVERIFY2(cmake.contains(rel),
+                         qPrintable(QStringLiteral(
+                             "%1 imports %2, which is not listed in"
+                             " CMakeLists.txt. Everything loads from"
+                             " qrc:/qt/qml/BSFChat/ (src/main.cpp), so that"
+                             " file is not in the binary, the import fails at"
+                             " runtime, and this component never loads — if"
+                             " it is a shell, the app opens no window. Add it"
+                             " to the RESOURCES list.").arg(who, rel)));
+            }
+        }
+        QVERIFY2(checked > 0, "no .js imports found at all — this scan has"
+                              " stopped matching the tree's shape");
     }
 
 private:
