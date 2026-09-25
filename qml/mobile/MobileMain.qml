@@ -624,6 +624,21 @@ ApplicationWindow {
             anchors.fill: parent
             spacing: 0
 
+            // Connection / sync / re-auth strip, ABOVE the page swap.
+            //
+            // A ROW of this column, not an item anchored over it. It used to
+            // be the first row inside MessageView, which is page 0 of the
+            // StackLayout below — so the layout hid it along with the
+            // timeline and a user in a call was told nothing when their
+            // session expired or the socket dropped. Hoisted here it is on
+            // screen whichever of the three surfaces is showing.
+            //
+            // It must stay a row. Anchoring it over the column would put it
+            // in exactly the position the empty state was in on 2026-09-24,
+            // compositing over live video; see the block comment below and
+            // qml/js/MainSurface.js.
+            ConnectionBanner { }
+
             StackLayout {
                 id: mainStack
                 Layout.fillWidth: true

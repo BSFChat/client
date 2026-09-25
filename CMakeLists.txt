@@ -1105,6 +1105,7 @@ qt_add_qml_module(bsfchat-app
         qml/components/ThemedComboBox.qml
         qml/components/ThemedCheckBox.qml
         qml/components/ThemedSlider.qml
+        qml/components/ConnectionBanner.qml
         qml/components/InfoBanner.qml
         qml/components/MemberList.qml
         qml/components/LoginDialog.qml
@@ -1197,7 +1198,17 @@ qt_add_qml_module(bsfchat-app
         # timeline, voice room, or empty state. Out of MobileMain.qml so
         # tests/qml/tst_mainsurface.qml can pin the rule that stopped "No
         # channel selected" painting over live video.
+        #
+        # (Missing from this list when it landed. Everything is loaded from
+        # qrc:/qt/qml/BSFChat/ — see src/main.cpp — so a qml/js file that is
+        # not in RESOURCES is not in the binary, its `import` fails, and the
+        # shell that imports it never loads at all. That is the crash on
+        # launch. Enforced from here on by the hygiene test.)
         qml/js/MainSurface.js
+        # What the connection / sync / re-auth banner says and whether it
+        # shows. Shared by ConnectionBanner.qml and
+        # tests/qml/tst_connectionbanner.qml.
+        qml/js/ConnectionBanner.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt

@@ -2381,6 +2381,9 @@ private slots:
 
         const QString qmlDir = QStringLiteral(BSFCHAT_QML_DIR);
         QStringList offenders;
+        // Counted so a regex that has stopped matching the tree's import
+        // syntax fails loudly instead of passing on an empty scan.
+        int checked = 0;
         QDirIterator it(qmlDir, {QStringLiteral("*.qml"), QStringLiteral("*.js")},
                         QDir::Files, QDirIterator::Subdirectories);
         while (it.hasNext()) {
@@ -2389,6 +2392,7 @@ private slots:
             const QString src = withoutComments(readAll(path));
             for (auto m = jsImport.globalMatch(src); m.hasNext();) {
                 const QString spelled = m.next().captured(1);
+                ++checked;
                 const QString abs = QDir::cleanPath(
                     fi.absolutePath() + QLatin1Char('/') + spelled);
                 const QString repoRel = QDir(rootDir).relativeFilePath(abs);
@@ -2405,6 +2409,9 @@ private slots:
             }
         }
 
+        QVERIFY2(checked > 0,
+                 "no `import \"*.js\"` found anywhere under the QML dir —"
+                 " this scan has stopped matching the tree's shape");
         QVERIFY2(offenders.isEmpty(),
                  qPrintable(QStringLiteral(
                      "a .js file is imported by the QML module but is not in"
@@ -2536,6 +2543,141 @@ private slots:
         // scan has been silently passing on nothing.
         QVERIFY2(qualifiersSeen > 0, "no `import \"*.js\" as X` found — scan is broken");
         QVERIFY2(offenders.isEmpty(), qPrintable(offenders.join(QStringLiteral("\n"))));
+    }
+
+    // The connection banner is a ROW OF EACH SHELL, and it is on screen
+    // during a voice call.
+    //
+    // It used to be `syncBanner`, the first row of the ColumnLayout inside
+    // qml/components/MessageView.qml. MessageView is page 0 of the main
+    // column's StackLayout on BOTH shells:
+    //
+    //     StackLayout { MessageView { }   // page 0 — the banner lived here
+    //                   VoiceRoom { }     // page 1
+    //                   Item { } }        // page 2, mobile only
+    //
+    // and a StackLayout writes `visible` on each of its children every time
+    // currentIndex changes. So tapping the voice channel took the banner off
+    // the screen along with the timeline, and a user sitting in a call whose
+    // session expired — or whose socket simply dropped — was told nothing at
+    // all, on the one surface where a silent disconnect is least explicable:
+    // the tiles just stop moving, and there is no message list to notice has
+    // gone quiet. Neither shell had a banner of its own; grepping either for
+    // `connectionStatus` found nothing.
+    //
+    // That mattered more than the missing strip suggests. The "Sign in again"
+    // button inside it is the only way out of an expired session from the
+    // main column — the client had no re-auth path at all until
+    // fix/reauth-recovery, and the documented workaround was to remove the
+    // server and add it back. The server rail offers a Reconnect that
+    // redials /sync with the same dead token, and on a phone the rail is
+    // behind a drawer.
+    //
+    // Four halves, and (b) is the one that fails on the commit before the fix:
+    //
+    //   (a) both shells mount ConnectionBanner.
+    //   (b) MessageView does not — the banner is not allowed back inside a
+    //       page, however it is spelled.
+    //   (c) in each shell it is a SIBLING of the StackLayout, in the same
+    //       main ColumnLayout, and ABOVE it in the source — a layout row,
+    //       which takes its 28px off the top of whichever surface is showing.
+    //   (d) it carries no `anchors`. An item anchored over the column
+    //       composites over live video, which is exactly the defect
+    //       fix/mobile-voice-overlays closed for the empty state. A banner
+    //       is not a toast; ToastHost is the only thing allowed over the
+    //       column and it is transient and self-dismissing.
+    //
+    // What this does NOT catch: a banner mounted as a row that is then given
+    // a zero height, or one whose `visible:` is gated on something that is
+    // false during a call. The rules it reads are in qml/js/ConnectionBanner.js
+    // and pinned in tests/qml/tst_connectionbanner.qml, which also measures
+    // both structures against a real StackLayout.
+    void theConnectionBannerIsAShellRow()
+    {
+        // ── (b) ──────────────────────────────────────────────────────
+        const QString view = withoutComments(
+            readQml(QStringLiteral("/components/MessageView.qml")));
+        QVERIFY2(!view.contains(QStringLiteral("ConnectionBanner")),
+                 "the connection banner is back inside MessageView.qml."
+                 " MessageView is a page of the main column's StackLayout on"
+                 " both shells, so the layout hides the banner along with the"
+                 " timeline every time the user flips to the voice room — and"
+                 " a session expiring mid-call is then announced to nobody."
+                 " It belongs to the shell, above the StackLayout.");
+        QVERIFY2(!view.contains(QStringLiteral("connectionStatus")),
+                 "MessageView.qml reads connectionStatus again — the"
+                 " connection's state is the shell's to report, in"
+                 " ConnectionBanner.qml, or it is invisible during a call");
+
+        struct Shell { const char* file; const char* what; };
+        const Shell shells[] = {
+            {"/main.qml",                "the desktop shell"},
+            {"/mobile/MobileMain.qml",   "the mobile shell"},
+        };
+        for (const auto& sh : shells) {
+            const QString src = withoutComments(readQml(QString::fromUtf8(sh.file)));
+            const QString who = QString::fromUtf8(sh.what);
+
+            // ── (a) ──────────────────────────────────────────────────
+            static const QRegularExpression mount(
+                QStringLiteral(R"(\bConnectionBanner\s*\{)"));
+            const auto m = mount.match(src);
+            QVERIFY2(m.hasMatch(),
+                     qPrintable(QStringLiteral(
+                         "%1 does not mount ConnectionBanner, so nothing on"
+                         " it reports a dropped connection or an expired"
+                         " session while the voice room is showing")
+                         .arg(who)));
+
+            // ── (c) ──────────────────────────────────────────────────
+            // The main column is the ColumnLayout that holds the one
+            // StackLayout; the banner has to be in it, and before it.
+            static const QRegularExpression stackDecl(
+                QStringLiteral(R"(\bStackLayout\s*\{)"));
+            const auto sm = stackDecl.match(src);
+            QVERIFY2(sm.hasMatch(),
+                     qPrintable(QStringLiteral("%1 has no StackLayout — this"
+                                               " rule is aimed at a shape the"
+                                               " file no longer has").arg(who)));
+            QVERIFY2(m.capturedStart() < sm.capturedStart(),
+                     qPrintable(QStringLiteral(
+                         "%1 mounts ConnectionBanner after the StackLayout."
+                         " The banner is the top row of the main column; below"
+                         " the pages it is either inside one of them or under"
+                         " the VoiceDock.").arg(who)));
+
+            // Siblings, not merely both present: the text from the banner's
+            // opening brace to the StackLayout's must close every block it
+            // opens. If it does not, one of them is nested inside something
+            // the other is not, and the banner is somewhere the page swap
+            // can reach.
+            const QString between = src.mid(
+                m.capturedStart(), sm.capturedStart() - m.capturedStart());
+            QVERIFY2(between.count(QLatin1Char('{')) == between.count(QLatin1Char('}')),
+                     qPrintable(QStringLiteral(
+                         "in %1 the ConnectionBanner and the StackLayout are"
+                         " not siblings — something opens or closes a block"
+                         " between them, so the banner is nested somewhere"
+                         " that the page swap can reach").arg(who)));
+
+            // ── (d) ──────────────────────────────────────────────────
+            const QString body = blockBody(
+                src.mid(m.capturedStart()),
+                QStringLiteral(R"(\bConnectionBanner\s*\{)"));
+            QVERIFY2(!body.contains(QStringLiteral("anchors")),
+                     qPrintable(QStringLiteral(
+                         "%1 anchors the ConnectionBanner. That makes it an"
+                         " overlay over the main column, and an overlay over"
+                         " the main column paints over the voice room's live"
+                         " video — the defect fix/mobile-voice-overlays just"
+                         " closed for the empty state. It is a LAYOUT ROW:"
+                         " let the ColumnLayout place it.").arg(who)));
+            QVERIFY2(!body.contains(QStringLiteral("z:")),
+                     qPrintable(QStringLiteral(
+                         "%1 gives the ConnectionBanner a z-order. A row in a"
+                         " layout has nothing to stack against; a z here means"
+                         " somebody made it an overlay.").arg(who)));
+        }
     }
 
 private:
