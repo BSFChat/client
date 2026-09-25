@@ -74,8 +74,15 @@ PROFILE_DIRS = (
 
 
 def die(msg: str) -> None:
+    # Flush stdout first. Anything this script printed as context — the
+    # profile inventory in cmd_fetch_profile, above all — goes to stdout,
+    # and the annotation goes to stderr; unflushed, the two streams reach
+    # the Actions log out of order and the context appears AFTER the error
+    # that it explains, or not at all if the process dies first.
+    sys.stdout.flush()
     # ::error:: makes it a GitHub Actions annotation; harmless locally.
     print(f"::error::{msg}", file=sys.stderr)
+    sys.stderr.flush()
     sys.exit(1)
 
 
@@ -236,6 +243,48 @@ def cmd_fetch_profile(args: argparse.Namespace) -> int:
         candidates.append(row)
 
     if not candidates:
+        # Print the whole inventory before dying. Without this the message
+        # below is unfalsifiable from the log: the three filters above drop
+        # a profile for a wrong TYPE or a wrong BUNDLE ID silently (only a
+        # wrong state gets a note), so "none found" reads identically
+        # whether the account holds nothing, holds an Ad Hoc profile
+        # somebody picked by mistake, holds one for a neighbouring bundle
+        # id, or the API key cannot see profiles at all. Those are four
+        # different fixes and the operator is the only one who can apply
+        # them — so tell them which one it is.
+        rows = listing.get("data", [])
+        print(
+            f"The API key can see {len(rows)} provisioning profile(s) in "
+            f"this account. Looking for profileType={args.profile_type} "
+            f"bundleId={args.bundle_id} profileState=ACTIVE:"
+        )
+        if not rows:
+            print(
+                "  (none at all — if the portal shows profiles, then this "
+                "key cannot read them: an App Store Connect API key needs "
+                "the Admin role to list provisioning profiles, and a key "
+                "with a lesser role returns an empty list rather than an "
+                "authorisation error.)"
+            )
+        for row in rows:
+            attrs = row.get("attributes", {})
+            rel = row.get("relationships", {}).get("bundleId", {}).get("data") or {}
+            bid = bundle_of.get(rel.get("id")) or "?"
+            why = []
+            if attrs.get("profileType") != args.profile_type:
+                why.append(f"type is {attrs.get('profileType')}")
+            if bid != args.bundle_id:
+                why.append(f"bundle id is {bid}")
+            if attrs.get("profileState") != "ACTIVE":
+                why.append(f"state is {attrs.get('profileState')}")
+            print(
+                f"  - {attrs.get('name')!r}: "
+                f"type={attrs.get('profileType')} bundle={bid} "
+                f"state={attrs.get('profileState')} "
+                f"expires={attrs.get('expirationDate')}"
+                + ("   <-- rejected: " + ", ".join(why) if why else "")
+            )
+
         die(
             f"No ACTIVE {args.profile_type} provisioning profile for "
             f"'{args.bundle_id}' exists in the developer account. This job "
@@ -244,7 +293,12 @@ def cmd_fetch_profile(args: argparse.Namespace) -> int:
             "at https://developer.apple.com/account/resources/profiles/list "
             "(Distribution -> App Store Connect), attach the Apple "
             "Distribution certificate whose private key is in the "
-            "IOS_DIST_CERTIFICATE secret, and re-run."
+            "IOS_DIST_CERTIFICATE secret, and re-run. Note that the portal "
+            "calls this profile type 'App Store Connect' under "
+            "Distribution; 'Ad Hoc' and 'Development' produce "
+            "IOS_APP_ADHOC and IOS_APP_DEVELOPMENT, which this job does "
+            "not accept. See the inventory above for what is actually "
+            "there."
         )
 
     # Prefer a profile that already authorises the certificate we
