@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
 import BSFChat
+import "../js/MainSurface.js" as MainSurface
 
 // Mobile entry point — loaded instead of main.qml on iOS/Android.
 // Reuses every desktop leaf component (MessageView, MessageBubble,
@@ -558,11 +559,27 @@ ApplicationWindow {
     }
 
     // ── Main content ─────────────────────────────────────────────
-    // MessageView fills the screen; on no-active-channel, an empty
-    // state promotes the user to open the drawer. When the user is
-    // connected to a voice room and has flipped to the voice view
-    // (via tapping the voice channel, VoiceStatusCard, or VoiceDock),
-    // the voice surface takes over the main column.
+    // Three surfaces can own the main column, and exactly one of them
+    // ever does: the message timeline, the voice room (reached by
+    // tapping the voice channel, the VoiceStatusCard, or the VoiceDock),
+    // and the shell's own empty state promoting the user to open the
+    // drawer.
+    //
+    // They are three PAGES OF ONE StackLayout rather than a stack of
+    // items with visibility rules, and that is load-bearing. The empty
+    // state used to be a sibling of the layout reading `!chatView.visible`
+    // — but a StackLayout writes `visible` on every child each time
+    // currentIndex changes, so that expression meant "the chat page is
+    // not on top", which is also true while the voice room is up. The
+    // owner's Pixel 6 Pro photographed the result on 2026-09-24: "No
+    // channel selected" composited across two participants' live video.
+    // The same pair of lines failed the other way round too — the
+    // layout's write does not kill MessageView's own `visible:` binding,
+    // so a channel arriving while the voice view was showing re-fired it
+    // and painted the timeline over the video. Pages can do neither: the
+    // layout is the only writer and it shows exactly one.
+    //
+    // See qml/js/MainSurface.js and tests/qml/tst_mainsurface.qml.
     Rectangle {
         id: mainArea
         anchors.fill: parent
@@ -581,17 +598,138 @@ ApplicationWindow {
             spacing: 0
 
             StackLayout {
+                id: mainStack
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                currentIndex: (serverManager.activeServer
-                               && serverManager.activeServer.viewingVoiceRoom) ? 1 : 0
 
-                MessageView {
-                    id: chatView
-                    visible: serverManager.activeServer
-                          && serverManager.activeServer.activeRoomId !== ""
+                // A plain snapshot, built here so the binding's dependencies
+                // are the two property reads below rather than something a
+                // shared .js file did out of sight. Same shape and same
+                // reasoning as ChannelList's `selectionView`.
+                readonly property var surfaceView: {
+                    var s = serverManager.activeServer;
+                    if (!s) return null;
+                    return {
+                        activeRoomId: s.activeRoomId,
+                        viewingVoiceRoom: s.viewingVoiceRoom
+                    };
                 }
+                currentIndex: MainSurface.mainPage(surfaceView)
+
+                // NOTHING in here may carry its own `visible:`. The layout
+                // owns that property on its children, and a second writer is
+                // exactly the bug described above. Enforced by
+                // theMobileMainColumnHasExactlyOneWriter() in
+                // tests/test_qml_hygiene.cpp.
+                MessageView { id: chatView }
                 VoiceRoom { id: voiceRoomView }
+
+                // The empty state, now a page like the other two. Wrapped in
+                // a bare Item so the StackLayout sizes IT and the content
+                // centres inside — otherwise the layout would stretch the
+                // ColumnLayout to fill the column and the centring would be
+                // done by the column, not by the text.
+                Item {
+                    id: emptyStatePage
+
+                    ColumnLayout {
+                        anchors.centerIn: parent
+                        spacing: Theme.sp.s5
+                        Icon {
+                            name: _noServers ? "plus" : "hash"
+                            size: 48
+                            color: Theme.fg3
+                            Layout.alignment: Qt.AlignHCenter
+                        }
+                        Text {
+                            text: _noServers
+                                ? "No servers yet"
+                                : "No channel selected"
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.xl
+                            font.weight: Theme.fontWeight.semibold
+                            color: Theme.fg1
+                            Layout.alignment: Qt.AlignHCenter
+                        }
+                        Text {
+                            text: _noServers
+                                ? "Sign in with your BSFChat ID, or join a server by the "
+                                  + "address whoever runs it gave you."
+                                : "Tap the menu button to pick a server and channel."
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.md
+                            color: Theme.fg3
+                            Layout.alignment: Qt.AlignHCenter
+                            horizontalAlignment: Text.AlignHCenter
+                            // Off the PAGE, not off `parent`: parent here is
+                            // the ColumnLayout, whose width is its children's
+                            // implicit width, so the old `parent.width * 0.8`
+                            // was a width that depended on itself.
+                            Layout.preferredWidth: Math.min(emptyStatePage.width * 0.8, 320)
+                            wrapMode: Text.WordWrap
+                        }
+                        // Re-open the login dialog — first-launch opens it via
+                        // Component.onCompleted but if it closes we need a way
+                        // back in that doesn't require a force-quit.
+                        //
+                        // TWO buttons, not one behind the other. This screen is what a
+                        // store reviewer sees on a fresh install if they dismiss the
+                        // dialog, and "join a server by address" was, until now,
+                        // reachable only through a text link inside it. It is the
+                        // product's central act on a self-hosted chat system; it gets
+                        // a button.
+                        //
+                        // These two `visible:`s are on grandchildren of the
+                        // layout, not on a page, so they are not the second
+                        // writer the comment above warns about.
+                        Button {
+                            id: signInCta
+                            visible: _noServers
+                            text: "Sign in with BSFChat ID"
+                            Layout.alignment: Qt.AlignHCenter
+                            onClicked: root.openLoginDialog()
+                            contentItem: Text {
+                                text: parent.text
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.md
+                                font.weight: Theme.fontWeight.semibold
+                                color: Theme.onAccent
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                color: signInCta.hovered ? Theme.accentDim : Theme.accent
+                                radius: Theme.r2
+                                implicitWidth: 240
+                                implicitHeight: Theme.touchTarget
+                            }
+                        }
+                        Button {
+                            id: emptyJoinByAddressCta
+                            visible: _noServers
+                            text: "Join a server by address"
+                            Layout.alignment: Qt.AlignHCenter
+                            onClicked: root.openJoinByAddress()
+                            contentItem: Text {
+                                text: parent.text
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.md
+                                font.weight: Theme.fontWeight.semibold
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                color: emptyJoinByAddressCta.hovered ? Theme.bg3 : "transparent"
+                                border.color: Theme.accent
+                                border.width: 1
+                                radius: Theme.r2
+                                implicitWidth: 240
+                                implicitHeight: Theme.touchTarget
+                            }
+                        }
+                    }
+                }
             }
 
             // Persistent VoiceDock — only rendered while connected to
@@ -601,97 +739,6 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 visible: serverManager.activeServer
                       && serverManager.activeServer.inVoiceChannel
-            }
-        }
-
-        ColumnLayout {
-            anchors.centerIn: parent
-            visible: !chatView.visible
-            spacing: Theme.sp.s5
-            Icon {
-                name: _noServers ? "plus" : "hash"
-                size: 48
-                color: Theme.fg3
-                Layout.alignment: Qt.AlignHCenter
-            }
-            Text {
-                text: _noServers
-                    ? "No servers yet"
-                    : "No channel selected"
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontSize.xl
-                font.weight: Theme.fontWeight.semibold
-                color: Theme.fg1
-                Layout.alignment: Qt.AlignHCenter
-            }
-            Text {
-                text: _noServers
-                    ? "Sign in with your BSFChat ID, or join a server by the "
-                      + "address whoever runs it gave you."
-                    : "Tap the menu button to pick a server and channel."
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontSize.md
-                color: Theme.fg3
-                Layout.alignment: Qt.AlignHCenter
-                horizontalAlignment: Text.AlignHCenter
-                Layout.preferredWidth: Math.min(parent.width * 0.8, 320)
-                wrapMode: Text.WordWrap
-            }
-            // Re-open the login dialog — first-launch opens it via
-            // Component.onCompleted but if it closes we need a way
-            // back in that doesn't require a force-quit.
-            //
-            // TWO buttons, not one behind the other. This screen is what a
-            // store reviewer sees on a fresh install if they dismiss the
-            // dialog, and "join a server by address" was, until now,
-            // reachable only through a text link inside it. It is the
-            // product's central act on a self-hosted chat system; it gets
-            // a button.
-            Button {
-                id: signInCta
-                visible: _noServers
-                text: "Sign in with BSFChat ID"
-                Layout.alignment: Qt.AlignHCenter
-                onClicked: root.openLoginDialog()
-                contentItem: Text {
-                    text: parent.text
-                    font.family: Theme.fontSans
-                    font.pixelSize: Theme.fontSize.md
-                    font.weight: Theme.fontWeight.semibold
-                    color: Theme.onAccent
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                }
-                background: Rectangle {
-                    color: signInCta.hovered ? Theme.accentDim : Theme.accent
-                    radius: Theme.r2
-                    implicitWidth: 240
-                    implicitHeight: Theme.touchTarget
-                }
-            }
-            Button {
-                id: emptyJoinByAddressCta
-                visible: _noServers
-                text: "Join a server by address"
-                Layout.alignment: Qt.AlignHCenter
-                onClicked: root.openJoinByAddress()
-                contentItem: Text {
-                    text: parent.text
-                    font.family: Theme.fontSans
-                    font.pixelSize: Theme.fontSize.md
-                    font.weight: Theme.fontWeight.semibold
-                    color: Theme.fg0
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                }
-                background: Rectangle {
-                    color: emptyJoinByAddressCta.hovered ? Theme.bg3 : "transparent"
-                    border.color: Theme.accent
-                    border.width: 1
-                    radius: Theme.r2
-                    implicitWidth: 240
-                    implicitHeight: Theme.touchTarget
-                }
             }
         }
     }

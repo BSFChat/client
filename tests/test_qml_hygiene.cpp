@@ -2096,6 +2096,127 @@ private slots:
                      .arg(worstCase).arg(narrowestPhoneDp).arg(inRow)));
     }
 
+    // Exactly one thing may decide what the mobile main column shows.
+    //
+    // The owner photographed a Pixel 6 Pro in voice channel #spikk, two
+    // participants, live screen-share and camera tiles on screen — with the
+    // words "No channel selected" composited across the middle of all of it.
+    // The shell asked "what is on screen" twice, in two incompatible ways:
+    //
+    //     StackLayout { currentIndex: ...viewingVoiceRoom ? 1 : 0
+    //                   MessageView { id: chatView
+    //                                 visible: ...activeRoomId !== "" }
+    //                   VoiceRoom { } }
+    //     ColumnLayout { visible: !chatView.visible ... }   // the empty state
+    //
+    // A StackLayout WRITES `visible` on each of its children whenever
+    // currentIndex changes — that is how it shows one page. So
+    // `chatView.visible` meant "the chat page is on top", not "there is a
+    // channel", and the two writers disagreed in both directions:
+    // flipping to voice turned the empty state ON over the video, and a
+    // channel arriving during a call re-fired MessageView's own binding and
+    // turned the timeline ON over the video as well — the layout's write
+    // does not kill a declared binding. Both are measured against a real
+    // StackLayout in tests/qml/tst_mainsurface.qml.
+    //
+    // Hence two halves here, and (b) is the one that fails on the commit
+    // before the fix:
+    //
+    //   (a) no DIRECT CHILD of that StackLayout declares its own `visible:`.
+    //       Children are found by brace depth, so a `visible:` on a
+    //       grandchild — the two CTAs inside the empty-state page — is not
+    //       caught, and should not be: the layout does not own those.
+    //   (b) no `visible:` binding ANYWHERE in the file reads the `.visible`
+    //       of one of those children. That is the general form of
+    //       `!chatView.visible`, and it stays wrong however it is spelled.
+    //
+    // What this does NOT catch: an overlay that is a sibling of the
+    // StackLayout and simply has no `visible:` at all, or one gated on
+    // something unrelated that happens to be true during a call. The sweep
+    // that accompanied the fix found none — everything else over the column
+    // is user-summoned (drawers, settings and profile popups, LoginDialog)
+    // or deliberately always-on-top (ToastHost) — but a new one would have
+    // to be caught by reading the file, not by this.
+    void theMobileMainColumnHasExactlyOneWriter()
+    {
+        const QString src = withoutComments(
+            readQml(QStringLiteral("/mobile/MobileMain.qml")));
+        QVERIFY2(!src.isEmpty(), "MobileMain.qml not found");
+
+        // One StackLayout in this file, and it is the main column. If a
+        // second one is ever added, this rule is aimed at the wrong block
+        // and needs retargeting rather than deleting.
+        static const QRegularExpression stackDecl(QStringLiteral(R"(\bStackLayout\s*\{)"));
+        int stacks = 0;
+        for (auto it = stackDecl.globalMatch(src); it.hasNext();) { it.next(); ++stacks; }
+        QCOMPARE(stacks, 1);
+
+        const QString stack = blockBody(src, QStringLiteral(R"(\bStackLayout\s*\{)"));
+        QVERIFY2(!stack.isEmpty(), "could not read the StackLayout's body");
+
+        // Walk the body once, tracking brace depth relative to it. Depth 0 is
+        // the StackLayout's own properties; depth 1 is inside a direct child.
+        QStringList offenders;
+        QStringList childIds;
+        int depth = 0;
+        const QStringList lines = stack.split(QLatin1Char('\n'));
+        for (const QString& line : lines) {
+            const QString t = line.trimmed();
+            const int opens  = line.count(QLatin1Char('{'));
+            const int closes = line.count(QLatin1Char('}'));
+            // A declaration's own text sits at the depth BEFORE its brace.
+            const int here = depth + (t.startsWith(QLatin1Char('}')) ? -closes : 0);
+            if (here == 1) {
+                if (t.startsWith(QLatin1String("visible:")))
+                    offenders << t;
+                static const QRegularExpression idDecl(
+                    QStringLiteral(R"(\bid:\s*([a-z_]\w*))"));
+                const auto m = idDecl.match(t);
+                if (m.hasMatch()) childIds << m.captured(1);
+            }
+            depth += opens - closes;
+        }
+
+        // ── (a) ──────────────────────────────────────────────────────
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "a page of the mobile main column declares its own"
+                     " `visible:`, which fights the StackLayout for the same"
+                     " property and is how \"No channel selected\" got painted"
+                     " over live video. Let the layout decide, via"
+                     " MainSurface.mainPage(). Offending: ")
+                     + offenders.join(QStringLiteral(" | "))));
+
+        // ── (b) ──────────────────────────────────────────────────────
+        QVERIFY2(!childIds.isEmpty(),
+                 "no ids found on the StackLayout's pages — the depth walk"
+                 " above has stopped matching the file's shape");
+        for (const QString& binding : visibleBindings(src)) {
+            for (const QString& id : childIds) {
+                QVERIFY2(!binding.contains(id + QStringLiteral(".visible")),
+                         qPrintable(QStringLiteral(
+                             "something in MobileMain.qml keys its visibility"
+                             " off `%1.visible`. That is a StackLayout page, so"
+                             " that property means \"this page is on top\", not"
+                             " anything about the app's state — and it is false"
+                             " while the voice room is showing. Ask"
+                             " MainSurface.js instead. Binding: %2")
+                             .arg(id, binding)));
+            }
+        }
+
+        // ── (c) ──────────────────────────────────────────────────────
+        // Last, because (a) and (b) are the ones that describe the hazard
+        // and they should be what a broken tree reports. This one is the
+        // structural marker: the pages are chosen by the one tested
+        // function, not by an inline conditional that can grow a second
+        // opinion the way `... ? 1 : 0` did.
+        QVERIFY2(stack.contains(QStringLiteral("MainSurface.mainPage(")),
+                 "the main column no longer picks its page through"
+                 " MainSurface.mainPage(); qml/js/MainSurface.js is the only"
+                 " place that answer is allowed to be computed");
+    }
+
 private:
     // The text between the braces of the first block whose opening matches
     // `opener` (which must end at that block's `{`). Null when there is none.
