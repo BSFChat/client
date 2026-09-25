@@ -1519,23 +1519,62 @@ jobs:
             -S apple-tool:,apple:,codesign: -k "$KEYCHAIN_PWD" $KEYCHAIN_PATH
           security list-keychains -d user -s $KEYCHAIN_PATH login.keychain-db
           rm -f $RUNNER_TEMP/ios_dist.p12
-          IDENTITY=$(security find-identity -v -p codesigning $KEYCHAIN_PATH \
-            | grep "Apple Distribution" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          LINE=$(security find-identity -v -p codesigning $KEYCHAIN_PATH \
+            | grep "Apple Distribution" | head -1)
+          IDENTITY=$(echo "$LINE" | sed 's/.*"\(.*\)".*/\1/')
           if [ -z "$IDENTITY" ]; then
             echo "::error::No 'Apple Distribution' identity in IOS_DIST_CERTIFICATE." \
                  "A Developer ID or Apple Development certificate cannot sign an App Store build."
             exit 1
           fi
+          # The SHA-1 fingerprint, not the display name, is what every
+          # later step keys off. Two certificates can share a display
+          # name — that is exactly what happens when a second one is
+          # issued to the same person — so a name match proves nothing
+          # about WHICH certificate signed the archive. The fingerprint
+          # does. It is also the value the owner matches against a row
+          # in developer.apple.com before revoking anything.
+          SHA1=$(echo "$LINE" | awk '{print $2}')
           echo "available=true" >> "$GITHUB_OUTPUT"
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+          echo "sha1=$SHA1" >> "$GITHUB_OUTPUT"
+          echo "IOS_SIGNING_SHA1=$SHA1" >> "$GITHUB_ENV"
+          echo "IOS_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
           echo "Signing identity: $IDENTITY"
+          echo "Signing identity SHA-1: $SHA1"
+          # Serial and expiry too, unredacted: these are the columns the
+          # developer-portal certificate list shows, and having them in
+          # the log is the difference between "revoke the surplus
+          # certificates" being a mechanical task and a guess.
+          security find-certificate -c "$IDENTITY" -p $KEYCHAIN_PATH \
+            | openssl x509 -noout -serial -enddate -subject || true
+          {
+            echo "### iOS signing certificate"
+            echo ""
+            echo "- SHA-1: \`$SHA1\`"
+            echo "- This is the ONLY certificate this run is permitted to sign with."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # === iOS: Materialise the App Store Connect API key ===
       #
-      # One key does two jobs. xcodebuild -allowProvisioningUpdates uses
-      # it to create and download the App Store provisioning profile on
-      # the fly, so there is NO .mobileprovision secret to rotate every
-      # twelve months; and the same key authenticates the TestFlight
-      # upload at the bottom of this job.
+      # One key does two jobs. scripts/asc-provisioning.py uses it to
+      # DOWNLOAD the App Store provisioning profile that already exists
+      # in the account, so there is NO .mobileprovision secret to rotate
+      # every twelve months; and the same key authenticates the
+      # TestFlight upload at the bottom of this job.
+      #
+      # It is NOT handed to xcodebuild any more, and that is the point.
+      # It used to be, together with -allowProvisioningUpdates, and
+      # `man xcodebuild` is explicit about what that combination does:
+      # "For automatically signed targets, xcodebuild will create and
+      # update profiles, app IDs, and certificates." A CI runner starts
+      # with an empty keychain every time, so on every run Xcode decided
+      # it had no usable identity and — with an Admin key, which is the
+      # only role cloud signing accepts — minted a NEW certificate. Run
+      # 36080815332 is where that ran out: "Choose a certificate to
+      # revoke. Your account has reached the maximum number of
+      # certificates." Nothing below passes -allowProvisioningUpdates to
+      # a build or archive action; see the Archive step.
       #
       # It lands in ~/.appstoreconnect/private_keys under the exact
       # AuthKey_<KEYID>.p8 name, which is the convention every Apple
@@ -1567,6 +1606,37 @@ jobs:
           chmod 600 "$KEY_PATH"
           echo "ASC_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
           echo "available=true" >> "$GITHUB_OUTPUT"
+
+      # === iOS: fetch the provisioning profile, do not create one ===
+      #
+      # This is the step that replaces automatic signing. It performs
+      # GET requests against App Store Connect and nothing else — the
+      # script implements no other HTTP verb — so the profile has to
+      # already exist, put there once by a human in the portal. If it
+      # does not, this fails in ten seconds with instructions, instead
+      # of Xcode quietly conjuring one plus a certificate to go with it.
+      #
+      # It also refuses to continue unless the profile actually lists
+      # the certificate we imported above, compared by SHA-1. That check
+      # is the difference between "the archive is signed" and "the
+      # archive is signed with the key we think it is", and it runs
+      # BEFORE the twenty-minute build rather than after it.
+      - name: Install the App Store provisioning profile
+        id: profile
+        if: steps.asc.outputs.available == 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          # Only dependency this script has beyond the standard library
+          # (ES256 is not in it). Cheap if the image already carries it.
+          python3 -c 'import cryptography' 2>/dev/null \
+            || pip3 install --break-system-packages --quiet cryptography
+          python3 scripts/asc-provisioning.py fetch-profile \
+            --bundle-id com.bsfchat.app \
+            --profile-type IOS_APP_STORE \
+            --require-sha1 "$IOS_SIGNING_SHA1"
 
       # -G Xcode, not Ninja: `xcodebuild archive` needs a real Xcode
       # project and the whole codesign/export path is driven through
@@ -1630,7 +1700,7 @@ jobs:
       # "someone added a macOS-only source file to the shared target
       # again", which is the failure this whole job exists to prevent.
       - name: Build (unsigned compile check)
-        if: steps.signing.outputs.available != 'true'
+        if: steps.profile.outputs.available != 'true'
         run: |
           xcodebuild build -quiet \
             -project build-ios/bsfchat-client.xcodeproj \
@@ -1639,16 +1709,39 @@ jobs:
             -destination 'generic/platform=iOS' \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
 
+      # Manual signing, no -allowProvisioningUpdates, no authentication
+      # key: this invocation cannot reach the Apple Developer website at
+      # all, so it cannot create a certificate however confused it gets.
+      #
+      # Why the old CODE_SIGN_STYLE=Automatic form burned a certificate
+      # per run, in one paragraph, because the symptom did not look like
+      # the cause. Nothing in the project or the command line ever set
+      # CODE_SIGN_IDENTITY, so the iphoneos default applied: "Apple
+      # Development". Automatic signing therefore went looking for a
+      # DEVELOPMENT identity and a development profile — which is why
+      # the eventual failure read "Xcode couldn't find any iOS App
+      # Development provisioning profiles matching 'com.bsfchat.app'"
+      # even though the job had just imported an Apple DISTRIBUTION
+      # certificate and logged it. The distribution certificate was
+      # never the one being looked for. It was used later, at export,
+      # where the app-store method re-signs — which is exactly why the
+      # job passed for weeks while quietly minting a development
+      # certificate on every single run. A fresh runner keychain means
+      # the previous run's certificate and its private key are gone, so
+      # nothing was ever reused.
+      #
+      # Pinned by SHA-1, not by name: see the import step.
       - name: Archive
-        if: steps.signing.outputs.available == 'true'
+        if: steps.profile.outputs.available == 'true'
         run: |
-          AUTH=()
-          if [ "${{ steps.asc.outputs.available }}" = "true" ]; then
-            AUTH=(-allowProvisioningUpdates
-                  -authenticationKeyPath "$ASC_KEY_PATH"
-                  -authenticationKeyID "${{ secrets.ASC_KEY_ID }}"
-                  -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}")
-          fi
+          set -euo pipefail
+          # Snapshot every code-signing identity visible right now. The
+          # guard step below diffs against this; anything new means
+          # something installed a certificate mid-build, which is the
+          # failure this whole change exists to prevent.
+          security find-identity -v -p codesigning \
+            | awk '/\)/ {print $2}' | sort -u > "$RUNNER_TEMP/identities-before.txt"
+          cat "$RUNNER_TEMP/identities-before.txt"
           xcodebuild archive -quiet \
             -project build-ios/bsfchat-client.xcodeproj \
             -scheme bsfchat-app \
@@ -1656,8 +1749,87 @@ jobs:
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/BSFChat.xcarchive" \
             DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
-            CODE_SIGN_STYLE=Automatic \
-            "${AUTH[@]}"
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="$IOS_SIGNING_SHA1" \
+            "CODE_SIGN_IDENTITY[sdk=iphoneos*]=$IOS_SIGNING_SHA1" \
+            PROVISIONING_PROFILE_SPECIFIER="${{ steps.profile.outputs.uuid }}" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $IOS_KEYCHAIN_PATH"
+
+      # === The loud part ===
+      #
+      # An archive signed by the wrong certificate is not a cosmetic
+      # problem, it is the bug above happening again, and last time it
+      # was invisible for several runs because everything downstream
+      # still succeeded. So assert it, on the artefact, not on the
+      # intent:
+      #
+      #   1. the leaf certificate embedded in the signature has the
+      #      exact SHA-1 of the .p12 we imported;
+      #   2. the profile baked into the .app is the one we downloaded;
+      #   3. no code-signing identity appeared on this machine that was
+      #      not there before the archive ran.
+      #
+      # (3) is the direct tripwire: a certificate created by Xcode lands
+      # in a keychain on the runner, so a new fingerprint here means one
+      # was minted. It is cheap and it does not depend on parsing
+      # xcodebuild's output, which is -quiet and changes between Xcodes.
+      - name: Verify the archive used the imported certificate
+        if: steps.profile.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/BSFChat.xcarchive/Products/Applications/bsfchat-app.app"
+          WORK="$RUNNER_TEMP/signing-check"
+          mkdir -p "$WORK"
+
+          # 1. Who actually signed it.
+          ( cd "$WORK" && codesign -d --extract-certificates=leaf "$APP" 2>/dev/null )
+          ACTUAL=$(openssl x509 -inform DER -in "$WORK/leaf0" -noout -fingerprint -sha1 \
+            | sed 's/.*=//; s/://g' | tr 'a-f' 'A-F')
+          echo "Archive signed by : $ACTUAL"
+          echo "Imported .p12     : $IOS_SIGNING_SHA1"
+          if [ "$ACTUAL" != "$IOS_SIGNING_SHA1" ]; then
+            echo "::error::The archive was signed by certificate $ACTUAL, which is" \
+                 "NOT the one imported from IOS_DIST_CERTIFICATE ($IOS_SIGNING_SHA1)." \
+                 "Do not upload this build. A certificate may have been created on" \
+                 "the developer account — check" \
+                 "https://developer.apple.com/account/resources/certificates/list"
+            codesign -dvvv "$APP" 2>&1 | sed -n '1,40p'
+            exit 1
+          fi
+
+          # 2. Which profile it embedded.
+          # Via a real file: PlistBuddy does not read a pipe.
+          security cms -D -i "$APP/embedded.mobileprovision" > "$WORK/profile.plist"
+          EMBEDDED=$(/usr/libexec/PlistBuddy -c "print UUID" "$WORK/profile.plist")
+          echo "Embedded profile  : $EMBEDDED"
+          if [ "$EMBEDDED" != "${{ steps.profile.outputs.uuid }}" ]; then
+            echo "::error::The archive embeds provisioning profile $EMBEDDED, not the" \
+                 "one this job downloaded (${{ steps.profile.outputs.uuid }})." \
+                 "Something provisioned this build behind our back."
+            exit 1
+          fi
+
+          # 3. Nothing new on the machine.
+          security find-identity -v -p codesigning \
+            | awk '/\)/ {print $2}' | sort -u > "$RUNNER_TEMP/identities-after.txt"
+          NEW=$(comm -13 "$RUNNER_TEMP/identities-before.txt" \
+                         "$RUNNER_TEMP/identities-after.txt" || true)
+          if [ -n "$NEW" ]; then
+            echo "::error::A code-signing identity appeared during the archive:" \
+                 "$NEW. That means a certificate was created on the developer" \
+                 "account. Revoke it at" \
+                 "https://developer.apple.com/account/resources/certificates/list"
+            security find-identity -v -p codesigning
+            exit 1
+          fi
+
+          {
+            echo "### iOS signing (verified)"
+            echo ""
+            echo "- Signed by: \`$ACTUAL\` (matches \`IOS_DIST_CERTIFICATE\`)"
+            echo "- Profile: \`${{ steps.profile.outputs.name }}\` (\`$EMBEDDED\`)"
+            echo "- No certificate was created: identity set unchanged across the archive."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Check the artefact, not the source — same reasoning as the
       # macOS bundle's PlistBuddy guard in CMakeLists.txt. These two
@@ -1667,7 +1839,7 @@ jobs:
       # record that does not exist, after the archive has already cost
       # twenty minutes.
       - name: Verify archived Info.plist
-        if: steps.signing.outputs.available == 'true'
+        if: steps.profile.outputs.available == 'true'
         run: |
           APP="$RUNNER_TEMP/BSFChat.xcarchive/Products/Applications/bsfchat-app.app"
           /usr/libexec/PlistBuddy -c "print ITSAppUsesNonExemptEncryption" "$APP/Info.plist"
@@ -1683,7 +1855,7 @@ jobs:
           /usr/libexec/PlistBuddy -c "print CFBundleIconName" "$APP/Info.plist"
 
       - name: Export .ipa
-        if: steps.signing.outputs.available == 'true'
+        if: steps.profile.outputs.available == 'true'
         run: |
           set -euo pipefail
           # ExportOptions is templated rather than committed complete:
@@ -1693,20 +1865,19 @@ jobs:
           # step below renders the same template again as the latter.
           sed -e "s/@APPLE_TEAM_ID@/${{ secrets.APPLE_TEAM_ID }}/" \
               -e "s/@EXPORT_DESTINATION@/export/" \
+              -e "s/@SIGNING_CERTIFICATE@/${{ steps.signing.outputs.sha1 }}/" \
+              -e "s/@PROVISIONING_PROFILE@/${{ steps.profile.outputs.uuid }}/" \
             ios/ExportOptions.plist.in > "$RUNNER_TEMP/ExportOptions.plist"
           plutil -lint "$RUNNER_TEMP/ExportOptions.plist"
-          AUTH=()
-          if [ "${{ steps.asc.outputs.available }}" = "true" ]; then
-            AUTH=(-allowProvisioningUpdates
-                  -authenticationKeyPath "$ASC_KEY_PATH"
-                  -authenticationKeyID "${{ secrets.ASC_KEY_ID }}"
-                  -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}")
-          fi
+          # No -allowProvisioningUpdates and no -authenticationKey* here
+          # either. The export re-signs, so it is a second place a
+          # certificate could have been created; with signingStyle
+          # manual and the profile already on disk it needs nothing from
+          # Apple, so it is given nothing.
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/BSFChat.xcarchive" \
             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
-            -exportPath "$RUNNER_TEMP/export" \
-            "${AUTH[@]}"
+            -exportPath "$RUNNER_TEMP/export"
           # Resolved-and-UNIQUE, not `head -1`. The .ipa is named after
           # the product rather than the scheme so it has to be resolved,
           # but taking the first of several would be worse than failing:
@@ -1731,7 +1902,7 @@ jobs:
           ls -la "$RUNNER_TEMP/export"
 
       - name: Upload .ipa artifact
-        if: steps.signing.outputs.available == 'true'
+        if: steps.profile.outputs.available == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: BSFChat-iOS
@@ -1773,19 +1944,25 @@ jobs:
       - name: Upload to TestFlight
         if: >-
           (startsWith(github.ref, 'refs/tags/v') || inputs.ios_upload)
-          && steps.signing.outputs.available == 'true'
+          && steps.profile.outputs.available == 'true'
           && steps.asc.outputs.available == 'true'
         run: |
           set -euo pipefail
           sed -e "s/@APPLE_TEAM_ID@/${{ secrets.APPLE_TEAM_ID }}/" \
               -e "s/@EXPORT_DESTINATION@/upload/" \
+              -e "s/@SIGNING_CERTIFICATE@/${{ steps.signing.outputs.sha1 }}/" \
+              -e "s/@PROVISIONING_PROFILE@/${{ steps.profile.outputs.uuid }}/" \
             ios/ExportOptions.plist.in > "$RUNNER_TEMP/ExportOptions-upload.plist"
           plutil -lint "$RUNNER_TEMP/ExportOptions-upload.plist"
+          # The -authenticationKey* trio stays: destination=upload has to
+          # authenticate to App Store Connect to hand over the build.
+          # -allowProvisioningUpdates does NOT stay — that flag is about
+          # provisioning, not upload, and it is the one that could mint a
+          # certificate.
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/BSFChat.xcarchive" \
             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions-upload.plist" \
             -exportPath "$RUNNER_TEMP/upload" \
-            -allowProvisioningUpdates \
             -authenticationKeyPath "$ASC_KEY_PATH" \
             -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
             -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}"
@@ -1799,6 +1976,35 @@ jobs:
                  "Export compliance must be answered before external" \
                  "testers can be added — see docs/store-submission-runbook.md."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Deliberately duplicates check (3) of the verify step, and runs
+      # however the job ended. The verify step's copy exists to stop a
+      # suspect build BEFORE it is exported and uploaded; this one
+      # exists because the run that exposed the whole problem
+      # (36080815332) FAILED during the archive — and a run that dies
+      # part-way through provisioning is exactly the kind that can leave
+      # a certificate behind on the account with nothing downstream to
+      # notice. A tripwire that only fires on success is not a tripwire.
+      - name: Tripwire — did anything create a signing identity?
+        if: always() && steps.profile.outputs.available == 'true'
+        run: |
+          BEFORE="$RUNNER_TEMP/identities-before.txt"
+          if [ ! -f "$BEFORE" ]; then
+            echo "Archive never started; nothing to compare."
+            exit 0
+          fi
+          security find-identity -v -p codesigning \
+            | awk '/\)/ {print $2}' | sort -u > "$RUNNER_TEMP/identities-final.txt"
+          NEW=$(comm -13 "$BEFORE" "$RUNNER_TEMP/identities-final.txt" || true)
+          if [ -n "$NEW" ]; then
+            echo "::error::A code-signing identity was created during this run:" \
+                 "$NEW. CI is not supposed to be able to do that. Revoke it at" \
+                 "https://developer.apple.com/account/resources/certificates/list" \
+                 "and see docs/ios-release.md section 1.4."
+            security find-identity -v -p codesigning
+            exit 1
+          fi
+          echo "No signing identity was created during this run."
 
       # Runs even when an earlier step failed: the decoded .p8 is a
       # long-lived App Store Connect credential and must not survive on

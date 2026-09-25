@@ -51,17 +51,64 @@ the imported `.p12` has no `Apple Distribution` identity.
 
 ### 1.4 Provisioning profile
 
-**Nothing to do.** The CI job passes `-allowProvisioningUpdates` with an
-App Store Connect API key, so Xcode creates and downloads the App Store
-profile itself. A hand-managed `.mobileprovision` expires every twelve
-months and fails in a way that looks like a signing bug; this has
-nothing to rotate.
+**Create one, by hand, once.** *Certificates, Identifiers & Profiles →
+Profiles → + → Distribution → App Store Connect.* App ID
+`com.bsfchat.app`; attach the **Apple Distribution** certificate from
+§1.3 — the one whose `.p12` is in `IOS_DIST_CERTIFICATE`. Name it
+anything; CI finds it by bundle id, type and certificate, not by name.
+
+This used to say "nothing to do", because the job archived with
+automatic signing and `-allowProvisioningUpdates` and let Xcode mint the
+profile. That is exactly what caused the outage of 2026-09-25, and the
+reason is in `man xcodebuild`:
+
+> For automatically signed targets, xcodebuild will create and update
+> profiles, app IDs, and **certificates**. For manually signed targets,
+> xcodebuild will download missing or updated provisioning profiles.
+
+A CI runner's keychain is empty at the start of every run. Nothing ever
+set `CODE_SIGN_IDENTITY`, so the iOS default — `Apple Development` —
+applied, and automatic signing went looking for a *development*
+identity, not the Apple Distribution one the job had just imported.
+Finding none, and holding an Admin API key, it created a fresh
+certificate. Every run. For several runs, silently, because the export
+step re-signed with the distribution certificate afterwards and
+everything downstream went green. It only surfaced when the account ran
+out of certificate slots and the archive died with *"Choose a
+certificate to revoke."*
+
+So the pipeline is manual end to end now. The job no longer passes
+`-allowProvisioningUpdates` to any build, archive or export action; it
+fetches this profile read-only with `scripts/asc-provisioning.py`
+(GET requests only — the script implements no other verb) and fails
+loudly if it is missing or if it does not list the certificate CI
+imported. **CI can use signing assets and cannot create them.** There is
+no flag that splits the difference: `-allowProvisioningUpdates` is one
+switch covering profiles, App IDs and certificates together, and manual
+signing is the only way to get profile downloads without certificate
+creation.
+
+The cost is the thing that was being avoided: this profile expires with
+the certificate, roughly once a year, and renewing it is a manual visit
+to the portal. The failure mode is a clear message from the fetch step,
+ten seconds into the job, naming the page to go to.
 
 ### 1.5 App Store Connect API key
 
 *App Store Connect → Users and Access → Integrations → App Store
 Connect API → Team Keys → generate.* Role: **App Manager** (Developer is
 not enough to upload builds).
+
+The key was raised to **Admin** at some point because cloud signing
+refuses anything less ("Cloud signing permission error"). Nothing uses
+cloud signing any more, so that reason is gone. The key is now used for
+exactly two things: GET requests against `/v1/profiles` and
+`/v1/certificates`, and authenticating the TestFlight upload. Dropping
+it back to App Manager is worth doing as blast-radius hygiene — if the
+"Install the App Store provisioning profile" step then returns HTTP 403,
+the role was needed after all and can go back up. Either way the key is
+never handed to `xcodebuild` for provisioning again, which is the part
+that mattered.
 
 Note the **Key ID** and the **Issuer ID** from that page. Download the
 `.p8` — **it can only be downloaded once**, so keep a copy somewhere
@@ -75,6 +122,61 @@ English.
 
 The record has to exist before the first upload; Transporter has
 nowhere to put a build otherwise.
+
+### 1.7 Cleaning up the certificates CI created — do this once
+
+Between roughly 2026-09-23 and 2026-09-25 the `ios` job created one
+**Apple Development** certificate per run (see §1.4). They are still on
+the account, they are what filled it up, and only the account holder can
+remove them. Apple gives no way to bulk-revoke and no API for it that is
+worth trusting with this — it is a manual pass through
+*Certificates, Identifiers & Profiles → Certificates*.
+
+**Keep, do not revoke:**
+
+1. The **Apple Distribution** certificate whose private key is in the
+   `IOS_DIST_CERTIFICATE` secret. Revoking this one breaks CI *and*
+   cannot be undone — the private key exists only inside that `.p12`,
+   so a replacement certificate means re-exporting, re-uploading the
+   secret, and regenerating the profile from §1.4.
+2. The **Apple Development** certificate whose private key is in the
+   login keychain of the Mac used for on-device builds
+   (`docs/ios-voice.md`). Revoking it breaks installing to the iPhone
+   until a new one is made.
+
+**Revoke:** every other **Apple Development** certificate. They were
+created by CI, their private keys were destroyed with the runner that
+made them, and they can never be used for anything by anyone.
+
+Identify (1) exactly rather than by eye. On the Mac that holds the
+`.p12`:
+
+```sh
+openssl pkcs12 -in AppleDistribution.p12 -nokeys -legacy \
+  | openssl x509 -noout -fingerprint -sha1 -serial -enddate -subject
+```
+
+The serial and expiry are the columns the portal lists; the SHA-1 is
+what CI prints in the "Import iOS signing certificate" step and in the
+job summary, so the two can be checked against each other. Identify (2)
+the same way with `security find-identity -v -p codesigning` locally.
+
+If the `.p12` itself has been lost, do **not** guess. Run
+
+```sh
+ASC_KEY_ID=… ASC_ISSUER_ID=… ASC_KEY_PATH=AuthKey_….p8 \
+  python3 scripts/asc-provisioning.py list-certificates
+```
+
+which prints every certificate on the account with its type, serial,
+expiry and SHA-1 (read-only; it cannot revoke anything), and compare the
+SHA-1 against the one in the last successful CI run's log.
+
+A note on how many there will be: Apple's limit is per certificate type
+and small — this is why an account that had done nothing unusual ran out
+after a handful of runs. Once the surplus is gone, the guard described
+in §1.4 means the count stops moving: the job now fails if any new
+signing identity appears on the runner while the archive runs.
 
 ---
 
@@ -156,7 +258,8 @@ Two things to be clear-eyed about before the first upload:
 2. Wait for main's CI to be green (all three desktop platforms **and**
    now iOS) before tagging — the existing rule, unchanged.
 3. Push `vX.Y.Z` or `vX.Y.Z-rc.N`. The `ios` job archives, exports and
-   uploads to TestFlight via `iTMSTransporter`.
+   uploads to TestFlight via `xcodebuild -exportArchive` with
+   `destination=upload`.
 4. TestFlight processes the build (10–60 minutes), then it appears under
    *TestFlight → iOS builds*.
 5. Internal testing needs no review. **External** testing needs a

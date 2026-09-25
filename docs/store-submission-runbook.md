@@ -394,11 +394,17 @@ Two routes:
 
 ### 4.2 [CI] What happens
 
-Imports the distribution certificate into a throwaway keychain; writes
-the App Store Connect key to `~/.appstoreconnect/private_keys`;
-configures with `-G Xcode`; archives with automatic signing and
-`-allowProvisioningUpdates`, which mints the provisioning profile on the
-fly so there is no `.mobileprovision` secret to rotate; asserts on the
+Imports the distribution certificate into a throwaway keychain and
+records its SHA-1; writes the App Store Connect key to
+`~/.appstoreconnect/private_keys`; **downloads** the App Store
+provisioning profile with `scripts/asc-provisioning.py` (read-only, and
+it refuses to continue unless the profile lists that exact
+certificate); configures with `-G Xcode`; archives with **manual**
+signing pinned to that certificate and profile, passing no
+`-allowProvisioningUpdates` and no API key to `xcodebuild` at all;
+verifies from the archive itself that the certificate that signed it is
+the one imported, that the embedded profile is the one downloaded, and
+that no new signing identity appeared on the runner; asserts on the
 **archived** `Info.plist` that `ITSAppUsesNonExemptEncryption`,
 `NSMicrophoneUsageDescription`, `NSLocalNetworkUsageDescription`,
 `CFBundleIconName` and the bundle id are all present and right; exports
@@ -407,6 +413,15 @@ a single `.ipa`; uploads it; and deletes the API key whatever happened.
 The `CFBundleIconName` check is worth knowing about: an iOS bundle whose
 asset catalog was listed but never *compiled* is rejected on upload as
 ITMS-90713 with no other symptom.
+
+The signing half used to be automatic, and automatic signing created a
+new Apple Development certificate on every run until the developer
+account hit Apple's limit — `docs/ios-release.md` §1.4 has the full
+account. The one operational consequence here: the App Store
+provisioning profile is now a thing a human maintains, and when it
+expires the job fails in its first minute with a message naming the
+portal page. That is the intended trade for a pipeline that cannot
+create signing assets.
 
 ### 4.3 [YOU] Export compliance — 10 min, and it is a gate
 

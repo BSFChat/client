@@ -2,13 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Template for `xcodebuild -exportArchive`, consumed by the `ios` job in
-  .github/workflows/ci.yml. @APPLE_TEAM_ID@ is substituted from the
-  APPLE_TEAM_ID secret — the one account-specific value in here, which
-  is why this is a .in rather than a finished file.
+  .github/workflows/ci.yml. The @PLACEHOLDERS@ are the account- and
+  run-specific values, which is why this is a .in rather than a finished
+  file.
 
   A local export can use it the same way:
     sed -e "s/@APPLE_TEAM_ID@/ABCDE12345/" \
         -e "s/@EXPORT_DESTINATION@/export/" \
+        -e "s/@SIGNING_CERTIFICATE@/Apple Distribution/" \
+        -e "s/@PROVISIONING_PROFILE@/<profile uuid or name>/" \
         ios/ExportOptions.plist.in > /tmp/eo.plist
 -->
 <plist version="1.0">
@@ -24,13 +26,45 @@
 	<key>teamID</key>
 	<string>@APPLE_TEAM_ID@</string>
 
-	<!-- Automatic: Xcode mints/downloads the App Store provisioning
-	     profile itself, using the App Store Connect API key that the CI
-	     job passes via -authenticationKeyPath. The alternative is a
-	     base64 .mobileprovision secret that silently expires once a
-	     year; this has nothing to rotate. -->
+	<!-- Manual, and deliberately so. This used to say "automatic",
+	     which let Xcode mint whatever signing assets it decided were
+	     missing using the App Store Connect API key — and because a CI
+	     runner's keychain starts empty every time, what it decided was
+	     missing was a CERTIFICATE, on every single run, until the
+	     account hit Apple's limit and the archive failed with "Choose a
+	     certificate to revoke". `man xcodebuild` on
+	     -allowProvisioningUpdates spells out the difference: automatic
+	     signing "will create and update profiles, app IDs, and
+	     certificates"; manual signing only downloads profiles. So the
+	     pipeline is manual end to end, and the CI job does not pass
+	     -allowProvisioningUpdates to any build, archive or export
+	     action at all. The profile is fetched read-only beforehand by
+	     scripts/asc-provisioning.py.
+
+	     The cost is that the App Store profile has to exist in the
+	     account, created once by a human. That is the intended trade:
+	     CI can use signing assets and can never create them. -->
 	<key>signingStyle</key>
-	<string>automatic</string>
+	<string>manual</string>
+
+	<!-- The exact certificate, by SHA-1 fingerprint, not by the display
+	     name "Apple Distribution". Two certificates issued to the same
+	     person share a display name, so a name would not pin anything —
+	     and pinning it is the whole point. Substituted from the
+	     fingerprint of the .p12 in the IOS_DIST_CERTIFICATE secret,
+	     which the import step prints. -->
+	<key>signingCertificate</key>
+	<string>@SIGNING_CERTIFICATE@</string>
+
+	<!-- Bundle id -> profile, required by manual signing. The value is
+	     the UUID of the profile downloaded from App Store Connect
+	     earlier in the job, so the export re-signs with the same
+	     profile the archive embedded. -->
+	<key>provisioningProfiles</key>
+	<dict>
+		<key>com.bsfchat.app</key>
+		<string>@PROVISIONING_PROFILE@</string>
+	</dict>
 
 	<!-- Upload the dSYMs so App Store Connect can symbolicate crash
 	     reports from testers. This is the ONLY diagnostic channel the
