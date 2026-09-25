@@ -208,7 +208,24 @@ def cmd_fetch_profile(args: argparse.Namespace) -> int:
         {
             "limit": "200",
             "include": "bundleId,certificates",
-            "fields[profiles]": "name,uuid,profileState,profileType,expirationDate",
+            # bundleId and certificates are RELATIONSHIPS, and they have to
+            # be named here even though they are not attributes. A JSON:API
+            # sparse fieldset restricts relationships as well as attributes:
+            # leave them out and every profile comes back with an EMPTY
+            # `relationships` object, while `included` is still fully
+            # populated — so the join below has nothing to join on.
+            #
+            # That failed silently in both directions. Bundle id resolved to
+            # None for every profile, so no profile ever matched
+            # --bundle-id and the script reported "No ACTIVE IOS_APP_STORE
+            # provisioning profile ... exists in the developer account" even
+            # with three of them sitting right there. And the certificate
+            # SHA-1 preference below saw no certificates on any profile, so
+            # it silently fell back to "all candidates" — meaning that even
+            # once a profile was found, --require-sha1 was not actually
+            # narrowing anything.
+            "fields[profiles]": "name,uuid,profileState,profileType,"
+            "expirationDate,bundleId,certificates",
             "fields[bundleIds]": "identifier",
             "fields[certificates]": "certificateContent",
         },
