@@ -168,16 +168,35 @@ The local toolchain is older than CI's and that matters:
 | compileSdk | 34 (newest platform installed) | 36 |
 | NDK | 25.1.8937393 | 27.2.12479018 |
 
-**JDK 17 is required**, not the system default. AGP 7.4.1's D8 throws
+**JDK 17 is required**, not the system default — but the build now
+selects it for you, so there is nothing to export. `cmake/AndroidJdk.cmake`
+looks for a JDK 17 (`JAVA_HOME` first if it is usable, then the usual
+macOS/Homebrew/Linux install paths), stages `android/`
+into the build tree, and writes `org.gradle.java.home` into the
+`gradle.properties` androiddeployqt generates. Gradle runs javac and D8
+inside its daemon JVM, so that one line settles both. Configure prints
+which JDK it picked:
+
+```
+-- Android: Gradle will use Java 17 at /opt/homebrew/opt/openjdk@17/...
+```
+
+Why exactly 17, and not "17 or newer": AGP 7.4.1's D8 throws
 `NullPointerException` while dexing anonymous inner classes compiled by
-JDK 26 — which is how a perfectly healthy C++ build fails at the very
-last step with no useful message. Qt 6.10 documents JDK 17 too, so CI
-pins the same.
+a JDK 26 javac (`QtLoader$1`, `ScreenCaptureHelper$2`, …) — which is how
+a perfectly healthy C++ build fails at the very last step with no useful
+message. Its ceiling is Java 17 class files; Gradle 8.0 will not start
+past 19 either; and AGP 8.10.1 (Qt 6.10, CI) needs *at least* 17.
+Intersect those and one version survives. Qt 6.10 documents JDK 17 too,
+so CI pins the same via `actions/setup-java`.
+
+If no JDK 17 is installed, configure warns and leaves Gradle to the
+default `java` — `brew install openjdk@17`, or pass
+`-DBSFCHAT_ANDROID_JDK=<jdk home>` to choose one explicitly. Raise
+`BSFCHAT_ANDROID_JDK_MAX` once the local Qt kit moves past 6.5 and
+brings an AGP whose dexer reads newer class files.
 
 ```sh
-export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-export PATH="$JAVA_HOME/bin:$PATH"
-
 cmake -B build-android -G Ninja -Wno-dev \
   -DCMAKE_TOOLCHAIN_FILE=$HOME/Qt/6.5.3/android_arm64_v8a/lib/cmake/Qt6/qt.toolchain.cmake \
   -DQT_HOST_PATH=$HOME/Qt/6.5.3/macos \

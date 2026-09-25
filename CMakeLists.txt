@@ -570,9 +570,16 @@ endif()
 # on-screen keyboard shrinks the window rather than covering the
 # composer.
 if(ANDROID)
+    # Picks the JDK Gradle runs on and stages android/ into the build
+    # tree with that choice written into gradle.properties. Without it
+    # the machine default JDK is used, and a too-new one makes AGP's
+    # dexer fail on every anonymous inner class -- see the file for the
+    # full story. Sets BSFCHAT_ANDROID_PACKAGE_SOURCE_DIR.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/AndroidJdk.cmake)
+
     set_property(TARGET bsfchat-app PROPERTY
         QT_ANDROID_PACKAGE_SOURCE_DIR
-        "${CMAKE_CURRENT_SOURCE_DIR}/android")
+        "${BSFCHAT_ANDROID_PACKAGE_SOURCE_DIR}")
     # androiddeployqt substitutes -- %%INSERT_VERSION_*%% in the
     # manifest from these properties. Keeping them out of the
     # manifest source means the version doesn't drift from the rest
