@@ -1153,6 +1153,11 @@ qt_add_qml_module(bsfchat-app
         # Shared by ThemedComboBox.qml and
         # tests/qml_models/tst_comboboxmodel.qml.
         qml/js/ComboBoxText.js
+        # Which of the three surfaces owns the mobile shell's main column —
+        # timeline, voice room, or empty state. Out of MobileMain.qml so
+        # tests/qml/tst_mainsurface.qml can pin the rule that stopped "No
+        # channel selected" painting over live video.
+        qml/js/MainSurface.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt

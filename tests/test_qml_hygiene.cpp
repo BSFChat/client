@@ -56,6 +56,7 @@
 //
 // See each one's own comment for exactly what it does not catch.
 #include <QtTest>
+#include <QDir>
 #include <QDirIterator>
 #include <QFileInfo>
 #include <QFile>
@@ -2215,6 +2216,113 @@ private slots:
                  "the main column no longer picks its page through"
                  " MainSurface.mainPage(); qml/js/MainSurface.js is the only"
                  " place that answer is allowed to be computed");
+    }
+
+    // Every .js the QML module imports is also REGISTERED in CMakeLists.txt.
+    //
+    // This one is here because the fix above shipped a crash. MainSurface.js
+    // was created, imported by MobileMain.qml, unit-tested, reviewed and
+    // merged — and never added to the qt_add_qml_module file list, so it was
+    // not in the binary. On the owner's Pixel:
+    //
+    //   qrc:/qt/qml/BSFChat/qml/mobile/MobileMain.qml:6:1:
+    //       Script qrc:/qt/qml/BSFChat/qml/js/MainSurface.js unavailable
+    //   Process com.bsfchat.app has died
+    //
+    // Every layer of the net had the same hole — they all look at the SOURCE
+    // TREE, and the bug was in what got packaged:
+    //
+    //   * the .js unit tests load the file from disk through
+    //     QUICK_TEST_SOURCE_DIR, so a file missing from the module passes;
+    //   * no desktop test instantiates MobileMain.qml (it imports the
+    //     BSFChat module, which is compiled into the app binary);
+    //   * the Android CI job builds an APK but never launches it, so an
+    //     unresolvable import is not a build error;
+    //   * and the rest of THIS file scans files on disk, which is exactly
+    //     where the missing file was sitting, perfectly readable.
+    //
+    // The property is static and mechanical, so it belongs here, where it
+    // costs milliseconds and names the line to add. It is also the general
+    // form: it is not about MainSurface.js, it is about the next .js someone
+    // adds to qml/ and imports without touching the build.
+    //
+    // Scans .qml AND .js sources, because a JS library can import another
+    // one (qml/js/UpdateFormat.js does `.import "PlaybackMath.js"`), and
+    // resolves each import against the IMPORTING file's directory, because
+    // they are written relative ("../js/Foo.js", "../data/EmojiData.js",
+    // "PlaybackMath.js") and land in more than one directory.
+    //
+    // Registration is checked as an exact whole-line match in CMakeLists.txt,
+    // which is how that list is written — one path per line. A path merely
+    // MENTIONED in a CMake `#` comment therefore does not count, which is the
+    // intent.
+    //
+    // What this does NOT catch: a .js listed in CMakeLists.txt under the
+    // wrong target, or a resource that is registered but given a different
+    // alias. Both are visible in build-android/.qt/rcc/*.qrc, which is the
+    // artefact to read if this rule passes and the device still says
+    // "unavailable".
+    void everyJsTheQmlModuleImportsIsRegisteredInCMake()
+    {
+        const QString rootDir = QStringLiteral(BSFCHAT_ROOT_DIR);
+        const QString cmakeText = readAll(rootDir + QStringLiteral("/CMakeLists.txt"));
+        QVERIFY2(!cmakeText.isEmpty(), "could not read the top-level CMakeLists.txt");
+
+        // One list entry per line is how qt_add_qml_module is written here.
+        QSet<QString> registered;
+        for (const QString& line : cmakeText.split(QLatin1Char('\n'))) {
+            const QString t = line.trimmed();
+            if (t.endsWith(QLatin1String(".js")))
+                registered.insert(t);
+        }
+        QVERIFY2(!registered.isEmpty(),
+                 "no .js entries found in CMakeLists.txt — the module's file"
+                 " list has moved and this rule is looking in the wrong place");
+
+        // Both spellings: QML's `import "x.js" as X` and a JS library's own
+        // `.import "x.js" as X`.
+        static const QRegularExpression jsImport(
+            // A plain escaped literal, not a raw string: AUTOMOC's parser
+            // silently produces an EMPTY .moc when it meets a raw string with
+            // a custom delimiter, and the only symptom is an undefined vtable
+            // at link time.
+            QStringLiteral("^\\s*\\.?import\\s+\"([^\"]+\\.js)\""),
+            QRegularExpression::MultilineOption);
+
+        const QString qmlDir = QStringLiteral(BSFCHAT_QML_DIR);
+        QStringList offenders;
+        QDirIterator it(qmlDir, {QStringLiteral("*.qml"), QStringLiteral("*.js")},
+                        QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString path = it.next();
+            const QFileInfo fi(path);
+            const QString src = withoutComments(readAll(path));
+            for (auto m = jsImport.globalMatch(src); m.hasNext();) {
+                const QString spelled = m.next().captured(1);
+                const QString abs = QDir::cleanPath(
+                    fi.absolutePath() + QLatin1Char('/') + spelled);
+                const QString repoRel = QDir(rootDir).relativeFilePath(abs);
+                const QString who = QDir(rootDir).relativeFilePath(path);
+                if (!QFileInfo::exists(abs)) {
+                    offenders << QStringLiteral("%1 imports \"%2\", which does"
+                                                " not exist (resolved to %3)")
+                                     .arg(who, spelled, repoRel);
+                } else if (!registered.contains(repoRel)) {
+                    offenders << QStringLiteral("%1 imports \"%2\" but %3 is"
+                                                " not in CMakeLists.txt")
+                                     .arg(who, spelled, repoRel);
+                }
+            }
+        }
+
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "a .js file is imported by the QML module but is not in"
+                     " the qt_add_qml_module file list, so it is NOT in the"
+                     " binary. The app loads on desktop from the source tree"
+                     " and dies on the device with \"Script ... unavailable\"."
+                     " Add the path to CMakeLists.txt. Offending:\n  ")
+                     + offenders.join(QStringLiteral("\n  "))));
     }
 
 private:
