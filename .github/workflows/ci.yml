@@ -1751,6 +1751,27 @@ jobs:
       # nothing was ever reused.
       #
       # Pinned by SHA-1, not by name: see the import step.
+      #
+      # And pinned WITHOUT the `[sdk=iphoneos*]` conditional, which used
+      # to be passed alongside the plain setting as a belt-and-braces
+      # second copy. It is xcconfig syntax and is not valid on the
+      # xcodebuild command line: xcodebuild splits an argument on the
+      # FIRST `=`, and in
+      #
+      #     CODE_SIGN_IDENTITY[sdk=iphoneos*]=EC2BD57E...
+      #
+      # that `=` is the one INSIDE the brackets. So the name parsed as
+      # `CODE_SIGN_IDENTITY[sdk`, the value as `iphoneos*]=EC2BD57E...`,
+      # and the name was then normalised back to CODE_SIGN_IDENTITY —
+      # overriding the correct assignment on the line above it with a
+      # value that is not a SHA-1 at all:
+      #
+      #     error: No certificate for team '...' matching
+      #     'iphoneos*]=EC2BD57E9314F626D4100B7782B6CB52E1B12868' found
+      #
+      # which reads like a keychain or team problem and is neither. The
+      # plain form is sufficient: a command-line build setting applies
+      # to every SDK, and -destination already pins this to iOS.
       - name: Archive
         if: steps.profile.outputs.available == 'true'
         run: |
@@ -1771,7 +1792,6 @@ jobs:
             DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="$IOS_SIGNING_SHA1" \
-            "CODE_SIGN_IDENTITY[sdk=iphoneos*]=$IOS_SIGNING_SHA1" \
             PROVISIONING_PROFILE_SPECIFIER="${{ steps.profile.outputs.uuid }}" \
             OTHER_CODE_SIGN_FLAGS="--keychain $IOS_KEYCHAIN_PATH"
 
@@ -1895,10 +1915,18 @@ jobs:
           # APPLE_TEAM_ID secret produces. plutil -lint is happy with it
           # and xcodebuild then fails much later with a signing error
           # that says nothing about the secret. Catch it here.
-          if grep -q '@[A-Z_]\{1,\}@' "$RUNNER_TEMP/ExportOptions.plist"; then
+          # Checked against the PARSED plist, not the file text. The
+          # template's leading comment says "The @PLACEHOLDERS@ are the
+          # account- and run-specific values", and a grep over the raw
+          # file matches that prose — failing the job over its own
+          # documentation. plutil -p prints values only, with comments
+          # gone, so this asks the question it means to ask.
+          if plutil -p "$RUNNER_TEMP/ExportOptions.plist" \
+               | grep -q '@[A-Z_][A-Z_]*@'; then
             echo "::error::ExportOptions.plist still contains unsubstituted" \
                  "@PLACEHOLDER@ values — check the APPLE_TEAM_ID secret," \
                  "the signing identity and the provisioning profile steps."
+            plutil -p "$RUNNER_TEMP/ExportOptions.plist"
             exit 1
           fi
           # Printed because it is the first thing anyone debugging an
@@ -2024,9 +2052,12 @@ jobs:
               -e "s/@PROVISIONING_PROFILE@/${{ steps.profile.outputs.uuid }}/" \
             ios/ExportOptions.plist.in > "$RUNNER_TEMP/ExportOptions-upload.plist"
           plutil -lint "$RUNNER_TEMP/ExportOptions-upload.plist"
-          if grep -q '@[A-Z_]\{1,\}@' "$RUNNER_TEMP/ExportOptions-upload.plist"; then
+          # Parsed, not raw — see the comment in the "Export .ipa" step.
+          if plutil -p "$RUNNER_TEMP/ExportOptions-upload.plist" \
+               | grep -q '@[A-Z_][A-Z_]*@'; then
             echo "::error::ExportOptions-upload.plist still contains" \
                  "unsubstituted @PLACEHOLDER@ values."
+            plutil -p "$RUNNER_TEMP/ExportOptions-upload.plist"
             exit 1
           fi
           echo "Rendered ExportOptions-upload.plist:"
