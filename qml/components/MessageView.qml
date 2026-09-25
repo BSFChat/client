@@ -384,6 +384,26 @@ Rectangle {
                 clip: true
                 verticalLayoutDirection: ListView.TopToBottom
                 spacing: 2
+
+                // Bottom-anchor a history that does not fill the screen, so
+                // the newest message sits on the composer instead of a screen
+                // away from it. Rationale, and why this is a top margin rather
+                // than `verticalLayoutDirection: ListView.BottomToTop`, is in
+                // TimelineOverlay.bottomAnchorSlack() — the short version is
+                // that BottomToTop renumbers the view and inverts the sign of
+                // every scroll statement in this file, and this is inert
+                // (slack === 0) the moment the content is taller than the
+                // viewport, which is the case all of that bookkeeping is
+                // written for.
+                //
+                // Safe as a binding: `topMargin` is a Flickable property and
+                // does NOT feed into `contentHeight`, which QQuickItemView
+                // computes from delegate heights, spacing, header and footer
+                // alone. So this reads contentHeight without being able to
+                // change it, and there is no loop. Measured on a real
+                // ListView in tests/qml/tst_timelineoverlay.qml.
+                topMargin: TimelineOverlay.bottomAnchorSlack(height, contentHeight)
+
                 // Prevent rubber-band overshoot. Without this, async delegate
                 // height changes (image loads, reaction chip layout) combined
                 // with positionViewAtEnd() during the initial settle could
@@ -1282,12 +1302,17 @@ Rectangle {
                 // of content — which then latched atBottom=false because dist
                 // went negative. Doing the arithmetic ourselves against the
                 // live contentHeight/height is both simpler and stable.
+                //
+                // Routed through TimelineOverlay.restingContentY so the
+                // un-scrollable case accounts for the bottom-anchor top
+                // margin. It used to read `contentY = originY`, which with a
+                // top margin is one whole margin ABOVE where the list rests:
+                // it dragged the rows back up under the header and put the
+                // dead space back. This runs on every count change, so the
+                // gap returned the moment anybody said anything.
                 function _jumpToEnd() {
-                    if (contentHeight <= height) {
-                        contentY = originY;
-                    } else {
-                        contentY = originY + contentHeight - height;
-                    }
+                    contentY = TimelineOverlay.restingContentY(
+                        originY, topMargin, contentHeight, height);
                 }
 
                 // Guarded callLater — re-checks the pin state at fire time so
