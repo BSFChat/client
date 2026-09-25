@@ -1915,10 +1915,18 @@ jobs:
           # APPLE_TEAM_ID secret produces. plutil -lint is happy with it
           # and xcodebuild then fails much later with a signing error
           # that says nothing about the secret. Catch it here.
-          if grep -q '@[A-Z_]\{1,\}@' "$RUNNER_TEMP/ExportOptions.plist"; then
+          # Checked against the PARSED plist, not the file text. The
+          # template's leading comment says "The @PLACEHOLDERS@ are the
+          # account- and run-specific values", and a grep over the raw
+          # file matches that prose — failing the job over its own
+          # documentation. plutil -p prints values only, with comments
+          # gone, so this asks the question it means to ask.
+          if plutil -p "$RUNNER_TEMP/ExportOptions.plist" \
+               | grep -q '@[A-Z_][A-Z_]*@'; then
             echo "::error::ExportOptions.plist still contains unsubstituted" \
                  "@PLACEHOLDER@ values — check the APPLE_TEAM_ID secret," \
                  "the signing identity and the provisioning profile steps."
+            plutil -p "$RUNNER_TEMP/ExportOptions.plist"
             exit 1
           fi
           # Printed because it is the first thing anyone debugging an
@@ -2044,9 +2052,12 @@ jobs:
               -e "s/@PROVISIONING_PROFILE@/${{ steps.profile.outputs.uuid }}/" \
             ios/ExportOptions.plist.in > "$RUNNER_TEMP/ExportOptions-upload.plist"
           plutil -lint "$RUNNER_TEMP/ExportOptions-upload.plist"
-          if grep -q '@[A-Z_]\{1,\}@' "$RUNNER_TEMP/ExportOptions-upload.plist"; then
+          # Parsed, not raw — see the comment in the "Export .ipa" step.
+          if plutil -p "$RUNNER_TEMP/ExportOptions-upload.plist" \
+               | grep -q '@[A-Z_][A-Z_]*@'; then
             echo "::error::ExportOptions-upload.plist still contains" \
                  "unsubstituted @PLACEHOLDER@ values."
+            plutil -p "$RUNNER_TEMP/ExportOptions-upload.plist"
             exit 1
           fi
           echo "Rendered ExportOptions-upload.plist:"
