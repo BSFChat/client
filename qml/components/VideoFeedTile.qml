@@ -190,7 +190,10 @@ Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             width: tile.compact ? Theme.avatar.md : Theme.avatar.xl
             height: width
-            radius: width / 2
+            // Rounded square like every other avatar; the radius tracks the
+            // size band the tile is in, r2 for avatar.md and r3 for avatar.xl,
+            // which is the pairing the rest of the tree already uses.
+            radius: tile.compact ? Theme.r2 : Theme.r3
             color: Theme.senderColor(tile.feed ? tile.feed.userId : "")
             Text {
                 anchors.centerIn: parent

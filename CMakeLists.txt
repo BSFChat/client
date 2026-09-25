@@ -1238,6 +1238,10 @@ qt_add_qml_module(bsfchat-app
         # tests/qml/tst_voicerosterview.qml can pin the rule that stopped the
         # drawer badging `1` while the header said "2 in call".
         qml/js/VoiceRosterView.js
+        # What the signed-in-account row says about who you are, so an OIDC
+        # homeserver's opaque subject never renders as the user's handle.
+        # Shared by ChannelList.qml and tests/qml/tst_useridentity.qml.
+        qml/js/UserIdentity.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt

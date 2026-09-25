@@ -5,6 +5,7 @@ import QtQuick.Window
 import BSFChat
 import "../js/ChannelSelection.js" as ChannelSelection
 import "../js/VoiceRosterView.js" as VoiceRosterView
+import "../js/UserIdentity.js" as UserIdentity
 
 Rectangle {
     id: channelListRoot
@@ -2119,8 +2120,18 @@ Rectangle {
                             Layout.fillWidth: true
                             spacing: 0
 
+                            // Both lines go through UserIdentity so the row
+                            // never renders a truncated OIDC subject as if it
+                            // were the user's handle — see that file for the
+                            // whole argument and for where the full mxid
+                            // still lives (the account menu below, and
+                            // Settings → Account → USER ID).
                             Text {
-                                text: serverManager.activeServer ? serverManager.activeServer.displayName : ""
+                                text: serverManager.activeServer
+                                    ? UserIdentity.accountTitle(
+                                          serverManager.activeServer.userId,
+                                          serverManager.activeServer.displayName)
+                                    : ""
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.md
                                 font.weight: Theme.fontWeight.semibold
@@ -2130,11 +2141,21 @@ Rectangle {
                             }
 
                             Text {
-                                text: serverManager.activeServer ? serverManager.activeServer.userId : ""
+                                text: serverManager.activeServer
+                                    ? UserIdentity.accountSubtitle(
+                                          serverManager.activeServer.userId)
+                                    : ""
                                 font.family: Theme.fontMono
                                 font.pixelSize: Theme.fontSize.xs
                                 color: Theme.fg3
-                                elide: Text.ElideRight
+                                // Middle, not right. Whatever ends up here is
+                                // worth more at its ends than at its start: a
+                                // handle that does not fit is still recognised
+                                // from "@josh…:bsfchat.com", and eliding right
+                                // is what produced "@oidc_fe982c2…" in the
+                                // first place.
+                                elide: Text.ElideMiddle
+                                visible: text.length > 0
                                 Layout.fillWidth: true
                             }
                         }
