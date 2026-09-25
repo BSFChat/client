@@ -1009,13 +1009,36 @@ if [ ! -f "$PLIST" ]; then
 fi
 missing=""
 for key in NSMicrophoneUsageDescription NSCameraUsageDescription \
-           NSLocalNetworkUsageDescription ITSAppUsesNonExemptEncryption \
+           NSLocalNetworkUsageDescription \
            CFBundleShortVersionString CFBundleIconName \
            CFBundleURLTypes:0:CFBundleURLSchemes:0; do
     if ! /usr/libexec/PlistBuddy -c "print $key" "$PLIST" >/dev/null 2>&1; then
         missing="$missing $key"
     fi
 done
+# ITSAppUsesNonExemptEncryption is deliberately NOT in that list: it is
+# valid for it to be absent (= "not answered yet", which makes App Store
+# Connect ask on the build) and valid for it to be true ALONGSIDE an
+# ITSEncryptionExportComplianceCode. What is never valid is true on its
+# own — that is fatal at upload, after the archive:
+#
+#     UPLOAD FAILED with 1 error
+#     Invalid Export Compliance Code. The export compliance key value []
+#     ... doesn't match the key value of the app's export compliance
+#     documentation.
+#
+# and it is unrecoverable without a code that only an uploaded build can
+# produce. v0.0.48-rc.4 died there. So the rule is the PAIRING, checked
+# here in seconds rather than by Apple twenty minutes later.
+enc=$(/usr/libexec/PlistBuddy -c "print ITSAppUsesNonExemptEncryption" "$PLIST" 2>/dev/null || true)
+code=$(/usr/libexec/PlistBuddy -c "print ITSEncryptionExportComplianceCode" "$PLIST" 2>/dev/null || true)
+if [ "$enc" = "true" ] && [ -z "$code" ]; then
+    echo "check-ios-plist: ITSAppUsesNonExemptEncryption is true with no" >&2
+    echo "  ITSEncryptionExportComplianceCode. Apple rejects that AT UPLOAD" >&2
+    echo "  and the code can only be obtained from a build that uploaded." >&2
+    echo "  Restore both keys together, or neither. See ios/Info.plist.in." >&2
+    exit 1
+fi
 if [ -n "$missing" ]; then
     echo "check-ios-plist: the built bundle's Info.plist is missing:$missing" >&2
     echo "  Source template: ios/Info.plist.in (configured by CMakeLists.txt)." >&2
