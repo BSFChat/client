@@ -113,12 +113,14 @@ Rectangle {
                 Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
             }
 
-            // Avatar circle itself, centered.
+            // Avatar tile itself, centered. Rounded square, matching every
+            // other avatar in the tree — r3 at this size for the same reason
+            // UserSettings.qml uses it on its 64px tile.
             Rectangle {
                 anchors.centerIn: parent
                 width: Theme.avatar.xl
                 height: Theme.avatar.xl
-                radius: Theme.avatar.xl / 2
+                radius: Theme.r3
                 color: Theme.senderColor(tile.userId)
 
                 Text {
