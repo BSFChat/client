@@ -500,6 +500,39 @@ if(BSFCHAT_ENABLE_VOICE)
         target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_MEDIAFOUNDATION)
         target_link_libraries(bsfchat-app PRIVATE
             mfplat mfuuid mf mfreadwrite wmcodecdspuuid ole32 oleaut32)
+    elseif(ANDROID)
+        # MediaCodec, through the NDK's C binding. The same hole iOS had
+        # and for the same reason: openh264 and libaom are (correctly)
+        # excluded on mobile in cmake/Dependencies.cmake, VideoToolbox is
+        # Apple-only and Media Foundation is Windows-only, so an Android
+        # build compiled NO video backend at all. Both
+        # VideoEncoder::h264EncodeProfiles() and
+        # VideoDecoder::h264DecodeProfiles() returned empty,
+        # VoiceEngine::localCapsJson() published video_codecs: [], and
+        # peerCanReceiveRtpVideo() was false for the phone — which put
+        # EVERY peer in the mesh on the legacy JPEG stills path, not just
+        # the one talking to it, while the phone itself could send no
+        # video because VideoEncoder::create() had nothing to return.
+        #
+        # Software H.264 is NOT the alternative here either; see the
+        # note in the APPLE branch above, which applies verbatim.
+        #
+        # MediaCodecLayout.cpp and MediaCodecAnnexB.cpp are the two
+        # platform-free halves (buffer geometry and bitstream
+        # inspection). They are also compiled into test_mobile_video on
+        # every host, which is the only way any of this gets exercised
+        # without a phone.
+        target_sources(bsfchat-app PRIVATE
+            src/voice/video/MediaCodecEncoder.cpp
+            src/voice/video/MediaCodecDecoder.cpp
+            src/voice/video/MediaCodecLayout.cpp
+            src/voice/video/MediaCodecAnnexB.cpp
+        )
+        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_MEDIACODEC)
+        # libmediandk carries AMediaCodec/AMediaFormat; liblog is its
+        # transitive dependency and is listed rather than inherited so a
+        # future NDK that stops re-exporting it does not break the link.
+        target_link_libraries(bsfchat-app PRIVATE mediandk log)
     endif()
 endif()
 
