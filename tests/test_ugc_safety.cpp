@@ -55,11 +55,15 @@
 #include "net/ReportRequest.h"
 
 #include <QtTest>
+#include <QDir>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
+#include <QSet>
+
+#include <utility>
 
 using namespace bsfchat::net;
 
@@ -999,20 +1003,88 @@ private slots:
         // U-C2: a Window.window.openX() that exists in main.qml and not in
         // MobileMain.qml is a TypeError on the platform the store gates are
         // for. Every helper these controls call must be in both.
+        //
+        // The required set is DERIVED from the call sites rather than listed
+        // here, because a hand-kept list only fails for the helpers someone
+        // remembered to add to it. openSelfRoles() was live in ChannelList's
+        // user menu — ungated, unlike the Keyboard Shortcuts entry next to it
+        // — with no forwarder in MobileMain at all, and the three-name list
+        // this replaces said nothing. Adding a Window.window.newThing() call
+        // to a shared component now fails the build until BOTH shells
+        // implement it.
         const QString desktop = withoutComments(
             readAll(QStringLiteral(BSFCHAT_QML_DIR "/main.qml")));
         const QString mobile = withoutComments(
             readAll(QStringLiteral(BSFCHAT_QML_DIR "/mobile/MobileMain.qml")));
         QVERIFY2(!desktop.isEmpty() && !mobile.isEmpty(), "shells not found");
 
-        const QStringList helpers{
-            QStringLiteral("function openReportDialog"),
-            QStringLiteral("function openBlockedUsers"),
-            QStringLiteral("function openDeleteAccount"),
+        // Only CALLS — the trailing "(" is what separates a helper the shells
+        // owe us from a property read like Window.window.showMemberList or
+        // the built-in Window.window.visibility. Any receiver is allowed
+        // before it: VoiceDock goes through `dock.Window.window` on purpose
+        // (a Connections block is not an Item, so the attached property is
+        // null there).
+        static const QRegularExpression call(
+            QStringLiteral(R"(\bWindow\.window\.([A-Za-z_][A-Za-z0-9_]*)\s*\()"));
+
+        // Provided by QQuickWindow/ApplicationWindow itself, so neither shell
+        // declares them and neither should have to.
+        static const QSet<QString> builtIns{
+            QStringLiteral("close"),       QStringLiteral("show"),
+            QStringLiteral("hide"),        QStringLiteral("raise"),
+            QStringLiteral("lower"),       QStringLiteral("alert"),
+            QStringLiteral("requestActivate"),
+            QStringLiteral("showFullScreen"), QStringLiteral("showNormal"),
+            QStringLiteral("showMaximized"),  QStringLiteral("showMinimized"),
         };
-        for (const QString& fn : helpers) {
-            QVERIFY2(desktop.contains(fn), qPrintable(fn + QStringLiteral(" missing from main.qml")));
-            QVERIFY2(mobile.contains(fn), qPrintable(fn + QStringLiteral(" missing from MobileMain.qml")));
+
+        // Reached through an alias rather than the literal
+        // `Window.window.` spelling the scan matches — ReportDialog and
+        // DeleteAccountDialog resolve the window once into `hostWindow` and
+        // call the toast helpers off that — so the scan cannot see them.
+        // Pinned by hand for exactly that reason.
+        QSet<QString> required{
+            QStringLiteral("toast"),        QStringLiteral("toastInfo"),
+            QStringLiteral("toastSuccess"), QStringLiteral("toastWarn"),
+            QStringLiteral("toastError"),
+        };
+
+        const QDir dir(QStringLiteral(BSFCHAT_QML_DIR "/components"));
+        const QStringList files = dir.entryList({QStringLiteral("*.qml")}, QDir::Files);
+        QVERIFY2(files.size() > 20,
+                 qPrintable(QStringLiteral("only %1 component(s) under %2 — the scan is "
+                                           "not looking where it thinks it is")
+                                .arg(files.size()).arg(dir.path())));
+
+        for (const QString& name : files) {
+            const QString src = withoutComments(readAll(dir.filePath(name)));
+            auto it = call.globalMatch(src);
+            while (it.hasNext()) {
+                const QString fn = it.next().captured(1);
+                if (!builtIns.contains(fn))
+                    required.insert(fn);
+            }
+        }
+
+        // A regex that silently stopped matching would turn this test into a
+        // no-op that still passes. These two are live call sites in
+        // ChannelList.qml and MessageBubble.qml.
+        QVERIFY2(required.contains(QStringLiteral("openSelfRoles")),
+                 "the call-site scan found no openSelfRoles() — the scan is broken");
+        QVERIFY2(required.contains(QStringLiteral("openReportDialog")),
+                 "the call-site scan found no openReportDialog() — the scan is broken");
+
+        QStringList sorted(required.cbegin(), required.cend());
+        sorted.sort();
+        for (const QString& fn : std::as_const(sorted)) {
+            const QString decl = QStringLiteral("function ") + fn;
+            QVERIFY2(desktop.contains(decl),
+                     qPrintable(QStringLiteral("shared components call Window.window.%1() "
+                                               "but main.qml does not define it").arg(fn)));
+            QVERIFY2(mobile.contains(decl),
+                     qPrintable(QStringLiteral("shared components call Window.window.%1() "
+                                               "but MobileMain.qml does not define it — "
+                                               "that is a TypeError on iOS/Android (U-C2)").arg(fn)));
         }
     }
 
