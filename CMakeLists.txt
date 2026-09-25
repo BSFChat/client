@@ -1209,6 +1209,10 @@ qt_add_qml_module(bsfchat-app
         # shows. Shared by ConnectionBanner.qml and
         # tests/qml/tst_connectionbanner.qml.
         qml/js/ConnectionBanner.js
+        # What the signed-in-account row says about who you are, so an OIDC
+        # homeserver's opaque subject never renders as the user's handle.
+        # Shared by ChannelList.qml and tests/qml/tst_useridentity.qml.
+        qml/js/UserIdentity.js
         qml/fonts/Geist-Variable.ttf
         qml/fonts/GeistMono-Variable.ttf
         qml/fonts/OFL.txt
