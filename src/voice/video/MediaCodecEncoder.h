@@ -86,6 +86,7 @@ public:
     // h264EncodeProfiles() in VideoCodecFactory.cpp for why this build
     // advertises Constrained Baseline only on the encode side.
     Caps caps() const override { return {true, false, false}; }
+    int framesInFlight() const override { return m_inFlight; }
 
     // Is there an H.264 encoder on this device at all? Asked once and
     // cached. The Android CDD has required one of every device with a
@@ -133,4 +134,13 @@ private:
     // True once a session has produced at least one access unit, so a
     // failure is distinguishable from the normal priming window.
     bool m_primed = false;
+    // Accepted minus emitted: the codec's real pipeline depth, measured
+    // rather than assumed. Surfaced through framesInFlight().
+    int m_inFlight = 0;
+    // Frames lost because no input buffer came free in time. Counted
+    // and reported because the first version of this backend dropped
+    // them in complete silence, which is indistinguishable in a log
+    // from an encoder that is simply slow.
+    quint64 m_inputStalls = 0;
+    bool m_inputStallLogged = false;
 };

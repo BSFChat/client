@@ -170,6 +170,10 @@ private:
     // H.264-over-RTP encode worker + adaptive governor (vcamera
     // track), mirroring ScreenShareController's screen pair. The JPEG
     // branch survives for legacy peers / the renegotiation gap.
+    // Record a frame arriving from the capture backend. Counts it, and
+    // counts the displacement when it lands on one no push consumed.
+    void noteCapturedFrame(const QVideoFrame& frame);
+
     VideoSendPipeline* m_pipeline = nullptr;
     VideoRateController* m_rate = nullptr;
     QPointer<QObject> m_wiredEngine;
@@ -186,6 +190,15 @@ private:
     // server).
     QList<QMetaObject::Connection> m_voiceRoomConns;
     QVideoFrame m_pendingFrame;
+    // Capture-side counters, the camera's half of videosend::Counters.
+    // ScreenShareController has always kept these; this path never did,
+    // so every camera window reported captureFps 0 and the rate
+    // controller could not tell a slow camera from a slow encoder. See
+    // noteCapturedFrame() for what that cost.
+    quint64 m_statCaptured = 0;
+    quint64 m_statOverwritten = 0;
+    quint64 m_statPushTicks = 0;
+    quint64 m_statEmptyTicks = 0;
     // Log the first frame's geometry once per start. See
     // logFirstFrameGeometry() — this is the seam that tells us, from a
     // device log, whether Qt stamps a capture rotation at all.

@@ -36,6 +36,33 @@ public:
     virtual bool reconfigure(const EncoderConfig& config) = 0;
     virtual Caps caps() const = 0;
 
+    // Frames this encoder has ACCEPTED but whose access units it has
+    // not returned yet.
+    //
+    // Zero for every backend but Android's: VideoToolbox, Media
+    // Foundation and openh264 are all driven one-in-one-out, so a false
+    // from encode() there means the frame is gone. MediaCodec is a
+    // queue in and a queue out and legitimately holds one to three
+    // frames, so a false from IT can mean "accepted, not ready" — which
+    // is not the same failure and must not be read as one.
+    //
+    // This matters because the read feeds back: VideoSendPipeline's
+    // `encoded` counter drives videosend::Window::sentFps, sentFps
+    // drives the Encode bottleneck, and the controller's remedy for
+    // Encode is to shed resolution — which rebuilds the session, which
+    // primes the pipeline again, which produces more not-ready returns.
+    // A pipelined encoder that cannot say "I am holding it" is a
+    // self-feeding downward spiral.
+    //
+    // Reported rather than acted on for now: on the device run that
+    // exposed this, the repeated rebuilds came from a different lie
+    // (the camera reporting no capture rate at all — see
+    // CameraController's send-window source), and fixing that removes
+    // the rebuilds that make priming visible. This is the seam and the
+    // instrumentation for settling the remainder on hardware instead of
+    // by argument.
+    virtual int framesInFlight() const { return 0; }
+
     // Best available backend for `kind` on this platform, hardware
     // preferred (with automatic software fallback if HW init fails —
     // callers should retry create(kind, false) when init() fails).

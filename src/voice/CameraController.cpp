@@ -84,7 +84,7 @@ CameraController::CameraController(QObject* parent)
                 m_sink->setVideoFrame(vf);
             }
             logFirstFrameGeometry(vf);
-            m_pendingFrame = vf;
+            noteCapturedFrame(vf);
         });
     connect(m_mac, &MacCameraCapturer::captureFailed, this,
         [this](const QString& desc) {
@@ -98,7 +98,7 @@ CameraController::CameraController(QObject* parent)
     connect(m_sink, &QVideoSink::videoFrameChanged, this,
         [this](const QVideoFrame& f) {
             logFirstFrameGeometry(f);
-            m_pendingFrame = f;
+            noteCapturedFrame(f);
         });
 #  if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
     // Desktop: build the capture objects up front, exactly as before.
@@ -129,10 +129,59 @@ CameraController::CameraController(QObject* parent)
     // loss into frame damage (videorate::frameDamagePct); encode
     // pressure lets an overloaded machine shed resolution.
     m_rate->setSendWindowSource([this](int askedFps) {
-        return m_sendStats.sample(m_pipeline->takeCounters(),
-                                  QDateTime::currentMSecsSinceEpoch(),
-                                  askedFps, /*capturePolled=*/false);
+        // The pipeline owns the ENCODE half of the counters; the capture
+        // half is ours and used to be left at zero, which is not a
+        // neutral default — it is a lie the controller acts on.
+        //
+        // Observed on a Pixel 6 Pro, 2026-09-25: "target 30 fps |
+        // capture 0.0 fps | sent 18.9 fps | overwritten 0.0/s". With
+        // captureFps unreportable and capturePolled false, TWO of the
+        // classifier's five outcomes were structurally unreachable for
+        // this path — a camera that genuinely delivers fewer frames
+        // than asked could never be diagnosed as Capture-bound, so it
+        // was diagnosed as Encode-bound instead. The controller's
+        // remedy for Encode is to shed resolution, which cannot make a
+        // camera produce more frames, so it sheds again: 720x1280 ->
+        // 540x960 -> 360x640 in ninety seconds, a codec rebuild and a
+        // keyframe at every step. That is the "really bad quality and
+        // it's freezing" report.
+        videosend::Counters c = m_pipeline->takeCounters();
+        c.captured = m_statCaptured;
+        c.overwritten = m_statOverwritten;
+        c.pushTicks = m_statPushTicks;
+        c.emptyTicks = m_statEmptyTicks;
+        // capturePolled TRUE for a camera, and this is the one
+        // judgement call here rather than a plumbing fix.
+        //
+        // The flag means "a missing frame is positive evidence that
+        // capture fell short". It is false for QScreenCapture and
+        // QWindowCapture because those deliver ON CHANGE: a still
+        // desktop legitimately produces nothing and must not be read as
+        // overload. A camera is not that. It is a continuous source
+        // running at a sensor rate, and it hands over a frame whether
+        // or not anything moved — so a shortfall against the rate we
+        // asked for is real, and is the camera's, and is exactly the
+        // evidence this flag exists to admit. Android drops to 15-20
+        // fps on its own in low light via auto-exposure; that is the
+        // most likely reading of 18.9 against a target of 30.
+        //
+        // Safe in the other direction: when the camera does meet the
+        // rate, captureFps clears kMeetingRatio and the Capture branch
+        // is never taken. It can only fire on a genuine shortfall, and
+        // the remedy it unlocks — cap the asked rate to what the camera
+        // actually achieves — is the one that helps, instead of the one
+        // that throws away pixels for nothing.
+        return m_sendStats.sample(c, QDateTime::currentMSecsSinceEpoch(),
+                                  askedFps, /*capturePolled=*/true);
     });
+}
+
+void CameraController::noteCapturedFrame(const QVideoFrame& frame) {
+    ++m_statCaptured;
+    // Displacing a frame no push consumed = a captured frame that will
+    // never be sent. The "cadence" bottleneck, in VideoSendStats terms.
+    if (m_pendingFrame.isValid()) ++m_statOverwritten;
+    m_pendingFrame = frame;
 }
 
 // Create QCamera + QMediaCaptureSession, once.
@@ -543,7 +592,11 @@ void CameraController::pushFrameToPeers()
     const bool canTransmit = voice && voice->hasOpenPeers();
     if (!canTransmit) setTransmitting(false);
     if (!voice) return;
-    if (!m_pendingFrame.isValid()) return;
+    ++m_statPushTicks;
+    if (!m_pendingFrame.isValid()) {
+        ++m_statEmptyTicks;
+        return;
+    }
     ++m_tick;
 
     // (Re)wire this session's engine: keyframe demands and delivery

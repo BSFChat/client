@@ -9,7 +9,8 @@
 | `h264EncodeProfiles()` / `h264DecodeProfiles()` come back non-empty on a device | **High** — the code path is compiled in and the probes are the only gate; not run on hardware |
 | The buffer-geometry and Annex-B logic is correct | **High** — 11 host-run cases, mutation-checked |
 | The encoder comes up on a Pixel 6 Pro | **Certain** — it did, on the first device run |
-| A frame actually encodes on a Pixel 6 Pro | **Unverified.** The first device run refused every frame; §3.1 is the fix, not yet re-run on hardware |
+| A frame actually encodes on a Pixel 6 Pro | **Certain** — `first H.264 access unit: 9784 bytes, keyframe, 720x1280`, received by the Mac at the same instant. The JPEG fallback stopped |
+| The rate controller stays at a sane resolution | **Unverified.** The second device run collapsed 720p→540p→360p in 90 s; §4.1 is the fix, not yet re-run |
 
 ## 1. The failure this closes
 
@@ -175,6 +176,80 @@ Two consequences, both correct and both unlike the Apple backend:
   the frame just handed in — they are different frames.
 * A `forceKeyframe` request surfaces as a keyframe a frame or two later than
   asked. `AMEDIAFORMAT_KEY_LATENCY=1` asks the encoder to keep that short.
+
+### 4.1 The collapse — a camera that could not report its own rate
+
+The second device run encoded real H.264 and the Mac received it, and then
+stepped down three resolution rungs in ninety seconds, rebuilding the codec and
+emitting a keyframe at each one. The owner saw "really bad quality and it's
+freezing", which is exactly what a rebuild-plus-IDR every thirty seconds looks
+like.
+
+The rate controller's own line names the cause if you read the whole of it:
+
+```
+sender cannot keep up (encode-bound: target 30 fps | capture 0.0 fps |
+sent 18.9 fps | overwritten 0.0/s | empty ticks 0% | ...)
+```
+
+`capture 0.0 fps`, `overwritten 0.0/s`, `empty ticks 0%` — all three of the
+capture-side numbers are zero, and they are zero because **`CameraController`
+never filled them in.** It sampled `m_pipeline->takeCounters()`, which carries
+only the encode half of `videosend::Counters`, and passed `capturePolled=false`.
+
+Read `Window::bottleneck()` with those inputs and two of its five outcomes are
+structurally unreachable on the camera path. `Cadence` needs
+`overwrittenPerSec`; `Capture` needs `capturePolled && captureFps`. Neither can
+ever be true. So a camera that genuinely delivers fewer frames than asked —
+which an Android camera does on its own in low light, dropping to 15-20 fps via
+auto-exposure, and 18.9 is squarely in that band — could only ever be
+classified `Encode`.
+
+The controller's remedy for `Encode` is to shed resolution. That cannot make a
+camera produce more frames, so the deficit persists, so it sheds again. The
+collapse is the controller correctly executing the right remedy for the wrong
+diagnosis, and it would have happened on any platform whose camera underdelivers
+— this is not an Android bug, it is just where it finally bit.
+
+The fix is one of plumbing and one of judgement:
+
+* `CameraController` now keeps `captured` / `overwritten` / `pushTicks` /
+  `emptyTicks`, exactly as `ScreenShareController` always has, and merges them
+  into the window.
+* `capturePolled` is now **true** for the camera. The flag means "a missing
+  frame is positive evidence that capture fell short". It is false for
+  `QScreenCapture` / `QWindowCapture` because those deliver *on change* and a
+  still desktop must not read as overload. A camera is not that: it is a
+  continuous source at a sensor rate and hands over a frame whether or not
+  anything moved, so a shortfall is real and is the camera's.
+
+With those, a slow camera is diagnosed `Capture`, and the controller's remedy
+for `Capture` is to cap the asked frame rate to what the camera actually
+achieves — leaving resolution alone. No thresholds were changed.
+
+### 4.2 Priming, and why it is instrumented rather than worked around
+
+The pipelining in §4 has a feedback path worth naming. `encoded` counts access
+units *out*; a priming return increments nothing, so it depresses `sentFps`,
+which feeds the `Encode` bottleneck, whose remedy rebuilds the session, which
+primes again. A pipelined encoder that cannot say "I am holding it" is a
+self-feeding spiral.
+
+`VideoEncoder::framesInFlight()` is the seam — virtual, 0 for every zero-delay
+backend, measured for MediaCodec. It is currently **reported, not acted on**,
+for two reasons: the rebuilds that made priming visible came from §4.1, and
+fixing that removes them; and rewiring the controller's inputs on a hypothesis
+would risk a component that has been carefully tuned. The priming wait is also
+now paid once per session rather than per frame (`kPrimeWaitUs`), so the window
+is a frame or two rather than a whole evaluation period. The first-access-unit
+log line carries the measured depth, so the next device run settles what is
+left by measurement.
+
+One real blind spot was closed on the way: a frame lost because no input buffer
+came free within `kInputWaitUs` used to return false in **complete silence**.
+In a log that is indistinguishable from an encoder that is merely slow, and it
+costs exactly the frame rate the controller then reads as encode pressure. It
+is now counted and reported once per session, with a running total at teardown.
 
 ## 5. Reclaim
 

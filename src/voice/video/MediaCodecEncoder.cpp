@@ -50,6 +50,12 @@ constexpr uint32_t kFlagCodecConfig = AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG;
 // returns at once. Capped well inside a 30 fps frame budget so a stalled
 // encoder costs a dropped frame rather than a stalled capture thread.
 constexpr int64_t kOutputWaitUs = 10000;
+// While the pipeline is still priming, wait longer — about two frame
+// intervals at 30 fps. This is paid once per session, and it is what
+// keeps the priming window to a frame or two instead of letting it
+// stretch across a whole rate-controller evaluation window, where a
+// handful of not-ready returns reads as an encoder that cannot keep up.
+constexpr int64_t kPrimeWaitUs = 66000;
 // The input side gets less. Failing to hand a frame over is a dropped
 // frame; blocking here backs up the capture pipeline behind it.
 constexpr int64_t kInputWaitUs = 4000;
@@ -96,6 +102,12 @@ MediaCodecEncoder::~MediaCodecEncoder() {
 }
 
 void MediaCodecEncoder::destroy() {
+    if (m_codec && (m_inputStalls > 0 || m_inFlight > 0)) {
+        qCWarning(logMCEnc,
+                 "session closing: %llu frame(s) dropped for want of an input "
+                 "buffer, %d still in flight",
+                 static_cast<unsigned long long>(m_inputStalls), m_inFlight);
+    }
     if (m_codec) {
         auto* codec = static_cast<AMediaCodec*>(m_codec);
         AMediaCodec_stop(codec);
@@ -108,6 +120,9 @@ void MediaCodecEncoder::destroy() {
     m_inputCapacity = 0;
     m_packRefusalLogged = false;
     m_primed = false;
+    m_inFlight = 0;
+    m_inputStalls = 0;
+    m_inputStallLogged = false;
 }
 
 bool MediaCodecEncoder::openSession(const EncoderConfig& config) {
@@ -311,7 +326,25 @@ bool MediaCodecEncoder::queueInput(const PlanarFrame& in, bool forceKeyframe,
 
     const ssize_t idx = AMediaCodec_dequeueInputBuffer(codec, kInputWaitUs);
     if (idx < 0) {
-        if (isHardError(idx)) *outStatus = int(idx);
+        if (isHardError(idx)) {
+            *outStatus = int(idx);
+            return false;
+        }
+        ++m_inputStalls;
+        if (!m_inputStallLogged) {
+            // A frame lost because the codec had no free input slot
+            // within kInputWaitUs. This used to return false in total
+            // silence, which in a log is indistinguishable from an
+            // encoder that is merely slow — and it costs exactly the
+            // frame rate that the rate controller then reads as encode
+            // pressure. Once per session, with a running count in the
+            // teardown line.
+            m_inputStallLogged = true;
+            qCWarning(logMCEnc,
+                     "no free input buffer within %lld us — frame dropped "
+                     "(in flight %d). Suppressing further copies.",
+                     static_cast<long long>(kInputWaitUs), m_inFlight);
+        }
         return false;
     }
 
@@ -369,6 +402,7 @@ bool MediaCodecEncoder::queueInput(const PlanarFrame& in, bool forceKeyframe,
         *outStatus = int(st);
         return false;
     }
+    ++m_inFlight;
     return true;
 }
 
@@ -423,6 +457,7 @@ void MediaCodecEncoder::drainOutput(int64_t blockUs, int* outStatus) {
                     p.data = std::move(au);
                 }
                 const bool first = !m_primed;
+                if (m_inFlight > 0) --m_inFlight;
                 m_ready.push_back(std::move(p));
                 m_primed = true;
                 if (first) {
@@ -433,10 +468,10 @@ void MediaCodecEncoder::drainOutput(int64_t blockUs, int* outStatus) {
                     // back to JPEG" — the JPEG line must stop and this one
                     // must appear.
                     qInfo("[mediacodec] first H.264 access unit: %d bytes, "
-                          "%s, %dx%d",
+                          "%s, %dx%d (pipeline depth %d)",
                           int(m_ready.back().data.size()),
                           m_ready.back().keyframe ? "keyframe" : "delta",
-                          m_config.width, m_config.height);
+                          m_config.width, m_config.height, m_inFlight);
                 }
             }
         }
@@ -456,8 +491,11 @@ bool MediaCodecEncoder::encode(const PlanarFrame& in, bool forceKeyframe,
     // refuse to give up an input buffer, and then nothing moves.
     drainOutput(0, &status);
     if (status == AMEDIA_OK) queueInput(in, forceKeyframe, &status);
-    if (status == AMEDIA_OK)
-        drainOutput(m_ready.empty() ? kOutputWaitUs : 0, &status);
+    if (status == AMEDIA_OK) {
+        drainOutput(m_ready.empty() ? (m_primed ? kOutputWaitUs : kPrimeWaitUs)
+                                    : 0,
+                    &status);
+    }
 
     if (status != AMEDIA_OK) {
         // Android reclaims codecs. A MediaCodec instance is a handle on
