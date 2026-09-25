@@ -49,13 +49,52 @@ Rectangle {
         color: Theme.line
     }
 
-    // 40×40 dock button with a tintable SVG icon. Toggled state tints the
-    // glyph red (mute/deafen engaged). `danger` variant is used for the
-    // disconnect action — solid-fill red with an onAccent glyph.
+    // 40×40 dock button with a tintable SVG icon.
+    //
+    // THREE STATES, AND THE COLOUR IS THE WHOLE POINT. The owner
+    // photographed this row on an iPhone with the camera running and the
+    // camera button was painted the SAME RED as the disconnect button
+    // immediately to its right. Red on a call bar reads as "off",
+    // "muted", or "about to end something"; it was in fact saying "your
+    // camera is live". A reviewer's first look at the app should not have
+    // the only destructive control and the only "you are broadcasting"
+    // control wearing one colour.
+    //
+    // The cause was that one property, `toggled`, was doing two opposite
+    // jobs. Mute and deafen use it to mean "a SUPPRESSING state is
+    // engaged" — red is right there, the feature of the button is that
+    // something is switched off. Screen-share and camera used the same
+    // property to mean "this capture is LIVE", which is the opposite kind
+    // of fact and wants the opposite colour.
+    //
+    // So the two meanings are now two properties:
+    //
+    //   toggled  a suppressing state is engaged (muted, deafened)
+    //            → danger tint, danger glyph
+    //   active   this control's capture or transmission is LIVE
+    //            (PTT held, screen share up, camera on)
+    //            → accent tint, accent ring, accent glyph
+    //   danger   the destructive action (disconnect)
+    //            → SOLID danger fill, white glyph
+    //
+    // Accent-means-live is not invented here: VoiceRoom's header already
+    // tints its member-strip and fullscreen toggles with Theme.accent for
+    // exactly this, and the PTT button below had ALREADY had to override
+    // `color` inline to escape the red — the workaround is deleted now
+    // that the shared state exists. That override is also why the held
+    // PTT button used to draw a Theme.danger GLYPH on a Theme.accent
+    // background: it overrode the fill and could not reach the icon.
+    //
+    // Solid fill stays reserved for `danger`, so the one irreversible
+    // control in the row remains the only one with that weight. `active`
+    // deliberately settles for a tint plus a ring rather than the solid
+    // accent the PTT button used to paint while held — a little less
+    // shout in exchange for a row where one colour means one thing.
     component DockButton: Rectangle {
         id: btn
         property string icon: ""
         property bool   toggled: false
+        property bool   active:  false
         property bool   danger:  false
         property string tooltip: ""
         property bool   enabled2: true
@@ -70,10 +109,28 @@ Rectangle {
         implicitWidth: Theme.isMobile ? 44 : 40
         implicitHeight: Theme.isMobile ? 44 : 40
         radius: Theme.r2
+        // `danger` first, then `active`, then `toggled`: a button is never
+        // meant to be two of these at once, and if a future one ever is,
+        // the destructive reading must win over the reassuring one.
         color: danger     ? Theme.danger
+             : active     ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.18)
              : toggled    ? Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.18)
              : hover.containsMouse && enabled2 ? Theme.bg3
              : Theme.bg2
+        // The ring is what keeps `active` from reading as nothing more
+        // than the hover highlight (Theme.bg3) on a phone, where there is
+        // no hover to compare it against and the tint is the only
+        // difference.
+        //
+        // The WIDTH is what switches, not the colour. A Rectangle draws
+        // its border as its own band inset from the edge, so a permanent
+        // `border.width: 1` with a transparent colour does not leave the
+        // fill showing through — it leaves a 1px transparent ring around
+        // every button in the dock. Nothing here resizes with the border
+        // either: the button's size is its implicitWidth/Height and the
+        // glyph is centred, so there is no layout reason to pin it.
+        border.width: active ? 1 : 0
+        border.color: Theme.accent
         opacity: enabled2 ? 1.0 : 0.45
         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
@@ -82,6 +139,7 @@ Rectangle {
             name: btn.icon
             size: 18
             color: btn.danger  ? "white"
+                 : btn.active  ? Theme.accent
                  : btn.toggled ? Theme.danger
                  : Theme.fg1
         }
@@ -388,16 +446,15 @@ Rectangle {
                 visible: appSettings
                          && appSettings.voiceMode === "ptt"
                 icon: "mic"
-                toggled: serverManager.activeServer
-                         && serverManager.activeServer.pttPressed
-                tooltip: toggled ? "Transmitting" : "Hold to talk"
-                // Override colours: while held, paint with the
-                // accent (green) instead of the danger (red) tint
-                // DockButton normally applies to `toggled`. Inline
-                // the hover/normal branch so users see a calm
-                // "armed, not yet transmitting" state.
-                color: toggled ? Theme.accent
-                     : Theme.bg2
+                // `active`, not `toggled`: being held down is the one
+                // moment this button is LIVE, and the inline `color`
+                // override that used to be needed to escape the danger
+                // tint is gone with it. It could only reach the fill, so
+                // the held button drew a red glyph on an accent
+                // background; DockButton now colours both.
+                active: serverManager.activeServer
+                        && serverManager.activeServer.pttPressed
+                tooltip: active ? "Transmitting" : "Hold to talk"
 
                 MouseArea {
                     anchors.fill: parent
@@ -447,7 +504,9 @@ Rectangle {
                 tooltip: visible && screenShare.active
                     ? "Stop sharing screen"
                     : "Share screen or window…"
-                toggled: visible && screenShare.active
+                // A share that is up is a live transmission, not a
+                // suppressed state — accent, never the disconnect red.
+                active: visible && screenShare.active
                 onClicked: {
                     if (!visible) return;
                     if (screenShare.active) {
@@ -494,7 +553,9 @@ Rectangle {
                 icon: "video"
                 tooltip: visible && camera.active
                     ? "Stop camera" : "Start camera"
-                toggled: visible && camera.active
+                // The button the owner photographed. A running camera is
+                // the reassuring state, and it is now the accent one.
+                active: visible && camera.active
                 // Right-click is where the per-share option lives for the
                 // camera. There is no camera picker to put it in — the button
                 // starts the camera on click — and a second permanently

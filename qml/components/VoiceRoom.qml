@@ -757,12 +757,99 @@ Rectangle {
             }
         }
 
+        // ── "Nobody is receiving this" ────────────────────────────
+        //
+        // A ROW, above the stage, and never an overlay. This warning
+        // used to be a pill inside VideoFeedTile anchored over the top-
+        // left of the picture, and on the owner's iPhone it printed
+        // itself across the corner of his own live camera preview.
+        // qml/js/ConnectionBanner.js states the rule it now follows —
+        // "an item anchored over the column composites over live video"
+        // — and the fix is the same one: take the height off the
+        // surface instead of covering it. feedArea anchors BELOW this,
+        // so the stage is simply shorter while it is up and there is no
+        // geometry in which the two overlap.
+        //
+        // One banner for the room, not one per feed: the sentence is
+        // about the call, and sharing a screen and a camera at once used
+        // to produce two identical copies of it. The wording and the
+        // predicate are VideoStage.transmitWarning() — tested, and the
+        // long version of why is in that file.
+        Rectangle {
+            id: transmitBanner
+
+            // The snapshot is built HERE so the binding's dependencies
+            // are captured in QML, exactly as ConnectionBanner and
+            // MainSurface do it. `typeof` because neither capture
+            // controller exists on every platform (src/main.cpp) and
+            // naming an absent one is a ReferenceError that would take
+            // the whole expression with it.
+            readonly property string message: {
+                var s = serverManager.activeServer;
+                var haveScreen = typeof screenShare !== "undefined"
+                                 && screenShare !== null;
+                var haveCamera = typeof camera !== "undefined"
+                                 && camera !== null;
+                return VideoStage.transmitWarning({
+                    screenCapturing: haveScreen && screenShare.active,
+                    screenTransmitting: haveScreen ? screenShare.transmitting
+                                                   : undefined,
+                    cameraCapturing: haveCamera && camera.active,
+                    cameraTransmitting: haveCamera ? camera.transmitting
+                                                   : undefined,
+                    voiceMemberCount: s && s.voiceMembers
+                                      ? s.voiceMembers.length : 0
+                });
+            }
+
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: message.length > 0 ? 28 : 0
+            visible: height > 0
+            clip: true
+            color: Theme.bg1
+            // Animated for the same reason the member strip is: a
+            // transport hiccup that flickers this on and off should not
+            // make the stage jump.
+            Behavior on height { NumberAnimation {
+                duration: Theme.motion.fastMs
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve: Theme.motion.bezier
+            } }
+
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width; height: 1; color: Theme.line
+            }
+
+            Row {
+                anchors.centerIn: parent
+                spacing: Theme.sp.s2
+                Icon {
+                    anchors.verticalCenter: parent.verticalCenter
+                    name: "bolt"
+                    size: 11
+                    color: Theme.warn
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: transmitBanner.message
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xs
+                    font.weight: Theme.fontWeight.semibold
+                    font.letterSpacing: Theme.trackWide.sm
+                    color: Theme.warn
+                }
+            }
+        }
+
         // Stage + thumbnail strip. One coordinate space for both, so a
         // feed moving between them is an animated resize rather than a
         // change of parent.
         Item {
             id: feedArea
-            anchors.top: parent.top
+            anchors.top: transmitBanner.bottom
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: memberStrip.top
@@ -912,10 +999,29 @@ Rectangle {
                     readonly property int stageIndex: VideoStage.stageIndexOf(
                         room._feeds, room._selectedKey, modelData.key)
                     readonly property var cell: {
-                        if (stageIndex >= 0)
-                            return VideoStage.gridCell(
-                                stageIndex, room._stageCount, feedArea.width,
-                                feedArea.stageH, feedArea.gap);
+                        if (stageIndex >= 0) {
+                            // Shrink-wrapped to the picture. The grid
+                            // decides WHERE and HOW BIG a cell is; the
+                            // tile then gives back whatever it cannot
+                            // fill, so the letterbox becomes stage
+                            // background rather than black tile
+                            // interior. See VideoStage.fitToAspect —
+                            // this is the phone's 60%-black screen-share
+                            // tile, and it is a no-op for a feed whose
+                            // shape already matches its cell.
+                            //
+                            // Stage only. A strip thumbnail is
+                            // `compact`, which means PreserveAspectCrop,
+                            // which means it has no letterbox to give
+                            // back — and its width is the strip's to
+                            // decide, not the picture's.
+                            return VideoStage.fitToAspect(
+                                VideoStage.gridCell(
+                                    stageIndex, room._stageCount,
+                                    feedArea.width, feedArea.stageH,
+                                    feedArea.gap),
+                                feedTile.contentAspect);
+                        }
                         var slot = VideoStage.stripSlot(
                             index, room._feeds.length, feedArea.width,
                             feedArea.gap, feedArea.thumbMaxW);
