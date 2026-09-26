@@ -69,11 +69,29 @@ Column {
                 isSelf && root.connection ? root.connection.micLevel : 0
             readonly property bool speaking: isSelf && !muted && micLevel > 0.05
 
+            // One row, one sentence. The trailing glyphs below (screen
+            // share, camera, mic-off / headphones-off) are 11px icons and
+            // are the only place this row says any of it; the Icon type
+            // is globally ignored, so they exist for a screen reader only
+            // through this name. Speaking was missing and is the one
+            // thing a listener most wants to know.
+            //
+            // Rebuilt from string concatenation into qsTr() clauses:
+            // ", deafened" glued onto a name is not translatable, and
+            // these strings are read aloud exactly like visible text.
+            // docs/accessibility.md §1.
             Accessible.role: Accessible.StaticText
-            Accessible.name: label
-                + (deafened ? ", deafened" : (muted ? ", muted" : ""))
-                + (sharing ? ", sharing screen" : "")
-                + (camera ? ", camera on" : "")
+            Accessible.name: {
+                var parts = [participantRow.isSelf
+                                ? qsTr("%1, you").arg(participantRow.label)
+                                : participantRow.label];
+                if (participantRow.deafened) parts.push(qsTr("deafened"));
+                else if (participantRow.muted) parts.push(qsTr("muted"));
+                if (participantRow.sharing) parts.push(qsTr("sharing screen"));
+                if (participantRow.camera) parts.push(qsTr("camera on"));
+                if (participantRow.speaking) parts.push(qsTr("speaking"));
+                return parts.join(qsTr(", "));
+            }
 
             RowLayout {
                 anchors.fill: parent
@@ -103,6 +121,7 @@ Column {
                                 var s = n.replace(/^[^a-zA-Z0-9]+/, "");
                                 return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
                             }
+                            Accessible.ignored: true
                             font.family: Theme.fontSans
                             font.pixelSize: 9
                             font.weight: Theme.fontWeight.semibold
@@ -129,6 +148,7 @@ Column {
                     Layout.fillWidth: true
                     Layout.alignment: Qt.AlignVCenter
                     text: participantRow.label
+                    Accessible.ignored: true
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.sm
                     font.weight: participantRow.isSelf

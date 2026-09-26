@@ -58,6 +58,45 @@ Rectangle {
                                           && serverManager.activeServer.voiceDeafened)
                                        : (member && member.deafened === true)
 
+    // ── Accessibility ───────────────────────────────────────────────
+    //
+    // One tile, one announcement: who, and everything about them that
+    // the tile encodes as colour or as a glyph. A sighted user reads
+    // "is anyone talking?" off an accent border; there is no spoken
+    // equivalent of an accent border, so speaking state goes in the
+    // name. Same for muted and deafened, which are 12px icons in the
+    // corner of an avatar. docs/accessibility.md §5.
+    //
+    // The avatar, the initial, the name Text, the status line and the
+    // diagnostics line are all ignored below — they are this sentence,
+    // read out one fragment at a time.
+    //
+    // Speaking is a live binding on `level`, which updates several
+    // times a second. That is deliberate and also the reason speaking
+    // is LAST: Qt emits a NameChanged event on every change, and a
+    // screen reader that re-reads the name should reach the stable part
+    // — the person's name — first.
+    readonly property string _spokenState: {
+        switch (tile.peerState) {
+        case "connected":    return "";
+        case "connecting":   return qsTr("connecting");
+        case "new":          return qsTr("joining");
+        case "failed":       return qsTr("connection failed");
+        case "disconnected": return qsTr("disconnected");
+        }
+        return tile.peerState;
+    }
+    Accessible.role: Accessible.StaticText
+    Accessible.name: {
+        var s = [];
+        s.push(tile.isSelf ? qsTr("%1, you").arg(tile.dispName) : tile.dispName);
+        if (tile._spokenState.length > 0) s.push(tile._spokenState);
+        if (tile.deafened) s.push(qsTr("deafened"));
+        else if (tile.muted) s.push(qsTr("muted"));
+        if (tile.speaking) s.push(qsTr("speaking"));
+        return s.join(qsTr(", "));
+    }
+
     implicitWidth:  Theme.layout.participantTileW
     implicitHeight: Theme.layout.participantTileH
     radius:         Theme.layout.participantRadius
@@ -132,6 +171,7 @@ Rectangle {
                                 ? stripped.charAt(0)
                                 : "?").toUpperCase();
                     }
+                    Accessible.ignored: true
                     font.family: Theme.fontSans
                     font.pixelSize: 28
                     font.weight: Theme.fontWeight.semibold
@@ -152,6 +192,8 @@ Rectangle {
                     color: Theme.danger
                     border.color: Theme.bg2
                     border.width: 2
+                    // Muted / deafened is in the tile's sentence.
+                    Accessible.ignored: true
                     visible: tile.muted || tile.deafened
                     Icon {
                         anchors.centerIn: parent
@@ -196,6 +238,7 @@ Rectangle {
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
             text: tile.dispName
+            Accessible.ignored: true
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.md
             font.weight: Theme.fontWeight.semibold
@@ -224,6 +267,7 @@ Rectangle {
                     default:             return tile.peerState;
                     }
                 }
+                Accessible.ignored: true
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
                 color: tile.peerState === "failed" ? Theme.danger
@@ -254,6 +298,9 @@ Rectangle {
                 anchors.centerIn: parent
                 horizontalAlignment: Text.AlignHCenter
                 text: tile.connectionPath
+                // Diagnostics, off by default, and a bare word
+                // ("relayed") with no context when read alone.
+                Accessible.ignored: true
                 font.family: Theme.fontMono
                 font.pixelSize: Theme.fontSize.xs
                 color: Theme.fg2

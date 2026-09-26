@@ -464,6 +464,17 @@ Rectangle {
                 }
                 MouseArea {
                     id: hideMemHover
+                    // Two-state, so it reports state rather than
+                    // flipping its label the way the tooltip does.
+                    Accessible.role: Accessible.CheckBox
+                    Accessible.name: qsTr("Member strip")
+                    Accessible.checkable: true
+                    Accessible.checked: room.showMembers
+                    Accessible.description: room.showMembers
+                        ? qsTr("Showing who is in the call. Activate to hide it.")
+                        : qsTr("Hidden. Activate to show who is in the call.")
+                    Accessible.onToggleAction: room.showMembers = !room.showMembers
+                    Accessible.onPressAction: room.showMembers = !room.showMembers
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
@@ -491,6 +502,15 @@ Rectangle {
                 }
                 MouseArea {
                     id: fullscreenHover
+                    Accessible.role: Accessible.CheckBox
+                    Accessible.name: qsTr("Full screen")
+                    Accessible.checkable: true
+                    Accessible.checked: room.fullscreen
+                    Accessible.description: room.fullscreen
+                        ? qsTr("Press Escape to leave full screen")
+                        : qsTr("Fills the window with the video")
+                    Accessible.onToggleAction: room.toggleFullscreen()
+                    Accessible.onPressAction: room.toggleFullscreen()
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
@@ -522,6 +542,22 @@ Rectangle {
             // the call does not have yet.
             Rectangle {
                 id: cryptoBadge
+                // "For a product whose entire pitch is that you host it
+                // yourself and nobody else is listening, the caveats on
+                // that claim are not an optional hover detail" — the
+                // comment below already says it. The same argument
+                // applies with more force to a user who cannot hover OR
+                // see the badge: the caveats go in the name, not behind
+                // a gesture that reveals a tooltip.
+                Accessible.role: Accessible.StaticText
+                Accessible.name: {
+                    var s = serverManager.activeServer;
+                    if (!s) return "";
+                    return s.voiceProtectionDetail.length > 0
+                        ? qsTr("%1. %2").arg(s.voiceProtectionBadge)
+                                        .arg(s.voiceProtectionDetail)
+                        : s.voiceProtectionBadge;
+                }
                 visible: cryptoText.text.length > 0
                 implicitWidth: cryptoText.implicitWidth + Theme.sp.s4
                 implicitHeight: 22
@@ -534,6 +570,7 @@ Rectangle {
 
                 Text {
                     id: cryptoText
+                    Accessible.ignored: true
                     anchors.centerIn: parent
                     text: serverManager.activeServer
                         ? serverManager.activeServer.voiceProtectionBadge : ""
@@ -561,6 +598,9 @@ Rectangle {
                 // opens the same text, tap again or wait closes it.
                 MouseArea {
                     id: cryptoHover
+                    // Pins the tooltip open on touch. Its whole content
+                    // is already in the badge's name above.
+                    Accessible.ignored: true
                     anchors.fill: parent
                     // The badge is 22 pt tall — half the touch minimum.
                     // Grown vertically only: horizontally it is already
@@ -966,6 +1006,15 @@ Rectangle {
                     }
 
                     MouseArea {
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Back to the grid")
+                        Accessible.description: qsTr("Stops showing this one feed full size")
+                        Accessible.onPressAction: {
+                            feedArea.forceActiveFocus();
+                            room._selectedKey = VideoStage.toggleExpanded(
+                                room._feeds, room._selectedKey,
+                                stageMarker.modelData.key);
+                        }
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {

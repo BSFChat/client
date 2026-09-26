@@ -233,6 +233,8 @@ Rectangle {
         color: tile.featured ? Theme.accent : Qt.rgba(0, 0, 0, 0.6)
         Text {
             id: nameLabel
+            // Read through the tile, which is the node you can act on.
+            Accessible.ignored: true
             anchors.centerIn: parent
             width: Math.min(implicitWidth, parent.width - Theme.sp.s3 * 2)
             elide: Text.ElideRight
@@ -405,6 +407,15 @@ Rectangle {
     // all.
     MouseArea {
         id: tileMouse
+        // The tile is a picture with a 10px name pill on it. Spoken, the
+        // pill IS the tile — who this is and whether it is their camera
+        // or their screen — and the click is what the tile is for.
+        Accessible.role: Accessible.Button
+        Accessible.name: nameLabel.text
+        Accessible.description: tile.featured
+            ? qsTr("Filling the stage. Activate to go back to the grid.")
+            : qsTr("Activate to fill the stage with this feed.")
+        Accessible.onPressAction: tile.clicked()
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton | Qt.RightButton
@@ -464,6 +475,12 @@ Rectangle {
             }
             MouseArea {
                 id: popHover
+                Accessible.role: Accessible.Button
+                Accessible.name: tile.poppedOut
+                    ? qsTr("Close the pop-out window for %1").arg(nameLabel.text)
+                    : qsTr("Pop %1 out into its own window").arg(nameLabel.text)
+                Accessible.onPressAction: tile.poppedOut
+                    ? tile.closePopOutRequested() : tile.popOutRequested()
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
@@ -484,7 +501,7 @@ Rectangle {
             radius: Theme.r1
             color: fullHover.containsMouse ? Theme.accent : Qt.rgba(0, 0, 0, 0.6)
             Accessible.role: Accessible.Button
-            Accessible.name: "Full screen"
+            Accessible.name: qsTr("Show %1 full screen").arg(nameLabel.text)
             Accessible.onPressAction: tile.fullscreenRequested()
             Icon {
                 anchors.centerIn: parent
@@ -507,11 +524,24 @@ Rectangle {
 
     Menu {
         id: feedMenu
+        // The corner buttons are not drawn on a small tile at all
+        // (tile._roomyEnoughForChrome), so on a phone this menu is the
+        // ONLY route to either action. It has to be named.
         MenuItem {
+            id: feedMenuFullscreen
             text: "Full screen"
+            Accessible.role: Accessible.MenuItem
+            Accessible.name: qsTr("Show %1 full screen").arg(nameLabel.text)
+            Accessible.onPressAction: feedMenuFullscreen.triggered()
             onTriggered: tile.fullscreenRequested()
         }
         MenuItem {
+            id: feedMenuPopOut
+            Accessible.role: Accessible.MenuItem
+            Accessible.name: tile.poppedOut
+                ? qsTr("Close the pop-out window for %1").arg(nameLabel.text)
+                : qsTr("Pop %1 out into its own window").arg(nameLabel.text)
+            Accessible.onPressAction: feedMenuPopOut.triggered()
             // No second window to pop out into on a phone. A menu item that
             // cannot do anything is worse than a shorter menu.
             visible: !Theme.isMobile
