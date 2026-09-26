@@ -97,14 +97,20 @@ class FakeServerConnection : public QObject
     Q_PROPERTY(QString typingDisplay READ typingDisplay
                WRITE setTypingDisplay NOTIFY typingDisplayChanged)
     Q_PROPERTY(QString serverUrl READ serverUrl CONSTANT)
-    Q_PROPERTY(bool canAttach READ canAttach WRITE setCanAttach
-               NOTIFY canAttachChanged)
     Q_PROPERTY(bool initialSyncComplete READ initialSyncComplete
                WRITE setInitialSyncComplete NOTIFY initialSyncCompleteChanged)
-    Q_PROPERTY(QStringList pinnedEventIds READ pinnedEventIds
-               NOTIFY pinnedEventIdsChanged)
     Q_PROPERTY(QVariantList categorizedRooms READ categorizedRooms
                NOTIFY categorizedRoomsChanged)
+
+    // ── the surface qml/components/MessageInput.qml adds ───────────────
+    //
+    // For tst_composer_send_real.qml. The byte budget is real: the composer's
+    // `overLimit` binding is what disarms the send control, so a test that
+    // wants to see the control refuse has to be able to move the limit.
+    Q_PROPERTY(int maxMessageBytes READ maxMessageBytes CONSTANT)
+    Q_PROPERTY(int permissionsGeneration READ permissionsGeneration
+               NOTIFY permissionsGenerationChanged)
+    Q_PROPERTY(QObject* memberListModel READ memberListModel CONSTANT)
 
 public:
     using QObject::QObject;
@@ -180,12 +186,25 @@ public:
 
     QString serverUrl() const { return QStringLiteral("https://test.invalid"); }
 
-    bool canAttach() const { return m_canAttach; }
-    void setCanAttach(bool v)
+    // PERMISSION QUERIES ARE FUNCTIONS OF A ROOM, NOT PROPERTIES.
+    //
+    // The shipped call sites are `s.canAttach(s.activeRoomId)`,
+    // `serverManager.activeServer.canSend(activeRoomId)`,
+    // `channelSlowmode(activeRoomId)` and `s.pinnedEventIds(s.activeRoomId)`.
+    // Declaring any of them as a Q_PROPERTY makes the binding throw
+    // "is not a function", which QML swallows into a false/undefined — the
+    // composer then silently refuses to send and the test looks like a
+    // product bug. Worth the comment: it cost a debugging round here.
+    Q_INVOKABLE bool canAttach(const QString& = {}) const { return m_canAttach; }
+    Q_INVOKABLE void setCanAttachForTest(bool v)
     {
         if (m_canAttach == v) return;
         m_canAttach = v;
         emit canAttachChanged();
+    }
+    Q_INVOKABLE QStringList pinnedEventIds(const QString& = {}) const
+    {
+        return m_pinnedEventIds;
     }
 
     bool initialSyncComplete() const { return m_initialSyncComplete; }
@@ -196,7 +215,6 @@ public:
         emit initialSyncCompleteChanged();
     }
 
-    QStringList pinnedEventIds() const { return m_pinnedEventIds; }
     QVariantList categorizedRooms() const { return m_categorizedRooms; }
 
     // The calls MessageView makes into the connection. Recorded rather than
@@ -220,6 +238,63 @@ public:
     Q_INVOKABLE QString messageLink(const QString& eventId) const
     {
         return QStringLiteral("https://test.invalid/#/room/!r/") + eventId;
+    }
+
+    // ── MessageInput's reads and calls ─────────────────────────────────
+
+    Q_INVOKABLE bool canSend(const QString& = {}) const { return m_canSend; }
+    Q_INVOKABLE void setCanSendForTest(bool v)
+    {
+        if (m_canSend == v) return;
+        m_canSend = v;
+        emit canSendChanged();
+    }
+    int maxMessageBytes() const { return 65536; }
+    // Zero, so the composer's client-side slowmode tracker never arms. A
+    // test that wants to see slowmode refuse would raise it; none does yet.
+    Q_INVOKABLE int channelSlowmode(const QString& = {}) const { return 0; }
+    int permissionsGeneration() const { return 1; }
+    QObject* memberListModel() const { return nullptr; }
+
+    Q_INVOKABLE int messageByteLength(const QString& body) const
+    {
+        return body.toUtf8().size();
+    }
+    Q_INVOKABLE void sendTypingNotification(bool) {}
+    Q_INVOKABLE void editMessage(const QString& = {}, const QString& = {}) {}
+    Q_INVOKABLE void replyToMessage(const QString& = {}, const QString& = {}) {}
+    Q_INVOKABLE void createDirectMessage(const QString& = {}) {}
+
+    // The three the composer's send path can land on. Recorded, because
+    // "pressing the shipped control reaches the shipped send" is the whole
+    // claim tst_composer_send_real.qml makes, and it is wiring no text
+    // check can see.
+    Q_INVOKABLE void sendMessage(const QString& body)
+    {
+        ++m_sendCalls;
+        m_lastSentBody = body;
+        emit sendRecordChanged();
+    }
+    Q_INVOKABLE void sendRichMessage(const QString& body, const QString&,
+                                     const QVariantList& = {})
+    {
+        ++m_sendCalls;
+        m_lastSentBody = body;
+        emit sendRecordChanged();
+    }
+    Q_INVOKABLE void sendEmote(const QString& body)
+    {
+        ++m_sendCalls;
+        m_lastSentBody = body;
+        emit sendRecordChanged();
+    }
+    Q_INVOKABLE int sendCalls() const { return m_sendCalls; }
+    Q_INVOKABLE QString lastSentBody() const { return m_lastSentBody; }
+    Q_INVOKABLE void resetSendRecording()
+    {
+        m_sendCalls = 0;
+        m_lastSentBody.clear();
+        emit sendRecordChanged();
     }
 
     // ── the test's own handles on the model ────────────────────────────
@@ -267,6 +342,9 @@ signals:
     void activeRoomTopicChanged();
     void typingDisplayChanged();
     void canAttachChanged();
+    void canSendChanged();
+    void permissionsGenerationChanged();
+    void sendRecordChanged();
     void initialSyncCompleteChanged();
     void pinnedEventIdsChanged();
     void categorizedRoomsChanged();
@@ -297,6 +375,9 @@ private:
     int m_echoSeq = 0;
     int m_loadOlderCalls = 0;
     bool m_timelineAtBottom = false;
+    bool m_canSend = true;
+    int m_sendCalls = 0;
+    QString m_lastSentBody;
 };
 
 // A stand-in for src/net/ServerManager.h with the three members the banner
@@ -350,6 +431,8 @@ public:
         m_connection->setReauthInProgress(false);
         m_connection->clearMessages();
         m_connection->resetTimelineRecording();
+        m_connection->resetSendRecording();
+        m_connection->setCanSendForTest(true);
         m_connection->setActiveRoomId(QStringLiteral("!room:test.invalid"));
         setActiveServer(m_connection);
         setActiveServerIndex(0);
