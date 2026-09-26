@@ -218,8 +218,7 @@ if(Qt6_VERSION VERSION_GREATER_EQUAL "6.6")
     qt_policy(SET QTP0004 OLD)
 endif()
 
-qt_add_executable(bsfchat-app
-    src/main.cpp
+qt_add_library(bsfchat-lib STATIC
     src/core/App.cpp
     src/core/AppProfile.cpp
     src/core/AudioDeviceStatus.cpp
@@ -295,8 +294,26 @@ qt_add_executable(bsfchat-app
     src/voice/VoiceTransportSelector.cpp
 )
 
+# The application: main.cpp and nothing else. Everything it does lives in
+# bsfchat-lib, and so is reachable from a test binary.
+#
+# STATIC + NO_PLUGIN on the module above is the combination that makes
+# `import BSFChat` work from a test: the generated qmldir and every QML file
+# are compiled into bsfchat-lib's resources under :/qt/qml/BSFChat/, which is
+# already on QQmlEngine's default import path, and any binary that links
+# bsfchat-lib gets them. NO_PLUGIN is not a downgrade — qt_add_qml_module
+# forces it anyway when the backing target is an executable, so this is
+# exactly the arrangement that shipped before, with a link step in front of
+# it. Adding a plugin instead would mean a second target that every consumer
+# has to remember to Q_IMPORT_QML_PLUGIN, for a module that is never loaded
+# from disk.
+qt_add_executable(bsfchat-app
+    src/main.cpp
+)
+target_link_libraries(bsfchat-app PRIVATE bsfchat-lib)
+
 if(BSFCHAT_ENABLE_VOICE)
-    target_sources(bsfchat-app PRIVATE
+    target_sources(bsfchat-lib PRIVATE
         # The transport seam. IVoiceTransport.cpp is empty apart from
         # its include — it exists so AUTOMOC generates the moc for the
         # interface's Q_OBJECT/signals. See the comment in the file.
@@ -387,7 +404,7 @@ if(BSFCHAT_ENABLE_VOICE)
         # default and has not been done. See docs/ios-voice.md.
         $<$<BOOL:${IOS}>:src/voice/IosAudioSession.mm>
     )
-    target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_VOICE_ENABLED)
+    target_compile_definitions(bsfchat-lib PUBLIC BSFCHAT_VOICE_ENABLED)
 
     # The build-flag half of the echo-cancellation off switch; the other
     # half is the user setting (audio/voiceProcessing, Settings.h). Both
@@ -407,11 +424,11 @@ if(BSFCHAT_ENABLE_VOICE)
         # not "Darwin" — so the generator-expression spelling silently
         # skipped the file on the one platform whose echo is confirmed,
         # and only the linker noticed. `APPLE` covers both.
-        target_sources(bsfchat-app PRIVATE src/voice/DarwinVpioBackend.mm)
-        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_DARWIN_VPIO)
+        target_sources(bsfchat-lib PRIVATE src/voice/DarwinVpioBackend.mm)
+        target_compile_definitions(bsfchat-lib PUBLIC BSFCHAT_DARWIN_VPIO)
         # AudioToolbox carries AudioUnit, AudioConverter and (on macOS)
         # the CoreAudio hardware object API the device lookup uses.
-        target_link_libraries(bsfchat-app PRIVATE
+        target_link_libraries(bsfchat-lib PUBLIC
             "-framework AudioToolbox" "-framework CoreAudio")
     endif()
 
@@ -422,31 +439,31 @@ if(BSFCHAT_ENABLE_VOICE)
         # VoiceProcessingIO capture path would need, so it is listed
         # here where the next person will look rather than discovered
         # as a link error later.
-        target_link_libraries(bsfchat-app PRIVATE
+        target_link_libraries(bsfchat-lib PUBLIC
             "-framework AVFoundation" "-framework AudioToolbox")
     endif()
     if(BSFCHAT_HAVE_OPENH264)
-        target_sources(bsfchat-app PRIVATE
+        target_sources(bsfchat-lib PRIVATE
             src/voice/video/OpenH264Encoder.cpp
             src/voice/video/OpenH264Decoder.cpp
         )
-        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_OPENH264)
-        target_link_libraries(bsfchat-app PRIVATE openh264::openh264)
+        target_compile_definitions(bsfchat-lib PUBLIC BSFCHAT_HAVE_OPENH264)
+        target_link_libraries(bsfchat-lib PUBLIC openh264::openh264)
     endif()
     # AV1 lossless tier (libaom) — desktop platforms.
     if(BSFCHAT_HAVE_AOM)
-        target_sources(bsfchat-app PRIVATE
+        target_sources(bsfchat-lib PRIVATE
             src/voice/video/AomLosslessEncoder.cpp
             src/voice/video/AomLosslessDecoder.cpp
         )
-        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_AOM)
-        target_link_libraries(bsfchat-app PRIVATE aom)
+        target_compile_definitions(bsfchat-lib PUBLIC BSFCHAT_HAVE_AOM)
+        target_link_libraries(bsfchat-lib PUBLIC aom)
         # libaom's CMake is old-style (same story as libyuv below): the
         # `aom` target sets its header paths with directory-scoped
         # include_directories() and exports no usage requirements, so the
         # aom source root (public <aom/*.h> headers) and its build dir
         # (generated aom_config.h) must be added to consumers explicitly.
-        target_include_directories(bsfchat-app PRIVATE
+        target_include_directories(bsfchat-lib PUBLIC
             ${libaom_SOURCE_DIR} ${libaom_BINARY_DIR})
     endif()
     # Hardware codec backends: VideoToolbox on BOTH Apple platforms,
@@ -474,7 +491,7 @@ if(BSFCHAT_ENABLE_VOICE)
     # sensible encoder, and it is also the only one — see the
     # BSFCHAT_VT_WANT_HW_SPEC note in MacVTEncoder.mm.
     if(APPLE)
-        target_sources(bsfchat-app PRIVATE
+        target_sources(bsfchat-lib PRIVATE
             src/voice/video/MacVTEncoder.mm
             src/voice/video/MacVTDecoder.mm
             src/voice/video/NV12Pack.cpp
@@ -487,19 +504,19 @@ if(BSFCHAT_ENABLE_VOICE)
             # there — the thing it opts out of is App Nap and desktop
             # timer coalescing for an unfocused window, and an iOS app is
             # either foreground or suspended.
-            target_sources(bsfchat-app PRIVATE
+            target_sources(bsfchat-lib PRIVATE
                 src/voice/video/LatencyCriticalActivity.mm)
         endif()
-        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_VIDEOTOOLBOX)
-        target_link_libraries(bsfchat-app PRIVATE
+        target_compile_definitions(bsfchat-lib PUBLIC BSFCHAT_HAVE_VIDEOTOOLBOX)
+        target_link_libraries(bsfchat-lib PUBLIC
             "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo")
     elseif(WIN32)
-        target_sources(bsfchat-app PRIVATE
+        target_sources(bsfchat-lib PRIVATE
             src/voice/video/MFEncoder.cpp
             src/voice/video/MFDecoder.cpp
         )
-        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_MEDIAFOUNDATION)
-        target_link_libraries(bsfchat-app PRIVATE
+        target_compile_definitions(bsfchat-lib PUBLIC BSFCHAT_HAVE_MEDIAFOUNDATION)
+        target_link_libraries(bsfchat-lib PUBLIC
             mfplat mfuuid mf mfreadwrite wmcodecdspuuid ole32 oleaut32)
     elseif(ANDROID)
         # MediaCodec, through the NDK's C binding. The same hole iOS had
@@ -523,17 +540,17 @@ if(BSFCHAT_ENABLE_VOICE)
         # inspection). They are also compiled into test_mobile_video on
         # every host, which is the only way any of this gets exercised
         # without a phone.
-        target_sources(bsfchat-app PRIVATE
+        target_sources(bsfchat-lib PRIVATE
             src/voice/video/MediaCodecEncoder.cpp
             src/voice/video/MediaCodecDecoder.cpp
             src/voice/video/MediaCodecLayout.cpp
             src/voice/video/MediaCodecAnnexB.cpp
         )
-        target_compile_definitions(bsfchat-app PRIVATE BSFCHAT_HAVE_MEDIACODEC)
+        target_compile_definitions(bsfchat-lib PUBLIC BSFCHAT_HAVE_MEDIACODEC)
         # libmediandk carries AMediaCodec/AMediaFormat; liblog is its
         # transitive dependency and is listed rather than inherited so a
         # future NDK that stops re-exporting it does not break the link.
-        target_link_libraries(bsfchat-app PRIVATE mediandk log)
+        target_link_libraries(bsfchat-lib PUBLIC mediandk log)
     endif()
 endif()
 
@@ -562,7 +579,7 @@ endif()
 # ASWebAuthenticationSession itself; UIKit is the presentation anchor it
 # refuses to present without.
 if(IOS)
-    target_link_libraries(bsfchat-app PRIVATE
+    target_link_libraries(bsfchat-lib PUBLIC
         "-framework AuthenticationServices" "-framework UIKit")
 endif()
 
@@ -700,7 +717,7 @@ endif()
 # may carry a -suffix (e.g. "0.0.0-dev"); BSFCHAT_VERSION_DOTS is the
 # strict M.N.P form needed by Apple bundle keys that reject
 # non-numeric components. Both come from cmake/Version.cmake.
-target_compile_definitions(bsfchat-app PRIVATE
+target_compile_definitions(bsfchat-lib PUBLIC
     BSFCHAT_VERSION="${BSFCHAT_VERSION}")
 
 # Ensure macOS .app bundle is created.
@@ -1096,9 +1113,47 @@ set_source_files_properties(qml/theme/Theme.qml PROPERTIES
     QT_QML_SINGLETON_TYPE TRUE
 )
 
-qt_add_qml_module(bsfchat-app
+qt_add_qml_module(bsfchat-lib
     URI BSFChat
     VERSION 1.0
+    # NO_PLUGIN, not because a plugin would be wrong, but because it would
+    # be a second thing to get right for nothing. Until this commit the
+    # backing target was the executable, and qt_add_qml_module FORCES
+    # NO_PLUGIN in that case (Qt6QmlMacros.cmake) — so "no plugin" is the
+    # arrangement that has always shipped, on all three platforms.
+    #
+    # Dropping it now that the backing target is a static library would
+    # create bsfchat-libplugin, whose whole job is to make the module
+    # loadable by a binary that does NOT link the backing target. Every
+    # binary here links it: the app, and the QML test runners. With
+    # NO_PLUGIN the generated qmldir and every QML_FILE/RESOURCE live in
+    # bsfchat-lib's compiled-in resources under :/qt/qml/BSFChat/, which is
+    # on QQmlEngine's default import path, so `import BSFChat` resolves in
+    # any of them with no Q_IMPORT_QML_PLUGIN and no qt_import_qml_plugins()
+    # to forget. Forgetting it is the classic failure here: the module
+    # resolves at build time and the binary dies at runtime with
+    # "module BSFChat is not installed".
+    NO_PLUGIN
+    # Put the generated qmldir/qmltypes back where they were.
+    #
+    # With an executable as the backing target Qt defaults OUTPUT_DIRECTORY
+    # to <binary dir>/<target path>, i.e. build/BSFChat/. With a LIBRARY it
+    # defaults to the binary dir itself, on the assumption that a library's
+    # own build directory is already named for the module — ours is not, so
+    # the first Android configure after the split printed
+    #
+    #   The bsfchat-lib target is a QML module with target path BSFChat. It
+    #   uses an OUTPUT_DIRECTORY of <build dir>, which should end in the
+    #   same target path, but doesn't. Tooling such as qmllint may not work
+    #   correctly.
+    #
+    # qmlimportscanner, which androiddeployqt runs to decide which QML
+    # modules to pack into the APK, walks the same import paths that
+    # tooling does. Leaving the qmldir loose in the build root is asking
+    # for the class of bug this repo already has scars from: a local build
+    # that links and an artefact that is missing something. Naming the
+    # directory restores the pre-split layout exactly.
+    OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/BSFChat
     # NOTE: an earlier draft of Icon.qml used Qt5Compat.GraphicalEffects'
     # ColorOverlay and we declared `IMPORTS Qt5Compat.GraphicalEffects`
     # here so Android deployment would bundle the plugin. The icon
@@ -1294,27 +1349,29 @@ qt_add_qml_module(bsfchat-app
         qml/icons/volume.svg
 )
 
-target_include_directories(bsfchat-app PRIVATE src)
+# Absolute, because this is now an INTERFACE include directory too and
+# consumers (tests/) sit in a different source dir.
+target_include_directories(bsfchat-lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Always emit a PDB for the app, Release included — crash triage on
 # tester machines is impossible from bare module+offset, and the cost
 # is only link time + a .pdb artifact that ships nowhere.
 if(MSVC)
-    target_compile_options(bsfchat-app PRIVATE $<$<CONFIG:Release>:/Zi>)
+    target_compile_options(bsfchat-lib PRIVATE $<$<CONFIG:Release>:/Zi>)
     target_link_options(bsfchat-app PRIVATE
         $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>)
 endif()
 
-target_link_libraries(bsfchat-app PRIVATE
+target_link_libraries(bsfchat-lib PUBLIC
     bsfchat_protocol
     Qt6::Core Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::QuickDialogs2 Qt6::Sql Qt6::Multimedia Qt6::Svg Qt6::Widgets
 )
 
 if(BSFCHAT_ENABLE_VOICE)
-    target_link_libraries(bsfchat-app PRIVATE datachannel-static opus yuv)
+    target_link_libraries(bsfchat-lib PUBLIC datachannel-static opus yuv)
     # libyuv's CMake is old-style — the `yuv` target carries no usage
     # requirements, so its headers must be added explicitly.
-    target_include_directories(bsfchat-app PRIVATE ${libyuv_SOURCE_DIR}/include)
+    target_include_directories(bsfchat-lib PUBLIC ${libyuv_SOURCE_DIR}/include)
 endif()
 
 # LiveKit SDK link + runtime bundling. Placed here, BEFORE the macOS
@@ -1329,11 +1386,11 @@ if(BSFCHAT_HAVE_LIVEKIT)
     # breaking API changes at v1.0.0, so the blast radius of a version
     # bump must stay small. The eventual LiveKitVoiceTransport.cpp joins
     # it as the second and last such TU.
-    target_sources(bsfchat-app PRIVATE src/voice/LiveKitSdkProbe.cpp)
-    target_compile_definitions(bsfchat-app PRIVATE
+    target_sources(bsfchat-lib PRIVATE src/voice/LiveKitSdkProbe.cpp)
+    target_compile_definitions(bsfchat-lib PUBLIC
         BSFCHAT_HAVE_LIVEKIT
         BSFCHAT_LIVEKIT_PINNED_VERSION="${BSFCHAT_LIVEKIT_VERSION}")
-    target_link_libraries(bsfchat-app PRIVATE livekit::livekit)
+    target_link_libraries(bsfchat-lib PUBLIC livekit::livekit)
     bsfchat_livekit_bundle_runtime(bsfchat-app)
 endif()
 
@@ -1348,7 +1405,7 @@ if(APPLE AND NOT IOS)
     # on iOS either. AVFoundation/CoreMedia DO exist on iOS but
     # we link them from the mobile-specific target separately when
     # that work lands.
-    target_link_libraries(bsfchat-app PRIVATE
+    target_link_libraries(bsfchat-lib PUBLIC
         "-framework CoreGraphics"
         "-framework ScreenCaptureKit"
         "-framework AVFoundation"
