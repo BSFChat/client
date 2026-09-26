@@ -415,44 +415,56 @@ private slots:
     // so the end and the start are the same position. MessageView takes the
     // slack up as the flickable's top margin instead.
     //
-    // Two call sites, neither of which a value test can see — the QML test
-    // beside this one (tests/qml/tst_timelineoverlay.qml) proves the margin
-    // does what it claims on a real ListView, but it builds a replica,
-    // because MessageView.qml imports the BSFChat module and no test binary
-    // can instantiate it. This is what keeps the replica and the real file
-    // in agreement.
+    // ── WHAT THIS GUARD USED TO BE, AND WHY IT IS NOW ONE LINE ───────────
+    //
+    // Until tests/qml_components/tst_messageview_real.qml this checked four
+    // strings in MessageView.qml's source text: that `topMargin:` called
+    // bottomAnchorSlack(, that _jumpToEnd routed through restingContentY(,
+    // that `contentY = originY;` was absent, and that the layout direction
+    // was TopToBottom. It had to, because MessageView.qml imports the
+    // BSFChat module and before PR #34 no test binary could instantiate it.
+    //
+    // All four passed over the bug that shipped, and they pass over it
+    // still: both mutations used to prove the replacement — swapping
+    // bottomAnchorSlack's two arguments, and passing a literal 0 where
+    // _jumpToEnd passes topMargin — leave every one of those strings exactly
+    // where it is while putting the dead space back on the screen. A grep
+    // for a call cannot see what the call computes.
+    //
+    // The behaviour is now MEASURED on the shipped component: rows pushed
+    // into the real ListView through a real MessageModel, and the first and
+    // last rows' edges read in viewport coordinates. Those four assertions
+    // are therefore deleted rather than kept — they are not a weaker second
+    // opinion on the same fact, they are a proxy that was demonstrated to be
+    // wrong, and leaving them would go on suggesting this file covers
+    // something it does not.
+    //
+    // ONE line survives, and it is the one the instantiated test cannot
+    // make: that the arithmetic still lives in qml/js/TimelineOverlay.js
+    // rather than inline in the component. That is a CROSS-FILE fact.
+    // tests/qml/tst_timelineoverlay.qml exercises those two functions
+    // directly over their edge cases — NaN and zero inputs from a
+    // mid-relayout view, which a live ListView will not reliably produce on
+    // demand — and that suite is only meaningful for as long as the shipped
+    // component is the thing calling them. Inlining the same arithmetic
+    // correctly would keep tst_messageview_real.qml green and silently
+    // strand tst_timelineoverlay.qml as a test of nothing.
     void theTimelineBottomAnchorsAShortHistory()
     {
         const QString src = withoutComments(
             readAll(QStringLiteral(BSFCHAT_QML_DIR "/components/MessageView.qml")));
         QVERIFY2(!src.isEmpty(), "MessageView.qml not found");
 
-        QVERIFY2(src.contains(QLatin1String("topMargin: TimelineOverlay.bottomAnchorSlack(")),
-                 "the message ListView no longer pads itself by the bottom-anchor slack, "
-                 "so a channel with a few messages in it renders them against the header "
-                 "with dead space down to the composer");
-
-        // `_jumpToEnd` runs on every count change. Its old un-scrollable
-        // branch assigned `contentY = originY`, which with a top margin is
-        // one whole margin ABOVE where the list rests: it pulled the rows
-        // back under the header and put the gap straight back the moment
-        // anybody said anything.
-        QVERIFY2(src.contains(QLatin1String("TimelineOverlay.restingContentY(")),
-                 "_jumpToEnd no longer routes through restingContentY");
-        static const QRegularExpression bareJump(
-            QStringLiteral(R"(contentY\s*=\s*originY\s*;)"));
-        QVERIFY2(!src.contains(bareJump),
-                 "`contentY = originY` ignores the bottom-anchor top margin and undoes it");
-
-        // The margin assumes rows run downward from index 0. Flipping to
-        // BottomToTop is the other way to bottom-anchor a list, and it
-        // inverts the sign of every scroll statement in this file — the
-        // pagination trigger, the originY term in _isAtEnd(), the jump
-        // target, the prepend anchor. If somebody does take that route they
-        // have to remove the margin in the same change, and this says so.
-        QVERIFY2(src.contains(QLatin1String("verticalLayoutDirection: ListView.TopToBottom")),
-                 "the timeline's layout direction changed; the bottom-anchor top margin "
-                 "above it is written for TopToBottom and must be revisited with it");
+        QVERIFY2(src.contains(QLatin1String("TimelineOverlay.bottomAnchorSlack("))
+                     && src.contains(QLatin1String("TimelineOverlay.restingContentY(")),
+                 "MessageView no longer reaches the bottom-anchor arithmetic "
+                 "through qml/js/TimelineOverlay.js. Whether the timeline still "
+                 "anchors is measured by tests/qml_components/"
+                 "tst_messageview_real.qml and is not what this is about: "
+                 "tests/qml/tst_timelineoverlay.qml covers the NaN and zero "
+                 "inputs a mid-relayout view feeds these two functions, and it "
+                 "stops testing the shipped code path the moment the component "
+                 "stops calling them.");
     }
 
     // One avatar shape across the app.
