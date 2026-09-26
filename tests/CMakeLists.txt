@@ -705,6 +705,39 @@ if(Qt6QuickTest_FOUND AND NOT ANDROID AND NOT IOS)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
+# REAL shipped components, out of the REAL BSFChat module
+# (tests/qml_components/, driven by qml_components_test_main.cpp).
+#
+# This is the target the bsfchat-lib split was for. Every other QML test in
+# this directory is a replica: the module used to be attached to the
+# executable, so `import BSFChat` in a test binary failed with "module
+# BSFChat is not installed", and the standing substitute for instantiating a
+# component was grepping its source text in test_qml_hygiene.cpp. This target
+# links bsfchat-lib, which carries the module's qmldir and every QML file in
+# its compiled-in resources under :/qt/qml/BSFChat/, so the import resolves
+# and the component under test is the file that ships.
+#
+# Linking the whole client library into a test is the cost, and it is worth
+# paying rather than carving out a QML-only library: the module is one module,
+# and a second one built from a subset would be a second thing that can drift
+# from what the app loads — which is the failure this test exists to end.
+# Nothing in the library is CONSTRUCTED here; see the runner's header for the
+# two stubs (AppSettings, serverManager) that stand in for the environment
+# src/main.cpp builds, and why the real Settings is not one of them.
+if(Qt6QuickTest_FOUND AND NOT ANDROID AND NOT IOS)
+    qt_add_executable(test_qml_components qml_components_test_main.cpp)
+    target_compile_definitions(test_qml_components PRIVATE
+        QUICK_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/qml_components")
+    target_link_libraries(test_qml_components PRIVATE
+        bsfchat-lib
+        Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::QuickTest)
+    add_test(NAME test_qml_components COMMAND test_qml_components)
+    # Headless, same as the two runners above: it measures layout geometry,
+    # not pixels, and must not open a window or steal focus during ctest.
+    set_tests_properties(test_qml_components PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
+
 # ServerManager's connection-list lifecycle (U-C1). Header-only logic
 # (src/net/ServerRoster.h) lifted out of ServerManager precisely so this
 # needs no Settings, no ServerConnection, no event loop and no network.
