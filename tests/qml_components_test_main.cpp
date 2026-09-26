@@ -45,6 +45,19 @@
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QString>
+#include <QHash>
+#include <QVariantList>
+#include <QVariantMap>
+
+// The REAL member model, out of bsfchat-lib. MemberList.qml's rows are
+// driven by it in production and are driven by it here — only the connection
+// around it is substituted. Its speaking state is the thing under test in
+// tests/qml_components/tst_memberlist_real.qml, so faking the model would
+// have left nothing worth asserting.
+#include "model/MemberListModel.h"
+
+#include <bsfchat/Constants.h>
+#include <bsfchat/MatrixTypes.h>
 
 // A stand-in for src/net/ServerConnection.h, carrying only the four
 // properties qml/js/ConnectionBanner.js reads. Writable from QML so a test
@@ -64,6 +77,34 @@ class FakeServerConnection : public QObject
                WRITE setNeedsReauth NOTIFY needsReauthChanged)
     Q_PROPERTY(bool reauthInProgress READ reauthInProgress
                WRITE setReauthInProgress NOTIFY reauthInProgressChanged)
+
+    // ── the surface MemberList.qml reads ────────────────────────────────
+    //
+    // Added for tst_memberlist_real.qml. MemberList.qml (and the profile
+    // card and role popup it declares) touch nothing outside this list and
+    // `appSettings` — checked by grepping the three files for
+    // `serverManager.activeServer.` — so this is the whole environment that
+    // component needs, not a guess at one.
+    //
+    // memberListModel is the REAL MemberListModel. Everything else is a
+    // constant or a recorder, because nothing else is under test.
+    Q_PROPERTY(QObject* memberListModel READ memberListModel CONSTANT)
+    Q_PROPERTY(QObject* blockedUsersModel READ blockedUsersModel CONSTANT)
+    Q_PROPERTY(QString userId READ userId WRITE setUserId NOTIFY userIdChanged)
+    Q_PROPERTY(QString serverUrl READ serverUrl CONSTANT)
+    Q_PROPERTY(QString activeRoomId READ activeRoomId CONSTANT)
+    Q_PROPERTY(QString activeRoomName READ activeRoomName CONSTANT)
+    Q_PROPERTY(int permissionsGeneration READ permissionsGeneration
+               NOTIFY permissionsGenerationChanged)
+    Q_PROPERTY(int botFlagsGeneration READ botFlagsGeneration
+               NOTIFY permissionsGenerationChanged)
+    Q_PROPERTY(int mediaTicketEpoch READ mediaTicketEpoch
+               NOTIFY permissionsGenerationChanged)
+    Q_PROPERTY(QVariantList serverRoles READ serverRoles CONSTANT)
+    Q_PROPERTY(bool canManageRoles READ canManageRoles CONSTANT)
+    Q_PROPERTY(bool canManageChannel READ canManageChannel CONSTANT)
+    Q_PROPERTY(bool canChangeNickname READ canChangeNickname CONSTANT)
+    Q_PROPERTY(bool canManageNicknames READ canManageNicknames CONSTANT)
 
 public:
     using QObject::QObject;
@@ -100,11 +141,94 @@ public:
         emit reauthInProgressChanged();
     }
 
+    // ── member list ─────────────────────────────────────────────────────
+
+    QObject* memberListModel() const { return m_members; }
+    QObject* blockedUsersModel() const { return nullptr; }
+
+    QString userId() const { return m_userId; }
+    void setUserId(const QString& v)
+    {
+        if (m_userId == v) return;
+        m_userId = v;
+        emit userIdChanged();
+    }
+
+    QString serverUrl() const { return QStringLiteral("http://test.invalid"); }
+    QString activeRoomId() const { return QStringLiteral("!room:test"); }
+    QString activeRoomName() const { return QStringLiteral("general"); }
+    int permissionsGeneration() const { return 0; }
+    int botFlagsGeneration() const { return 0; }
+    int mediaTicketEpoch() const { return 0; }
+    QVariantList serverRoles() const { return {}; }
+    bool canManageRoles() const { return false; }
+    bool canManageChannel() const { return false; }
+    bool canChangeNickname() const { return false; }
+    bool canManageNicknames() const { return false; }
+
+    // Constants rather than recorders: none of these is what a member-list
+    // test is about, and a row whose bindings throw is a row whose
+    // accessible name is never computed.
+    Q_INVOKABLE QString presenceFor(const QString& uid) const
+    {
+        return m_presence.value(uid, QStringLiteral("offline"));
+    }
+    Q_INVOKABLE QString statusMessageFor(const QString&) const { return {}; }
+    Q_INVOKABLE QVariantList memberRoles(const QString&) const { return {}; }
+    Q_INVOKABLE void setMemberRoles(const QString&, const QVariantList&) {}
+    Q_INVOKABLE bool isUserBlocked(const QString&) const { return false; }
+    Q_INVOKABLE void blockUser(const QString&) {}
+    Q_INVOKABLE void unblockUser(const QString&) {}
+    Q_INVOKABLE void createDirectMessage(const QString&) {}
+    Q_INVOKABLE bool isBot(const QString& uid) const
+    {
+        return m_members->isBot(uid);
+    }
+    Q_INVOKABLE void fetchProfile(const QString&) {}
+    Q_INVOKABLE void fetchNickname(const QString&) {}
+    Q_INVOKABLE void setNickname(const QString&, const QString&) {}
+    Q_INVOKABLE QString resolveMediaUrl(const QString& mxc) const { return mxc; }
+
+    // ── what a member-list test drives ──────────────────────────────────
+    //
+    // The two voice calls are the exact ones ServerConnection makes from its
+    // VoiceEngine::peerLevelChanged / micLevelChanged handlers — a raw level
+    // forwarded to the model, with the thresholding left where it lives.
+
+    Q_INVOKABLE void addMemberForTest(const QString& uid, const QString& name)
+    {
+        bsfchat::RoomEvent ev;
+        ev.event_id = "$m" + uid.toStdString();
+        ev.sender = uid.toStdString();
+        ev.type = std::string(bsfchat::event_type::kRoomMember);
+        ev.state_key = uid.toStdString();
+        ev.origin_server_ts = 1000;
+        ev.content.data = {{"membership", "join"},
+                           {"displayname", name.toStdString()}};
+        m_members->processEvent(ev);
+    }
+
+    Q_INVOKABLE void setVoiceLevelForTest(const QString& uid, qreal level)
+    {
+        m_members->setVoiceLevel(uid, float(level));
+    }
+
+    Q_INVOKABLE void clearVoiceLevelsForTest() { m_members->clearVoiceLevels(); }
+
+    Q_INVOKABLE void resetMembersForTest()
+    {
+        m_members->clearVoiceLevels();
+        m_members->clear();
+        m_presence.clear();
+    }
+
 signals:
     void connectionStatusChanged();
     void syncErrorMessageChanged();
     void needsReauthChanged();
     void reauthInProgressChanged();
+    void userIdChanged();
+    void permissionsGenerationChanged();
 
 private:
     // Default to the healthy state, so every test case starts from "the
@@ -113,6 +237,10 @@ private:
     QString m_syncError;
     bool m_needsReauth = false;
     bool m_reauthInProgress = false;
+
+    MemberListModel* m_members = new MemberListModel(this);
+    QString m_userId = QStringLiteral("@me:test");
+    QHash<QString, QString> m_presence;
 };
 
 // A stand-in for src/net/ServerManager.h with the three members the banner
@@ -164,6 +292,7 @@ public:
         m_connection->setSyncErrorMessage(QString());
         m_connection->setNeedsReauth(false);
         m_connection->setReauthInProgress(false);
+        m_connection->resetMembersForTest();
         setActiveServer(m_connection);
         setActiveServerIndex(0);
         m_reauthCalls = 0;
@@ -177,6 +306,10 @@ public:
         m_lastReauthIndex = index;
         emit reauthCallsChanged();
     }
+
+    // MemberList.qml's context menu offers "Copy user ID". Nothing asserts on
+    // it; it exists so the binding that references it resolves.
+    Q_INVOKABLE void copyToClipboard(const QString&) {}
 
 signals:
     void activeServerChanged();
@@ -240,6 +373,19 @@ public:
         emit accessibilityModeChanged();
     }
 
+    // Per-peer output volume, off the `appSettings` CONTEXT PROPERTY rather
+    // than the AppSettings singleton — MemberList.qml's context menu binds a
+    // slider to it. In src/main.cpp both names are the one Settings object,
+    // and they are the one object here too.
+    Q_INVOKABLE qreal peerVolume(const QString& uid) const
+    {
+        return m_peerVolume.value(uid, 1.0);
+    }
+    Q_INVOKABLE void setPeerVolume(const QString& uid, qreal v)
+    {
+        m_peerVolume[uid] = v;
+    }
+
 signals:
     void themeChanged();
     void layoutVariantChanged();
@@ -253,6 +399,7 @@ private:
     QString m_layoutVariant = QStringLiteral("standard");
     int m_accentHue = 180;
     bool m_accessibilityMode = false;
+    QHash<QString, qreal> m_peerVolume;
 };
 
 class QmlComponentsSetup : public QObject
@@ -272,6 +419,10 @@ public slots:
         QQmlEngine::setObjectOwnership(settings, QQmlEngine::CppOwnership);
         qmlRegisterSingletonInstance<FakeAppSettings>(
             "BSFChat", 1, 0, "AppSettings", settings);
+        // …and the same object again as the `appSettings` context property,
+        // which is how src/main.cpp exposes it and how everything outside
+        // Theme.qml reaches it.
+        engine->rootContext()->setContextProperty("appSettings", settings);
 
         auto* manager = new FakeServerManager(this);
         QQmlEngine::setObjectOwnership(manager, QQmlEngine::CppOwnership);
