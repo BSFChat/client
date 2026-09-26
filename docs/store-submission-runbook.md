@@ -425,26 +425,72 @@ create signing assets.
 
 ### 4.3 [YOU] Export compliance — 10 min, and it is a gate
 
-`ios/Info.plist.in` declares `ITSAppUsesNonExemptEncryption = true`,
-which is the honest answer: call media is DTLS-SRTP from libdatachannel
-built against an OpenSSL we cross-compile ourselves, which is not
-Apple's OS crypto.
+The substance is unchanged and still honest: call media is DTLS-SRTP
+from libdatachannel built against an OpenSSL we cross-compile
+ourselves, which is not Apple's OS crypto. No CCATS is needed, because
+the algorithms are industry-standard rather than proprietary.
+`docs/ios-release.md` §3 has the reasoning; if you want belt and
+braces, file the BIS year-end self-classification report too — it is
+an email.
 
-**`true` does not skip the questionnaire — `false` is what does that.**
-A comment in the plist claimed otherwise and has been corrected. Expect:
+**What changed on 2026-09-25, the hard way.**
 
-- The build to appear in App Store Connect as **"Missing Compliance"**.
-- Questions to answer once per version, not per build.
-- The **French encryption declaration**, if France is in your territory
-  list (it is, by default).
-- No CCATS, because the algorithms are industry-standard rather than
-  proprietary. `docs/ios-release.md` §3 has the reasoning; if you want
-  belt and braces, file the BIS year-end self-classification report too
-  — it is an email.
+`ios/Info.plist.in` used to declare `ITSAppUsesNonExemptEncryption =
+true`. It no longer declares the key at all, because `true` with no
+`ITSEncryptionExportComplianceCode` is **fatal at upload**:
 
-**Missing Compliance blocks external TestFlight testers. It does not
-block internal ones**, so you can start testing on your own devices
-immediately and sort this out in parallel.
+    UPLOAD FAILED with 1 error
+    Invalid Export Compliance Code. The export compliance key value []
+    in the app's Info.plist doesn't match the key value of the app's
+    export compliance documentation.
+
+and it is a closed circle — the code comes only from the App Store
+Connect questionnaire, which is only shown against an **uploaded
+build**. No build, no questionnaire; no questionnaire, no code; no
+code, no build. `v0.0.48-rc.4` died there with TestFlight showing
+"No Builds".
+
+An **absent** key breaks the circle and states nothing false: it means
+"not answered yet, ask me", which is what produces the Missing
+Compliance prompt on the build. `check-ios-plist` and the CI archive
+check now enforce the pairing — absent is fine, `true` **with** a code
+is fine, `true` alone is refused in seconds rather than by Apple
+twenty minutes later.
+
+**What was actually answered (2026-09-26, build 282):**
+
+- *What type of encryption algorithms?* → **Standard encryption
+  algorithms instead of, or in addition to, Apple's OS.** Not the
+  proprietary option.
+- *Available in France?* → **No, for now.**
+
+**⚠ ACTION REQUIRED BEFORE PUBLIC SUBMISSION.** That France answer is
+a declaration, not a preference. Answering **Yes** requires uploading
+export compliance documentation for ANSSI review before Apple issues
+the code — days, not minutes — so it was deferred to unblock testing.
+Either:
+
+- **keep France out of the territory list**, so the declaration stays
+  true; or
+- **file the French declaration**, change the answer to Yes, and put
+  the `ITSEncryptionExportComplianceCode` Apple issues into
+  `ios/Info.plist.in` **together with** `ITSAppUsesNonExemptEncryption
+  = true` — both keys or neither, per the guard.
+
+A `No` here with France still enabled in territories is a quiet
+mismatch that surfaces as a rejection weeks later.
+
+**Age ratings trap, same sitting.** Declaring **Social Media = Yes**
+forces **Age Assurance = Yes**, because Apple reasons that disabling
+social features for under-13s requires knowing who is under 13. There
+is no age gate, no date of birth and no verification anywhere in the
+codebase, so Age Assurance must be **No** — which means Social Media
+must be **No** too. That is defensible on Apple's own definition
+(*"a social feed or similar discovery method that visibly spreads
+content to many users"*): BSFChat has no feed, no amplification and no
+discovery — you join a server because someone gave you its address.
+**User-Generated Content stays Yes.** The resulting rating is **13+**,
+which matches the minimum age in the privacy policy and terms.
 
 Once Apple issues a compliance code, paste it into `ios/Info.plist.in`
 as `ITSEncryptionExportComplianceCode` and the questions stop for good.
