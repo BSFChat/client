@@ -169,6 +169,7 @@ ApplicationWindow {
             Layout.fillHeight: true
             Layout.preferredWidth: Theme.panelBorderWidth
             color: Theme.panelBorder
+            Accessible.ignored: true
         }
 
         // Channel sidebar (SPEC §3.2) — width from Theme.layout, switches
@@ -183,6 +184,7 @@ ApplicationWindow {
             Layout.fillHeight: true
             Layout.preferredWidth: Theme.panelBorderWidth
             color: Theme.panelBorder
+            Accessible.ignored: true
         }
 
         // Main column (SPEC §1): main content stacks above the sticky
@@ -238,6 +240,7 @@ ApplicationWindow {
             Layout.fillHeight: true
             Layout.preferredWidth: Theme.panelBorderWidth
             color: Theme.panelBorder
+            Accessible.ignored: true
             visible: root.showMemberList && serverManager.activeServer !== null
                      && Theme.layout.memberListW > 0
         }

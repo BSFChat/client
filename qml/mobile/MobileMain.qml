@@ -374,8 +374,8 @@ ApplicationWindow {
                 // Role=Button + name + clickable onPressAction gives
                 // screen-reader users a usable navigation target.
                 Accessible.role: Accessible.Button
-                Accessible.name: "Channels"
-                Accessible.description: "Open the server and channel drawer"
+                Accessible.name: qsTr("Channels")
+                Accessible.description: qsTr("Open the server and channel drawer")
                 Accessible.onPressAction: leftDrawer.open()
                 Icon { anchors.centerIn: parent; name: "menu"; size: 20; color: Theme.fg0 }
                 MouseArea {
@@ -432,8 +432,8 @@ ApplicationWindow {
                 radius: Theme.r1
                 color: membersMouse.pressed ? Theme.bg3 : "transparent"
                 Accessible.role: Accessible.Button
-                Accessible.name: "Members"
-                Accessible.description: "Open the member list"
+                Accessible.name: qsTr("Members")
+                Accessible.description: qsTr("Open the member list")
                 Accessible.onPressAction: rightDrawer.open()
                 Icon { anchors.centerIn: parent; name: "users"; size: 20; color: Theme.fg0 }
                 MouseArea {
@@ -448,6 +448,17 @@ ApplicationWindow {
                 Layout.preferredHeight: Theme.touchTarget
                 radius: Theme.r1
                 color: overflowMouse.pressed ? Theme.bg3 : "transparent"
+                // The desktop scatters these across a chat-header cluster
+                // and a footer gear, neither of which exists here, so this
+                // one unlabelled glyph is the only way to reach settings,
+                // search or sign out on a phone.
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("More")
+                Accessible.description: qsTr("Settings, search and sign out")
+                Accessible.onPressAction: overflowMenu.popup(
+                    overflowMouse.parent,
+                    overflowMouse.parent.width - 200,
+                    overflowMouse.parent.height)
                 Icon {
                     anchors.centerIn: parent
                     name: "more-horizontal"
@@ -477,6 +488,11 @@ ApplicationWindow {
                     component OverflowItem: MenuItem {
                         id: omi
                         implicitHeight: 40
+                        // One annotation for every item in the menu; the
+                        // item's own text is what a sighted user reads.
+                        Accessible.role: Accessible.MenuItem
+                        Accessible.name: omi.text
+                        Accessible.onPressAction: if (omi.enabled) omi.triggered()
                         property string iconName: ""
                         contentItem: RowLayout {
                             spacing: Theme.sp.s3
@@ -488,6 +504,7 @@ ApplicationWindow {
                             }
                             Text {
                                 text: omi.text
+                                Accessible.ignored: true
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.md
                                 color: Theme.fg0
@@ -731,6 +748,11 @@ ApplicationWindow {
                         // writer the comment above warns about.
                         Button {
                             id: signInCta
+                            // The whole screen on a fresh install. If this
+                            // is unnamed there is no app.
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Sign in with BSFChat ID")
+                            Accessible.onPressAction: signInCta.clicked()
                             visible: _noServers
                             text: "Sign in with BSFChat ID"
                             Layout.alignment: Qt.AlignHCenter
@@ -753,6 +775,10 @@ ApplicationWindow {
                         }
                         Button {
                             id: emptyJoinByAddressCta
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Join a server by address")
+                            Accessible.description: qsTr("For a server you already have the address of")
+                            Accessible.onPressAction: emptyJoinByAddressCta.clicked()
                             visible: _noServers
                             text: "Join a server by address"
                             Layout.alignment: Qt.AlignHCenter
@@ -794,6 +820,9 @@ ApplicationWindow {
                         // theMobileMainColumnHasExactlyOneWriter() forbids.
                         Button {
                             id: emptyOpenChannelsCta
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Open channel list")
+                            Accessible.onPressAction: emptyOpenChannelsCta.clicked()
                             visible: !_noServers && _noChannels
                             text: "Open channel list"
                             Layout.alignment: Qt.AlignHCenter
@@ -832,6 +861,14 @@ ApplicationWindow {
     // ── Left drawer: servers + channels ──────────────────────────
     Drawer {
         id: leftDrawer
+        // A drawer that opens without moving focus leaves a screen
+        // reader parked on the timeline behind it, reading a surface
+        // the user can no longer touch. docs/accessibility.md §9.
+        // On the Drawer (a Popup), which Qt warns about and supports
+        // anyway — see docs/accessibility.md §11.
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Servers and channels")
+        onOpened: leftDrawer.forceActiveFocus()
         width: Math.min(root.width * 0.85, 340)
         height: root.height
         edge: Qt.LeftEdge
@@ -888,6 +925,11 @@ ApplicationWindow {
     // ── Right drawer: member list ────────────────────────────────
     Drawer {
         id: rightDrawer
+        // On the Drawer (a Popup), which Qt warns about and supports
+        // anyway — see docs/accessibility.md §11.
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Members")
+        onOpened: rightDrawer.forceActiveFocus()
         width: Math.min(root.width * 0.75, 280)
         height: root.height
         edge: Qt.RightEdge
