@@ -85,6 +85,13 @@ Popup {
             radius: Theme.r1
             color: closeXMouse.containsMouse ? Theme.bg3 : "transparent"
             z: 10
+            // Icon-only, and on a phone the ONLY way back out of this
+            // pane — so it is the one control here that must be named.
+            // On the Rectangle, not the MouseArea: attached
+            // accessibility only takes effect on an Item.
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Close client settings")
+            Accessible.onPressAction: clientSettingsPopup.close()
             Icon {
                 anchors.centerIn: parent
                 name: "x"
@@ -114,7 +121,7 @@ Popup {
             font.letterSpacing: Theme.trackTight.xxl
             color: Theme.fg0
         }
-        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
+        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line; Accessible.ignored: true }
     }
 
     // Row with title + description on the left and an arbitrary control on
@@ -209,6 +216,7 @@ Popup {
                 width: Theme.r2
                 height: parent.height
                 color: Theme.bg0
+                Accessible.ignored: true
             }
 
             ColumnLayout {
@@ -240,6 +248,15 @@ Popup {
                              : navItemMouse.containsMouse ? Theme.bg2
                              : "transparent"
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                        // Same string the row draws. Selection is state,
+                        // not part of the name, so the platform reports
+                        // it and the label stays stable.
+                        Accessible.role: Accessible.ListItem
+                        Accessible.name: modelData
+                        Accessible.checkable: true
+                        Accessible.checked: isActive
+                        Accessible.onPressAction: clientSettingsPopup.section = index
+                        Accessible.onToggleAction: clientSettingsPopup.section = index
 
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
@@ -252,6 +269,8 @@ Popup {
                             font.weight: parent.isActive
                                          ? Theme.fontWeight.semibold
                                          : Theme.fontWeight.medium
+                            // Covered by the row's own name.
+                            Accessible.ignored: true
                         }
                         MouseArea {
                             id: navItemMouse
@@ -296,6 +315,9 @@ Popup {
             // 44 pt: Apple's HIG / Material touch minimum. This is the one
             // control on the pane that every other one is reached through.
             implicitHeight: 44
+            // The phone's replacement for the nav rail, so its name is
+            // what it navigates, not the section it happens to show.
+            Accessible.name: qsTr("Settings section")
             model: clientSettingsPopup.sections
             currentIndex: clientSettingsPopup.section
             // Re-established with Qt.binding, not left as the plain value
@@ -360,6 +382,16 @@ Popup {
                                     border.color: selected ? Theme.accent : Theme.line
                                     border.width: 1
                                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                    // "Dark" / "Light" alone is not
+                                    // useful read out of context in a
+                                    // rotor, so the name says what the
+                                    // choice is about.
+                                    Accessible.role: Accessible.Button
+                                    Accessible.name: qsTr("%1 theme").arg(modelData.label)
+                                    Accessible.checkable: true
+                                    Accessible.checked: selected
+                                    Accessible.onPressAction: appSettings.theme = modelData.key
+                                    Accessible.onToggleAction: appSettings.theme = modelData.key
                                     Text {
                                         anchors.centerIn: parent
                                         text: modelData.label
@@ -369,6 +401,8 @@ Popup {
                                         font.weight: parent.selected
                                                      ? Theme.fontWeight.semibold
                                                      : Theme.fontWeight.medium
+                                        // Covered by the button's name.
+                                        Accessible.ignored: true
                                     }
                                     MouseArea {
                                         id: themeMouse
@@ -408,6 +442,16 @@ Popup {
                                     border.color: selected ? Theme.fg0 : Theme.line
                                     border.width: selected ? 3 : 1
                                     Behavior on border.width { NumberAnimation { duration: Theme.motion.fastMs } }
+                                    // A bare colour swatch with no text
+                                    // at all. The tooltip below already
+                                    // holds the right word for it, so
+                                    // the name matches it.
+                                    Accessible.role: Accessible.Button
+                                    Accessible.name: qsTr("%1 accent color").arg(modelData.label)
+                                    Accessible.checkable: true
+                                    Accessible.checked: selected
+                                    Accessible.onPressAction: appSettings.accentHue = modelData.hue
+                                    Accessible.onToggleAction: appSettings.accentHue = modelData.hue
                                     MouseArea {
                                         anchors.fill: parent
                                         cursorShape: Qt.PointingHandCursor
@@ -450,6 +494,14 @@ Popup {
                                     border.color: selected ? Theme.accent : Theme.line
                                     border.width: 1
                                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                    // "Compact" on its own says nothing
+                                    // about what it is compacting.
+                                    Accessible.role: Accessible.Button
+                                    Accessible.name: qsTr("%1 layout density").arg(modelData.label)
+                                    Accessible.checkable: true
+                                    Accessible.checked: selected
+                                    Accessible.onPressAction: appSettings.layoutVariant = modelData.key
+                                    Accessible.onToggleAction: appSettings.layoutVariant = modelData.key
 
                                     Text {
                                         anchors.centerIn: parent
@@ -460,6 +512,8 @@ Popup {
                                                      ? Theme.fontWeight.semibold
                                                      : Theme.fontWeight.medium
                                         color: parent.selected ? Theme.onAccent : Theme.fg1
+                                        // Covered by the button's name.
+                                        Accessible.ignored: true
                                     }
                                     MouseArea {
                                         id: variantMouse
@@ -477,6 +531,7 @@ Popup {
                         title: "Accessibility mode"
                         description: "Draws thick, high-contrast borders between the server sidebar, channel list, chat, and member list so panel boundaries are unambiguous."
                         ThemedSwitch {
+                            Accessible.name: qsTr("Accessibility mode")
                             checked: appSettings.accessibilityMode
                             // A user toggle writes `checked` itself, which
                             // replaces the binding above — so put it back, or
@@ -537,6 +592,7 @@ Popup {
                             spacing: 2
                             ThemedComboBox {
                                 id: inputCombo
+                                Accessible.name: qsTr("Input device")
                                 implicitWidth: 260
                                 model: appSettings.audioInputDevices
                                 textRole: "description"
@@ -609,6 +665,7 @@ Popup {
                         // shipping.
                         visible: Qt.platform.os !== "android"
                         ThemedSwitch {
+                            Accessible.name: qsTr("Automatic gain control")
                             checked: appSettings.autoGainControl
                             // Re-bind after the user's write (D-C1).
                             onToggled: {
@@ -629,6 +686,7 @@ Popup {
                         description: "Lets the system remove your speakers from what your microphone picks up, so others do not hear themselves. Also applies noise suppression and gain control. Turn off if you use headphones and want your microphone untouched. Applies the next time you join voice."
                         visible: appSettings.voiceProcessingAvailable
                         ThemedSwitch {
+                            Accessible.name: qsTr("Echo cancellation")
                             checked: appSettings.voiceProcessing
                             // Re-bind after the user's write (D-C1).
                             onToggled: {
@@ -647,6 +705,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: inputVolSlider
+                                Accessible.name: qsTr("Input volume")
                                 // Narrower on a phone — see the screen-share sliders below.
                                 implicitWidth: Theme.isMobile ? 180 : 220
                                 from: 0; to: 200; stepSize: 5
@@ -678,6 +737,7 @@ Popup {
                             spacing: 2
                             ThemedComboBox {
                                 id: outputCombo
+                                Accessible.name: qsTr("Output device")
                                 implicitWidth: 260
                                 model: appSettings.audioOutputDevices
                                 textRole: "description"
@@ -745,6 +805,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: outputVolSlider
+                                Accessible.name: qsTr("Output volume")
                                 // Narrower on a phone — see the screen-share sliders below.
                                 implicitWidth: Theme.isMobile ? 180 : 220
                                 from: 0; to: 200; stepSize: 5
@@ -783,6 +844,7 @@ Popup {
                         description: "Open mic sends whenever you speak. Push-to-talk only transmits while you hold the shortcut key."
                         ThemedComboBox {
                             id: voiceModeCombo
+                            Accessible.name: qsTr("Input mode")
                             implicitWidth: 220
                             textRole: "label"
                             model: [
@@ -807,6 +869,8 @@ Popup {
                         visible: appSettings.voiceMode === "ptt"
                         TextField {
                             id: pttKeyField
+                            Accessible.role: Accessible.EditableText
+                            Accessible.name: qsTr("Push-to-talk key")
                             implicitWidth: 220
                             text: appSettings.pttKeySequence
                             color: Theme.fg0
@@ -890,6 +954,7 @@ Popup {
                                    + "If the server has no relay, joining a call with this "
                                    + "on will fail rather than connect directly."
                         ThemedSwitch {
+                            Accessible.name: qsTr("Hide my IP address")
                             checked: appSettings.voiceRelayMode === "relayOnly"
                             // D-C1: a user toggle writes `checked` imperatively
                             // and destroys the declarative binding, so it has to
@@ -983,6 +1048,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: fpsSlider
+                                Accessible.name: qsTr("Frame rate")
                                 // Narrower on a phone. Stacked under its title the slider has the
                                 // whole pane, but it shares that row with a value readout and a
                                 // server-cap badge, and at 200 the badge ran off the edge.
@@ -1017,6 +1083,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: widthSlider
+                                Accessible.name: qsTr("Maximum resolution")
                                 // Narrower on a phone. Stacked under its title the slider has the
                                 // whole pane, but it shares that row with a value readout and a
                                 // server-cap badge, and at 200 the badge ran off the edge.
@@ -1053,6 +1120,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: bitrateSlider
+                                Accessible.name: qsTr("Target bitrate")
                                 // Narrower on a phone. Stacked under its title the slider has the
                                 // whole pane, but it shares that row with a value readout and a
                                 // server-cap badge, and at 200 the badge ran off the edge.
@@ -1088,6 +1156,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: gopSlider
+                                Accessible.name: qsTr("Keyframe interval")
                                 // Narrower on a phone. Stacked under its title the slider has the
                                 // whole pane, but it shares that row with a value readout and a
                                 // server-cap badge, and at 200 the badge ran off the edge.
@@ -1119,6 +1188,7 @@ Popup {
                                    + "to H.264 automatically."
                         ThemedComboBox {
                             id: videoCodecCombo
+                            Accessible.name: qsTr("Video codec")
                             implicitWidth: 220
                             textRole: "label"
                             model: [
@@ -1165,6 +1235,7 @@ Popup {
                         RowLayout {
                             spacing: Theme.sp.s3
                             ThemedSwitch {
+                                Accessible.name: qsTr("Lossless mode (experimental)")
                                 enabled: !serverManager.activeServer
                                       || serverManager.activeServer.allowLossless
                                 checked: appSettings.screenShareLossless
@@ -1190,6 +1261,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: qSlider
+                                Accessible.name: qsTr("JPEG quality (legacy peers)")
                                 // Narrower on a phone. Stacked under its title the slider has the
                                 // whole pane, but it shares that row with a value readout and a
                                 // server-cap badge, and at 200 the badge ran off the edge.
@@ -1235,6 +1307,7 @@ Popup {
                             spacing: Theme.sp.s3
                             ThemedSlider {
                                 id: smoothingSlider
+                                Accessible.name: qsTr("Smoothness of others' video")
                                 // Narrower on a phone. Stacked under its title the slider has the
                                 // whole pane, but it shares that row with a value readout and a
                                 // server-cap badge, and at 200 the badge ran off the edge.
@@ -1284,6 +1357,7 @@ Popup {
                         title: "Enable notifications"
                         description: "Show an OS notification when a new message arrives in a channel you're not currently viewing."
                         ThemedSwitch {
+                            Accessible.name: qsTr("Enable notifications")
                             checked: appSettings.notificationsEnabled
                             // A user toggle writes `checked` itself, which
                             // replaces the binding above — so put it back, or
@@ -1304,6 +1378,7 @@ Popup {
                         title: "Play a sound"
                         description: "Play the notification chime when a new message arrives."
                         ThemedSwitch {
+                            Accessible.name: qsTr("Play a notification sound")
                             enabled: appSettings.notificationsEnabled
                             checked: appSettings.notificationSound
                             // A user toggle writes `checked` itself, which
@@ -1393,6 +1468,7 @@ Popup {
                                    + "prompt, rather than having to come "
                                    + "here and look."
                         ThemedSwitch {
+                            Accessible.name: qsTr("Check for updates automatically")
                             checked: appSettings.autoUpdateCheck
                             // A user toggle writes `checked` itself, which
                             // replaces the binding above — so put it back, or
@@ -1451,6 +1527,7 @@ Popup {
                                    + "ratio, and dropped frames. Handy "
                                    + "when reporting quality issues."
                         ThemedSwitch {
+                            Accessible.name: qsTr("Video diagnostics overlay")
                             checked: appSettings.showVideoDiagnostics
                             // A user toggle writes `checked` itself, which
                             // replaces the binding above — so put it back, or
@@ -1476,6 +1553,7 @@ Popup {
                                    + "you're chasing a problem — the log "
                                    + "grows quickly."
                         ThemedSwitch {
+                            Accessible.name: qsTr("Verbose voice logging")
                             checked: appSettings.verboseVoiceLogging
                             // A user toggle writes `checked` itself, which
                             // replaces the binding above — so put it back, or
@@ -1498,13 +1576,20 @@ Popup {
                                    + "generations). Attach these when "
                                    + "reporting bugs."
                         Button {
+                            id: logFolderBtn
                             text: "Open log folder"
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Open log folder")
+                            Accessible.description: qsTr("Opens the client log directory in your file manager")
+                            Accessible.onPressAction: logFolderBtn.clicked()
                             onClicked: Qt.openUrlExternally(
                                 appSettings.logDirectory().startsWith("/")
                                     ? "file://" + appSettings.logDirectory()
                                     : "file:///" + appSettings.logDirectory())
                             contentItem: Text {
                                 text: parent.text
+                                // Covered by the button's own name.
+                                Accessible.ignored: true
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.sm
                                 font.weight: Theme.fontWeight.medium

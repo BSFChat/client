@@ -62,7 +62,7 @@ Popup {
                 font.letterSpacing: Theme.trackTight.xxl
                 color: Theme.fg0
             }
-            Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
+            Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line; Accessible.ignored: true }
         }
 
         // Avatar section — 64×64 rounded-square (matches ServerRail /
@@ -133,6 +133,14 @@ Popup {
                         (Theme.isMobile && !avatarMouse.containsMouse) ? 0.35 : 0.55)
                     opacity: (Theme.isMobile || avatarMouse.containsMouse) ? 1.0 : 0.0
                     Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
+                    // Icon-only, and the only route to changing the
+                    // avatar. On the overlay Rectangle rather than the
+                    // MouseArea inside it, because that is the Item the
+                    // handler belongs to.
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Change profile picture")
+                    Accessible.description: qsTr("Opens a file picker to choose a new avatar image")
+                    Accessible.onPressAction: avatarFileDialog.open()
 
                     Icon {
                         anchors.centerIn: parent
@@ -194,6 +202,11 @@ Popup {
                 TextField {
                     id: displayNameField
                     Layout.fillWidth: true
+                    // The visible label is a separate "DISPLAY NAME"
+                    // heading above the row, so the field itself has
+                    // nothing to announce without this.
+                    Accessible.role: Accessible.EditableText
+                    Accessible.name: qsTr("Display name")
                     placeholderText: "Enter display name"
                     placeholderTextColor: Theme.fg3
                     color: Theme.fg0
@@ -215,11 +228,17 @@ Popup {
 
                 Button {
                     id: displayNameSaveBtn
+                    // "Save" on its own is four identical rows in a
+                    // rotor; name the thing it saves.
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Save display name")
+                    Accessible.onPressAction: displayNameSaveBtn.clicked()
                     enabled: serverManager.activeServer
                              && displayNameField.text.trim().length > 0
                              && displayNameField.text.trim() !== serverManager.activeServer.displayName
                     contentItem: Text {
                         text: "Save"
+                        Accessible.ignored: true
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md
                         font.weight: Theme.fontWeight.semibold
@@ -275,12 +294,16 @@ Popup {
         // on this homeserver, and deleting the account deletes it on this
         // homeserver. ClientSettings is device preferences and neither of
         // these is one. (See the header comments on both files.)
-        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
+        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line; Accessible.ignored: true }
 
         Button {
             id: blockedUsersBtn
             Layout.fillWidth: true
             Layout.preferredHeight: 40
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Blocked accounts")
+            Accessible.description: qsTr("Opens the list of accounts you have blocked")
+            Accessible.onPressAction: blockedUsersBtn.clicked()
             contentItem: RowLayout {
                 spacing: Theme.sp.s3
                 Icon {
@@ -291,6 +314,7 @@ Popup {
                 }
                 Text {
                     text: "Blocked accounts"
+                    Accessible.ignored: true
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.md
                     font.weight: Theme.fontWeight.medium
@@ -333,8 +357,16 @@ Popup {
             id: logoutBtn
             Layout.fillWidth: true
             Layout.preferredHeight: 40
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Log out")
+            // Danger zone: say what is destroyed. This removes the
+            // server entry and its saved token from this device (see
+            // onClicked below), it does not merely disconnect.
+            Accessible.description: qsTr("Removes this server and its saved login from this device")
+            Accessible.onPressAction: logoutBtn.clicked()
             contentItem: Text {
                 text: "Log out"
+                Accessible.ignored: true
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.md
                 font.weight: Theme.fontWeight.semibold
@@ -373,8 +405,16 @@ Popup {
             id: deleteAccountBtn
             Layout.fillWidth: true
             Layout.preferredHeight: 32
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Delete account")
+            // Nothing is deleted by this click — it opens the
+            // confirmation — so the description says that as well as
+            // what the confirmed action destroys.
+            Accessible.description: qsTr("Opens a confirmation for permanently deleting your account on this server")
+            Accessible.onPressAction: deleteAccountBtn.clicked()
             contentItem: Text {
                 text: "Delete account"
+                Accessible.ignored: true
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
                 font.weight: Theme.fontWeight.medium

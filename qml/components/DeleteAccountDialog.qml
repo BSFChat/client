@@ -70,6 +70,7 @@ Popup {
     closePolicy: Popup.CloseOnEscape
     padding: Theme.sp.s7
 
+
     enter: Transition {
         NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 150; easing.type: Easing.OutCubic }
         NumberAnimation { property: "scale"; from: 0.95; to: 1.0; duration: 150; easing.type: Easing.OutCubic }
@@ -150,6 +151,12 @@ Popup {
         }
     }
 
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: qsTr("Delete your account")
+
     contentItem: Flickable {
         id: contentFlick
         // The Popup takes its implicitHeight from this, and a Flickable's own
@@ -183,6 +190,8 @@ Popup {
                     Layout.preferredHeight: Theme.controlHeight.sm
                     radius: Theme.r2
                     color: Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.15)
+                    // Decorative tint behind the title glyph (§6).
+                    Accessible.ignored: true
                     Icon {
                         anchors.centerIn: parent
                         name: "x"
@@ -264,6 +273,8 @@ Popup {
                     && !deleteDialog.conn.accountDeletionBusy
                 placeholderText: deleteDialog.confirmWord
                 placeholderTextColor: Theme.fg3
+                Accessible.role: Accessible.EditableText
+                Accessible.name: qsTr("Type %1 to confirm").arg(deleteDialog.confirmWord)
                 color: Theme.fg0
                 font.family: Theme.fontMono
                 font.pixelSize: Theme.fontSize.md
@@ -305,6 +316,8 @@ Popup {
                 placeholderText: "Password"
                 placeholderTextColor: Theme.fg3
                 echoMode: TextInput.Password
+                Accessible.role: Accessible.EditableText
+                Accessible.name: qsTr("Your password")
                 color: Theme.fg0
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.md
@@ -326,6 +339,12 @@ Popup {
                 visible: deleteDialog.conn !== null
                     && deleteDialog.conn.accountDeletionError.length > 0
                 text: deleteDialog.conn ? deleteDialog.conn.accountDeletionError : ""
+                Accessible.role: Accessible.AlertMessage
+                Accessible.name: deleteDialog.conn
+                                 ? deleteDialog.conn.accountDeletionError : ""
+                onVisibleChanged: if (visible)
+                                      Accessible.announce(Accessible.name,
+                                                          Accessible.Assertive)
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
                 color: Theme.danger
@@ -343,6 +362,9 @@ Popup {
                     id: deleteCancelBtn
                     enabled: deleteDialog.conn === null
                         || !deleteDialog.conn.accountDeletionBusy
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Cancel")
+                    Accessible.onPressAction: deleteDialog.close()
                     implicitHeight: Theme.controlHeight.md
                     contentItem: Text {
                         text: "Cancel"
@@ -371,6 +393,17 @@ Popup {
                         && !deleteDialog.conn.accountDeletionBusy
                         && (!deleteDialog.conn.accountDeletionNeedsPassword
                             || passwordField.text.length > 0)
+                    // The one irreversible control in the app. The name is the
+                    // label; the description is the whole consequence, said in
+                    // full, because a screen-reader user gets no second look at
+                    // the bullet list above before they press it (§3).
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Delete account")
+                    Accessible.description: qsTr("Permanently deletes your account on %1: your sign-in on this and every other device, your display name, nickname and avatar, your membership of every channel here, and your blocked list and settings on this server. Messages you have already sent stay in their channels. It cannot be undone, and support cannot bring it back.")
+                        .arg(deleteDialog.conn ? deleteDialog.conn.serverUrl
+                                               : qsTr("this server"))
+                    Accessible.onPressAction: if (deleteConfirmBtn.enabled)
+                                                  deleteConfirmBtn.clicked()
                     implicitHeight: Theme.controlHeight.md
                     contentItem: Text {
                         text: {

@@ -111,6 +111,9 @@ ColumnLayout {
 
         ThemedSwitch {
             Layout.alignment: Qt.AlignVCenter
+            // The label is the "Beta channel" heading in the column to
+            // the left, which the switch itself cannot see.
+            Accessible.name: qsTr("Beta channel")
             checked: root._onBeta
             onToggled: {
                 if (typeof appSettings === "undefined") return;

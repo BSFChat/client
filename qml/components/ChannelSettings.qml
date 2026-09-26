@@ -59,6 +59,9 @@ Popup {
         return resolved ? resolved : channelSettings.roomName;
     }
 
+    // The surface a screen reader lands on when this opens, named with the
+    // same wording the header bar shows.
+
     onOpened: {
         // D-L: the dialog opened with nothing focused, so the first keypress
         // went nowhere.
@@ -155,6 +158,7 @@ Popup {
             anchors.verticalCenter: parent.verticalCenter
             height: 1
             color: Theme.line
+            Accessible.ignored: true
         }
     }
 
@@ -216,6 +220,10 @@ Popup {
     component TriToggle: Rectangle {
         id: tri
         property int state: 0
+        // What these three segments are about (the permission name, at the
+        // one call site). Supplied by the row so each segment announces
+        // something unique instead of a bare "Allow" repeated per row.
+        property string subject: ""
         signal stateChangeRequested(int newState)
 
         implicitWidth: 228
@@ -249,9 +257,25 @@ Popup {
                          : "transparent"
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
+                    // The three segments are one choice, so each is a radio
+                    // button whose name says both what it sets and what it
+                    // is for. The handler lives on the MouseArea below, but
+                    // attached accessibility only works on an Item, so the
+                    // segment rectangle is the node.
+                    Accessible.role: Accessible.RadioButton
+                    Accessible.checkable: true
+                    Accessible.checked: isSelected
+                    Accessible.name: tri.subject.length > 0
+                        ? qsTr("%1: %2").arg(tri.subject).arg(modelData.label)
+                        : modelData.label
+                    Accessible.onPressAction: tri.stateChangeRequested(modelData.value)
+                    Accessible.onToggleAction: tri.stateChangeRequested(modelData.value)
+
                     Text {
                         anchors.centerIn: parent
                         text: modelData.label
+                        // Part of the segment's own announcement.
+                        Accessible.ignored: true
                         color: parent.isSelected ? Theme.onAccent : Theme.fg2
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm
@@ -272,6 +296,14 @@ Popup {
     }
 
     // ----- Layout -----
+
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: channelSettings.liveRoomName
+        ? qsTr("Channel settings for %1").arg(channelSettings.liveRoomName)
+        : qsTr("Channel settings")
 
     contentItem: ColumnLayout {
         anchors.fill: parent
@@ -309,6 +341,10 @@ Popup {
                     Layout.preferredHeight: Theme.isMobile ? 44 : 28
                     radius: Theme.r1
                     color: closeXMouse.containsMouse ? Theme.bg3 : "transparent"
+                    // Icon-only, and on a phone the only way out of this pane.
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Close channel settings")
+                    Accessible.onPressAction: channelSettings.close()
                     Icon {
                         anchors.centerIn: parent
                         name: "x"
@@ -329,6 +365,7 @@ Popup {
                 width: parent.width
                 height: 1
                 color: Theme.line
+                Accessible.ignored: true
             }
         }
 
@@ -431,6 +468,15 @@ Popup {
                             id: saveNameBtn
                             enabled: nameField.text.trim().length > 0
                                   && nameField.text !== nameField._original
+                            // Two buttons in this pane say "Save"; the name
+                            // has to say which one. Why it is greyed out is
+                            // invisible without the description.
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Save channel name")
+                            Accessible.description: saveNameBtn.enabled
+                                ? qsTr("Rename this channel to the text in the field")
+                                : qsTr("Unavailable until you type a different name")
+                            Accessible.onPressAction: if (saveNameBtn.enabled) saveNameBtn.clicked()
                             contentItem: Text {
                                 text: "Save"
                                 font.family: Theme.fontSans
@@ -513,6 +559,12 @@ Popup {
                         Button {
                             id: saveTopicBtn
                             enabled: topicField.text !== topicField._original
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Save channel topic")
+                            Accessible.description: saveTopicBtn.enabled
+                                ? qsTr("Set this channel's topic to the text in the field")
+                                : qsTr("Unavailable until you change the topic")
+                            Accessible.onPressAction: if (saveTopicBtn.enabled) saveTopicBtn.clicked()
                             contentItem: Text {
                                 text: "Save"
                                 font.family: Theme.fontSans
@@ -571,6 +623,10 @@ Popup {
                     ThemedComboBox {
                         id: slowmodeCombo
                         implicitWidth: 160
+                        // The visible label lives in the row's left column, so
+                        // without this the box announces only its value.
+                        Accessible.name: qsTr("Slowmode")
+                        Accessible.description: qsTr("How long members must wait between messages")
                         model: [
                             {label: "Off",        seconds: 0},
                             {label: "5 seconds",  seconds: 5},
@@ -620,6 +676,18 @@ Popup {
                     ThemedSwitch {
                         id: privateSwitch
                         checked: privateRow.isPrivate
+                        // Label is in the row's left column. The name stays the
+                        // stable noun; the platform reads the checked state.
+                        Accessible.name: qsTr("Private channel")
+                        Accessible.checkable: true
+                        Accessible.checked: privateRow.isPrivate
+                        Accessible.description: privateRow.isPrivate
+                            ? qsTr("On. Everyone is denied View channel here except roles with an explicit Allow.")
+                            : qsTr("Off. Everyone can see this channel.")
+                        // Same path a click takes: flip, then emit, so the
+                        // existing onToggled does the write.
+                        Accessible.onPressAction: { privateSwitch.toggle(); privateSwitch.toggled(); }
+                        Accessible.onToggleAction: { privateSwitch.toggle(); privateSwitch.toggled(); }
                         onToggled: {
                             if (!serverManager.activeServer) return;
                             var ov = privateRow._evOverride;
@@ -657,6 +725,8 @@ Popup {
                     ThemedComboBox {
                         id: roleCombo
                         Layout.fillWidth: true
+                        Accessible.name: qsTr("Role")
+                        Accessible.description: qsTr("Choose which role's permissions in this channel to edit")
                         model: serverManager.activeServer
                             ? serverManager.activeServer.serverRoles : []
                         textRole: "name"
@@ -678,6 +748,13 @@ Popup {
                             color: Theme.bg2
                             border.color: Theme.line
                             border.width: 1
+
+                            // One announcement for the label and its hint; the
+                            // three segments stay separately reachable because
+                            // they are separately actionable.
+                            Accessible.role: Accessible.Pane
+                            Accessible.name: flagInfo.label
+                            Accessible.description: flagInfo.hint
 
                             readonly property var flagInfo: modelData
                             // Use activeServer + currentIndex + permissionsGeneration as deps
@@ -715,6 +792,8 @@ Popup {
                                     spacing: 2
                                     Text {
                                         text: flagInfo.label
+                                        // Carried by the row's own name.
+                                        Accessible.ignored: true
                                         color: Theme.fg0
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.md
@@ -722,6 +801,8 @@ Popup {
                                     Text {
                                         visible: flagInfo.hint.length > 0
                                         Layout.fillWidth: true
+                                        // Carried by the row's own description.
+                                        Accessible.ignored: true
                                         text: flagInfo.hint
                                         color: Theme.fg2
                                         font.family: Theme.fontSans
@@ -731,6 +812,7 @@ Popup {
                                 }
                                 TriToggle {
                                     state: triState
+                                    subject: flagInfo.label
                                     onStateChangeRequested: function(s) { apply(s); }
                                 }
                             }
@@ -753,6 +835,7 @@ Popup {
                 width: parent.width
                 height: 1
                 color: Theme.line
+                Accessible.ignored: true
             }
             RowLayout {
                 anchors.fill: parent
@@ -772,9 +855,14 @@ Popup {
                     radius: Theme.r2
                     color: doneBtnMouse.containsMouse ? Theme.accentDim : Theme.accent
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Done")
+                    Accessible.description: qsTr("Close. Changes are already saved.")
+                    Accessible.onPressAction: channelSettings.close()
                     Text {
                         anchors.centerIn: parent
                         text: "Done"
+                        Accessible.ignored: true
                         color: Theme.onAccent
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md

@@ -44,12 +44,19 @@ Popup {
     property string _initialMessage: ""
     property string _selectedPresence: "online"
 
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: qsTr("Set your status")
+
     contentItem: ColumnLayout {
         id: contentColumn
         spacing: Theme.sp.s4
 
         Text {
             text: "Set your status"
+            Accessible.ignored: true
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.lg
             font.weight: Theme.fontWeight.semibold
@@ -76,6 +83,15 @@ Popup {
             border.width: 1
             Behavior on color       { ColorAnimation { duration: Theme.motion.fastMs } }
             Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
+            // One of a mutually exclusive set, so RadioButton rather than
+            // CheckBox: the platform then says "1 of 3" as well as the state.
+            Accessible.role: Accessible.RadioButton
+            Accessible.name: row.title
+            Accessible.description: row.subtitle
+            Accessible.checkable: true
+            Accessible.checked: picker._selectedPresence === row.presence
+            Accessible.onPressAction: picker._selectedPresence = row.presence
+            Accessible.onToggleAction: picker._selectedPresence = row.presence
 
             RowLayout {
                 anchors.fill: parent
@@ -90,12 +106,14 @@ Popup {
                     color: row.dotColor
                     border.color: Theme.bg1
                     border.width: 2
+                    Accessible.ignored: true
                 }
                 ColumnLayout {
                     spacing: 1
                     Layout.fillWidth: true
                     Text {
                         text: row.title
+                        Accessible.ignored: true
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.base
                         font.weight: Theme.fontWeight.medium
@@ -103,6 +121,7 @@ Popup {
                     }
                     Text {
                         text: row.subtitle
+                        Accessible.ignored: true
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
                         color: Theme.fg3
@@ -145,6 +164,7 @@ Popup {
 
         Text {
             text: "Custom status (optional)"
+            Accessible.ignored: true
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.sm
             font.weight: Theme.fontWeight.medium
@@ -173,6 +193,9 @@ Popup {
                 font.pixelSize: Theme.fontSize.base
                 selectByMouse: true
                 maximumLength: 80
+                Accessible.role: Accessible.EditableText
+                Accessible.name: qsTr("Custom status")
+                Accessible.description: qsTr("Optional, shown under your name. Up to 80 characters.")
                 Keys.onReturnPressed: picker._save()
             }
         }
@@ -188,6 +211,9 @@ Popup {
             Button {
                 text: "Cancel"
                 onClicked: picker.close()
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Cancel")
+                Accessible.onPressAction: picker.close()
                 contentItem: Text {
                     text: parent.text
                     color: Theme.fg1
@@ -208,6 +234,9 @@ Popup {
             Button {
                 text: "Save"
                 onClicked: picker._save()
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Save status")
+                Accessible.onPressAction: picker._save()
                 contentItem: Text {
                     text: parent.text
                     color: Theme.onAccent

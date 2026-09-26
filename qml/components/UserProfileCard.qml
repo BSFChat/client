@@ -75,6 +75,7 @@ Popup {
     modal: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
+
     x: (parent.width - width) / 2
     y: (parent.height - height) / 2
 
@@ -109,6 +110,9 @@ Popup {
             serverManager.activeServer.fetchProfile(userId);
             serverManager.activeServer.fetchNickname(userId);
         }
+        // Last, after the clean slate above: there is no field on an opened
+        // card, so focus goes to the primary action.
+        messageBtn.forceActiveFocus();
     }
 
     // Sends whatever is in the editor. An empty value is a CLEAR, not a no-op, so
@@ -146,6 +150,12 @@ Popup {
         }
     }
 
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: qsTr("Profile for %1").arg(profileCard.effectiveName)
+
     contentItem: ColumnLayout {
         id: cardContent
         anchors.fill: parent
@@ -161,9 +171,11 @@ Popup {
             Layout.preferredHeight: 72
             radius: Theme.r2
             color: Theme.senderColor(profileCard.userId)
+            Accessible.ignored: true
 
             Rectangle {
                 id: avatarTile
+                Accessible.ignored: true
                 width: 72
                 height: 72
                 radius: Theme.r3
@@ -182,6 +194,7 @@ Popup {
                     radius: Theme.r2
                     color: Theme.senderColor(profileCard.userId)
                     clip: true
+                    Accessible.ignored: true
 
                     Image {
                         anchors.fill: parent
@@ -195,6 +208,7 @@ Popup {
                         anchors.centerIn: parent
                         text: ProfileCardAvatar.initial(profileCard.profileDisplayName,
                                                         profileCard.userId)
+                        Accessible.ignored: true
                         font.family: Theme.fontSans
                         font.pixelSize: 28
                         font.weight: Theme.fontWeight.semibold
@@ -220,6 +234,7 @@ Popup {
 
             Text {
                 text: profileCard.effectiveName
+                Accessible.ignored: true
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.xl
                 font.weight: Theme.fontWeight.semibold
@@ -253,6 +268,8 @@ Popup {
                 && profileCard.profileDisplayName !== ""
                 && profileCard.profileDisplayName !== profileCard.nickname
             text: qsTr("aka %1").arg(profileCard.profileDisplayName)
+            Accessible.role: Accessible.StaticText
+            Accessible.name: qsTr("Account name %1").arg(profileCard.profileDisplayName)
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.sm
             color: Theme.fg2
@@ -263,6 +280,8 @@ Popup {
         // User ID — mono, fg3 (quieter than display name).
         Text {
             text: profileCard.userId
+            Accessible.role: Accessible.StaticText
+            Accessible.name: qsTr("User ID %1").arg(profileCard.userId)
             font.family: Theme.fontMono
             font.pixelSize: Theme.fontSize.sm
             color: Theme.fg3
@@ -273,6 +292,9 @@ Popup {
         // Server host, in mono for consistency with the mxid.
         Text {
             text: serverManager.activeServer ? serverManager.activeServer.serverUrl : ""
+            Accessible.role: Accessible.StaticText
+            Accessible.name: qsTr("Server %1").arg(
+                serverManager.activeServer ? serverManager.activeServer.serverUrl : "")
             font.family: Theme.fontMono
             font.pixelSize: Theme.fontSize.xs
             color: Theme.fg3
@@ -290,7 +312,7 @@ Popup {
             spacing: Theme.sp.s3
             visible: profileCard.nickname !== "" || profileCard.mayEditNickname
 
-            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.line }
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.line; Accessible.ignored: true }
 
             RowLayout {
                 Layout.fillWidth: true
@@ -303,6 +325,7 @@ Popup {
 
                     Text {
                         text: qsTr("NICKNAME ON THIS SERVER")
+                        Accessible.ignored: true
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
                         font.weight: Theme.fontWeight.semibold
@@ -313,6 +336,10 @@ Popup {
                         Layout.fillWidth: true
                         text: profileCard.nickname !== "" ? profileCard.nickname
                                                           : qsTr("None")
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: profileCard.nickname !== ""
+                            ? qsTr("Nickname on this server: %1").arg(profileCard.nickname)
+                            : qsTr("No nickname on this server")
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md
                         color: profileCard.nickname !== "" ? Theme.fg0 : Theme.fg3
@@ -322,6 +349,11 @@ Popup {
 
                 Button {
                     id: editNickBtn
+                    Accessible.role: Accessible.Button
+                    Accessible.name: profileCard.isSelf
+                        ? qsTr("Change your nickname")
+                        : qsTr("Change nickname for %1").arg(profileCard.effectiveName)
+                    Accessible.onPressAction: editNickBtn.clicked()
                     visible: profileCard.mayEditNickname
                     Layout.preferredWidth: 44
                     Layout.preferredHeight: Theme.controlHeight.sm
@@ -360,6 +392,9 @@ Popup {
 
                 TextField {
                     id: nickField
+                    Accessible.role: Accessible.EditableText
+                    Accessible.name: qsTr("Nickname for %1").arg(profileCard.effectiveName)
+                    Accessible.description: qsTr("Leave empty to remove the nickname")
                     Layout.fillWidth: true
                     placeholderText: profileCard.profileDisplayName || profileCard.userId
                     // Matches kMaxNicknameCodepoints server-side. The server
@@ -388,6 +423,9 @@ Popup {
 
                     Button {
                         id: saveNickBtn
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Save nickname")
+                        Accessible.onPressAction: saveNickBtn.clicked()
                         Layout.fillWidth: true
                         Layout.preferredHeight: 34
                         contentItem: Text {
@@ -409,6 +447,12 @@ Popup {
 
                     Button {
                         id: clearNickBtn
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Remove nickname for %1")
+                            .arg(profileCard.effectiveName)
+                        Accessible.description: qsTr("%1 goes back to their account name")
+                            .arg(profileCard.effectiveName)
+                        Accessible.onPressAction: clearNickBtn.clicked()
                         visible: profileCard.nickname !== ""
                         Layout.preferredHeight: 34
                         Layout.preferredWidth: 80
@@ -435,6 +479,9 @@ Popup {
 
                     Button {
                         id: cancelNickBtn
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Cancel nickname edit")
+                        Accessible.onPressAction: cancelNickBtn.clicked()
                         Layout.preferredHeight: 34
                         Layout.preferredWidth: 74
                         contentItem: Text {
@@ -476,6 +523,9 @@ Popup {
 
             Button {
                 id: messageBtn
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Send message to %1").arg(profileCard.effectiveName)
+                Accessible.onPressAction: messageBtn.clicked()
                 Layout.fillWidth: true
                 Layout.preferredHeight: Theme.controlHeight.lg
                 contentItem: Text {
@@ -510,6 +560,9 @@ Popup {
 
             Button {
                 id: manageRolesBtn
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Manage roles for %1").arg(profileCard.effectiveName)
+                Accessible.onPressAction: manageRolesBtn.clicked()
                 visible: parent.canManageRoles
                 Layout.preferredWidth: 44
                 Layout.preferredHeight: Theme.controlHeight.lg
@@ -555,6 +608,14 @@ Popup {
                     var subscribe = s.blockedUsersModel.users;
                     return s.isUserBlocked(profileCard.userId);
                 }
+                Accessible.role: Accessible.Button
+                Accessible.name: blockBtn.blocked
+                    ? qsTr("Unblock %1").arg(profileCard.effectiveName)
+                    : qsTr("Block %1").arg(profileCard.effectiveName)
+                Accessible.description: blockBtn.blocked
+                    ? qsTr("You will see their messages again")
+                    : qsTr("You stop seeing their messages. They are not told.")
+                Accessible.onPressAction: blockBtn.clicked()
                 contentItem: Icon {
                     anchors.centerIn: parent
                     name: "lock"
@@ -588,6 +649,10 @@ Popup {
 
             Button {
                 id: reportBtn
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Report %1").arg(profileCard.effectiveName)
+                Accessible.description: qsTr("Report to the server administrators")
+                Accessible.onPressAction: reportBtn.clicked()
                 Layout.preferredWidth: 44
                 Layout.preferredHeight: Theme.controlHeight.lg
                 contentItem: Icon {

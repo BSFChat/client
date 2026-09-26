@@ -25,6 +25,13 @@ Dialog {
     standardButtons: Dialog.NoButton
     closePolicy: Popup.CloseOnEscape
 
+    // docs/accessibility.md §9. Initial focus is set where the dialog is
+    // opened from — onReauthPasswordRequired below fills the username in and
+    // then puts the caret in the password field, which is the only thing
+    // there is left to type.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: qsTr("Sign in again")
+
     // Which sidebar row we are signing back in to. Set from the signal
     // rather than by the caller: the dialog subscribes to ServerManager once
     // and does not need to be pre-bound to a connection before the flow that
@@ -116,6 +123,8 @@ Dialog {
                 id: usernameField
                 Layout.fillWidth: true
                 placeholderText: "Username"
+                Accessible.role: Accessible.EditableText
+                Accessible.name: qsTr("Username")
                 enabled: !dialog.busy
                 font.family: Theme.fontSans
                 onAccepted: passwordField.forceActiveFocus()
@@ -126,6 +135,8 @@ Dialog {
                 Layout.fillWidth: true
                 placeholderText: "Password"
                 echoMode: TextInput.Password
+                Accessible.role: Accessible.EditableText
+                Accessible.name: qsTr("Password")
                 enabled: !dialog.busy
                 font.family: Theme.fontSans
                 onAccepted: dialog.submit()
@@ -135,6 +146,13 @@ Dialog {
                 Layout.fillWidth: true
                 visible: dialog.errorMessage.length > 0
                 text: dialog.errorMessage
+                // §8: a refusal a sighted user sees appear has to be said out
+                // loud, not left to be stumbled on.
+                Accessible.role: Accessible.AlertMessage
+                Accessible.name: qsTr("Sign-in failed: %1").arg(dialog.errorMessage)
+                onVisibleChanged: if (visible)
+                                      Accessible.announce(Accessible.name,
+                                                          Accessible.Assertive)
                 wrapMode: Text.Wrap
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
@@ -150,11 +168,20 @@ Dialog {
                 Button {
                     text: "Cancel"
                     enabled: !dialog.busy
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Cancel")
+                    Accessible.onPressAction: dialog.close()
                     onClicked: dialog.close()
                 }
                 Button {
                     text: dialog.busy ? "Signing in…" : "Sign in"
                     enabled: !dialog.busy && passwordField.text.length > 0
+                    // The name stays the stable verb; the visible label flips
+                    // to "Signing in…" and the busy state is carried by the
+                    // control's own disabled state (§5).
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Sign in")
+                    Accessible.onPressAction: dialog.submit()
                     onClicked: dialog.submit()
                 }
             }

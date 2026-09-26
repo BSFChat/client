@@ -45,12 +45,22 @@ Popup {
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
     padding: 0
 
+
+    // No field in this dialog, so focus lands on the primary action.
+    onOpened: saveBtn.forceActiveFocus()
+
     background: Rectangle {
         color: Theme.bg1
         radius: Theme.r3
         border.color: Theme.line
         border.width: 1
     }
+
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: qsTr("Manage roles for %1").arg(popup.displayName)
 
     contentItem: ColumnLayout {
         anchors.fill: parent
@@ -71,8 +81,10 @@ Popup {
                     Layout.preferredHeight: Theme.avatar.md
                     radius: Theme.r2
                     color: Theme.senderColor(popup.userId)
+                    Accessible.ignored: true
                     Text {
                         anchors.centerIn: parent
+                        Accessible.ignored: true
                         text: {
                             var n = popup.displayName || popup.userId || "?";
                             var s = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -89,6 +101,7 @@ Popup {
                     spacing: 0
                     Text {
                         text: "Manage roles"
+                        Accessible.ignored: true
                         color: Theme.fg3
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
@@ -97,6 +110,7 @@ Popup {
                     }
                     Text {
                         text: popup.displayName
+                        Accessible.ignored: true
                         color: Theme.fg0
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.lg
@@ -107,6 +121,8 @@ Popup {
                     }
                     Text {
                         text: popup.userId
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: qsTr("User ID %1").arg(popup.userId)
                         color: Theme.fg3
                         font.family: Theme.fontMono
                         font.pixelSize: Theme.fontSize.xs
@@ -122,6 +138,9 @@ Popup {
                     Layout.topMargin: 2
                     radius: Theme.r1
                     color: closeXMouse.containsMouse ? Theme.bg3 : "transparent"
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Close")
+                    Accessible.onPressAction: popup.close()
                     Icon {
                         anchors.centerIn: parent
                         name: "x"; size: 14
@@ -141,6 +160,7 @@ Popup {
                 width: parent.width
                 height: 1
                 color: Theme.line
+                Accessible.ignored: true
             }
         }
 
@@ -173,6 +193,14 @@ Popup {
                         radius: Theme.r1
                         color: roleHover.containsMouse ? Theme.bg2 : "transparent"
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                        // The whole row is the two-state control; the tick, the
+                        // colour dot and the label inside it are one announcement.
+                        Accessible.role: Accessible.CheckBox
+                        Accessible.checkable: true
+                        Accessible.checked: isChecked
+                        Accessible.name: role.name || roleId
+                        Accessible.onPressAction: roleHover.clicked(null)
+                        Accessible.onToggleAction: roleHover.clicked(null)
 
                         RowLayout {
                             anchors.fill: parent
@@ -183,6 +211,7 @@ Popup {
                             ThemedCheckBox {
                                 id: roleCheckbox
                                 checked: parent.parent.isChecked
+                                Accessible.ignored: true
                             }
                             Rectangle {
                                 Layout.alignment: Qt.AlignVCenter
@@ -190,11 +219,13 @@ Popup {
                                 color: parent.parent.role.color || Theme.accent
                                 border.color: Theme.bg0
                                 border.width: 1
+                                Accessible.ignored: true
                             }
                             Text {
                                 Layout.alignment: Qt.AlignVCenter
                                 Layout.fillWidth: true
                                 text: parent.parent.role.name || parent.parent.roleId
+                                Accessible.ignored: true
                                 color: Theme.fg0
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.md
@@ -207,6 +238,9 @@ Popup {
                             Text {
                                 visible: parent.parent.role.hoist === true
                                 text: "HOISTED"
+                                Accessible.role: Accessible.StaticText
+                                Accessible.name: qsTr("%1 is hoisted")
+                                    .arg(parent.parent.role.name || parent.parent.roleId)
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.xs
                                 font.weight: Theme.fontWeight.semibold
@@ -250,6 +284,7 @@ Popup {
                 width: parent.width
                 height: 1
                 color: Theme.line
+                Accessible.ignored: true
             }
             RowLayout {
                 anchors.fill: parent
@@ -284,6 +319,11 @@ Popup {
 
                 Button {
                     id: saveBtn
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Save roles")
+                    Accessible.description: qsTr("Apply the ticked roles to %1")
+                        .arg(popup.displayName)
+                    Accessible.onPressAction: saveBtn.clicked()
                     contentItem: Text {
                         text: "Save"
                         font.family: Theme.fontSans

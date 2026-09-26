@@ -113,6 +113,12 @@ Popup {
 
     contentItem: UpdatePanel {
         embedded: false
+        // The panel names itself after the updater state it is
+        // reporting; here that panel IS the modal's body, so the role
+        // becomes Dialog rather than the panel's default Pane. (The
+        // Popup root cannot carry this: attached accessibility only
+        // takes effect on an Item, and Popup is not one.)
+        Accessible.role: Accessible.Dialog
         // Cap the release-notes box against the window rather than a
         // constant, so the dialog stays inside a short window.
         notesMaxHeight: Math.max(120, Math.min(220,
