@@ -80,12 +80,20 @@ Popup {
     // in light mode because the point is to make the image the only lit thing
     // on screen. Hence Theme.scrim / Theme.scrimFg throughout this file.
     background: Rectangle {
+        Accessible.ignored: true
         color: Qt.rgba(Theme.scrim.r, Theme.scrim.g, Theme.scrim.b, 0.88)
     }
 
     contentItem: Item {
         id: viewport
         anchors.fill: parent
+
+        // The Popup itself is not an Item (see the D-H3 note at the bottom of
+        // this file), so the dialog node lives on the contentItem.
+        Accessible.role: Accessible.Dialog
+        Accessible.name: viewer.filename.length > 0
+            ? qsTr("Image viewer: %1").arg(viewer.filename)
+            : qsTr("Image viewer")
         // Focus lives here so the key handler below actually receives events;
         // `focus: true` on the Popup alone only makes the POPUP the active
         // focus item within the overlay.
@@ -113,6 +121,9 @@ Popup {
         // transparent areas fall through to this MouseArea and close.
         MouseArea {
             anchors.fill: parent
+            // Click-outside-to-dismiss hit area: no content of its own, and
+            // the named Close button below does the same job.
+            Accessible.ignored: true
             acceptedButtons: Qt.LeftButton
             onClicked: viewer.close()
             // Wheel events anywhere outside the image also zoom — feels
@@ -146,6 +157,10 @@ Popup {
             Image {
                 id: mediaImage
                 anchors.fill: parent
+                Accessible.role: Accessible.Graphic
+                Accessible.name: viewer.filename.length > 0
+                    ? qsTr("Image %1").arg(viewer.filename)
+                    : qsTr("Image")
                 source: viewer.imageUrl
                 fillMode: Image.Stretch
                 asynchronous: true
@@ -157,10 +172,13 @@ Popup {
             // Loading placeholder.
             Rectangle {
                 anchors.fill: parent
+                Accessible.role: Accessible.StaticText
+                Accessible.name: qsTr("Loading image")
                 color: Qt.rgba(0, 0, 0, 0.5)
                 visible: mediaImage.status === Image.Loading
                 Text {
                     anchors.centerIn: parent
+                    Accessible.ignored: true
                     text: "Loading…"
                     color: Theme.fg0
                     font.family: Theme.fontSans
@@ -171,6 +189,8 @@ Popup {
             // Error state.
             Rectangle {
                 anchors.fill: parent
+                Accessible.role: Accessible.StaticText
+                Accessible.name: qsTr("Couldn't load image")
                 color: Theme.bg3
                 visible: mediaImage.status === Image.Error
                 ColumnLayout {
@@ -182,6 +202,7 @@ Popup {
                     }
                     Text {
                         Layout.alignment: Qt.AlignHCenter
+                        Accessible.ignored: true
                         text: "Couldn't load image"
                         color: Theme.fg0
                         font.family: Theme.fontSans
@@ -198,6 +219,10 @@ Popup {
             MouseArea {
                 id: imageMouse
                 anchors.fill: parent
+                // Pointer-only pan/zoom/pinch surface — the image node above
+                // carries the announcement and the keyboard shortcuts cover
+                // the zooming.
+                Accessible.ignored: true
                 hoverEnabled: true
                 acceptedButtons: Qt.LeftButton
                 cursorShape: pressed      ? Qt.ClosedHandCursor
@@ -304,9 +329,15 @@ Popup {
                 id: gbtn
                 property string icon: ""
                 property string tooltip: ""
+                // Spoken label. Set per call site so it goes through qsTr()
+                // rather than borrowing the untranslated tooltip literal.
+                property string accessibleName: ""
                 signal clicked()
                 Layout.preferredWidth: 36
                 Layout.preferredHeight: Theme.controlHeight.md
+                Accessible.role: Accessible.Button
+                Accessible.name: gbtn.accessibleName
+                Accessible.onPressAction: gbtn.clicked()
                 radius: Theme.r2
                 color: gbtnMouse.containsMouse
                     ? Qt.rgba(1, 1, 1, 0.18) : Qt.rgba(1, 1, 1, 0.08)
@@ -330,6 +361,7 @@ Popup {
             GlassBtn {
                 icon: "link"
                 tooltip: "Open with your system viewer"
+                accessibleName: qsTr("Open with your system viewer")
                 // Not the browser, and not this URL. Downloads the object with
                 // an Authorization header and opens the local copy — see
                 // ServerConnection::openMediaExternally.
@@ -343,6 +375,7 @@ Popup {
             GlassBtn {
                 icon: "x"
                 tooltip: "Close  (Esc)"
+                accessibleName: qsTr("Close image viewer")
                 onClicked: viewer.close()
             }
         }
@@ -350,6 +383,16 @@ Popup {
         // Bottom caption strip.
         Rectangle {
             z: 2
+            Accessible.role: Accessible.StaticText
+            Accessible.name: {
+                var pct = Math.round(viewer.zoom * 100);
+                if (viewer.filename.length > 0 && viewer.zoom !== 1.0)
+                    return qsTr("%1, zoomed to %2 percent")
+                           .arg(viewer.filename).arg(pct);
+                if (viewer.zoom !== 1.0)
+                    return qsTr("Zoomed to %1 percent").arg(pct);
+                return viewer.filename;
+            }
             visible: viewer.filename.length > 0 || viewer.zoom !== 1.0
             anchors.bottom: parent.bottom
             anchors.horizontalCenter: parent.horizontalCenter
@@ -368,6 +411,7 @@ Popup {
                 spacing: Theme.sp.s4
                 Text {
                     visible: viewer.filename.length > 0
+                    Accessible.ignored: true
                     text: viewer.filename
                     color: Theme.scrimFg
                     font.family: Theme.fontSans
@@ -378,6 +422,8 @@ Popup {
                 }
                 Text {
                     visible: viewer.fileSize > 0
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: qsTr("File size %1").arg(text)
                     text: viewer.fileSize < 1024 ? viewer.fileSize + " B"
                         : viewer.fileSize < 1024 * 1024
                             ? (viewer.fileSize / 1024).toFixed(1) + " KB"
@@ -390,12 +436,14 @@ Popup {
                 }
                 Rectangle {
                     visible: viewer.zoom !== 1.0
+                    Accessible.ignored: true
                     Layout.preferredWidth: 1
                     Layout.preferredHeight: 14
                     color: Qt.rgba(1, 1, 1, 0.2)
                 }
                 Text {
                     visible: viewer.zoom !== 1.0
+                    Accessible.ignored: true
                     text: Math.round(viewer.zoom * 100) + "%"
                     color: Theme.accent
                     font.family: Theme.fontMono
@@ -409,6 +457,10 @@ Popup {
                          || viewer.panX !== 0 || viewer.panY !== 0
                     Layout.preferredWidth: resetText.implicitWidth + Theme.sp.s3
                     Layout.preferredHeight: 18
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Reset zoom")
+                    Accessible.description: qsTr("Fit the image to the window again")
+                    Accessible.onPressAction: viewer.resetView()
                     radius: Theme.r1
                     color: resetMouse.containsMouse
                         ? Qt.rgba(1, 1, 1, 0.18) : Qt.rgba(1, 1, 1, 0.08)
@@ -416,6 +468,7 @@ Popup {
                     Text {
                         id: resetText
                         anchors.centerIn: parent
+                        Accessible.ignored: true
                         text: "Reset"
                         color: Theme.scrimFg
                         font.family: Theme.fontSans

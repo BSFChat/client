@@ -104,6 +104,27 @@ Rectangle {
     border.width: 1
     clip: true
 
+    // The whole card is one activatable thing: every hit area inside it
+    // opens the same URL, so the card is the accessible node and the
+    // chrome inside it (stripe, scrim, thumbnail, text rows) is ignored.
+    Accessible.role: Accessible.Button
+    Accessible.name: {
+        var t = preview.ogTitle.length > 0 ? preview.ogTitle
+                                           : String(preview.url);
+        var s = preview.ogSiteName.length > 0 ? preview.ogSiteName
+                                              : preview.hostName;
+        if (preview.isVideoEmbed) {
+            return s.length > 0 ? qsTr("Video: %1, from %2").arg(t).arg(s)
+                                : qsTr("Video: %1").arg(t);
+        }
+        return s.length > 0 ? qsTr("Link preview: %1, from %2").arg(t).arg(s)
+                            : qsTr("Link preview: %1").arg(t);
+    }
+    Accessible.description: preview.ogDescription.length > 0
+        ? preview.ogDescription
+        : qsTr("Opens the link in your browser")
+    Accessible.onPressAction: Qt.openUrlExternally(preview.url)
+
     // Left accent stripe — mirrors the reply-preamble chrome so
     // "quoted content" reads consistently whether it's another
     // message or a linked page. Hidden for video embeds; the card
@@ -113,6 +134,7 @@ Rectangle {
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
+        Accessible.ignored: true
         width: 3
         color: Theme.accent
     }
@@ -134,6 +156,10 @@ Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: width * 9 / 16
             Layout.maximumHeight: 270
+            // Thumbnail + play overlay. Activating it does exactly what
+            // activating the card does, so it is folded into the card's
+            // single announcement rather than repeated.
+            Accessible.ignored: true
             radius: Theme.r1
             // Letterbox behind a 16:9 thumbnail: a scrim, not a panel, so it
             // stays black in light mode rather than flashing a pale frame
@@ -144,6 +170,7 @@ Rectangle {
             Image {
                 id: videoThumb
                 anchors.fill: parent
+                Accessible.ignored: true
                 source: preview.videoThumbUrl
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
@@ -164,12 +191,14 @@ Rectangle {
             // Dim scrim so the play button reads over any frame.
             Rectangle {
                 anchors.fill: parent
+                Accessible.ignored: true
                 color: Qt.rgba(0, 0, 0, 0.25)
             }
 
             // Red circle play button in the YouTube brand colour.
             Rectangle {
                 anchors.centerIn: parent
+                Accessible.ignored: true
                 width: 72; height: 72; radius: 36
                 color: videoMouse.containsMouse
                     ? Qt.rgba(1, 0, 0, 0.95)
@@ -203,6 +232,7 @@ Rectangle {
         // rendering video embeds eagerly: a known, stable footprint.
         Text {
             Layout.fillWidth: true
+            Accessible.ignored: true
             Layout.preferredHeight: Math.ceil(
                 Theme.fontSize.md * 1.3 * 2)
             text: preview.ogTitle
@@ -222,6 +252,7 @@ Rectangle {
         }
         Text {
             Layout.fillWidth: true
+            Accessible.ignored: true
             Layout.preferredHeight: Math.ceil(
                 Theme.fontSize.xs * 1.3)
             // Always render — `hostName` is derived from the URL
@@ -257,6 +288,7 @@ Rectangle {
 
             // Site name — quiet, small. Falls back to the URL's host.
             Text {
+                Accessible.ignored: true
                 text: preview.ogSiteName.length > 0
                     ? preview.ogSiteName : preview.hostName
                 visible: text.length > 0
@@ -268,6 +300,7 @@ Rectangle {
             }
             // Title — accent-coloured, clickable like a link.
             Text {
+                Accessible.ignored: true
                 text: preview.ogTitle
                 visible: text.length > 0
                 color: Theme.accent
@@ -287,6 +320,7 @@ Rectangle {
             }
             // Description — dimmer, up to 3 lines.
             Text {
+                Accessible.ignored: true
                 text: preview.ogDescription
                 visible: text.length > 0
                 color: Theme.fg2
@@ -303,6 +337,9 @@ Rectangle {
         // image viewer, consistent with inline m.image handling.
         Rectangle {
             visible: preview.hasImage
+            // Decorative relative to the card's own name; tapping it
+            // opens the same URL the card does.
+            Accessible.ignored: true
             Layout.preferredWidth: 96
             Layout.preferredHeight: 96
             Layout.alignment: Qt.AlignVCenter
@@ -313,6 +350,7 @@ Rectangle {
             Image {
                 id: thumb
                 anchors.fill: parent
+                Accessible.ignored: true
                 source: preview.ogImage
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true

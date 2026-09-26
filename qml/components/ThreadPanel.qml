@@ -90,7 +90,8 @@ Item {
         anchors.fill: parent
         color: "#000000"
         opacity: 0.25
-        MouseArea { anchors.fill: parent; onClicked: threadPanel.closePanel() }
+        Accessible.ignored: true
+        MouseArea { anchors.fill: parent; Accessible.ignored: true; onClicked: threadPanel.closePanel() }
     }
 
     // Panel chrome — right-anchored rail.
@@ -105,10 +106,14 @@ Item {
         color: Theme.bg1
         border.width: 0
 
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Thread")
+
         Rectangle {
             anchors.left: parent.left
             anchors.top: parent.top
             anchors.bottom: parent.bottom
+            Accessible.ignored: true
             width: 1
             color: Theme.line
         }
@@ -131,6 +136,8 @@ Item {
 
                     Icon { name: "forward"; size: 14; color: Theme.accent }
                     Text {
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: qsTr("Thread")
                         text: "THREAD"
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
@@ -147,6 +154,11 @@ Item {
                         Layout.preferredHeight: Theme.isMobile ? Theme.touchTarget : 28
                         radius: Theme.r1
                         color: closeMouse.containsMouse ? Theme.bg3 : "transparent"
+
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Close thread")
+                        Accessible.description: qsTr("Return to the channel")
+                        Accessible.onPressAction: threadPanel.closePanel()
                         Icon {
                             anchors.centerIn: parent
                             name: "x"; size: 14
@@ -164,6 +176,7 @@ Item {
 
                 Rectangle {
                     anchors.bottom: parent.bottom
+                    Accessible.ignored: true
                     width: parent.width; height: 1; color: Theme.line
                 }
             }
@@ -175,6 +188,8 @@ Item {
                 Layout.fillHeight: true
                 clip: true
                 spacing: Theme.sp.s2
+                Accessible.role: Accessible.List
+                Accessible.name: qsTr("Thread messages")
                 ScrollBar.vertical: ThemedScrollBar {}
                 boundsBehavior: Flickable.StopAtBounds
 
@@ -210,6 +225,24 @@ Item {
                         !threadRow.isParent
                         && (threadRow.mentionsMe || threadRow.mentionsRoom)
 
+                    // One announcement per message, same rule the timeline
+                    // follows: the row is the node, its text children are not.
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: {
+                        var who = threadRow.senderDisplayName
+                               || threadRow.sender || threadRow.eventId;
+                        var when = new Date(threadRow.timestamp)
+                            .toLocaleString(Qt.locale(), "h:mm ap");
+                        if (threadRow.isParent)
+                            return qsTr("Thread start. %1 said %2, %3")
+                                   .arg(who).arg(threadRow.body).arg(when);
+                        if (threadRow.highlight)
+                            return qsTr("%1 said %2, %3, mentions you")
+                                   .arg(who).arg(threadRow.body).arg(when);
+                        return qsTr("%1 said %2, %3")
+                               .arg(who).arg(threadRow.body).arg(when);
+                    }
+
                     Rectangle {
                         anchors.fill: parent
                         anchors.leftMargin: Theme.sp.s4
@@ -230,6 +263,7 @@ Item {
                         // Left bar, matching the timeline's mention marker.
                         Rectangle {
                             visible: threadRow.highlight
+                            Accessible.ignored: true
                             anchors.left: parent.left
                             anchors.top: parent.top
                             anchors.bottom: parent.bottom
@@ -248,6 +282,7 @@ Item {
                                 spacing: Theme.sp.s3
                                 Layout.fillWidth: true
                                 Text {
+                                    Accessible.ignored: true
                                     text: threadRow.senderDisplayName
                                           || threadRow.sender
                                           || threadRow.eventId
@@ -259,6 +294,7 @@ Item {
                                     Layout.fillWidth: true
                                 }
                                 Text {
+                                    Accessible.ignored: true
                                     text: {
                                         var d = new Date(threadRow.timestamp);
                                         return d.toLocaleString(Qt.locale(), "h:mm ap");
@@ -270,6 +306,7 @@ Item {
                             }
                             Text {
                                 id: bodyText
+                                Accessible.ignored: true
                                 // MessageModel bakes the highlighted mention
                                 // anchors into formattedBody, so rendering the
                                 // plain body here would print the bare
@@ -305,6 +342,7 @@ Item {
                                 }
                                 MouseArea {
                                     anchors.fill: parent
+                                    Accessible.ignored: true
                                     acceptedButtons: Qt.NoButton
                                     cursorShape: bodyText.hoveredLink
                                         ? Qt.PointingHandCursor : Qt.ArrowCursor
@@ -334,6 +372,7 @@ Item {
 
                 Rectangle {
                     anchors.top: parent.top
+                    Accessible.ignored: true
                     width: parent.width; height: 1; color: Theme.line
                 }
 
@@ -355,6 +394,9 @@ Item {
                         Layout.fillWidth: true
                         Layout.alignment: Qt.AlignVCenter
                         placeholderText: "Reply in thread…"
+                        Accessible.role: Accessible.EditableText
+                        Accessible.name: qsTr("Reply in thread")
+                        Accessible.description: qsTr("Return posts the reply into this thread")
                         color: Theme.fg0
                         placeholderTextColor: Theme.fg3
                         font.family: Theme.fontSans
@@ -420,10 +462,10 @@ Item {
                         }
 
                         Accessible.role: Accessible.Button
-                        Accessible.name: "Send reply"
+                        Accessible.name: qsTr("Send reply")
                         Accessible.description: sendReplyBtn.armed
-                            ? "Post this reply into the thread"
-                            : "Nothing to send yet"
+                            ? qsTr("Post this reply into the thread")
+                            : qsTr("Nothing to send yet")
                         Accessible.onPressAction: if (sendReplyBtn.armed)
                             threadPanel._send()
 

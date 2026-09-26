@@ -21,6 +21,41 @@ Rectangle {
             messageInput.inputArea.forceActiveFocus();
     }
 
+    // ── The timeline announces incoming messages ─────────────────────
+    //
+    // A message arriving is the event this whole application exists to
+    // deliver, and it is invisible to someone who is not looking at the
+    // screen. docs/accessibility.md §8.
+    //
+    // Driven off ServerConnection::messageReceived rather than the
+    // ListView's onCountChanged, deliberately. onCountChanged fires for
+    // back-pagination too — pressing "Load older messages" would read
+    // fifty of them aloud — and it fires for edits and reactions
+    // re-landing rows. messageReceived is emitted once per inbound
+    // m.room.message that came from somebody else and is not an edit or
+    // a reaction, which is exactly the set worth speaking.
+    //
+    // Only for the room actually on screen: the same signal drives
+    // NotificationManager, which is what handles the other rooms, and
+    // hearing every room read out would make the app unusable rather
+    // than accessible.
+    //
+    // A message naming you interrupts; anything else waits its turn.
+    Connections {
+        target: serverManager.activeServer
+        function onMessageReceived(roomId, senderDisplayName, body,
+                                   eventId, mentionsMe) {
+            var s = serverManager.activeServer;
+            if (!s || roomId !== s.activeRoomId) return;
+            messageViewRoot.Accessible.announce(
+                mentionsMe ? qsTr("%1 mentioned you: %2")
+                               .arg(senderDisplayName).arg(body)
+                           : qsTr("%1: %2").arg(senderDisplayName).arg(body),
+                mentionsMe ? Accessible.AnnouncementPoliteness.Assertive
+                           : Accessible.AnnouncementPoliteness.Polite);
+        }
+    }
+
     // Tell the composer an upload it will hear the end of has begun.
     //
     // Exposed for the mobile shell: MobileMain.qml's Android share-intent
@@ -213,6 +248,19 @@ Rectangle {
                 property bool toggled: false
                 signal clicked()
 
+                // Icon-only, 28x28, no text anywhere in the control. The
+                // tooltip already IS the label a sighted user gets on
+                // hover, so it is the accessible name — annotated on the
+                // component so every HeaderButton in the header gets it
+                // and none can be added without one. `toggled` is real
+                // two-state, so it is reported as such rather than being
+                // folded into the wording.
+                Accessible.role: Accessible.Button
+                Accessible.name: hbtn.tooltip
+                Accessible.checkable: hbtn.toggled
+                Accessible.checked: hbtn.toggled
+                Accessible.onPressAction: hbtn.clicked()
+
                 Layout.preferredWidth: 28
                 Layout.preferredHeight: 28
                 Layout.alignment: Qt.AlignVCenter
@@ -380,6 +428,12 @@ Rectangle {
 
             ListView {
                 id: messageListView
+
+                // Named so the timeline is a landmark a screen reader can
+                // jump to, rather than an unlabelled scroll container
+                // between the header and the composer.
+                Accessible.role: Accessible.List
+                Accessible.name: qsTr("Message timeline")
                 anchors.fill: parent
                 clip: true
                 verticalLayoutDirection: ListView.TopToBottom
@@ -1463,6 +1517,14 @@ Rectangle {
                     Item {
                         width: parent.width
                         height: visible ? 18 : 0
+                        // A hairline and a 9px pill reading "NEW". Spelt
+                        // out, because "N E W" is what a screen reader
+                        // makes of a three-letter all-caps pill, and
+                        // because the line itself is where the unread
+                        // boundary is — the most useful landmark in the
+                        // timeline for someone returning to a channel.
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: qsTr("New messages below this point")
                         visible: messageListView.unreadDividerEventId !== ""
                               && messageListView.unreadDividerEventId === model.eventId
 
@@ -1486,6 +1548,7 @@ Rectangle {
                             Text {
                                 id: newPill
                                 anchors.centerIn: parent
+                                Accessible.ignored: true
                                 text: "NEW"
                                 font.family: Theme.fontSans
                                 font.pixelSize: 9
@@ -1752,6 +1815,8 @@ Rectangle {
                     Text {
                         id: loadOlderLabel
                         anchors.centerIn: parent
+                        // Spoken through the button below.
+                        Accessible.ignored: true
                         text: qsTr("Load older messages")
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm
@@ -1760,6 +1825,9 @@ Rectangle {
 
                     MouseArea {
                         id: loadOlderMouse
+                        Accessible.role: Accessible.Button
+                        Accessible.name: loadOlderLabel.text
+                        Accessible.description: qsTr("Fetches the previous fifty messages in this channel")
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
@@ -1781,6 +1849,17 @@ Rectangle {
                 // it sits in the natural reach zone of a one-handed grip.
                 Rectangle {
                     id: scrollToBottomBtn
+                    // A bare chevron. Without a name it is the unlabelled
+                    // control that appears and disappears under your
+                    // thumb on a phone.
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Jump to the newest message")
+                    Accessible.onPressAction: {
+                        messageListView.followEnd = true;
+                        messageListView.forceLayout();
+                        messageListView._jumpToEnd();
+                        messageListView.atBottom = true;
+                    }
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: Theme.sp.s3
                     anchors.right: Theme.isMobile ? parent.right : undefined
@@ -2010,6 +2089,10 @@ Rectangle {
     // reply-jump. Unpin button (admins/mods only) removes it live.
     Popup {
         id: pinnedPopover
+        // On the Popup, which Qt warns about and supports anyway — see
+        // docs/accessibility.md §11.
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Pinned messages")
         parent: Overlay.overlay
         // 380 overflows a phone; clamp to the viewport with a gutter.
         width: Math.min(380, (parent ? parent.width : 380) - 2 * Theme.sp.s7)
@@ -2165,6 +2248,15 @@ Rectangle {
                                 Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
                                 MouseArea {
                                     id: unpinMouse
+                                    // The only route to unpinning
+                                    // anything, and on desktop it is an
+                                    // opacity-0 glyph until you hover it.
+                                    Accessible.role: Accessible.Button
+                                    Accessible.name: qsTr("Unpin this message")
+                                    Accessible.onPressAction: {
+                                        var s = serverManager.activeServer;
+                                        if (s) s.togglePinnedEvent(s.activeRoomId, modelData);
+                                    }
                                     anchors.fill: parent
                                     // Negative margins grow the hit area past
                                     // the 12 px glyph: to the 44 pt minimum on
@@ -2196,6 +2288,15 @@ Rectangle {
 
                     MouseArea {
                         id: pinRowHover
+                        Accessible.role: Accessible.ListItem
+                        Accessible.name: preview && preview.body && preview.body.length > 0
+                            ? qsTr("Pinned: %1").arg(preview.body)
+                            : qsTr("A pinned message that has not loaded yet")
+                        Accessible.description: qsTr("Go to it in the timeline")
+                        Accessible.onPressAction: {
+                            messageListView.jumpToLoadedEvent(modelData);
+                            pinnedPopover.close();
+                        }
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
@@ -2245,6 +2346,15 @@ Rectangle {
     // exactly what's about to be redacted — easy to bail on a misclick.
     Popup {
         id: deleteConfirm
+        // On the Popup, which Qt warns about and supports anyway — see
+        // docs/accessibility.md §11.
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Delete this message?")
+        // Focus lands on Cancel, not on Delete. §9 says the primary
+        // action, but the primary action here is irreversible and
+        // destructive, and an initial focus that deletes a message on a
+        // space-bar press is a trap, not an affordance.
+        onOpened: cancelDeleteBtn.forceActiveFocus()
         parent: Overlay.overlay
         anchors.centerIn: Overlay.overlay
         width: 420
@@ -2350,6 +2460,10 @@ Rectangle {
 
                 Button {
                     id: cancelDeleteBtn
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Cancel")
+                    Accessible.description: qsTr("Leaves the message where it is")
+                    Accessible.onPressAction: cancelDeleteBtn.clicked()
                     contentItem: Text {
                         text: "Cancel"
                         font.family: Theme.fontSans
@@ -2372,6 +2486,14 @@ Rectangle {
                 }
                 Button {
                     id: confirmDeleteBtn
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Delete")
+                    // The consequence, in full, because this is the last
+                    // step before it happens and a screen-reader user has
+                    // not read the paragraph above unless they went
+                    // looking for it.
+                    Accessible.description: qsTr("Deletes this message for everyone in the channel. This cannot be undone.")
+                    Accessible.onPressAction: confirmDeleteBtn.clicked()
                     contentItem: Text {
                         text: "Delete"
                         font.family: Theme.fontSans

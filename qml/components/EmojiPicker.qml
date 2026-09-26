@@ -32,6 +32,7 @@ Popup {
             anchors.fill: parent
             anchors.margins: -1
             z: -1
+            Accessible.ignored: true
             radius: Theme.r3 + 1
             // Was a literal #40000000, which is a black shadow at 25% — fine in
             // dark mode and a smudge in light, where the theme's shadow is both
@@ -43,6 +44,9 @@ Popup {
 
     contentItem: ColumnLayout {
         spacing: 0
+
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Emoji picker")
 
         // Search bar
         Rectangle {
@@ -76,9 +80,14 @@ Popup {
                     clip: true
                     onTextChanged: emojiPicker.searchQuery = text
 
+                    Accessible.role: Accessible.EditableText
+                    Accessible.name: qsTr("Search emoji")
+                    Accessible.description: qsTr("Filters the emoji grid as you type")
+
                     Text {
                         anchors.fill: parent
                         anchors.verticalCenter: parent.verticalCenter
+                        Accessible.ignored: true
                         text: "Search emoji…"
                         color: Theme.fg3
                         font.family: Theme.fontSans
@@ -97,6 +106,14 @@ Popup {
                     radius: Theme.r1
                     color: clearSearchMouse.containsMouse ? Theme.bg3 : "transparent"
                     visible: searchField.text.length > 0
+
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Clear emoji search")
+                    Accessible.onPressAction: {
+                        searchField.text = "";
+                        searchField.forceActiveFocus();
+                    }
+
                     Icon {
                         anchors.centerIn: parent
                         name: "x"
@@ -148,11 +165,18 @@ Popup {
                         visible: modelData.id !== "frequent" || emojiPicker.recentEmoji.length > 0
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
+                        Accessible.role: Accessible.PageTab
+                        Accessible.name: qsTr("%1 emoji").arg(modelData.name)
+                        Accessible.checkable: true
+                        Accessible.checked: isSelected
+                        Accessible.onPressAction: emojiPicker.currentCategory = modelData.id
+
                         // Selected-tab accent stripe along the bottom edge —
                         // reads the selection without having to compare bg tints.
                         Rectangle {
                             anchors.bottom: parent.bottom
                             anchors.horizontalCenter: parent.horizontalCenter
+                            Accessible.ignored: true
                             width: parent.isSelected ? 20 : 0
                             height: 2
                             radius: 1
@@ -166,6 +190,7 @@ Popup {
 
                         Text {
                             anchors.centerIn: parent
+                            Accessible.ignored: true
                             text: modelData.icon
                             font.pixelSize: 18
                             opacity: parent.isSelected ? 1.0 : 0.65
@@ -192,6 +217,7 @@ Popup {
 
         // Separator
         Rectangle {
+            Accessible.ignored: true
             Layout.fillWidth: true
             Layout.preferredHeight: 1
             Layout.leftMargin: Theme.sp.s3
@@ -233,8 +259,17 @@ Popup {
                     radius: Theme.r1
                     color: emojiCellHover.containsMouse ? Theme.bg3 : "transparent"
 
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: modelData.name
+                    Accessible.description: qsTr("Insert %1").arg(modelData.name)
+                    Accessible.onPressAction: {
+                        addToRecent(modelData);
+                        emojiPicker.emojiSelected(modelData.emoji);
+                    }
+
                     Text {
                         anchors.centerIn: parent
+                        Accessible.ignored: true
                         text: modelData.emoji
                         font.pixelSize: 24
                     }
@@ -260,6 +295,8 @@ Popup {
                 // Empty state for search
                 Text {
                     anchors.centerIn: parent
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: qsTr("No emoji found")
                     text: "No emoji found"
                     color: Theme.fg2
                     font.pixelSize: Theme.fontSize.md
