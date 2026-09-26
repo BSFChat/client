@@ -38,6 +38,43 @@ Rectangle {
     Layout.fillWidth: true
     Layout.preferredHeight: visible ? 28 : 0
     visible: Banner.isShowing(connView)
+
+    // ── Accessibility ────────────────────────────────────────────────
+    //
+    // This strip is the single surface a screen-reader user most needs and
+    // is least able to notice: it appears without being asked for, says
+    // something the rest of the UI does not, and is 28px of colour at the
+    // top of the window. Two halves, per docs/accessibility.md §8.
+    //
+    // (a) It is a named node, so it can be found and re-read afterwards.
+    //     The whole strip is one announcement — the pulse dot and the
+    //     message Text below are both Accessible.ignored, because reading
+    //     "dot, Reconnecting…" is worse than reading "Reconnecting…".
+    Accessible.role: Accessible.AlertMessage
+    Accessible.name: Banner.message(root.connView)
+
+    // (b) It announces itself when it appears, because by the time the user
+    //     next sweeps the screen the thing they needed to know is that
+    //     messages have not been sending for the last thirty seconds.
+    //     Danger (disconnected, expired session) interrupts; warn
+    //     (reconnecting) waits its turn.
+    //
+    //     Both triggers matter and neither subsumes the other: the strip
+    //     appearing at all, and the strip changing what it says while it
+    //     stays up — reconnecting → disconnected is a new fact, on an item
+    //     that never became invisible in between.
+    function _announceState() {
+        if (!root.visible) return;
+        var msg = Banner.message(root.connView);
+        if (!msg || msg.length === 0) return;
+        root.Accessible.announce(
+            msg,
+            Banner.tone(root.connView) === Banner.Danger
+                ? Accessible.AnnouncementPoliteness.Assertive
+                : Accessible.AnnouncementPoliteness.Polite);
+    }
+    onVisibleChanged: _announceState()
+    Accessible.onNameChanged: _announceState()
     color: {
         var t = Banner.tone(connView);
         if (t === Banner.Warn) return Theme.warn;
@@ -66,6 +103,10 @@ Rectangle {
             Layout.preferredHeight: 6
             radius: 3
             color: Theme.onAccent
+            // Ornament. "Live state, not static warning" is a visual idea
+            // with no spoken equivalent, and the strip's own name already
+            // carries the state.
+            Accessible.ignored: true
             SequentialAnimation on opacity {
                 loops: Animation.Infinite
                 running: root.visible
@@ -88,6 +129,9 @@ Rectangle {
             // high-saturation colours that contrast with both the dark-mode
             // near-black and the light-mode white.
             color: Theme.onAccent
+            // Already spoken as the strip's Accessible.name. Reading it
+            // again as its own node would announce every banner twice.
+            Accessible.ignored: true
         }
 
         // The way out. Until this existed the banner named the problem
@@ -108,6 +152,13 @@ Rectangle {
             text: Banner.reauthLabel(root.connView)
             padding: 0
             background: null
+            // The only way out of an expired session on a phone during a
+            // call. It has to be reachable by name, not by knowing there is
+            // something pressable at the right-hand end of a coloured strip.
+            Accessible.role: Accessible.Button
+            Accessible.name: reauthButton.text
+            Accessible.description: qsTr("Sign in again to restore this connection")
+            Accessible.onPressAction: if (reauthButton.enabled) reauthButton.clicked()
             // A phone needs a thumb-sized target; the strip is 28h, so the
             // width is what there is to give.
             implicitHeight: Math.max(implicitContentHeight, 28)
