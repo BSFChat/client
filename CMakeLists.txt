@@ -1174,6 +1174,7 @@ qt_add_qml_module(bsfchat-lib
         qml/components/VoiceRoom.qml
         qml/components/VoiceParticipantList.qml
         qml/components/ParticipantTile.qml
+        qml/components/VoiceMemberChip.qml
         qml/components/VideoFeedTile.qml
         qml/components/VideoFullscreenWindow.qml
         qml/components/VideoPopoutWindow.qml
@@ -1293,6 +1294,14 @@ qt_add_qml_module(bsfchat-lib
         # tests/qml/tst_voicerosterview.qml can pin the rule that stopped the
         # drawer badging `1` while the header said "2 in call".
         qml/js/VoiceRosterView.js
+        # When an audio level counts as somebody talking. One predicate over
+        # the two levels ServerConnection publishes (micLevel for us,
+        # peerLevel() for everyone else), shared by ParticipantTile.qml,
+        # VoiceMemberChip.qml, VoiceParticipantList.qml and
+        # tests/qml/tst_voicelevels.qml. It exists because those three each
+        # picked their own floor, and because the two levels are on different
+        # scales so one floor for both would have been wrong.
+        qml/js/VoiceLevels.js
         # What the signed-in-account row says about who you are, so an OIDC
         # homeserver's opaque subject never renders as the user's handle.
         # Shared by ChannelList.qml and tests/qml/tst_useridentity.qml.

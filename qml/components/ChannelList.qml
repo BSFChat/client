@@ -1401,6 +1401,12 @@ Rectangle {
                                     height: channelItemContent.implicitHeight + 4
 
                                     readonly property int channelIndex: index
+                                    // This row's room, named once. The nested
+                                    // VoiceParticipantList needs it to know
+                                    // whether a remote peer's audio level
+                                    // belongs to these rows.
+                                    readonly property string channelRoomId:
+                                        modelData.roomId || ""
 
                                     // The people in this voice channel — the
                                     // ONE list both the count badge and the
@@ -1838,6 +1844,13 @@ Rectangle {
                                                 width: parent.width
                                                 participants: channelDelegate.voiceRoster
                                                 connection: serverManager.activeServer
+                                                // Which channel this roster is
+                                                // for. The list needs it to
+                                                // decide whether a remote
+                                                // peer's audio level belongs to
+                                                // these rows — see the note on
+                                                // its remoteLevelsApply.
+                                                roomId: channelDelegate.channelRoomId
                                             }
                                         }
 

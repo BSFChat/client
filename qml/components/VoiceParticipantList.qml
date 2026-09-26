@@ -7,6 +7,8 @@ import QtQuick
 import QtQuick.Layouts
 import BSFChat
 
+import "../js/VoiceLevels.js" as VoiceLevels
+
 // The people currently in one voice channel, nested under that channel's row
 // in the sidebar (Discord's arrangement, and SPEC §3.2: 16px indent, 22h rows,
 // 16x16 avatar).
@@ -28,14 +30,44 @@ Column {
     property var participants: []
 
     // Connection the roster belongs to. Used for display-name resolution and
-    // for the local mic level that drives the self speaking ring; null is
-    // tolerated so the delegate can't crash mid-teardown.
+    // for the audio levels that drive the speaking rings; null is tolerated so
+    // the delegate can't crash mid-teardown.
     property var connection: null
 
-    // Only the local user gets a speaking indicator — the mesh doesn't signal
-    // remote voice activity yet, and faking one would be a lie about who is
-    // talking.
+    // This used to say that only the local user gets a speaking indicator
+    // "because the mesh doesn't signal remote voice activity yet". That was
+    // out of date: the mesh does not signal it, and never will, but it does
+    // not have to — we DECODE remote audio, so AudioWorker measures each
+    // peer's level at playout and ServerConnection publishes it as
+    // peerLevel(userId). ParticipantTile has read it for as long as it has
+    // existed.
+    //
+    // What remains true, and is the real bound on this list, is that a level
+    // only exists for peers we have a media connection TO. This list also
+    // shows the rosters of voice channels the local user is NOT in — that is
+    // its whole point, since "who's in there already" is what makes you decide
+    // to join — and for those rows peerLevel() answers 0 and no ring appears.
+    // That needs no special case: the absence of a level IS the answer, and it
+    // is the honest one. Nobody's ring is faked, and nobody in the channel we
+    // are actually in is silently left out of it any more.
     readonly property string selfUserId: connection ? connection.userId : ""
+
+    // Which voice channel this roster belongs to. Needed because peerLevel()
+    // is keyed by USER, not by room, and rosters come from m.call.member
+    // state, which can be stale: somebody who dropped without leaving is still
+    // listed in the channel they left. If they are now talking in the channel
+    // WE are in, their level is non-zero, and an unguarded lookup would ring
+    // their name under a channel they are not in. So remote levels are only
+    // read for the one room we are connected to, where "this user's decoded
+    // audio" and "this row" are the same person by construction.
+    //
+    // Unset means no remote rings, which is the behaviour this list had
+    // before — a caller that forgets to pass it loses a feature rather than
+    // showing something untrue.
+    property string roomId: ""
+    readonly property bool remoteLevelsApply:
+        connection !== null && roomId.length > 0
+        && roomId === connection.activeVoiceRoomId
 
     visible: participants && participants.length > 0
     leftPadding: 16
@@ -65,9 +97,33 @@ Column {
             readonly property string label:
                 modelData.displayName || participantRow.userId
 
-            readonly property real micLevel:
-                isSelf && root.connection ? root.connection.micLevel : 0
-            readonly property bool speaking: isSelf && !muted && micLevel > 0.05
+            // peerLevel() is an INVOKABLE, so calling it creates no binding
+            // dependency; peerLevelChanged(userId) is the notification and
+            // _levelGen is the dependency the binding can actually see. Same
+            // shape as ParticipantTile.qml and VoiceMemberChip.qml — see the
+            // longer note in either.
+            property int _levelGen: 0
+            Connections {
+                target: root.connection
+                // The sidebar outlives connections: `connection` is null
+                // between servers, and a named handler on a null target warns
+                // once per row per switch without this.
+                ignoreUnknownSignals: true
+                function onPeerLevelChanged(uid) {
+                    if (uid === participantRow.userId) participantRow._levelGen++;
+                }
+            }
+            readonly property real level: {
+                if (!root.connection) return 0;
+                if (participantRow.isSelf) return root.connection.micLevel;
+                if (!root.remoteLevelsApply) return 0;
+                participantRow._levelGen;   // dependency, see above
+                return root.connection.peerLevel(participantRow.userId);
+            }
+            readonly property bool speaking:
+                VoiceLevels.speaking(participantRow.level,
+                                     participantRow.isSelf,
+                                     participantRow.muted)
 
             // One row, one sentence. The trailing glyphs below (screen
             // share, camera, mic-off / headphones-off) are 11px icons and
@@ -131,7 +187,7 @@ Column {
 
                     Rectangle {
                         anchors.centerIn: parent
-                        width: 18 + participantRow.micLevel * 6
+                        width: 18 + participantRow.level * 6
                         height: width
                         radius: width / 2
                         color: "transparent"

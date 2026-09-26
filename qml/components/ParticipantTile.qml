@@ -2,6 +2,8 @@ import QtQuick
 import QtQuick.Layouts
 import BSFChat
 
+import "../js/VoiceLevels.js" as VoiceLevels
+
 // Single tile in VoiceRoom's participant grid (SPEC §3.3).
 //
 // Fixed-size by `Theme.layout.participantTile{W,H}`. bg2 surface with a
@@ -45,7 +47,18 @@ Rectangle {
         return serverManager.activeServer
             ? serverManager.activeServer.peerLevel(userId) : 0;
     }
-    readonly property bool   speaking: level > 0.04
+    // The floor lives in qml/js/VoiceLevels.js, not here, because this tile
+    // was one of three places that each picked their own number for the same
+    // question. Note that it matters which floor: `level` above is micLevel
+    // for ourselves and peerLevel for everyone else, and those two are on
+    // DIFFERENT SCALES — perceptual dB versus linear peak — so `isSelf` is an
+    // argument and not a convenience.
+    //
+    // `muted` goes in for a second reason: this tile used to ring for our own
+    // voice while we were muted, because micLevel is measured before the mute
+    // check that decides whether to transmit. VoiceParticipantList already
+    // guarded that; here it was missing.
+    readonly property bool   speaking: VoiceLevels.speaking(level, isSelf, muted)
     // Muted state. For ourselves, authoritative from the connection;
     // for remote peers, we trust the per-member `muted` flag broadcast
     // over the voice signalling channel.
