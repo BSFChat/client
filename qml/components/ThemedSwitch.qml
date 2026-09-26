@@ -15,6 +15,35 @@ Switch {
     implicitHeight: 22
     padding: 0
 
+    // Default accessible identity. The contentItem below is deliberately
+    // an empty Item — settings rows put the label in their own left-hand
+    // column — so without this every ThemedSwitch in the app announces as
+    // an unnamed control. Plain bindings: a call site that sets
+    // `Accessible.name` overrides this one. Role is CheckBox because that
+    // is how a two-state control is reported to the platform.
+    Accessible.role: Accessible.CheckBox
+    Accessible.name: sw.text
+    Accessible.checkable: true
+    Accessible.checked: sw.checked
+    // A pointer click goes through nextCheckState(), which flips
+    // `checked` AND emits toggled(). Neither of the obvious shortcuts
+    // does both: AbstractButton::toggle() sets checked without emitting
+    // toggled(), and Qt's own default accessible handling writes the
+    // `checked` property directly (qaccessiblequickitem.cpp, the
+    // CheckBox branch of doAction). Either way the call site's
+    // `onToggled` never runs, so the setting is not written and the
+    // D-C1 re-binding never happens: the switch flips on screen and
+    // stops tracking the value for the rest of the session. So do what
+    // the click does, in the order the click does it.
+    Accessible.onPressAction: {
+        sw.checked = !sw.checked;
+        sw.toggled();
+    }
+    Accessible.onToggleAction: {
+        sw.checked = !sw.checked;
+        sw.toggled();
+    }
+
     indicator: Rectangle {
         implicitWidth: 40
         implicitHeight: 22

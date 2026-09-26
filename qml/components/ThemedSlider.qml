@@ -9,6 +9,30 @@ Slider {
     id: slider
     padding: 0
 
+    // Qt's Slider already reports value / from / to to the platform, so
+    // the only missing piece is what the number is ABOUT. Slider carries
+    // no `text` of its own to fall back on, so this is a last-resort
+    // placeholder: every call site is expected to override
+    // `Accessible.name` with the wording of its visible label, which is
+    // what the settings panes do.
+    Accessible.role: Accessible.Slider
+    Accessible.name: qsTr("Slider")
+    // Same trap as the toggles: Slider::increase()/decrease() set
+    // `value` without emitting moved(), and Qt's default accessible
+    // handling writes the value through the value interface, which does
+    // not emit it either. Every call site persists the setting in
+    // `onMoved` (and restores the D-C1 binding there), so a screen
+    // reader stepping the slider would otherwise move the handle and
+    // change nothing. Arrow keys already emit moved() themselves.
+    Accessible.onIncreaseAction: {
+        slider.increase();
+        slider.moved();
+    }
+    Accessible.onDecreaseAction: {
+        slider.decrease();
+        slider.moved();
+    }
+
     background: Rectangle {
         x: slider.leftPadding
         y: slider.topPadding + slider.availableHeight / 2 - height / 2

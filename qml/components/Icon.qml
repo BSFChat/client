@@ -23,6 +23,15 @@ Item {
     implicitWidth: size
     implicitHeight: size
 
+    // An icon is never the accessible node. It is either inside a control
+    // whose Accessible.name already covers it, or it is ornament. Excluding
+    // it once here keeps every icon in the app out of the screen reader's
+    // tree instead of needing the same line at ~200 call sites. See
+    // docs/accessibility.md §6 — the rule is that decorative elements say
+    // so, rather than being left unnamed and indistinguishable from the
+    // ones somebody forgot.
+    Accessible.ignored: true
+
     // Convert the QML `color` to a "rrggbb" string for the URL. Strip
     // the leading '#' and any alpha so the cache key is stable.
     readonly property string _hex: {
