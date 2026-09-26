@@ -98,6 +98,21 @@ Window {
                                     fsWin.feed ? fsWin.feed.isSelf === true
                                                : false)
 
+    // Spoken name for this window and for the picture in it. Built here
+    // with qsTr() rather than reused from VideoWindows.fullscreenLabel(),
+    // which assembles a VISIBLE label out of untranslated fragments —
+    // docs/accessibility.md §1 wants every spoken string in the
+    // extraction set.
+    readonly property string _a11yName: {
+        var who = fsWin.displayName
+            || (fsWin.feed ? fsWin.feed.userId : "");
+        if (fsWin.feed && fsWin.feed.isSelf === true)
+            return fsWin._isScreen ? qsTr("Your screen share")
+                                   : qsTr("Your camera");
+        return fsWin._isScreen ? qsTr("Screen share from %1").arg(who)
+                               : qsTr("Camera from %1").arg(who);
+    }
+
     // A frameless window is not given focus by the compositor on its own,
     // and without focus the Escape shortcut below never fires — leaving a
     // fullscreen video with no way out but the mouse.
@@ -117,6 +132,11 @@ Window {
         // are pointing at.
         fillMode: VideoOutput.PreserveAspectFit
         visible: fsWin._live
+        // Not readable content, but it is the entire window — say whose
+        // feed it is rather than leaving an unnamed black rectangle.
+        Accessible.role: Accessible.Graphic
+        Accessible.name: fsWin._a11yName
+        Accessible.description: qsTr("Full screen video. Press Escape to leave.")
         Component.onCompleted: {
             var s = serverManager.activeServer;
             // typeof, not truthiness: neither capture controller exists
@@ -168,6 +188,11 @@ Window {
     // is on top of it and gets its own clicks.
     MouseArea {
         id: wake
+        // Cursor-wake / hide scrim over the whole window, not a control:
+        // its double-click is a shortcut for the named Exit button and
+        // the Escape shortcut, and an attached name on a MouseArea would
+        // do nothing anyway.
+        Accessible.ignored: true
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton
@@ -216,6 +241,10 @@ Window {
         height: 34
         radius: Theme.r2
         color: exitHover.containsMouse ? Theme.accent : Qt.rgba(0, 0, 0, 0.6)
+        Accessible.role: Accessible.Button
+        Accessible.name: qsTr("Exit full screen")
+        Accessible.description: qsTr("Return this feed to the call window")
+        Accessible.onPressAction: fsWin.exitRequested()
         opacity: fsWin._chromeVisible ? 1 : 0
         visible: opacity > 0.01
         Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
@@ -234,6 +263,8 @@ Window {
             Text {
                 anchors.verticalCenter: parent.verticalCenter
                 text: "Exit full screen  (Esc)"
+                // Said by the button; not said twice.
+                Accessible.ignored: true
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
                 font.weight: Theme.fontWeight.semibold

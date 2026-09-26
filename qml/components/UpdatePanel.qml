@@ -98,6 +98,16 @@ Rectangle {
     border.color: embedded ? Theme.line : "transparent"
     border.width: embedded ? 1 : 0
 
+    // The panel is the thing that reports WHICH of the eight updater
+    // states you are in, so it carries that headline as its own name —
+    // the same expression the title Text below draws, which is then
+    // ignored so the sentence is not read twice. UpdateDialog overrides
+    // the role with Dialog for the modal case.
+    Accessible.role: Accessible.Pane
+    Accessible.name: panel._u
+        ? UF.title(panel._state, panel._u.availableVersion)
+        : qsTr("Updates")
+
     // Shared button chrome. Matches the pattern already used in
     // ClientSettings / UpdateDialog rather than introducing a third one;
     // it is a `component` only so the four call sites below stop being
@@ -106,8 +116,16 @@ Rectangle {
         id: btn
         property bool primary: false
         property int minWidth: 104
+        // Every call site sets `text`, and the label is already the
+        // right wording for the action ("Download", "Restart to
+        // install", "Open the release page"), so the name follows it.
+        Accessible.role: Accessible.Button
+        Accessible.name: btn.text
+        Accessible.onPressAction: btn.clicked()
         contentItem: Text {
             text: btn.text
+            // Covered by the button's own name.
+            Accessible.ignored: true
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.sm
             font.weight: btn.primary ? Theme.fontWeight.semibold
@@ -162,6 +180,7 @@ Rectangle {
                 implicitHeight: 34
                 radius: Theme.r2
                 color: Qt.rgba(panel._tint.r, panel._tint.g, panel._tint.b, 0.14)
+                Accessible.ignored: true
                 Icon {
                     anchors.centerIn: parent
                     name: UF.iconName(panel._state)
@@ -186,6 +205,8 @@ Rectangle {
                     font.letterSpacing: Theme.trackTight.lg
                     color: Theme.fg0
                     wrapMode: Text.WordWrap
+                    // Covered by the panel's own name.
+                    Accessible.ignored: true
                 }
                 Text {
                     id: detailText
@@ -325,6 +346,7 @@ Rectangle {
                     anchors.fill: parent
                     radius: height / 2
                     color: Theme.bg3
+                    Accessible.ignored: true
                 }
                 // Determinate fill.
                 Rectangle {
@@ -333,6 +355,7 @@ Rectangle {
                     height: parent.height
                     radius: height / 2
                     color: Theme.accent
+                    Accessible.ignored: true
                     Behavior on width {
                         NumberAnimation { duration: Theme.motion.fastMs }
                     }
@@ -347,6 +370,7 @@ Rectangle {
                     height: parent.height
                     radius: height / 2
                     color: Theme.accent
+                    Accessible.ignored: true
                     SequentialAnimation on x {
                         // Gated on the state, not on `sweeper.visible`:
                         // an item inside an invisible ancestor still
@@ -436,6 +460,15 @@ Rectangle {
                 primary: true
                 visible: panel._primaryLabel.length > 0
                 text: panel._primaryLabel
+                // ReadyToApply is left to its own label: UF.applyLabel()
+                // already says "Restart to install" or "Open the release
+                // page" per platform, and a description here could only
+                // contradict one of them.
+                Accessible.description: panel._state === UF.UpdateAvailable
+                    ? qsTr("Downloads the update in the background")
+                    : panel._state === UF.Failed
+                        ? qsTr("Checks for updates again")
+                        : ""
                 enabled: panel._u !== null
                 onClicked: {
                     if (!panel._u) return;

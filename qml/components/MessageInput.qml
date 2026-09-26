@@ -466,6 +466,11 @@ Rectangle {
         color: Theme.bg0
         radius: Theme.r2
         visible: inputRoot.editingEventId !== ""
+
+        Accessible.role: Accessible.AlertMessage
+        Accessible.name: qsTr("Editing a message")
+        Accessible.description: qsTr("Press Escape to cancel editing")
+
         RowLayout {
             anchors.fill: parent
             anchors.leftMargin: Theme.sp.s4
@@ -475,6 +480,7 @@ Rectangle {
             Icon { name: "edit"; size: 12; color: Theme.fg2 }
 
             Text {
+                Accessible.ignored: true
                 text: "Editing message"
                 color: Theme.fg1
                 font.family: Theme.fontSans
@@ -482,6 +488,7 @@ Rectangle {
                 font.weight: Theme.fontWeight.semibold
             }
             Text {
+                Accessible.ignored: true
                 text: "— press Esc to cancel"
                 color: Theme.fg3
                 font.family: Theme.fontSans
@@ -494,6 +501,11 @@ Rectangle {
                 Layout.preferredHeight: 22
                 radius: Theme.r1
                 color: cancelMouse.containsMouse ? Theme.bg3 : "transparent"
+
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Cancel editing")
+                Accessible.description: qsTr("Leave the message as it was")
+                Accessible.onPressAction: inputRoot.cancelEditing()
                 Icon {
                     anchors.centerIn: parent
                     name: "x"
@@ -539,9 +551,19 @@ Rectangle {
                     width: parent.width
                     height: 18
                     readonly property real p: inputRoot._uploads[modelData] || 0
+
+                    // One row, one announcement: the file and where it is up
+                    // to. Four rows all saying "Uploading" would be useless.
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: p >= 1.0
+                        ? qsTr("%1 uploaded").arg(modelData)
+                        : qsTr("Uploading %1, %2 percent")
+                          .arg(modelData).arg(Math.round(p * 100))
+
                     Text {
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
+                        Accessible.ignored: true
                         width: parent.width * 0.5
                         text: "Uploading " + modelData
                         font.family: Theme.fontSans
@@ -552,6 +574,7 @@ Rectangle {
                     Rectangle {
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
+                        Accessible.ignored: true
                         width: parent.width * 0.45
                         height: 4
                         radius: 2
@@ -580,6 +603,17 @@ Rectangle {
         color: Theme.bg0
         radius: Theme.r2
         visible: inputRoot.replyToEventId !== "" && !editingHeader.visible
+
+        // The whole strip reads as one sentence — who you are replying to and
+        // what they said — because that is the context a sighted user gets
+        // from glancing at it.
+        Accessible.role: Accessible.AlertMessage
+        Accessible.name: qsTr("Replying to %1: %2")
+            .arg(inputRoot.replyToSenderName !== ""
+                 ? inputRoot.replyToSenderName : qsTr("unknown sender"))
+            .arg(inputRoot.replyToPreview)
+        Accessible.description: qsTr("Press Escape to cancel the reply")
+
         RowLayout {
             anchors.fill: parent
             anchors.leftMargin: Theme.sp.s4
@@ -589,12 +623,14 @@ Rectangle {
             Icon { name: "reply"; size: 12; color: Theme.accent }
 
             Text {
+                Accessible.ignored: true
                 text: "Replying to"
                 color: Theme.fg2
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
             }
             Text {
+                Accessible.ignored: true
                 text: inputRoot.replyToSenderName !== ""
                       ? inputRoot.replyToSenderName : "unknown"
                 color: Theme.accent
@@ -603,6 +639,7 @@ Rectangle {
                 font.weight: Theme.fontWeight.semibold
             }
             Text {
+                Accessible.ignored: true
                 text: inputRoot.replyToPreview
                 color: Theme.fg3
                 font.family: Theme.fontSans
@@ -615,6 +652,13 @@ Rectangle {
                 Layout.preferredHeight: 22
                 radius: Theme.r1
                 color: replyCancelMouse.containsMouse ? Theme.bg3 : "transparent"
+
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Cancel reply to %1")
+                    .arg(inputRoot.replyToSenderName !== ""
+                         ? inputRoot.replyToSenderName : qsTr("unknown sender"))
+                Accessible.description: qsTr("Send as a normal message instead")
+                Accessible.onPressAction: inputRoot.cancelReplying()
                 Icon {
                     anchors.centerIn: parent
                     name: "x"
@@ -654,6 +698,12 @@ Rectangle {
         radius: Theme.r2
         visible: inputRoot.overLimit
 
+        Accessible.role: Accessible.AlertMessage
+        Accessible.name: qsTr("Message is too long")
+        Accessible.description: qsTr("%1 bytes over the %2-byte limit. Shorten it, or attach it as a file.")
+            .arg(inputRoot.bodyBytes - inputRoot.maxBodyBytes)
+            .arg(inputRoot.maxBodyBytes)
+
         RowLayout {
             anchors.fill: parent
             anchors.leftMargin: Theme.sp.s4
@@ -664,6 +714,7 @@ Rectangle {
             // above use theirs to say WHICH mode the composer is in, not to
             // raise an alarm. Colour and wording carry this one.
             Text {
+                Accessible.ignored: true
                 text: "Message is too long"
                 color: Theme.danger
                 font.family: Theme.fontSans
@@ -671,6 +722,7 @@ Rectangle {
                 font.weight: Theme.fontWeight.semibold
             }
             Text {
+                Accessible.ignored: true
                 // The numbers, because "too long" on its own gives the user no
                 // idea whether to delete a word or a page. Bytes rather than
                 // characters is what the server counts, and saying so is more
@@ -713,6 +765,13 @@ Rectangle {
             opacity: inputRoot.uploading ? 0.4 : 1.0
             visible: inputRoot.canAttach
 
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Attach a file")
+            Accessible.description: inputRoot.uploading
+                ? qsTr("An upload is already in progress")
+                : qsTr("Choose a file to upload to this channel")
+            Accessible.onPressAction: if (!inputRoot.uploading) fileDialog.open()
+
             Icon {
                 anchors.centerIn: parent
                 name: "paperclip"
@@ -744,6 +803,26 @@ Rectangle {
                     return "Message #" + inputRoot.roomName;
                 }
                 placeholderTextColor: Theme.fg3
+
+                Accessible.role: Accessible.EditableText
+                Accessible.name: inputRoot.roomName !== ""
+                    ? qsTr("Message #%1").arg(inputRoot.roomName)
+                    : qsTr("Message")
+                // Which key sends is not guessable, and it differs by
+                // platform — so it is said rather than implied.
+                Accessible.description: {
+                    if (!inputRoot.canSend)
+                        return qsTr("You don't have permission to send here");
+                    if (inputRoot.slowmodeRemaining > 0)
+                        return qsTr("Slowmode: %n second(s) until you can send again",
+                                    "", inputRoot.slowmodeRemaining);
+                    if (inputRoot.uploading)
+                        return qsTr("Uploading a file");
+                    return Theme.isMobile
+                        ? qsTr("Return starts a new line. Use the send button to post.")
+                        : qsTr("Return sends the message. Shift and Return start a new line.");
+                }
+
                 color: Theme.fg0
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.base
@@ -896,6 +975,28 @@ Rectangle {
             radius: Theme.r1
             color: emojiHover.containsMouse || emojiPopup.visible ? Theme.bg2 : "transparent"
 
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Emoji")
+            Accessible.checkable: true
+            Accessible.checked: emojiPopup.visible
+            Accessible.description: emojiPopup.visible
+                ? qsTr("Currently open. Activate to close the emoji picker.")
+                : qsTr("Currently closed. Activate to open the emoji picker.")
+            Accessible.onPressAction: {
+                if (emojiPopup.visible) {
+                    emojiPopup.close();
+                } else {
+                    emojiPopup.open();
+                }
+            }
+            Accessible.onToggleAction: {
+                if (emojiPopup.visible) {
+                    emojiPopup.close();
+                } else {
+                    emojiPopup.open();
+                }
+            }
+
             Icon {
                 anchors.centerIn: parent
                 name: "smile"
@@ -937,11 +1038,14 @@ Rectangle {
         Row {
             Layout.alignment: Qt.AlignVCenter
             spacing: 3
+            // Pulse dots: the upload strip above carries the announcement.
+            Accessible.ignored: true
             visible: inputRoot.uploading
             Repeater {
                 model: 3
                 delegate: Rectangle {
                     required property int index
+                    Accessible.ignored: true
                     width: 5; height: 5; radius: 2.5
                     color: Theme.accent
                     opacity: 0.35
@@ -971,8 +1075,8 @@ Rectangle {
             // Bare digits next to a composer read as a countdown; a screen
             // reader gets no such context from them.
             Accessible.role: Accessible.StaticText
-            Accessible.name: (inputRoot.maxBodyBytes - inputRoot.bodyBytes)
-                             + " bytes remaining"
+            Accessible.name: qsTr("%1 bytes remaining")
+                             .arg(inputRoot.maxBodyBytes - inputRoot.bodyBytes)
         }
 
         // Send button — accent-filled once the composer has something to
@@ -992,18 +1096,18 @@ Rectangle {
             // Screen readers: a "Send" button at all times — the
             // visual disabled state already covers empty composers.
             Accessible.role: Accessible.Button
-            Accessible.name: "Send message"
+            Accessible.name: qsTr("Send message")
             // The over-length case gets its own sentence: a screen reader
             // user has no red border and no banner colour to go on, and
             // "nothing to send yet" in front of a composer full of text is
             // actively misleading.
             Accessible.description: sendBtn.armed
-                ? "Send the typed message"
+                ? qsTr("Send the typed message")
                 : (inputRoot.overLimit
-                   ? "Message is " + (inputRoot.bodyBytes - inputRoot.maxBodyBytes)
-                     + " bytes over the " + inputRoot.maxBodyBytes
-                     + "-byte limit and cannot be sent"
-                   : "Nothing to send yet")
+                   ? qsTr("Message is %1 bytes over the %2-byte limit and cannot be sent")
+                     .arg(inputRoot.bodyBytes - inputRoot.maxBodyBytes)
+                     .arg(inputRoot.maxBodyBytes)
+                   : qsTr("Nothing to send yet"))
             Accessible.onPressAction: if (sendBtn.armed) sendCurrentMessage()
             // `armed` must include preeditText so Android IMEs (which
             // keep keystrokes in preedit until a commit char like space
@@ -1065,6 +1169,7 @@ Rectangle {
                                         ? inputRoot._mentionMembers() : []
 
         background: Rectangle {
+            Accessible.ignored: true
             color: Theme.bg1
             border.color: Theme.line
             border.width: 1
@@ -1074,9 +1179,13 @@ Rectangle {
         contentItem: Column {
             spacing: 0
 
+            Accessible.role: Accessible.List
+            Accessible.name: qsTr("Matching members")
+
             // Popup header label — gives context so the list doesn't feel
             // like a stray menu.
             Text {
+                Accessible.ignored: true
                 leftPadding: Theme.sp.s3
                 topPadding: Theme.sp.s2
                 bottomPadding: Theme.sp.s2
@@ -1101,6 +1210,16 @@ Rectangle {
                            : (memberHover.containsMouse ? Theme.bg3 : "transparent")
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: qsTr("%1, %2")
+                        .arg(modelData.displayName)
+                        .arg(modelData.subtitle || ("@" + modelData.tokenName))
+                    Accessible.description: qsTr("Insert this mention")
+                    Accessible.onPressAction: {
+                        inputRoot._insertMention(modelData);
+                        inputArea.forceActiveFocus();
+                    }
+
                     RowLayout {
                         anchors.fill: parent
                         anchors.leftMargin: Theme.sp.s3
@@ -1111,6 +1230,7 @@ Rectangle {
                         Rectangle {
                             Layout.preferredWidth: 20
                             Layout.preferredHeight: 20
+                            Accessible.ignored: true
                             radius: Theme.r1
                             color: index === inputRoot.mentionSelected
                                    ? Qt.rgba(0, 0, 0, 0.15)
@@ -1130,6 +1250,7 @@ Rectangle {
                         }
 
                         Text {
+                            Accessible.ignored: true
                             text: modelData.displayName
                             color: index === inputRoot.mentionSelected
                                    ? Theme.onAccent : Theme.fg0
@@ -1139,6 +1260,7 @@ Rectangle {
                             elide: Text.ElideRight
                         }
                         Text {
+                            Accessible.ignored: true
                             // @room has no mxid to show, so it explains
                             // itself here instead.
                             text: modelData.subtitle
@@ -1187,6 +1309,7 @@ Rectangle {
                               ? inputRoot._slashMatches() : []
 
         background: Rectangle {
+            Accessible.ignored: true
             color: Theme.bg1
             border.color: Theme.line
             border.width: 1
@@ -1196,7 +1319,11 @@ Rectangle {
         contentItem: Column {
             spacing: 0
 
+            Accessible.role: Accessible.List
+            Accessible.name: qsTr("Slash commands")
+
             Text {
+                Accessible.ignored: true
                 leftPadding: Theme.sp.s3
                 topPadding: Theme.sp.s2
                 bottomPadding: Theme.sp.s2
@@ -1221,6 +1348,15 @@ Rectangle {
                            : (slashRowHover.containsMouse ? Theme.bg3 : "transparent")
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: qsTr("%1, %2")
+                        .arg(modelData.name).arg(modelData.description)
+                    Accessible.description: qsTr("Complete this command in the composer")
+                    Accessible.onPressAction: {
+                        inputRoot._insertSlash(modelData);
+                        inputArea.forceActiveFocus();
+                    }
+
                     RowLayout {
                         anchors.fill: parent
                         anchors.leftMargin: Theme.sp.s3
@@ -1230,6 +1366,7 @@ Rectangle {
                         // Command name — monospaced so users
                         // immediately read it as something to type.
                         Text {
+                            Accessible.ignored: true
                             text: modelData.name
                                 + (modelData.usage ? " " + modelData.usage : "")
                             font.family: Theme.fontMono
@@ -1240,6 +1377,7 @@ Rectangle {
                             elide: Text.ElideRight
                         }
                         Text {
+                            Accessible.ignored: true
                             text: modelData.description
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.xs

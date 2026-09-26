@@ -26,6 +26,7 @@ Popup {
     modal: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
+
     x: (parent.width - width) / 2
     y: (parent.height - height) / 2
 
@@ -79,6 +80,17 @@ Popup {
 
     onAboutToShow: _rebuildRows()
 
+    // §9. There is no field here; the channel list is the whole decision, so
+    // it takes focus. aboutToShow is too early — the content item is not
+    // visible yet — hence a separate onOpened.
+    onOpened: channelList.forceActiveFocus()
+
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: qsTr("Forward message")
+
     contentItem: ColumnLayout {
         anchors.fill: parent
         anchors.margins: Theme.sp.s7
@@ -96,7 +108,10 @@ Popup {
                 font.letterSpacing: Theme.trackTight.xl
                 color: Theme.fg0
             }
-            Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
+            Rectangle {
+                Layout.fillWidth: true; height: 1; color: Theme.line
+                Accessible.ignored: true
+            }
         }
 
         // Preview of the message being forwarded — quoted style.
@@ -116,6 +131,8 @@ Popup {
                     Layout.fillHeight: true
                     color: Theme.accent
                     radius: 1.5
+                    // The quote bar (§6).
+                    Accessible.ignored: true
                 }
 
                 ColumnLayout {
@@ -160,6 +177,8 @@ Popup {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
+            Accessible.role: Accessible.List
+            Accessible.name: qsTr("Destination channel")
 
             ScrollBar.vertical: ThemedScrollBar {}
             model: forwardDialog._rows
@@ -197,6 +216,20 @@ Popup {
                     radius: Theme.r1
                     color: chanHover.containsMouse ? Theme.bg3 : "transparent"
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                    // The row is the accessible node, not the MouseArea
+                    // inside it: attached accessibility only takes effect on
+                    // the visual item (§2). Same action as onClicked below.
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: qsTr("Forward to %1").arg(row.name)
+                    Accessible.onPressAction: {
+                        if (serverManager.activeServer
+                            && forwardDialog.sourceEventId !== "") {
+                            serverManager.activeServer.forwardMessage(
+                                forwardDialog.sourceEventId, row.roomId);
+                        }
+                        forwardDialog.close();
+                    }
 
                     RowLayout {
                         anchors.fill: parent
@@ -246,6 +279,9 @@ Popup {
             Item { Layout.fillWidth: true }
             Button {
                 id: cancelBtn
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Cancel")
+                Accessible.onPressAction: cancelBtn.clicked()
                 contentItem: Text {
                     text: "Cancel"
                     font.family: Theme.fontSans

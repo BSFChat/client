@@ -135,10 +135,35 @@ Item {
                     }
                 }
 
-                // Slide-in animation — fade + scale, anchored on arrival.
+                // ── Accessibility ────────────────────────────────────
+                //
+                // The card is the node; the stripe, the icon, the message
+                // Text and the expander are all ignored below, so one
+                // toast is one announcement rather than four fragments.
+                //
+                // The name is `toastText` in FULL, not what is on screen.
+                // A sighted user gets four lines and an ellipsis and a
+                // "show the rest" affordance; a screen-reader user gets
+                // the whole sentence at once, which is strictly better and
+                // makes the expander a purely visual control.
+                Accessible.role: Accessible.AlertMessage
+                Accessible.name: card.toastText
+
+                // Announced on arrival, because a toast in the corner for
+                // 3.5 seconds is not something you find by exploring — by
+                // the time you reached it, it would be gone. Errors and
+                // warnings interrupt; info and success wait their turn.
+                // docs/accessibility.md §8.
                 Component.onCompleted: {
                     opacity = 1.0;
                     scale = 1.0;
+                    if (card.toastText && card.toastText.length > 0) {
+                        card.Accessible.announce(
+                            card.toastText,
+                            (card.toastKind === "error" || card.toastKind === "warn")
+                                ? Accessible.AnnouncementPoliteness.Assertive
+                                : Accessible.AnnouncementPoliteness.Polite);
+                    }
                 }
                 Behavior on opacity { NumberAnimation { duration: 180 } }
                 Behavior on scale   { NumberAnimation { duration: 180
@@ -152,6 +177,7 @@ Item {
                     height: parent.height - Theme.sp.s4 * 2
                     color: card.tintColor
                     radius: 1.5
+                    Accessible.ignored: true
                 }
 
                 RowLayout {
@@ -204,6 +230,12 @@ Item {
                                 ? card.expandedLines : card.collapsedLines
                             elide: card.expanded ? Text.ElideNone : Text.ElideRight
 
+                            // Spoken as the card's name, in full and
+                            // un-elided. Reading it again here would
+                            // announce every toast twice, and would
+                            // announce the TRUNCATED copy the second time.
+                            Accessible.ignored: true
+
                             // On the Text rather than on the card's hover area:
                             // that one is `acceptedButtons: Qt.NoButton` on
                             // purpose (D-H1), because anything up here that
@@ -214,6 +246,10 @@ Item {
                                 enabled: messageText.truncated || card.expanded
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: card.toggleExpanded()
+                                // Purely visual. The ellipsis it undoes
+                                // never existed for a screen reader, which
+                                // was handed the whole message up front.
+                                Accessible.ignored: true
                             }
                         }
 
@@ -231,10 +267,15 @@ Item {
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.xs
                             font.weight: Theme.fontWeight.semibold
+                            // Same reason as the expander it labels: there
+                            // is no "rest of this message" to show someone
+                            // who already has all of it.
+                            Accessible.ignored: true
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: card.toggleExpanded()
+                                Accessible.ignored: true
                             }
                         }
                     }
@@ -247,6 +288,14 @@ Item {
                         radius: Theme.r1
                         color: dismissMouse.containsMouse
                             ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+                        // Icon-only, 20x20, and the only control on the
+                        // card that does anything a screen-reader user
+                        // wants. Named after what it dismisses so a stack
+                        // of four does not read as four identical "Close".
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Dismiss notification")
+                        Accessible.description: card.toastText
+                        Accessible.onPressAction: host._dismiss(card.toastId)
                         Icon {
                             anchors.centerIn: parent
                             name: "x"
@@ -271,6 +320,8 @@ Item {
                     anchors.fill: parent
                     hoverEnabled: true
                     acceptedButtons: Qt.NoButton
+                    // Reading-clock plumbing, not a control.
+                    Accessible.ignored: true
                     onEntered: dismissTimer.stop()
                     // Not restarted while expanded — the user opened this one
                     // deliberately and the only thing that should close it is

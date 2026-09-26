@@ -52,6 +52,7 @@ Popup {
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
     padding: Theme.sp.s7
 
+
     readonly property var _server: serverManager.activeServer
     readonly property var _model: _server ? _server.channelInviteModel : null
     // permissionsGeneration is a real int dependency the AOT compiler will not
@@ -88,7 +89,11 @@ Popup {
     onOpened: {
         if (_model) _model.reset();
         memberIdField.clear();
+        // §9. With the permission, the field is the only thing to do here;
+        // without it there is no field at all, so focus goes to the one
+        // control the locked state does offer.
         if (mayAdd) memberIdField.forceActiveFocus();
+        else addCloseBtn.forceActiveFocus();
     }
     // Cleared on the way out as well as on the way in. A notice left standing
     // would greet the next channel's dialog with the last channel's result.
@@ -108,6 +113,12 @@ Popup {
         border.width: 1
     }
 
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: qsTr("Add someone to %1").arg(addMemberDialog._channelPhrase)
+
     contentItem: ColumnLayout {
         spacing: Theme.sp.s4
 
@@ -121,6 +132,8 @@ Popup {
                 Layout.preferredHeight: 32
                 radius: Theme.r2
                 color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.15)
+                // Decorative tint behind the title glyph (§6).
+                Accessible.ignored: true
                 Icon {
                     anchors.centerIn: parent
                     name: addMemberDialog.mayAdd ? "users" : "lock"
@@ -190,6 +203,9 @@ Popup {
                 id: memberIdField
                 Layout.fillWidth: true
                 placeholderText: "@alice:bsfchat.com"
+                Accessible.role: Accessible.EditableText
+                Accessible.name: qsTr("Who to add")
+                Accessible.description: qsTr("A full user ID, for example @alice:bsfchat.com")
                 color: Theme.fg0
                 font.family: Theme.fontMono
                 font.pixelSize: Theme.fontSize.md
@@ -257,6 +273,11 @@ Popup {
                 Layout.fillWidth: true
                 visible: text.length > 0
                 text: memberIdField.problem
+                Accessible.role: Accessible.AlertMessage
+                Accessible.name: qsTr("Check the ID you typed: %1").arg(memberIdField.problem)
+                onVisibleChanged: if (visible)
+                                      Accessible.announce(Accessible.name,
+                                                          Accessible.Assertive)
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
                 color: Theme.danger
@@ -266,6 +287,13 @@ Popup {
                 Layout.fillWidth: true
                 visible: text.length > 0 && memberIdField.problem.length === 0
                 text: addMemberDialog._model ? addMemberDialog._model.errorText : ""
+                Accessible.role: Accessible.AlertMessage
+                Accessible.name: qsTr("Could not add them: %1")
+                                 .arg(addMemberDialog._model
+                                      ? addMemberDialog._model.errorText : "")
+                onVisibleChanged: if (visible)
+                                      Accessible.announce(Accessible.name,
+                                                          Accessible.Assertive)
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
                 color: Theme.danger
@@ -284,6 +312,13 @@ Popup {
                 Layout.fillWidth: true
                 visible: text.length > 0
                 text: addMemberDialog._model ? addMemberDialog._model.noticeText : ""
+                // It worked — informational, so Polite (§8).
+                Accessible.role: Accessible.AlertMessage
+                Accessible.name: addMemberDialog._model
+                                 ? addMemberDialog._model.noticeText : ""
+                onVisibleChanged: if (visible)
+                                      Accessible.announce(Accessible.name,
+                                                          Accessible.Polite)
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
                 color: Theme.online
@@ -301,6 +336,11 @@ Popup {
 
             Button {
                 id: addCloseBtn
+                Accessible.role: Accessible.Button
+                Accessible.name: (addMemberDialog._model
+                                  && addMemberDialog._model.noticeText.length > 0)
+                                 ? qsTr("Done") : qsTr("Cancel")
+                Accessible.onPressAction: addCloseBtn.clicked()
                 contentItem: Text {
                     // "Done" once something has been added, because the
                     // dialog stays open on success — adding three bots to a
@@ -333,6 +373,12 @@ Popup {
                          && !addMemberDialog._model.busy
                          && memberIdField.text.trim().length > 0
                          && memberIdField.problem.length === 0
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Add")
+                Accessible.description: qsTr("Add this account to %1")
+                                        .arg(addMemberDialog._channelPhrase)
+                Accessible.onPressAction: if (addConfirmBtn.enabled)
+                                              addConfirmBtn.clicked()
                 contentItem: Text {
                     text: addMemberDialog._model && addMemberDialog._model.busy
                           ? "Adding…" : "Add"

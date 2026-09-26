@@ -15,6 +15,16 @@ ComboBox {
     font.family: Theme.fontSans
     font.pixelSize: Theme.fontSize.md
 
+    // Default accessible identity: the string the closed field actually
+    // shows, resolved exactly the way the contentItem below resolves it
+    // (plain `displayText` is blank on a QJsonArray model, and a blank
+    // name is an unnamed control). A call site that sets
+    // `Accessible.name` — a settings row naming what the box is FOR —
+    // overrides this binding.
+    Accessible.role: Accessible.ComboBox
+    Accessible.name: ComboBoxText.resolve(cb.displayText, cb.model,
+                                          cb.currentIndex, cb.textRole)
+
     delegate: ItemDelegate {
         id: itemDelegate
         width: cb.width
@@ -22,6 +32,13 @@ ComboBox {
         required property int index
         required property var modelData
         readonly property bool selected: index === cb.currentIndex
+        // Same resolver expression as the row's visible Text below, so a
+        // popup row is announced with the label it is drawn with.
+        Accessible.role: Accessible.ListItem
+        Accessible.name: ComboBoxText.resolve(cb.textAt(itemDelegate.index),
+                                              cb.model, itemDelegate.index,
+                                              cb.textRole)
+        Accessible.onPressAction: itemDelegate.clicked()
         contentItem: Text {
             // ComboBox.textAt(index) resolves through textRole against
             // most model shapes — QVariantList-as-array,
@@ -45,6 +62,8 @@ ComboBox {
             color: itemDelegate.selected ? Theme.accent : Theme.fg1
             verticalAlignment: Text.AlignVCenter
             leftPadding: Theme.sp.s4
+            // The row itself already announces this string as its name.
+            Accessible.ignored: true
         }
         background: Rectangle {
             color: itemDelegate.hovered ? Theme.bg3 : "transparent"
@@ -81,6 +100,9 @@ ComboBox {
         color: Theme.fg0
         verticalAlignment: Text.AlignVCenter
         elide: Text.ElideRight
+        // The combo box itself carries this string; reading the closed
+        // field as a second node would say it twice.
+        Accessible.ignored: true
     }
 
     background: Rectangle {

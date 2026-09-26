@@ -40,6 +40,7 @@ Popup {
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
     padding: Theme.sp.s7
 
+
     enter: Transition {
         NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 150; easing.type: Easing.OutCubic }
         NumberAnimation { property: "scale"; from: 0.95; to: 1.0; duration: 150; easing.type: Easing.OutCubic }
@@ -61,6 +62,12 @@ Popup {
     // below exists as well.
     onAboutToShow: if (blockedDialog.conn) blockedDialog.conn.refreshBlockedUsers()
 
+    // §9. The list IS this dialog — there is no field, and the buttons on the
+    // rows are what a person came here for — so focus starts there rather
+    // than on Done. aboutToShow is too early for it: the content item is not
+    // visible yet at that point.
+    onOpened: blockedList.forceActiveFocus()
+
     // "Checked 4 minutes ago". Recomputed off `lastRefreshedMs` rather than a
     // ticking timer: the only thing that can make it wrong is time passing
     // while the pane sits open, and a pane nobody is looking at does not need
@@ -74,6 +81,12 @@ Popup {
         var hours = Math.round(mins / 60);
         return hours + (hours === 1 ? " hour ago" : " hours ago");
     }
+
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: qsTr("Blocked accounts")
 
     contentItem: ColumnLayout {
         spacing: Theme.sp.s4
@@ -102,7 +115,10 @@ Popup {
                 color: Theme.fg3
             }
         }
-        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line }
+        Rectangle {
+            Layout.fillWidth: true; height: 1; color: Theme.line
+            Accessible.ignored: true
+        }
 
         Text {
             Layout.fillWidth: true
@@ -121,6 +137,12 @@ Popup {
             visible: blockedDialog.blockModel !== null
                 && blockedDialog.blockModel.errorText.length > 0
             text: blockedDialog.blockModel ? blockedDialog.blockModel.errorText : ""
+            Accessible.role: Accessible.AlertMessage
+            Accessible.name: blockedDialog.blockModel
+                             ? blockedDialog.blockModel.errorText : ""
+            onVisibleChanged: if (visible)
+                                  Accessible.announce(Accessible.name,
+                                                      Accessible.Assertive)
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.sm
             color: Theme.danger
@@ -169,6 +191,8 @@ Popup {
                 anchors.margins: Theme.sp.s2
                 clip: true
                 spacing: 2
+                Accessible.role: Accessible.List
+                Accessible.name: qsTr("Accounts you have blocked")
                 model: blockedDialog.blockModel
                     ? blockedDialog.blockModel.users : []
                 ScrollBar.vertical: ThemedScrollBar {}
@@ -178,6 +202,14 @@ Popup {
                     required property var modelData
                     width: ListView.view.width
                     height: 44
+
+                    // One announcement per row, in the order the row reads:
+                    // the name if there is one, then the id it stands for.
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: blockedRow.modelData.displayName.length > 0
+                        ? qsTr("%1, %2").arg(blockedRow.modelData.displayName)
+                                        .arg(blockedRow.modelData.userId)
+                        : blockedRow.modelData.userId
 
                     RowLayout {
                         anchors.fill: parent
@@ -217,6 +249,16 @@ Popup {
                         Button {
                             id: unblockBtn
                             enabled: !blockedRow.modelData.pending
+                            // Named after the account, not the verb: four rows
+                            // all called "Unblock" are four identical rows in
+                            // a screen reader's rotor (§4).
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Unblock %1").arg(
+                                blockedRow.modelData.displayName.length > 0
+                                    ? blockedRow.modelData.displayName
+                                    : blockedRow.modelData.userId)
+                            Accessible.onPressAction: if (unblockBtn.enabled)
+                                                          unblockBtn.clicked()
                             implicitHeight: Theme.controlHeight.sm
                             contentItem: Text {
                                 text: blockedRow.modelData.pending
@@ -269,6 +311,10 @@ Popup {
                 id: refreshBtn
                 enabled: blockedDialog.blockModel !== null
                     && !blockedDialog.blockModel.busy
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Refresh")
+                Accessible.description: qsTr("Ask the server for blocks made on another device")
+                Accessible.onPressAction: if (refreshBtn.enabled) refreshBtn.clicked()
                 implicitHeight: Theme.controlHeight.sm
                 contentItem: Text {
                     text: "Refresh"
@@ -299,6 +345,9 @@ Popup {
             Button {
                 id: blockedCloseBtn
                 implicitHeight: Theme.controlHeight.md
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Done")
+                Accessible.onPressAction: blockedCloseBtn.clicked()
                 contentItem: Text {
                     text: "Done"
                     font.family: Theme.fontSans

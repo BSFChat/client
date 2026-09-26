@@ -10,6 +10,13 @@ ScrollBar {
     id: bar
     minimumSize: 0.08
 
+    // Not a node a screen reader should meet. Scroll position is reported
+    // by the Flickable this is attached to, and a screen reader scrolls by
+    // moving focus, never by dragging a 4px stripe. Leaving it in the tree
+    // puts an unnamed, undraggable control between every pane and its
+    // contents. docs/accessibility.md §6.
+    Accessible.ignored: true
+
     // How much horizontal room a scrolling view has to keep clear so that
     // nothing it lays out ends up underneath this bar.
     //

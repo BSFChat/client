@@ -29,6 +29,9 @@ import BSFChat
 Item {
     id: botPane
 
+    Accessible.role: Accessible.Pane
+    Accessible.name: qsTr("Bots")
+
     readonly property var _server: serverManager.activeServer
     readonly property var _model: _server ? _server.botAdminModel : null
     // Re-evaluated on every permission tick, the same way every other
@@ -71,6 +74,7 @@ Item {
             Layout.fillWidth: true
             Text {
                 text: "Bots"
+                Accessible.ignored: true
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.xxl
                 font.weight: Theme.fontWeight.semibold
@@ -83,6 +87,9 @@ Item {
             // invisible here until something asks again.
             Button {
                 id: refreshBtn
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Refresh bot list")
+                Accessible.onPressAction: if (refreshBtn.enabled) refreshBtn.clicked()
                 visible: botPane._mayManage
                 enabled: botPane._model && !botPane._model.busy
                 implicitHeight: Theme.controlHeight.sm
@@ -112,6 +119,7 @@ Item {
             // in Server Settings.
             Layout.preferredHeight: 1
             color: Theme.line
+            Accessible.ignored: true
         }
 
         // ── No permission ─────────────────────────────────────────────────
@@ -147,6 +155,13 @@ Item {
             color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.10)
             border.color: Theme.accent
             border.width: 1
+            // Names the banner, not its contents: the token itself is the
+            // TextEdit's value and must never be copied into a spoken label.
+            Accessible.role: Accessible.AlertMessage
+            Accessible.name: botPane._model && botPane._model.issuedTokenIsRotation
+                ? qsTr("New token for %1").arg(
+                      botPane._model.displayNameFor(botPane._model.issuedTokenUserId))
+                : qsTr("Bot created — here is its token")
 
             ColumnLayout {
                 id: tokenColumn
@@ -166,6 +181,7 @@ Item {
                                   ? botPane._model.displayNameFor(botPane._model.issuedTokenUserId)
                                   : "")
                             : "Bot created — here is its token"
+                        Accessible.ignored: true
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.lg
                         font.weight: Theme.fontWeight.semibold
@@ -208,6 +224,8 @@ Item {
                         text: botPane._model ? botPane._model.issuedToken : ""
                         readOnly: true
                         selectByMouse: true
+                        Accessible.role: Accessible.EditableText
+                        Accessible.name: qsTr("Bot access token")
                         wrapMode: TextEdit.WrapAnywhere
                         font.family: Theme.fontMono
                         font.pixelSize: Theme.fontSize.sm
@@ -229,6 +247,12 @@ Item {
                         // means dismissing the banner to "try again", which
                         // destroys the token.
                         property bool copied: false
+                        // Stable name: it must not flip to "Copied", which is
+                        // a transient label, not what the control is.
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Copy token to clipboard")
+                        Accessible.description: qsTr("This token is not shown again")
+                        Accessible.onPressAction: copyTokenBtn.clicked()
                         contentItem: RowLayout {
                             spacing: Theme.sp.s2
                             Icon {
@@ -268,6 +292,10 @@ Item {
 
                     Button {
                         id: dismissTokenBtn
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Hide token")
+                        Accessible.description: qsTr("Hides the token for good. It cannot be shown again; recovering means rotating it.")
+                        Accessible.onPressAction: dismissTokenBtn.clicked()
                         implicitHeight: Theme.controlHeight.sm
                         contentItem: Text {
                             text: "I've saved it — hide"
@@ -344,6 +372,12 @@ Item {
 
                 BotField {
                     id: localpartField
+                    Accessible.role: Accessible.EditableText
+                    Accessible.name: qsTr("Bot username")
+                    Accessible.description: localpartField.problem.length > 0
+                        ? localpartField.problem
+                        : qsTr("Keeps the %1 prefix").arg(
+                              botPane._model ? botPane._model.localpartPrefix : "")
                     Layout.preferredWidth: 180
                     // Prefilled, not merely hinted. `bot_` is mandatory
                     // server-side (protocol bot::kLocalpartPrefix) and it is
@@ -394,17 +428,25 @@ Item {
                 }
                 BotField {
                     id: botNameField
+                    Accessible.role: Accessible.EditableText
+                    Accessible.name: qsTr("Bot display name")
                     Layout.preferredWidth: 180
                     placeholderText: "Display name"
                 }
                 BotField {
                     id: botDescField
+                    Accessible.role: Accessible.EditableText
+                    Accessible.name: qsTr("What the bot is for")
                     Layout.fillWidth: true
                     placeholderText: "What is it for? (optional)"
                 }
 
                 Button {
                     id: createBotBtn
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Create bot")
+                    Accessible.description: qsTr("Creates the account and shows its access token once")
+                    Accessible.onPressAction: if (createBotBtn.enabled) createBotBtn.clicked()
                     implicitHeight: Theme.controlHeight.md
                     // `problem` carries the whole rule now, including "the
                     // prefix on its own is not a name" — which the old
@@ -486,6 +528,8 @@ Item {
             visible: botPane._mayManage
             clip: true
             spacing: 4
+            Accessible.role: Accessible.List
+            Accessible.name: qsTr("Bots on this server")
             ScrollBar.vertical: ThemedScrollBar { id: botScrollBar }
             model: botPane._model ? botPane._model.bots : []
 
@@ -519,11 +563,23 @@ Item {
                 // exists, still owns its user id, and its old messages still
                 // carry the badge.
                 opacity: modelData.deactivated ? 0.55 : 1.0
+                // One announcement for the row; the actions on it stay
+                // separately reachable.
+                Accessible.role: Accessible.ListItem
+                Accessible.name: modelData.deactivated === true
+                    ? qsTr("%1, deactivated").arg(modelData.displayName || modelData.userId)
+                    : (modelData.displayName || modelData.userId)
+                Accessible.description: modelData.description
+                                        && modelData.description.length > 0
+                    ? qsTr("%1. %2").arg(modelData.description).arg(modelData.userId)
+                    : modelData.userId
 
                 MouseArea {
                     id: botRowMouse
                     anchors.fill: parent
                     hoverEnabled: true
+                    // Hover tint only — no action behind it.
+                    Accessible.ignored: true
                 }
 
                 RowLayout {
@@ -541,6 +597,7 @@ Item {
                             spacing: Theme.sp.s2
                             Text {
                                 text: modelData.displayName || modelData.userId
+                                Accessible.ignored: true
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.md
                                 font.weight: Theme.fontWeight.semibold
@@ -552,6 +609,7 @@ Item {
                             Text {
                                 visible: modelData.deactivated === true
                                 text: "DEACTIVATED"
+                                Accessible.ignored: true
                                 font.family: Theme.fontSans
                                 font.pixelSize: 9
                                 font.weight: Theme.fontWeight.bold
@@ -563,6 +621,7 @@ Item {
                             Layout.fillWidth: true
                             text: modelData.description && modelData.description.length > 0
                                 ? modelData.description : modelData.userId
+                            Accessible.ignored: true
                             font.family: modelData.description
                                          && modelData.description.length > 0
                                          ? Theme.fontSans : Theme.fontMono
@@ -577,6 +636,10 @@ Item {
                     // one piece of a bot's identity that IS safe to hand out.
                     Button {
                         id: copyIdBtn
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Copy user ID for %1")
+                            .arg(modelData.displayName || modelData.userId)
+                        Accessible.onPressAction: copyIdBtn.clicked()
                         implicitHeight: Theme.controlHeight.sm
                         implicitWidth: Theme.controlHeight.sm
                         ToolTip.visible: hovered
@@ -595,6 +658,11 @@ Item {
 
                     Button {
                         id: rotateBtn
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Rotate token for %1")
+                            .arg(modelData.displayName || modelData.userId)
+                        Accessible.description: qsTr("Issues a new token and immediately stops the old one working. Anything running with the old token is signed out.")
+                        Accessible.onPressAction: if (rotateBtn.enabled) rotateBtn.clicked()
                         implicitHeight: Theme.controlHeight.sm
                         enabled: !!botPane._model && !botPane._model.busy
                         ToolTip.visible: hovered
@@ -620,6 +688,11 @@ Item {
 
                     Button {
                         id: deactivateBtn
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Deactivate %1")
+                            .arg(modelData.displayName || modelData.userId)
+                        Accessible.description: qsTr("Asks to confirm. The bot can then no longer sign in or post, and its user ID stays taken.")
+                        Accessible.onPressAction: if (deactivateBtn.enabled) deactivateBtn.clicked()
                         implicitHeight: Theme.controlHeight.sm
                         implicitWidth: Theme.controlHeight.sm
                         // Hidden, not disabled, once the bot is off: the
@@ -666,6 +739,14 @@ Item {
         padding: Theme.sp.s7
         onClosed: botPane.pendingDeactivateId = ""
 
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Deactivate %1?").arg(
+            botPane._model ? botPane._model.displayNameFor(botPane.pendingDeactivateId)
+                           : botPane.pendingDeactivateId)
+
+        // Destructive confirmation: focus the way out, not the way through.
+        onOpened: cancelDeactivateBtn.forceActiveFocus()
+
         background: Rectangle {
             color: Theme.bg1
             radius: Theme.r3
@@ -684,6 +765,7 @@ Item {
                     Layout.preferredHeight: Theme.controlHeight.sm
                     radius: Theme.r2
                     color: Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.15)
+                    Accessible.ignored: true
                     Icon { anchors.centerIn: parent; name: "x"; size: 16
                            color: Theme.danger }
                 }
@@ -694,6 +776,7 @@ Item {
                              ? botPane._model.displayNameFor(botPane.pendingDeactivateId)
                              : botPane.pendingDeactivateId)
                           + "?"
+                    Accessible.ignored: true
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.xl
                     font.weight: Theme.fontWeight.semibold
@@ -723,6 +806,10 @@ Item {
 
                 Button {
                     id: cancelDeactivateBtn
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Cancel")
+                    Accessible.description: qsTr("Leave the bot as it is")
+                    Accessible.onPressAction: cancelDeactivateBtn.clicked()
                     implicitHeight: Theme.controlHeight.md
                     contentItem: Text {
                         text: "Cancel"
@@ -744,6 +831,12 @@ Item {
 
                 Button {
                     id: confirmDeactivateBtn
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Deactivate %1").arg(
+                        botPane._model ? botPane._model.displayNameFor(botPane.pendingDeactivateId)
+                                       : botPane.pendingDeactivateId)
+                    Accessible.description: qsTr("Its token stops working immediately and it can no longer sign in or post. This cannot be undone from here.")
+                    Accessible.onPressAction: confirmDeactivateBtn.clicked()
                     implicitHeight: Theme.controlHeight.md
                     contentItem: Text {
                         text: "Deactivate"

@@ -14,6 +14,30 @@ CheckBox {
     // use one. Our settings rows generally put the label outside.
     spacing: Theme.sp.s3
 
+    // Default accessible identity. The contentItem below is hidden when
+    // `text` is empty, which is the normal case in settings rows (the
+    // label lives in the row's left-hand column), so without this every
+    // ThemedCheckBox announces as an unnamed control. Plain bindings: a
+    // call site that sets `Accessible.name` simply overrides this one.
+    Accessible.role: Accessible.CheckBox
+    Accessible.name: cb.text
+    Accessible.checkable: true
+    Accessible.checked: cb.checked
+    // Flip AND emit, in that order, because that is what a pointer
+    // click does (nextCheckState) and what every call site's
+    // `onToggled` handler is written against. AbstractButton::toggle()
+    // sets `checked` without emitting toggled(), and Qt's default
+    // accessible handling writes the property directly — both leave the
+    // caller's handler unrun. See the longer note in ThemedSwitch.qml.
+    Accessible.onPressAction: {
+        cb.checked = !cb.checked;
+        cb.toggled();
+    }
+    Accessible.onToggleAction: {
+        cb.checked = !cb.checked;
+        cb.toggled();
+    }
+
     indicator: Rectangle {
         implicitWidth: 18
         implicitHeight: 18
@@ -49,6 +73,9 @@ CheckBox {
         // use their own left-column label without double-labelling.
         text: cb.text
         visible: cb.text.length > 0
+        // The root already announces this string as its name; leaving
+        // the label reachable too would read it twice.
+        Accessible.ignored: true
         font.family: Theme.fontSans
         font.pixelSize: Theme.fontSize.md
         color: Theme.fg0

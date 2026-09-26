@@ -18,6 +18,9 @@ Dialog {
     modal: true
     standardButtons: Dialog.NoButton
 
+    // The name tracks the header, because this one Dialog is four screens
+    // and "Add Server" is wrong on three of them.
+
     property string errorMessage: ""
     property bool isConnecting: false
     property bool checkingFlows: false
@@ -356,6 +359,17 @@ Dialog {
         dialog.probeRedirected = false;
     }
 
+    // §9. onAboutToShow above has just reset to the chooser, whose primary
+    // action is the ID sign-in; the identity-server field beside it is
+    // prefilled and is not what anybody came to type.
+    //
+    // Guarded on the mode rather than unconditional, because openAtAddress()
+    // opens this dialog straight onto address entry and focuses urlField
+    // itself. Under the Basic style `opened` is emitted inside open(), so
+    // that call already comes second and wins — the guard is so it still
+    // wins the day somebody gives this dialog an enter transition.
+    onOpened: if (dialog.mode === "choose") identityButton.forceActiveFocus()
+
     onClosed: {
         dialog.isConnecting = false;
         dialog.oidcInProgress = false;
@@ -385,6 +399,15 @@ Dialog {
     // button were below the cut and unreachable, so the app could not be
     // signed into at a size it lets you resize to. It only scrolls when it has
     // to; at any normal window size nothing moves and nothing looks different.
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: dialog.mode === "signedIn" ? qsTr("Signed in")
+        : dialog.mode === "noServers" ? qsTr("Almost there")
+        : dialog.mode === "address" ? qsTr("Join a server")
+        : qsTr("Add a server")
+
     contentItem: Flickable {
         id: contentFlick
         implicitWidth: loginForm.implicitWidth
@@ -423,6 +446,11 @@ Dialog {
                 visible: dialog.mode === "choose"
                 Layout.fillWidth: true
                 Layout.topMargin: Theme.sp.s3
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Sign in with BSFChat ID")
+                Accessible.description: qsTr("Opens your browser to sign in and restore the servers you have already joined")
+                Accessible.onPressAction: if (identityButton.enabled)
+                                              identityButton.clicked()
                 enabled: !dialog.identitySyncInProgress && !dialog.isConnecting && !dialog.oidcInProgress
                 contentItem: Text {
                     text: dialog.identitySyncInProgress ? "Waiting for browser login…"
@@ -485,6 +513,16 @@ Dialog {
                     dialog.mode = "address";
                     urlField.forceActiveFocus();
                 }
+
+                // Declared after the handler, unlike every other control in
+                // this file, and not by preference: theChooserOffersBothPaths
+                // in tests/test_qml_hygiene.cpp scans a fixed 1600 characters
+                // from `id: joinByAddressButton` for the `dialog.mode =
+                // "address"` above, and anything put in front of it eats that
+                // budget. Comments are stripped before that scan; code is not.
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Join a server by address")
+                Accessible.onPressAction: joinByAddressButton.clicked()
             }
 
             // What "not you?" leaves behind. The local session is gone; the
@@ -522,6 +560,8 @@ Dialog {
                     id: identityUrlField
                     Layout.fillWidth: true
                     text: "https://id.bsfchat.com"
+                    Accessible.role: Accessible.EditableText
+                    Accessible.name: qsTr("Identity server address")
                     placeholderText: "https://id.bsfchat.com"
                     placeholderTextColor: Theme.fg3
                     color: Theme.fg0
@@ -621,6 +661,10 @@ Dialog {
                 id: continueButton
                 visible: dialog.mode === "signedIn"
                 Layout.fillWidth: true
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Continue")
+                Accessible.description: qsTr("Keep this account and close this window")
+                Accessible.onPressAction: continueButton.clicked()
                 contentItem: Text {
                     text: "Continue"
                     font.family: Theme.fontSans
@@ -662,6 +706,14 @@ Dialog {
                     dialog.mode = "address";
                     urlField.forceActiveFocus();
                 }
+
+                // After the handler for the same reason as the chooser's
+                // button above: anAccountWithNoServersIsToldWhatToDoNext
+                // scans 1200 characters from `id: noServersJoinButton` for
+                // the `dialog.mode = "address"` it leads to.
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Join a server by address")
+                Accessible.onPressAction: noServersJoinButton.clicked()
             }
 
             // "Not you?" — the whole point of the confirmation screen. A
@@ -672,6 +724,10 @@ Dialog {
                 id: notYouButton
                 visible: dialog.mode === "signedIn" || dialog.mode === "noServers"
                 Layout.fillWidth: true
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Not you? Sign out and use a different account")
+                Accessible.description: qsTr("Removes the servers this sign-in added and forgets the identity session on this device")
+                Accessible.onPressAction: notYouButton.clicked()
                 contentItem: Text {
                     text: "Not you? Sign out and use a different account"
                     font.family: Theme.fontSans
@@ -694,6 +750,11 @@ Dialog {
                 id: backButton
                 visible: dialog.mode === "address"
                 Layout.alignment: Qt.AlignLeft
+                // Icon-only in effect: the label is a chevron and a word.
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Back")
+                Accessible.description: qsTr("Return to the sign-in choices")
+                Accessible.onPressAction: backButton.clicked()
                 contentItem: Text {
                     text: "‹ Back"
                     font.family: Theme.fontSans
@@ -740,6 +801,9 @@ Dialog {
                         id: urlField
                         Layout.fillWidth: true
                         placeholderText: "chat.example.com"
+                        Accessible.role: Accessible.EditableText
+                        Accessible.name: qsTr("Server address")
+                        Accessible.description: qsTr("The address of the server to join, for example chat.example.com")
                         placeholderTextColor: Theme.fg2
                         color: Theme.fg0
                         font.pixelSize: Theme.fontSize.md
@@ -775,6 +839,11 @@ Dialog {
                     Button {
                         id: checkButton
                         enabled: urlField.text.trim() !== "" && !dialog.isConnecting && !dialog.oidcInProgress && !dialog.checkingFlows
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Check")
+                        Accessible.description: qsTr("Look up which sign-in methods this address offers")
+                        Accessible.onPressAction: if (checkButton.enabled)
+                                                      checkButton.clicked()
                         contentItem: Text {
                             text: "Check"
                             font.family: Theme.fontSans
@@ -821,6 +890,16 @@ Dialog {
                 Layout.fillWidth: true
                 visible: dialog.mode === "address" && dialog.probed && !dialog.checkingFlows
                 text: dialog.probeSummary()
+                // §8. "No BSFChat server found at …" is the answer to
+                // something the user just did, and a probe that fails in
+                // silence is the same dead end this line was added to end.
+                // Every fresh probe clears `probed`, so this goes invisible
+                // and visible again per attempt and each result is announced.
+                Accessible.role: Accessible.AlertMessage
+                Accessible.name: dialog.probeSummary()
+                onVisibleChanged: if (visible)
+                                      Accessible.announce(Accessible.name,
+                                                          Accessible.Assertive)
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
                 color: dialog.probeFailed() ? Theme.danger : Theme.fg2
@@ -846,6 +925,11 @@ Dialog {
                 Layout.fillWidth: true
                 visible: dialog.mode === "address" && dialog.oidcAvailable && !dialog.checkingFlows
                 enabled: !dialog.isConnecting && !dialog.oidcInProgress
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Sign in with BSFChat ID")
+                Accessible.description: qsTr("Opens your browser to sign in to this server")
+                Accessible.onPressAction: if (oidcButton.enabled)
+                                              oidcButton.clicked()
                 contentItem: Text {
                     text: "Sign in with BSFChat ID"
                     font.family: Theme.fontSans
@@ -896,6 +980,17 @@ Dialog {
                 Layout.topMargin: -Theme.sp.s1
                 visible: dialog.mode === "address" && dialog.probed && dialog.oidcAvailable
                          && dialog.passwordAvailable && !dialog.checkingFlows
+                // A disclosure with two states, so it reports both (§5). The
+                // name is the stable noun; `checked` says which way it is.
+                Accessible.role: Accessible.CheckBox
+                Accessible.checkable: true
+                Accessible.checked: dialog.showPasswordFallback
+                Accessible.name: qsTr("Use password instead")
+                Accessible.description: dialog.showPasswordFallback
+                    ? qsTr("Password sign-in is showing. Activate to hide it.")
+                    : qsTr("Password sign-in is hidden. Activate to show it.")
+                Accessible.onToggleAction: passwordToggle.clicked()
+                Accessible.onPressAction: passwordToggle.clicked()
                 contentItem: Text {
                     text: dialog.showPasswordFallback ? "Hide password login"
                                                       : "Use password instead"
@@ -933,6 +1028,8 @@ Dialog {
                     id: usernameField
                     Layout.fillWidth: true
                     placeholderText: "Enter username"
+                    Accessible.role: Accessible.EditableText
+                    Accessible.name: qsTr("Username")
                     placeholderTextColor: Theme.fg2
                     color: Theme.fg0
                     font.pixelSize: Theme.fontSize.md
@@ -970,6 +1067,8 @@ Dialog {
                     id: passwordField
                     Layout.fillWidth: true
                     placeholderText: "Enter password"
+                    Accessible.role: Accessible.EditableText
+                    Accessible.name: qsTr("Password")
                     placeholderTextColor: Theme.fg2
                     color: Theme.fg0
                     font.pixelSize: Theme.fontSize.md
@@ -994,6 +1093,11 @@ Dialog {
                 font.pixelSize: Theme.fontSize.sm
                 color: Theme.danger
                 visible: dialog.errorMessage !== ""
+                Accessible.role: Accessible.AlertMessage
+                Accessible.name: dialog.errorMessage
+                onVisibleChanged: if (visible)
+                                      Accessible.announce(Accessible.name,
+                                                          Accessible.Assertive)
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
             }
@@ -1026,6 +1130,13 @@ Dialog {
                     text: "Couldn't open a browser on this computer. Open this "
                           + "link yourself to finish signing in — this window "
                           + "keeps waiting for it."
+                    // A click that appears to do nothing is exactly what this
+                    // block exists to end, and it has to say so out loud (§8).
+                    Accessible.role: Accessible.AlertMessage
+                    Accessible.name: qsTr("Could not open a browser on this computer. Open the sign-in link below yourself to finish signing in.")
+                    onVisibleChanged: if (visible)
+                                          Accessible.announce(Accessible.name,
+                                                              Accessible.Assertive)
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.sm
                     color: Theme.warn
@@ -1042,6 +1153,10 @@ Dialog {
                     Layout.fillWidth: true
                     text: dialog.manualAuthUrl
                     readOnly: true
+                    // Read-only, so StaticText rather than EditableText; the
+                    // link itself is the value the platform reads out.
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: qsTr("Sign-in link")
                     wrapMode: TextEdit.WrapAnywhere
                     font.family: Theme.fontMono
                     font.pixelSize: Theme.fontSize.xs
@@ -1061,6 +1176,10 @@ Dialog {
                 Button {
                     id: copyLinkButton
                     Layout.alignment: Qt.AlignRight
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Copy link")
+                    Accessible.description: qsTr("Copies the sign-in link to the clipboard")
+                    Accessible.onPressAction: copyLinkButton.clicked()
                     contentItem: Text {
                         text: "Copy link"
                         font.family: Theme.fontSans
@@ -1106,6 +1225,11 @@ Dialog {
                     id: registerBtn
                     Layout.fillWidth: true
                     enabled: !dialog.isConnecting && !dialog.oidcInProgress
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Register")
+                    Accessible.description: qsTr("Create an account on this server with the username and password above")
+                    Accessible.onPressAction: if (registerBtn.enabled)
+                                                  registerBtn.clicked()
                     contentItem: Text {
                         text: "Register"
                         font.family: Theme.fontSans
@@ -1140,6 +1264,10 @@ Dialog {
                     id: loginButton
                     Layout.fillWidth: true
                     enabled: !dialog.isConnecting && !dialog.oidcInProgress
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Login")
+                    Accessible.onPressAction: if (loginButton.enabled)
+                                                  loginButton.clicked()
                     contentItem: Text {
                         text: "Login"
                         font.family: Theme.fontSans
@@ -1177,6 +1305,9 @@ Dialog {
                 id: cancelBtn
                 visible: dialog.mode === "choose" || dialog.mode === "address"
                 Layout.fillWidth: true
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Cancel")
+                Accessible.onPressAction: cancelBtn.clicked()
                 contentItem: Text {
                     text: "Cancel"
                     font.family: Theme.fontSans

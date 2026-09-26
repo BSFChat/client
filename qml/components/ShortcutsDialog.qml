@@ -13,6 +13,11 @@ Popup {
     modal: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
+    // §9. `onOpened: forceActiveFocus()` at the foot of this file puts focus
+    // on the popup itself, which is right for a reference sheet: there is
+    // nothing to fill in and nothing to confirm, only text to read, and the
+    // close control is a plain Rectangle that takes no keyboard focus.
+
     background: Rectangle {
         color: Theme.bg1
         radius: Theme.r3
@@ -28,6 +33,12 @@ Popup {
             radius: Theme.r1
             color: xMouse.containsMouse ? Theme.bg3 : "transparent"
             z: 10
+            // Icon-only control: the name is the label it would have had.
+            // On the Rectangle rather than the MouseArea because attached
+            // accessibility only takes effect on the visual item (§2).
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Close")
+            Accessible.onPressAction: shortcutsDialog.close()
             Icon {
                 anchors.centerIn: parent
                 name: "x"
@@ -92,6 +103,12 @@ Popup {
         }
     ]
 
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: qsTr("Keyboard Shortcuts")
+
     contentItem: ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -117,6 +134,7 @@ Popup {
                 width: parent.width
                 height: 1
                 color: Theme.line
+                Accessible.ignored: true
             }
         }
 
@@ -163,6 +181,7 @@ Popup {
                                 anchors.verticalCenter: parent.verticalCenter
                                 height: 1
                                 color: Theme.line
+                                Accessible.ignored: true
                             }
                         }
 

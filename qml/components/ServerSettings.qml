@@ -33,6 +33,7 @@ Popup {
     focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
+
     property int selectedSection: 0
     // One list, read by the desktop nav rail and by the phone's
     // section dropdown. Two copies is how a section gets added to
@@ -408,6 +409,14 @@ Popup {
             border.color: Theme.danger
             border.width: 1
             z: 20
+            // A toast sliding in is precisely what a screen-reader user
+            // cannot see happen, so it is both reachable afterwards and
+            // announced at the time. Assertive: it is a save that failed.
+            Accessible.role: Accessible.AlertMessage
+            Accessible.name: serverSettingsPopup._toastMessage
+            onVisibleChanged: if (visible && serverSettingsPopup._toastMessage !== "")
+                                  Accessible.announce(serverSettingsPopup._toastMessage,
+                                                      Accessible.Assertive)
             visible: anchors.topMargin > -_errorToast.height
             Behavior on anchors.topMargin {
                 NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
@@ -431,6 +440,8 @@ Popup {
                 Text {
                     Layout.fillWidth: true
                     text: serverSettingsPopup._toastMessage
+                    // Carried by the toast's own name.
+                    Accessible.ignored: true
                     color: Theme.fg0
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.sm
@@ -443,9 +454,13 @@ Popup {
                     radius: Theme.r1
                     color: _toastDismissMouse.containsMouse
                            ? Qt.rgba(0, 0, 0, 0.15) : "transparent"
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Dismiss error")
+                    Accessible.onPressAction: serverSettingsPopup._toastMessage = ""
                     Text {
                         anchors.centerIn: parent
                         text: "×"
+                        Accessible.ignored: true
                         color: Theme.fg1
                         font.pixelSize: 14
                     }
@@ -477,6 +492,10 @@ Popup {
             radius: Theme.r1
             color: closeXMouse.containsMouse ? Theme.bg3 : "transparent"
             z: 10
+            // Icon-only, and on a phone the only way out of this pane.
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Close server settings")
+            Accessible.onPressAction: serverSettingsPopup.close()
             Icon {
                 anchors.centerIn: parent
                 name: "x"
@@ -498,6 +517,12 @@ Popup {
     // children below are ever visible at once — the locked panel replaces
     // the nav AND the pages — and a layout skips invisible children, so
     // `columns: 2` still pairs them the way it always did.
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: qsTr("Server settings")
+
     contentItem: GridLayout {
         columns: Theme.isMobile ? 1 : 2
         rowSpacing: 0
@@ -654,11 +679,21 @@ Popup {
                              : "transparent"
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
+                        // Which page you are on is colour-only otherwise.
+                        Accessible.role: Accessible.ListItem
+                        Accessible.name: qsTr("%1 section").arg(modelData)
+                        Accessible.description: isActive
+                            ? qsTr("Currently showing")
+                            : qsTr("Activate to show this section")
+                        Accessible.onPressAction: selectedSection = index
+
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.left: parent.left
                             anchors.leftMargin: Theme.sp.s3
                             text: modelData
+                            // Carried by the row's own name.
+                            Accessible.ignored: true
                             color: parent.isActive ? Theme.fg0 : Theme.fg1
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.md
@@ -702,6 +737,9 @@ Popup {
             // 44 pt: Apple HIG / Material touch minimum. Every other control
             // in this pane is reached through this one.
             implicitHeight: 44
+            // No visible label of its own — it IS the navigation on a phone.
+            Accessible.name: qsTr("Settings section")
+            Accessible.description: qsTr("Choose which server settings page to show")
             model: serverSettingsPopup.sections
             currentIndex: serverSettingsPopup.selectedSection
             // Re-established with Qt.binding, not left as the plain value
@@ -841,6 +879,10 @@ Popup {
                                 Button {
                                     id: uploadIconBtn
                                     text: "Upload icon…"
+                                    Accessible.role: Accessible.Button
+                                    Accessible.name: qsTr("Upload server icon")
+                                    Accessible.description: qsTr("Pick an image file to use as this server's icon")
+                                    Accessible.onPressAction: uploadIconBtn.clicked()
                                     contentItem: Text {
                                         text: uploadIconBtn.text
                                         font.family: Theme.fontSans
@@ -918,6 +960,14 @@ Popup {
                             enabled: serverManager.activeServer
                                      && serverNameField.text.trim().length > 0
                                      && serverNameField.text.trim() !== serverManager.activeServer.serverName
+                            // Greyed out is invisible to a screen reader, and
+                            // "Save changes" does not say what changes.
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Save server name")
+                            Accessible.description: saveServerNameBtn.enabled
+                                ? qsTr("Rename this server to the text in the field")
+                                : qsTr("Unavailable until you type a different server name")
+                            Accessible.onPressAction: if (saveServerNameBtn.enabled) saveServerNameBtn.clicked()
                             contentItem: Text {
                                 text: "Save changes"
                                 font.family: Theme.fontSans
@@ -1006,6 +1056,12 @@ Popup {
                         ThemedSlider {
                             implicitWidth: 220
                             from: pr.minVal; to: pr.maxVal; stepSize: pr.stepVal
+                            // The label is a separate Text in the left column,
+                            // so the slider has nothing of its own to say.
+                            Accessible.name: qsTr("%1").arg(pr.label)
+                            Accessible.description: pr.value < 0
+                                ? qsTr("No cap set")
+                                : qsTr("Capped at %1%2").arg(pr.value).arg(pr.suffix)
                             enabled: pr.value >= 0 && pr.editable
                             value: pr.value < 0 ? pr.minVal : pr.value
                             onMoved: pr.commit(Math.round(value))
@@ -1022,6 +1078,15 @@ Popup {
                             text: "Cap"
                             enabled: pr.editable
                             checked: pr.value >= 0
+                            // Name stays the noun; the platform reads checked.
+                            Accessible.name: qsTr("%1 cap").arg(pr.label)
+                            Accessible.checkable: true
+                            Accessible.checked: pr.value >= 0
+                            Accessible.description: pr.value >= 0
+                                ? qsTr("Capped. Turn off to honour each member's own setting on this axis.")
+                                : qsTr("Not capped. Turn on to limit this axis.")
+                            Accessible.onPressAction: pr.commit(pr.value >= 0 ? -1 : pr.maxVal)
+                            Accessible.onToggleAction: pr.commit(pr.value >= 0 ? -1 : pr.maxVal)
                             onToggled: {
                                 if (checked) pr.commit(pr.maxVal);
                                 else         pr.commit(-1);
@@ -1122,6 +1187,15 @@ Popup {
                             enabled: overviewPane.policyEditorEnabled
                             checked: serverManager.activeServer
                                 ? serverManager.activeServer.allowLossless : true
+                            // Label and the bandwidth caveat are separate Texts
+                            // in this row, so both have to be said here.
+                            Accessible.name: qsTr("Allow lossless")
+                            Accessible.checkable: true
+                            Accessible.checked: serverManager.activeServer
+                                ? serverManager.activeServer.allowLossless : true
+                            Accessible.description: qsTr("AV1 mathematically-lossless mode. Very high bandwidth — LAN-class links.")
+                            Accessible.onPressAction: overviewPane._commitPolicy("lossless", !losslessSwitch.checked)
+                            Accessible.onToggleAction: overviewPane._commitPolicy("lossless", !losslessSwitch.checked)
                             // A user toggle writes `checked` itself, replacing
                             // the binding above — so it has to be put back, or
                             // this switch stops tracking the server exactly the
@@ -1217,6 +1291,15 @@ Popup {
                                 color: roleRowMouse.containsMouse ? Theme.bg3 : Theme.bg2
                                 border.color: roleDelegate.isEditing ? Theme.accent : Theme.line
                                 border.width: 1
+                                // Colour chip + name + chevron are one row and
+                                // one gesture; the reorder buttons inside stay
+                                // separately reachable.
+                                Accessible.role: Accessible.ListItem
+                                Accessible.name: qsTr("Role %1").arg(roleDelegate.role.name || "")
+                                Accessible.description: roleDelegate.isEditing
+                                    ? qsTr("Expanded. Activate to close the editor.")
+                                    : qsTr("Collapsed. Activate to edit this role.")
+                                Accessible.onPressAction: roleRowMouse.clicked(null)
                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                 Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
 
@@ -1233,9 +1316,12 @@ Popup {
                                         color: roleDelegate.role.color || Theme.accent
                                         border.color: Theme.bg0
                                         border.width: 1
+                                        Accessible.ignored: true
                                     }
                                     Text {
                                         text: roleDelegate.role.name || ""
+                                        // Carried by the row's own name.
+                                        Accessible.ignored: true
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.md
                                         font.weight: Theme.fontWeight.semibold
@@ -1254,6 +1340,13 @@ Popup {
                                         id: rbtn
                                         property string iconName: ""
                                         property bool disabled: false
+                                        // The role this button moves. Passed in
+                                        // by the call site because an inline
+                                        // component cannot reach the enclosing
+                                        // delegate's scope, and two identical
+                                        // "Move up" rows per role would be
+                                        // useless in a rotor.
+                                        property string roleName: ""
                                         signal clicked()
                                         Layout.preferredWidth: 22
                                         Layout.preferredHeight: 22
@@ -1266,6 +1359,17 @@ Popup {
                                                || rbtnMouse.containsMouse ? 1.0 : 0.0)
                                         Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
                                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                        // Icon-only, reveal-on-hover, and there
+                                        // are two per row: the rotation is what
+                                        // distinguishes up from down.
+                                        Accessible.role: Accessible.Button
+                                        Accessible.name: rbtn.rotation < 0
+                                            ? qsTr("Move %1 up").arg(rbtn.roleName)
+                                            : qsTr("Move %1 down").arg(rbtn.roleName)
+                                        Accessible.description: rbtn.disabled
+                                            ? qsTr("Unavailable at this end of the list")
+                                            : ""
+                                        Accessible.onPressAction: if (!rbtn.disabled) rbtn.clicked()
                                         Icon {
                                             anchors.centerIn: parent
                                             name: rbtn.iconName
@@ -1287,6 +1391,7 @@ Popup {
                                     ReorderBtn {
                                         iconName: "chevron-right"
                                         rotation: -90          // point up
+                                        roleName: roleDelegate.role.name || ""
                                         disabled: !roleDelegate.canMoveUp
                                         onClicked: serverSettingsPopup.moveRole(
                                             roleDelegate.roleIndex, -1)
@@ -1294,6 +1399,7 @@ Popup {
                                     ReorderBtn {
                                         iconName: "chevron-right"
                                         rotation: 90           // point down
+                                        roleName: roleDelegate.role.name || ""
                                         disabled: !roleDelegate.canMoveDown
                                         onClicked: serverSettingsPopup.moveRole(
                                             roleDelegate.roleIndex, 1)
@@ -1422,6 +1528,10 @@ Popup {
                                         SpinBox {
                                             id: editRolePosition
                                             from: 0; to: 1000
+                                            // Bare number field with no label.
+                                            Accessible.role: Accessible.SpinBox
+                                            Accessible.name: qsTr("Role position")
+                                            Accessible.description: qsTr("Where this role sits in the role order")
                                             value: serverSettingsPopup.roleScratchPos
                                             onValueModified: serverSettingsPopup.roleScratchPos = value
                                             font.family: Theme.fontMono
@@ -1454,6 +1564,17 @@ Popup {
                                                 Behavior on border.width {
                                                     NumberAnimation { duration: Theme.motion.fastMs }
                                                 }
+                                                // Twelve identical dots; the hex
+                                                // is the only thing that tells
+                                                // them apart, so the hex is the
+                                                // name. Selection is a ring, i.e.
+                                                // invisible without `checked`.
+                                                Accessible.role: Accessible.RadioButton
+                                                Accessible.checkable: true
+                                                Accessible.checked: selected
+                                                Accessible.name: qsTr("Role colour %1").arg(modelData)
+                                                Accessible.onPressAction: serverSettingsPopup.roleScratchColor = modelData
+                                                Accessible.onToggleAction: serverSettingsPopup.roleScratchColor = modelData
                                                 MouseArea {
                                                     anchors.fill: parent
                                                     cursorShape: Qt.PointingHandCursor
@@ -1476,11 +1597,19 @@ Popup {
                                         ThemedCheckBox {
                                             id: mentionableBox
                                             checked: serverSettingsPopup.roleScratchMentionable
+                                            // Its label is the sibling Text.
+                                            Accessible.name: qsTr("Allow anyone to @mention this role")
+                                            Accessible.checkable: true
+                                            Accessible.checked: serverSettingsPopup.roleScratchMentionable
+                                            Accessible.onPressAction: { mentionableBox.toggle(); mentionableBox.toggled(); }
+                                            Accessible.onToggleAction: { mentionableBox.toggle(); mentionableBox.toggled(); }
                                             onToggled: serverSettingsPopup.roleScratchMentionable
                                                 = !serverSettingsPopup.roleScratchMentionable
                                         }
                                         Text {
                                             text: "Allow anyone to @mention this role"
+                                            // Carried by the checkbox's name.
+                                            Accessible.ignored: true
                                             color: Theme.fg0
                                             font.family: Theme.fontSans
                                             font.pixelSize: Theme.fontSize.sm
@@ -1512,11 +1641,19 @@ Popup {
                                         ThemedCheckBox {
                                             id: selfAssignableBox
                                             checked: serverSettingsPopup.roleScratchSelfAssignable
+                                            // Its label is the sibling Text.
+                                            Accessible.name: qsTr("Let members add and remove this role themselves")
+                                            Accessible.checkable: true
+                                            Accessible.checked: serverSettingsPopup.roleScratchSelfAssignable
+                                            Accessible.onPressAction: { selfAssignableBox.toggle(); selfAssignableBox.toggled(); }
+                                            Accessible.onToggleAction: { selfAssignableBox.toggle(); selfAssignableBox.toggled(); }
                                             onToggled: serverSettingsPopup.roleScratchSelfAssignable
                                                 = !serverSettingsPopup.roleScratchSelfAssignable
                                         }
                                         Text {
                                             text: "Let members add and remove this role themselves"
+                                            // Carried by the checkbox's name.
+                                            Accessible.ignored: true
                                             color: Theme.fg0
                                             font.family: Theme.fontSans
                                             font.pixelSize: Theme.fontSize.sm
@@ -1568,11 +1705,23 @@ Popup {
                                                     // and same reason, as MessageInput's.
                                                     checked: serverSettingsPopup.roleScratchPerms >= 0
                                                         && serverSettingsPopup.roleScratchHasPerm(modelData.flag)
+                                                    // Label and hover hint both
+                                                    // live on the sibling Text.
+                                                    Accessible.name: qsTr("%1 permission").arg(modelData.label)
+                                                    Accessible.description: modelData.hint
+                                                    Accessible.checkable: true
+                                                    Accessible.checked: serverSettingsPopup.roleScratchPerms >= 0
+                                                        && serverSettingsPopup.roleScratchHasPerm(modelData.flag)
+                                                    Accessible.onPressAction: { cb.toggle(); cb.toggled(); }
+                                                    Accessible.onToggleAction: { cb.toggle(); cb.toggled(); }
                                                     onToggled: serverSettingsPopup.toggleRoleScratchPerm(modelData.flag)
                                                 }
                                                 Text {
                                                     id: permLabel
                                                     text: modelData.label
+                                                    // Label and tooltip are both
+                                                    // on the checkbox already.
+                                                    Accessible.ignored: true
                                                     color: Theme.fg0
                                                     font.family: Theme.fontSans
                                                     font.pixelSize: Theme.fontSize.sm
@@ -1601,6 +1750,10 @@ Popup {
                                         // Primary Save — accent pill.
                                         Button {
                                             id: roleSaveBtn
+                                            Accessible.role: Accessible.Button
+                                            Accessible.name: qsTr("Save role")
+                                            Accessible.description: qsTr("Write the name, colour, position and permissions above back to the server")
+                                            Accessible.onPressAction: roleSaveBtn.clicked()
                                             contentItem: Text {
                                                 text: "Save role"
                                                 font.family: Theme.fontSans
@@ -1662,6 +1815,13 @@ Popup {
                                             id: roleDeleteBtn
                                             visible: (roleEditCard.editRole.id || roleEditCard.editRole.name) !== "everyone"
                                                   && (roleEditCard.editRole.id || roleEditCard.editRole.name) !== "admin"
+                                            // Destructive and unconfirmed, so
+                                            // the description says so before
+                                            // the user activates it.
+                                            Accessible.role: Accessible.Button
+                                            Accessible.name: qsTr("Delete role %1").arg(roleEditCard.editRole.name || "")
+                                            Accessible.description: qsTr("Deletes this role straight away and takes it off every member who holds it")
+                                            Accessible.onPressAction: roleDeleteBtn.clicked()
                                             contentItem: Text {
                                                 text: "Delete role"
                                                 font.family: Theme.fontSans
@@ -1716,6 +1876,10 @@ Popup {
                     // label instead of a unicode plus glyph.
                     Button {
                         id: addRoleBtn
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Add role")
+                        Accessible.description: qsTr("Creates a new role with the default permissions")
+                        Accessible.onPressAction: addRoleBtn.clicked()
                         contentItem: RowLayout {
                             spacing: Theme.sp.s2
                             Icon { name: "plus"; size: 14; color: Theme.onAccent; Layout.alignment: Qt.AlignVCenter }
@@ -1903,6 +2067,18 @@ Popup {
                                 color: memberItemMouse.containsMouse ? Theme.bg3 : Theme.bg2
                                 border.color: parent.expanded ? Theme.accent : Theme.line
                                 border.width: 1
+                                // Avatar + display name + mxid are one row. The
+                                // mxid is in the name on purpose: two accounts
+                                // of the same person share a display name, and
+                                // that is the whole 2026-09-20 incident.
+                                Accessible.role: Accessible.ListItem
+                                Accessible.name: modelData.displayName
+                                    ? qsTr("%1, %2").arg(modelData.displayName).arg(memberRow.memberUserId)
+                                    : memberRow.memberUserId
+                                Accessible.description: memberRow.expanded
+                                    ? qsTr("Expanded. Activate to close role assignment.")
+                                    : qsTr("Collapsed. Activate to assign roles, kick or ban.")
+                                Accessible.onPressAction: memberItemMouse.clicked(null)
                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                 Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
 
@@ -1922,6 +2098,8 @@ Popup {
                                         color: Theme.senderColor(modelData.userId || "")
                                         Text {
                                             anchors.centerIn: parent
+                                            // Decorative initial; the row is named.
+                                            Accessible.ignored: true
                                             text: {
                                                 var n = modelData.displayName || modelData.userId || "?";
                                                 var s = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -1945,6 +2123,9 @@ Popup {
                                             spacing: Theme.sp.s2
                                             Text {
                                                 text: modelData.displayName || ""
+                                                // Both halves are in the row's
+                                                // own name.
+                                                Accessible.ignored: true
                                                 font.family: Theme.fontSans
                                                 font.pixelSize: Theme.fontSize.md
                                                 font.weight: Theme.fontWeight.semibold
@@ -1953,6 +2134,7 @@ Popup {
                                             }
                                             Text {
                                                 text: modelData.userId || ""
+                                                Accessible.ignored: true
                                                 font.family: Theme.fontMono
                                                 font.pixelSize: Theme.fontSize.xs
                                                 color: Theme.fg3
@@ -2011,6 +2193,11 @@ Popup {
                                                         Rectangle {
                                                             width: 6; height: 6; radius: 3
                                                             color: parent.parent.rcolor
+                                                            // The chip's Text says
+                                                            // the role name; the
+                                                            // dot repeats it in
+                                                            // colour only.
+                                                            Accessible.ignored: true
                                                             Layout.alignment: Qt.AlignVCenter
                                                         }
                                                         Text {
@@ -2114,6 +2301,17 @@ Popup {
                                                     id: rolecb
                                                     checked: serverSettingsPopup.memberScratchHasRole(
                                                         parent.parent.roleId)
+                                                    // The colour dot and the name
+                                                    // beside it are this box's
+                                                    // label, so it carries them.
+                                                    Accessible.name: qsTr("Role %1").arg(modelData.name || "")
+                                                    Accessible.checkable: true
+                                                    Accessible.checked: serverSettingsPopup.memberScratchHasRole(
+                                                        modelData.id || modelData.name)
+                                                    Accessible.onPressAction: serverSettingsPopup.toggleMemberScratchRole(
+                                                        modelData.id || modelData.name)
+                                                    Accessible.onToggleAction: serverSettingsPopup.toggleMemberScratchRole(
+                                                        modelData.id || modelData.name)
                                                     onToggled: serverSettingsPopup.toggleMemberScratchRole(
                                                         parent.parent.roleId)
                                                 }
@@ -2123,11 +2321,14 @@ Popup {
                                                     color: modelData.color || Theme.accent
                                                     border.color: Theme.bg0
                                                     border.width: 1
+                                                    Accessible.ignored: true
                                                 }
                                                 Text {
                                                     Layout.alignment: Qt.AlignVCenter
                                                     Layout.fillWidth: true
                                                     text: modelData.name || ""
+                                                    // Carried by the checkbox.
+                                                    Accessible.ignored: true
                                                     color: Theme.fg0
                                                     font.family: Theme.fontSans
                                                     font.pixelSize: Theme.fontSize.md
@@ -2141,6 +2342,13 @@ Popup {
                                                 anchors.fill: parent
                                                 hoverEnabled: true
                                                 cursorShape: Qt.PointingHandCursor
+                                                // A convenience hit area over a
+                                                // checkbox that is already named
+                                                // and already actionable: a
+                                                // second node for the same
+                                                // toggle would just be read
+                                                // twice.
+                                                Accessible.ignored: true
                                                 // Click anywhere on the row
                                                 // toggles the role in/out of the
                                                 // popup-level scratch set; the
@@ -2186,6 +2394,10 @@ Popup {
 
                                         Button {
                                             id: roleAssignSaveBtn
+                                            Accessible.role: Accessible.Button
+                                            Accessible.name: qsTr("Save role assignments")
+                                            Accessible.description: qsTr("Apply the ticked roles to %1").arg(memberRow.memberUserId)
+                                            Accessible.onPressAction: roleAssignSaveBtn.clicked()
                                             contentItem: Text {
                                                 text: "Save assignments"
                                                 font.family: Theme.fontSans
@@ -2223,6 +2435,13 @@ Popup {
                                         Button {
                                             id: kickBtn
                                             visible: !parent.isSelf
+                                            // "Kick" alone is one of four
+                                            // identical rows in a rotor.
+                                            Accessible.role: Accessible.Button
+                                            Accessible.name: qsTr("Kick %1").arg(
+                                                modelData.displayName || memberRow.memberUserId)
+                                            Accessible.description: qsTr("Asks you to confirm, then removes them from every channel on this server")
+                                            Accessible.onPressAction: kickBtn.clicked()
                                             contentItem: Text {
                                                 text: "Kick"
                                                 font.family: Theme.fontSans
@@ -2256,6 +2475,11 @@ Popup {
                                         Button {
                                             id: banBtn
                                             visible: !parent.isSelf
+                                            Accessible.role: Accessible.Button
+                                            Accessible.name: qsTr("Ban %1").arg(
+                                                modelData.displayName || memberRow.memberUserId)
+                                            Accessible.description: qsTr("Asks you to confirm, then removes them and blocks them from rejoining until unbanned")
+                                            Accessible.onPressAction: banBtn.clicked()
                                             contentItem: Text {
                                                 text: "Ban"
                                                 font.family: Theme.fontSans
@@ -2328,6 +2552,9 @@ Popup {
                         // emit a signal instead of opening it directly.
                         Button {
                             id: addCategoryBtn
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Add category")
+                            Accessible.onPressAction: addCategoryBtn.clicked()
                             contentItem: RowLayout {
                                 spacing: Theme.sp.s2
                                 Icon { name: "plus"; size: 14; color: Theme.onAccent; Layout.alignment: Qt.AlignVCenter }
@@ -2417,6 +2644,15 @@ Popup {
                                         radius: Theme.r1
                                         color: _cabMouse.containsMouse ? Theme.bg3 : "transparent"
                                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                        // Icon-only. Same wording as the
+                                        // tooltip; an inline component cannot
+                                        // read the enclosing category's name,
+                                        // so `createKind` is what it has.
+                                        Accessible.role: Accessible.Button
+                                        Accessible.name: _cab.createKind === "voice"
+                                            ? qsTr("Add voice channel")
+                                            : qsTr("Add text channel")
+                                        Accessible.onPressAction: _cabMouse.clicked(null)
                                         Icon {
                                             anchors.centerIn: parent
                                             name: _cab.iconName
@@ -2455,6 +2691,8 @@ Popup {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     acceptedButtons: Qt.NoButton  // pass clicks through to the CatAddBtn children
+                                    // Hover detection only — nothing to press.
+                                    Accessible.ignored: true
                                 }
                             }
 
@@ -2519,6 +2757,13 @@ Popup {
                                             // channel", invisible and unreachable.
                                             visible: (Theme.isMobile || chSettingsMouse.containsMouse)
                                                    && !parent.parent.rowIsVoice
+                                            // Icon-only and hover-revealed; the
+                                            // tooltip wording plus the channel
+                                            // it acts on.
+                                            Accessible.role: Accessible.Button
+                                            Accessible.name: qsTr("Channel settings for %1").arg(
+                                                parent.parent.rowRoomName)
+                                            Accessible.onPressAction: _settingsMouse.clicked(null)
                                             Icon {
                                                 anchors.centerIn: parent
                                                 name: "settings"
@@ -2549,6 +2794,13 @@ Popup {
                                                    ? Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.16)
                                                    : "transparent"
                                             visible: Theme.isMobile || chSettingsMouse.containsMouse
+                                            // Destructive, icon-only, and one of
+                                            // a column of identical x glyphs.
+                                            Accessible.role: Accessible.Button
+                                            Accessible.name: qsTr("Delete channel %1").arg(
+                                                parent.parent.rowRoomName)
+                                            Accessible.description: qsTr("Asks you to confirm, then removes this channel and its history for everyone")
+                                            Accessible.onPressAction: _deleteMouse.clicked(null)
                                             Icon {
                                                 anchors.centerIn: parent
                                                 name: "x"
@@ -2576,6 +2828,8 @@ Popup {
                                         id: chSettingsMouse
                                         anchors.fill: parent
                                         hoverEnabled: true
+                                        // Hover detection only — nothing to press.
+                                        Accessible.ignored: true
                                         // Hover-only — clicks on the settings/
                                         // delete buttons are handled by their
                                         // own MouseAreas stacked above.
@@ -2697,6 +2951,8 @@ Popup {
                                     color: Theme.senderColor(modelData.userId || "")
                                     Text {
                                         anchors.centerIn: parent
+                                        // Decorative initial; the name is beside it.
+                                        Accessible.ignored: true
                                         text: {
                                             var n = modelData.displayName || modelData.userId || "?";
                                             var s = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -2750,6 +3006,11 @@ Popup {
                                 // Ghost Unban.
                                 Button {
                                     id: unbanBtn
+                                    Accessible.role: Accessible.Button
+                                    Accessible.name: qsTr("Unban %1").arg(
+                                        modelData.displayName || modelData.userId || "")
+                                    Accessible.description: qsTr("Asks you to confirm, then lets them rejoin this server")
+                                    Accessible.onPressAction: unbanBtn.clicked()
                                     contentItem: Text {
                                         text: "Unban"
                                         font.family: Theme.fontSans
@@ -2836,6 +3097,10 @@ Popup {
         modal: true
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         padding: Theme.sp.s7
+
+        Accessible.role: Accessible.Dialog
+        Accessible.name: _confirmModDialog.titleText
+        Accessible.description: _confirmModDialog.descText
 
         readonly property bool isDestructive:
             serverSettingsPopup.confirmMod.kind === "kick"
@@ -2954,6 +3219,10 @@ Popup {
 
                 Button {
                     id: cancelModBtn
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Cancel")
+                    Accessible.description: qsTr("Close without changing anything")
+                    Accessible.onPressAction: cancelModBtn.clicked()
                     contentItem: Text {
                         text: "Cancel"
                         font.family: Theme.fontSans
@@ -2977,6 +3246,19 @@ Popup {
 
                 Button {
                     id: confirmModBtn
+                    // Same wording the button draws, so the spoken label and
+                    // the visible one cannot drift apart.
+                    Accessible.role: Accessible.Button
+                    Accessible.name: {
+                        switch (serverSettingsPopup.confirmMod.kind) {
+                            case "kick":  return qsTr("Kick member");
+                            case "ban":   return qsTr("Ban member");
+                            case "unban": return qsTr("Unban member");
+                            default:      return qsTr("Confirm");
+                        }
+                    }
+                    Accessible.description: _confirmModDialog.descText
+                    Accessible.onPressAction: confirmModBtn.clicked()
                     contentItem: Text {
                         text: {
                             switch (serverSettingsPopup.confirmMod.kind) {

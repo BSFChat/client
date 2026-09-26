@@ -102,6 +102,11 @@ Rectangle {
                     font.letterSpacing: Theme.trackWidest.xs
                     color: Theme.fg3
                     verticalAlignment: Text.AlignVCenter
+                    // The label and the "— N" beside it are one fact. Said
+                    // here once, with the count folded in; the count element
+                    // is ignored below so it is not read a second time.
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: qsTr("%n member(s)", "", headerItem.memberCount)
                 }
                 Text {
                     text: "— " + headerItem.memberCount
@@ -110,6 +115,7 @@ Rectangle {
                     color: Theme.fg3
                     verticalAlignment: Text.AlignVCenter
                     visible: headerItem.memberCount > 0
+                    Accessible.ignored: true
                 }
                 Item { Layout.fillWidth: true }
 
@@ -164,6 +170,30 @@ Rectangle {
                         : ("Add a member — not available to "
                            + (serverManager.activeServer
                               ? serverManager.activeServer.userId : ""))
+
+                    // Icon.qml ignores itself, because an icon is normally
+                    // ornament inside a named control. Here the icon IS the
+                    // control — it owns the MouseArea below — so this one
+                    // opts back in and carries the name. Same shape as the
+                    // Server Settings gear in ChannelList.qml.
+                    Accessible.ignored: false
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Add a member to this channel")
+                    // The locked case says so, and says which account is
+                    // being refused — the tooltip's reasoning applies
+                    // exactly as much to someone who cannot see the muting.
+                    Accessible.description: addMemberIcon.unlocked
+                        ? qsTr("Invite someone to this channel")
+                        : qsTr("Not available to %1").arg(
+                              serverManager.activeServer
+                              ? serverManager.activeServer.userId : "")
+                    Accessible.onPressAction: {
+                        var s = serverManager.activeServer;
+                        if (!s) return;
+                        addMemberDialog.roomId = s.activeRoomId || "";
+                        addMemberDialog.roomName = s.activeRoomName || "";
+                        addMemberDialog.open();
+                    }
 
                     MouseArea {
                         id: addMemberMouse
@@ -220,6 +250,40 @@ Rectangle {
                     color: memberMouse.containsMouse ? Theme.bg3 : "transparent"
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
+                    // One announcement for the whole row (docs/accessibility
+                    // §7): name, bot-ness, presence, hoisted role, custom
+                    // status — in the order the eye takes them off the row.
+                    // Every Text inside is ignored so this is read as one
+                    // sentence instead of four fragments. The name is here
+                    // rather than on the delegate Item because this is the
+                    // item that owns the MouseArea.
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: {
+                        memberListRoot._presenceGen;   // dep — see below
+                        var s = serverManager.activeServer;
+                        var out = model.displayName || model.userId;
+                        if (model.isBot === true)
+                            out = qsTr("%1, bot").arg(out);
+                        var p = s ? s.presenceFor(model.userId) : "offline";
+                        if (p === "online")      out = qsTr("%1, online").arg(out);
+                        else if (p === "idle")   out = qsTr("%1, idle").arg(out);
+                        else if (p === "dnd")    out = qsTr("%1, do not disturb").arg(out);
+                        else                     out = qsTr("%1, offline").arg(out);
+                        var r = memberDelegate._role;
+                        if (r && r.hoist && r.name)
+                            out = qsTr("%1, %2").arg(out).arg(r.name);
+                        var msg = s ? s.statusMessageFor(model.userId) : "";
+                        if (msg && msg.length > 0)
+                            out = qsTr("%1, %2").arg(out).arg(msg);
+                        return out;
+                    }
+                    Accessible.description: qsTr("Open profile")
+                    Accessible.onPressAction: {
+                        memberProfileCard.userId = model.userId;
+                        memberProfileCard.profileDisplayName = model.displayName;
+                        memberProfileCard.open();
+                    }
+
                     RowLayout {
                         anchors.fill: parent
                         anchors.leftMargin: Theme.sp.s4
@@ -250,6 +314,9 @@ Rectangle {
                                     font.pixelSize: 13
                                     font.weight: Theme.fontWeight.semibold
                                     color: Theme.onAccent
+                                    // The initial is a picture of the name
+                                    // the row already announces.
+                                    Accessible.ignored: true
                                 }
                             }
 
@@ -282,6 +349,8 @@ Rectangle {
                                 border.width: _state === "offline" ? 1.5 : 2
                                 border.color: _state === "offline" ? Theme.fg3 : Theme.bg1
                                 visible: true
+                                // Presence is in the row's name already.
+                                Accessible.ignored: true
                             }
                         }
 
@@ -316,6 +385,7 @@ Rectangle {
                                     }
                                     elide: Text.ElideRight
                                     Layout.fillWidth: true
+                                    Accessible.ignored: true
                                 }
 
                                 // `model.isBot` is MemberListModel's IsBotRole,
@@ -325,6 +395,11 @@ Rectangle {
                                 BotBadge {
                                     visible: model.isBot === true
                                     Layout.alignment: Qt.AlignVCenter
+                                    // BotBadge names itself "Bot account",
+                                    // which is right where it stands alone.
+                                    // Here the row already says "bot", so the
+                                    // pill would be the second time.
+                                    Accessible.ignored: true
                                 }
                             }
 
@@ -352,6 +427,7 @@ Rectangle {
                                 color: Theme.fg3
                                 elide: Text.ElideRight
                                 Layout.fillWidth: true
+                                Accessible.ignored: true
                             }
                             // Role tag under the name — only shown for
                             // hoisted roles so @everyone-only members
@@ -377,6 +453,7 @@ Rectangle {
                                 opacity: 0.75
                                 elide: Text.ElideRight
                                 Layout.fillWidth: true
+                                Accessible.ignored: true
                             }
                         }
                     }
@@ -494,6 +571,15 @@ Rectangle {
             height: implicitHeight
             property string iconName: ""
             property color labelColor: Theme.fg0
+
+            // Floor for every row in this menu: the visible label is the
+            // name, and pressing it triggers it. Rows that can say WHICH
+            // member they act on override the name below — "Block" on its
+            // own in a rotor is four identical words away from useful.
+            Accessible.role: Accessible.Button
+            Accessible.name: mi.text
+            Accessible.onPressAction: mi.triggered()
+
             contentItem: RowLayout {
                 spacing: Theme.sp.s3
                 Icon {
@@ -509,6 +595,8 @@ Rectangle {
                     color: !mi.enabled ? Theme.fg3 : mi.labelColor
                     Layout.fillWidth: true
                     verticalAlignment: Text.AlignVCenter
+                    // The row is the node; its label is not a second one.
+                    Accessible.ignored: true
                 }
             }
             background: Rectangle {
@@ -521,6 +609,8 @@ Rectangle {
         MemberCtxItem {
             text: "View profile"
             iconName: "at"
+            Accessible.name: qsTr("View profile of %1").arg(
+                                 memberContextMenu.displayName)
             onTriggered: {
                 memberProfileCard.userId = memberContextMenu.userId;
                 memberProfileCard.profileDisplayName = memberContextMenu.displayName;
@@ -534,6 +624,8 @@ Rectangle {
         MemberCtxItem {
             text: "Send direct message"
             iconName: "send"
+            Accessible.name: qsTr("Send direct message to %1").arg(
+                                 memberContextMenu.displayName)
             enabled: serverManager.activeServer
                      && memberContextMenu.userId !== ""
                      && memberContextMenu.userId !== serverManager.activeServer.userId
@@ -546,6 +638,8 @@ Rectangle {
         MemberCtxItem {
             text: "Copy user ID"
             iconName: "copy"
+            Accessible.name: qsTr("Copy user ID of %1").arg(
+                                 memberContextMenu.displayName)
             onTriggered: {
                 if (serverManager) serverManager.copyToClipboard(memberContextMenu.userId);
             }
@@ -583,17 +677,27 @@ Rectangle {
                         font.pixelSize: Theme.fontSize.sm
                         color: Theme.fg1
                         Layout.fillWidth: true
+                        // Label and readout for the slider below, which
+                        // carries both its name and its value itself.
+                        Accessible.ignored: true
                     }
                     Text {
                         text: Math.round(peerVolumeSlider.value) + "%"
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm
                         color: Theme.fg2
+                        Accessible.ignored: true
                     }
                 }
                 ThemedSlider {
                     id: peerVolumeSlider
                     Layout.fillWidth: true
+                    // ThemedSlider is a Slider, so the role and the value
+                    // come for free; only the label was missing.
+                    Accessible.name: qsTr("Volume for %1").arg(
+                                         memberContextMenu.displayName)
+                    Accessible.description: qsTr(
+                        "How loud you hear this person, on this device only")
                     from: 0; to: 200; stepSize: 5
                     // Set imperatively in the menu's onAboutToShow: the stored
                     // value is not a notifying property, and a binding the
@@ -626,6 +730,12 @@ Rectangle {
             iconName: "lock"
             labelColor: memberContextMenu.isBlocked ? Theme.fg0 : Theme.danger
             visible: !memberContextMenu.isSelf
+            // A menu row, not a toggle: the label is the action about to
+            // happen, so the name follows the label rather than staying a
+            // stable noun with a checked state beside it.
+            Accessible.name: memberContextMenu.isBlocked
+                ? qsTr("Unblock %1").arg(memberContextMenu.displayName)
+                : qsTr("Block %1").arg(memberContextMenu.displayName)
             onTriggered: {
                 var s = serverManager.activeServer;
                 if (!s) return;
@@ -637,6 +747,7 @@ Rectangle {
             text: "Report user…"
             iconName: "bolt"
             visible: !memberContextMenu.isSelf
+            Accessible.name: qsTr("Report %1").arg(memberContextMenu.displayName)
             onTriggered: Window.window.openReportDialog(
                 "user", memberContextMenu.userId,
                 memberContextMenu.displayName, "", "", "")
@@ -654,6 +765,8 @@ Rectangle {
             text: "Manage roles…"
             iconName: "shield"
             visible: memberContextMenu.canManageRoles
+            Accessible.name: qsTr("Manage roles for %1").arg(
+                                 memberContextMenu.displayName)
             onTriggered: roleAssignPopup.openFor(
                 memberContextMenu.userId,
                 memberContextMenu.displayName)

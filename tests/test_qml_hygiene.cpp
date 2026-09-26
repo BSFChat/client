@@ -207,6 +207,74 @@ double deltaE(const Oklab& x, const Oklab& y)
                      + (x.b - y.b) * (x.b - y.b));
 }
 
+
+// Comments blanked rather than removed, so every byte keeps its line.
+// withoutComments() above deletes a block comment outright, which shifts
+// every line below it — fine for the scans that only ask "does this text
+// appear", wrong for one that has to print a line number the reader can
+// open the file at.
+QString commentsBlanked(const QString& src)
+{
+    QString out = src;
+    static const QRegularExpression block(QStringLiteral(R"(/\*.*?\*/)"),
+                                          QRegularExpression::DotMatchesEverythingOption);
+    for (auto it = block.globalMatch(out); it.hasNext();) {
+        const auto m = it.next();
+        for (qsizetype i = m.capturedStart(); i < m.capturedEnd(); ++i)
+            if (out.at(i) != QLatin1Char('\n')) out[i] = QLatin1Char(' ');
+    }
+    static const QRegularExpression line(QStringLiteral("//[^\n]*"));
+    for (auto it = line.globalMatch(out); it.hasNext();) {
+        const auto m = it.next();
+        for (qsizetype i = m.capturedStart(); i < m.capturedEnd(); ++i)
+            out[i] = QLatin1Char(' ');
+    }
+    return out;
+}
+
+// Index of the `}` that closes the `{` at `open`. Textual, so a brace
+// inside a string literal would throw it off; none exists in qml/ today
+// and the guard that uses this says so in its own comment.
+qsizetype matchingBrace(const QString& src, qsizetype open)
+{
+    int depth = 0;
+    for (qsizetype i = open; i < src.size(); ++i) {
+        if (src.at(i) == QLatin1Char('{')) ++depth;
+        else if (src.at(i) == QLatin1Char('}') && --depth == 0) return i;
+    }
+    return src.size() - 1;
+}
+
+// The block's own text with every nested block removed, so a property
+// declared inside a child (a `contentItem:`, a `background:`) does not
+// count as declared on the parent.
+QString directLevel(const QString& src, qsizetype open, qsizetype close)
+{
+    QString out;
+    int depth = 0;
+    for (qsizetype i = open + 1; i < close; ++i) {
+        const QChar c = src.at(i);
+        if (c == QLatin1Char('{')) ++depth;
+        else if (c == QLatin1Char('}')) --depth;
+        else if (depth == 0) out.append(c);
+    }
+    return out;
+}
+
+// The innermost block containing `at`. Walks from the start keeping a
+// stack of open braces; whatever is on top when we reach `at` is it.
+void enclosingBlock(const QString& src, qsizetype at, qsizetype* open, qsizetype* close)
+{
+    QList<qsizetype> stack;
+    for (qsizetype i = 0; i < at; ++i) {
+        if (src.at(i) == QLatin1Char('{')) stack.append(i);
+        else if (src.at(i) == QLatin1Char('}') && !stack.isEmpty()) stack.removeLast();
+    }
+    if (stack.isEmpty()) { *open = -1; *close = -1; return; }
+    *open = stack.last();
+    *close = matchingBrace(src, *open);
+}
+
 } // namespace
 
 class QmlHygieneTest : public QObject {
@@ -2332,7 +2400,14 @@ private slots:
                                                "this rule rather than dropping it")
                                     .arg(file, call)));
             // A screen reader has to be told what it is…
-            QVERIFY2(src.contains(QStringLiteral("Accessible.name: \x22Send")),
+            //
+            // `qsTr("Send` as well as the bare `"Send`: the accessibility
+            // pass settled that every user-facing accessible string goes
+            // through qsTr() (docs/accessibility.md §1), and these two were
+            // the first strings it converted. The rule is that the control
+            // is NAMED, not how the name is spelt.
+            QVERIFY2(src.contains(QStringLiteral("Accessible.name: \x22Send"))
+                         || src.contains(QStringLiteral("Accessible.name: qsTr(\x22Send")),
                      qPrintable(QStringLiteral("%1 has no control named \x22Send…\x22")
                                     .arg(file)));
             // …and a finger has to be able to reach it. An Accessible
@@ -3238,6 +3313,184 @@ private slots:
                      " glyph sitting on an accent background.")
                      .arg(branches)));
     }
+
+    // Every interactive control is named, or says out loud that it is not
+    // a control.
+    //
+    // Qt bridges QAccessible to VoiceOver on macOS and iOS and to TalkBack
+    // on Android automatically — but only for what the QML declares. A
+    // Rectangle with a MouseArea and an Icon in it is, to a screen reader,
+    // an unnamed nothing, and this client was built out of those: before
+    // the annotation pass there were 31 `Accessible.` usages across 9 of
+    // 53 QML files and 258 of 263 interactive controls had no name at all.
+    //
+    // That is not a bug that shows up in a screenshot, which is exactly why
+    // it survived to 0.0.53. It shows up when somebody who cannot see the
+    // screen tries to find the mute button.
+    //
+    // WHAT THIS ENFORCES (docs/accessibility.md is the convention):
+    //
+    //   * a declarative control — Button, ItemDelegate, MenuItem, CheckBox,
+    //     Slider, ComboBox and the rest of kStrict below — must declare
+    //     BOTH Accessible.role and Accessible.name at its own direct level,
+    //     or Accessible.ignored: true.
+    //   * a Themed* wrapper call site needs only Accessible.name; the
+    //     wrapper supplies the role. These deliberately blank out the
+    //     control's built-in text (settings rows label them from a separate
+    //     left-hand column), so without a name they announce as nothing,
+    //     which is how sixteen toggles in ClientSettings came to be
+    //     invisible to a screen reader.
+    //   * a MouseArea or TapHandler that carries a click handler must be
+    //     declared on ITSELF or on the item that owns it. Both are correct
+    //     QML — a MouseArea is an Item — and both appear in the tree.
+    //
+    // "Direct level" means the block's own text with nested blocks removed,
+    // so a name buried in a `contentItem:` does not satisfy the control
+    // that contains it.
+    //
+    // Inline components (`component HeaderButton: Rectangle {`) are matched
+    // on their declaration, which is the right place for them: annotating
+    // the component once covers every instance and means a new instance
+    // cannot be added unnamed.
+    //
+    // WHAT IT DOES NOT CATCH, and is not trying to:
+    //
+    //   * whether the name is any GOOD. A name of "x" passes. This guard
+    //     stops the next two hundred controls from being added unnamed; it
+    //     cannot review prose.
+    //   * whether the name is accurate, whether focus order makes sense, or
+    //     whether a toggle reports the state it actually has.
+    //   * custom wrapper types that are not in the lists below. Adding a new
+    //     wrapper means adding it here.
+    //   * braces inside string literals. The brace walk is textual (the same
+    //     trade-off every other scan in this file makes), so a QML string
+    //     holding an unbalanced `{` would mis-scope one block. None exists
+    //     today; if one appears, this guard misreports rather than crashes.
+    //
+    // It is a source scan for the usual reason: the BSFChat QML module is
+    // compiled into the app binary, so no test target can instantiate a
+    // component. Once qml/ moves onto a library target, this should be
+    // replaced by a walk of the real QAccessible tree, which could assert
+    // the far stronger property that every focusable node HAS a name at
+    // runtime, including ones Qt synthesises. Until then, text.
+    void everyInteractiveControlIsNamedOrDeliberatelyIgnored()
+    {
+        // Controls that must carry their own role and name.
+        static const QStringList kStrict = {
+            QStringLiteral("Button"),       QStringLiteral("ToolButton"),
+            QStringLiteral("RoundButton"),  QStringLiteral("TabButton"),
+            QStringLiteral("ItemDelegate"), QStringLiteral("MenuItem"),
+            QStringLiteral("SwipeDelegate"),QStringLiteral("CheckBox"),
+            QStringLiteral("RadioButton"),  QStringLiteral("Switch"),
+            QStringLiteral("Slider"),       QStringLiteral("ComboBox"),
+            QStringLiteral("SpinBox"),      QStringLiteral("Dial"),
+        };
+        // Our own wrappers. Each one's root IS one of the above and
+        // declares the role there, so a call site owes only a name.
+        static const QStringList kWrappers = {
+            QStringLiteral("ThemedCheckBox"), QStringLiteral("ThemedSwitch"),
+            QStringLiteral("ThemedSlider"),   QStringLiteral("ThemedComboBox"),
+        };
+        // Input handlers. Only interesting when they actually do something
+        // on a click — a hover-only MouseArea is plumbing, not a control.
+        static const QStringList kHandlers = {
+            QStringLiteral("MouseArea"), QStringLiteral("TapHandler"),
+        };
+
+        const QStringList every = kStrict + kWrappers + kHandlers;
+        // `component Foo: Bar {` is matched on Bar, so an inline component
+        // is checked once at its declaration.
+        const QRegularExpression decl(
+            QStringLiteral(R"(^[ \t]*(?:component\s+\w+\s*:\s*)?(%1)\s*\{)")
+                .arg(every.join(QLatin1Char('|'))),
+            QRegularExpression::MultilineOption);
+        static const QRegularExpression clickHandler(
+            QStringLiteral(R"(\bon(?:Clicked|Tapped|DoubleClicked|SingleTapped)\s*:)"));
+        static const QRegularExpression ignored(
+            QStringLiteral(R"(Accessible\.ignored\s*:\s*true)"));
+
+        const QStringList qml = filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
+                                           QStringLiteral("*.qml"));
+        QVERIFY2(!qml.isEmpty(), "no QML found under BSFCHAT_QML_DIR");
+
+        QStringList offenders;
+        int checked = 0;
+        for (const QString& path : qml) {
+            // Comments replaced by blanks rather than deleted, so the line
+            // number in a failure is the line in the file the reader will
+            // open — the shared withoutComments() eats newlines inside a
+            // block comment and would report every offender below one at
+            // the wrong place.
+            const QString src = commentsBlanked(readAll(path));
+            const QString file = QFileInfo(path).fileName();
+
+            for (auto it = decl.globalMatch(src); it.hasNext();) {
+                const auto m = it.next();
+                const QString type = m.captured(1);
+                const qsizetype open = src.indexOf(QLatin1Char('{'), m.capturedStart(1));
+                if (open < 0) continue;
+                const qsizetype close = matchingBrace(src, open);
+                const QString own = directLevel(src, open, close);
+
+                QString scope = own;
+                if (kHandlers.contains(type)) {
+                    if (!clickHandler.match(own).hasMatch()) continue;
+                    ++checked;
+                    // Declared on the handler itself is fine and common.
+                    if (ignored.match(own).hasMatch()
+                        || (own.contains(QStringLiteral("Accessible.role"))
+                            && own.contains(QStringLiteral("Accessible.name"))))
+                        continue;
+                    // Otherwise it belongs on the item that owns it.
+                    qsizetype encOpen = -1, encClose = -1;
+                    enclosingBlock(src, m.capturedStart(1), &encOpen, &encClose);
+                    scope = encOpen < 0 ? QString()
+                                        : directLevel(src, encOpen, encClose);
+                } else {
+                    ++checked;
+                }
+
+                if (ignored.match(scope).hasMatch()) continue;
+                const bool named = scope.contains(QStringLiteral("Accessible.name"));
+                const bool roled = scope.contains(QStringLiteral("Accessible.role"));
+                if (kWrappers.contains(type) ? named : (named && roled)) continue;
+
+                offenders << QStringLiteral("%1:%2  %3")
+                                 .arg(file)
+                                 .arg(src.left(m.capturedStart(1))
+                                          .count(QLatin1Char('\n')) + 1)
+                                 .arg(type);
+            }
+        }
+
+        // Liveness. A text scan that stops matching passes silently and
+        // green, which this repo has been bitten by before — the floor is
+        // set well under the 263 controls that exist today and well over
+        // anything a broken regex would find.
+        QVERIFY2(checked > 0,
+                 "the interactive-control scan matched nothing at all. The "
+                 "regex has stopped describing this codebase — fix it or "
+                 "delete the guard, do not leave it green on an empty set.");
+        QVERIFY2(checked >= 100,
+                 qPrintable(QStringLiteral(
+                     "the interactive-control scan found only %1 controls in "
+                     "the whole of qml/. There were 263 when this guard was "
+                     "written, so either a lot of UI has gone or the match "
+                     "has broken. Either way this guard is no longer "
+                     "checking what it claims to.").arg(checked)));
+
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "%1 interactive control(s) carry no accessible name, so "
+                     "a screen reader announces them as nothing. Give each "
+                     "one Accessible.role + Accessible.name (a Themed* "
+                     "wrapper needs only the name), or, if it really is "
+                     "decorative or a dismiss-overlay, Accessible.ignored: "
+                     "true. See docs/accessibility.md.\n    %2")
+                     .arg(offenders.size())
+                     .arg(offenders.join(QStringLiteral("\n    ")))));
+    }
+
 
 private:
     // The text between the braces of the first block whose opening matches

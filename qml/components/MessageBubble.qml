@@ -127,6 +127,100 @@ Item {
     property string threadRootId: ""
     property int threadReplyCount: 0
 
+    // ── Accessibility ────────────────────────────────────────────────
+    //
+    // A bubble is a dozen Text elements: an avatar initial, a sender
+    // name, a timestamp, a reply preamble in two parts, a body that the
+    // markdown renderer may have cut into styled spans, a filename, a
+    // size, and a chip per reaction. Qt gives every one of them a default
+    // StaticText interface, so left alone a screen reader reads a message
+    // in twelve swipes and it sounds like a stack trace.
+    //
+    // So: THE BUBBLE IS THE NODE. Every Text that contributes to the
+    // sentence below carries Accessible.ignored, and the sentence is
+    // assembled here, once, in one place. The bubble's interactive
+    // children — hover actions, reaction chips, the file card, the
+    // sender — are NOT ignored: they stay separately reachable, because
+    // they are separately actionable. docs/accessibility.md §7.
+
+    // What was sent, as a clause with the sender in it. Reads from
+    // `body`, never `formattedBody`: the latter is HTML, and a screen
+    // reader handed "<span style=…>" reads the markup out.
+    readonly property string _spokenSaid: {
+        var who = bubble.senderDisplayName;
+        var cap = bubble.body;
+        switch (bubble.msgtype) {
+        case "m.image":
+            return bubble.mediaFileName !== ""
+                ? qsTr("%1 sent an image: %2").arg(who).arg(bubble.mediaFileName)
+                : qsTr("%1 sent an image").arg(who);
+        case "m.video":
+            return bubble.mediaFileName !== ""
+                ? qsTr("%1 sent a video: %2").arg(who).arg(bubble.mediaFileName)
+                : qsTr("%1 sent a video").arg(who);
+        case "m.audio":
+            return bubble.mediaFileName !== ""
+                ? qsTr("%1 sent an audio clip: %2").arg(who).arg(bubble.mediaFileName)
+                : qsTr("%1 sent an audio clip").arg(who);
+        case "m.file":
+            return bubble.mediaFileName !== ""
+                ? qsTr("%1 sent a file: %2").arg(who).arg(bubble.mediaFileName)
+                : qsTr("%1 sent a file").arg(who);
+        // "/me waves" renders as "* josh waves" on screen; spoken, the
+        // asterisk is noise and the third person is the whole point.
+        case "m.emote":
+            return qsTr("%1 %2").arg(who).arg(cap);
+        }
+        return qsTr("%1: %2").arg(who).arg(cap);
+    }
+
+    // Spoken timestamp. Same today/yesterday/absolute shape the visible
+    // one uses, but through Locale formats rather than a hard-coded
+    // "MM/dd/yyyy", because a screen reader says a date better than it
+    // says a slash-separated number.
+    readonly property string _spokenTime: {
+        var d = new Date(bubble.timestamp);
+        var t = d.toLocaleTimeString(Qt.locale(), Locale.ShortFormat);
+        var today = new Date();
+        var yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+        if (d.toDateString() === today.toDateString())
+            return qsTr("Today at %1").arg(t);
+        if (d.toDateString() === yesterday.toDateString())
+            return qsTr("Yesterday at %1").arg(t);
+        return qsTr("%1 at %2")
+                 .arg(d.toLocaleDateString(Qt.locale(), Locale.LongFormat)).arg(t);
+    }
+
+    // Order: what makes this message worth stopping on, then who said
+    // what, then when, then the rest. "Mentions you" leads deliberately —
+    // it is the one fact that decides whether to keep listening, and
+    // putting it after a timestamp buries it. Everything else follows
+    // docs/accessibility.md §7: body before time, state suffixes last.
+    Accessible.role: Accessible.StaticText
+    Accessible.name: {
+        var s = [];
+        if (bubble.mentionsMe) s.push(qsTr("Mentions you"));
+        if (bubble.replyToEventId !== "")
+            s.push(qsTr("Replying to %1: %2")
+                     .arg(bubble.replyToSender !== "" ? bubble.replyToSender
+                                                      : qsTr("an unknown sender"))
+                     .arg(bubble.replyPreview !== "" ? bubble.replyPreview
+                                                     : qsTr("message unavailable")));
+        if (bubble.senderIsBot)
+            s.push(qsTr("From a bot account"));
+        s.push(bubble._spokenSaid);
+        s.push(bubble._spokenTime);
+        if (bubble.edited) s.push(qsTr("Edited"));
+        if (bubble.deliveryState === 1) s.push(qsTr("Sending"));
+        else if (bubble.deliveryState === 2) s.push(qsTr("Not sent"));
+        var rc = (bubble.reactions && bubble.reactions.length) ? bubble.reactions.length : 0;
+        if (rc > 0) s.push(qsTr("%n reaction(s)", "", rc));
+        if (bubble.threadReplyCount > 0)
+            s.push(qsTr("%n reply(s) in thread", "", bubble.threadReplyCount));
+        return s.join(qsTr(". "));
+    }
+
     // URLs to unfurl — extracted once per body change. Capped at 2 so
     // a spam-linked message doesn't explode into preview cards.
     readonly property var _previewUrls: {
@@ -278,6 +372,15 @@ Item {
 
         component CtxItem: MenuItem {
             id: ci
+            // Annotated once here rather than at each of the ~a dozen
+            // call sites: the item's own `text` is the label a sighted
+            // user reads, so it is exactly the right accessible name,
+            // and the keyboard shortcut goes in the description where a
+            // screen reader offers it without interrupting the label.
+            Accessible.role: Accessible.MenuItem
+            Accessible.name: ci.text
+            Accessible.description: ci.shortcut
+            Accessible.onPressAction: if (ci.enabled) ci.triggered()
             // Collapse vertical footprint when hidden. Qt Controls Menu
             // doesn't always skip invisible MenuItems in its layout, so
             // an `Edit` item on someone else's message would leave a
@@ -299,6 +402,7 @@ Item {
                 }
                 Text {
                     text: ci.text
+                    Accessible.ignored: true
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.md
                     color: !ci.enabled ? Theme.fg3 : ci.labelColor
@@ -307,6 +411,7 @@ Item {
                 }
                 Text {
                     text: ci.shortcut
+                    Accessible.ignored: true
                     visible: ci.shortcut.length > 0
                     font.family: Theme.fontMono
                     font.pixelSize: Theme.fontSize.xs
@@ -615,6 +720,10 @@ Item {
         Rectangle {
             width: 28; height: 24
             radius: Theme.r1
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Reply to %1").arg(bubble.senderDisplayName)
+            Accessible.onPressAction: bubble.replyRequested(
+                bubble.eventId, bubble.body, bubble.senderDisplayName)
             color: replyMouse.containsMouse ? Theme.bg3 : Theme.bg1
             border.color: Theme.line
             border.width: 1
@@ -638,6 +747,11 @@ Item {
         Rectangle {
             width: 28; height: 24
             radius: Theme.r1
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Forward the message from %1")
+                               .arg(bubble.senderDisplayName)
+            Accessible.onPressAction: bubble.forwardRequested(
+                bubble.eventId, bubble.body, bubble.senderDisplayName)
             color: forwardMouse.containsMouse ? Theme.bg3 : Theme.bg1
             border.color: Theme.line
             border.width: 1
@@ -663,6 +777,10 @@ Item {
         Rectangle {
             width: 28; height: 24
             radius: Theme.r1
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Copy a link to this message")
+            Accessible.description: qsTr("Puts a link on the clipboard that jumps back to this message")
+            Accessible.onPressAction: bubble.copyLinkRequested(bubble.eventId)
             color: copyLinkMouse.containsMouse ? Theme.bg3 : Theme.bg1
             border.color: Theme.line
             border.width: 1
@@ -687,6 +805,9 @@ Item {
             id: reactButton
             width: 28; height: 24
             radius: Theme.r1
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Add a reaction")
+            Accessible.onPressAction: bubble.openReactPicker()
             color: reactMouse.containsMouse || ctxReactPicker.visible
                    ? Theme.bg3 : Theme.bg1
             border.color: Theme.line
@@ -714,6 +835,9 @@ Item {
         Rectangle {
             width: 28; height: 24
             radius: Theme.r1
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Edit your message")
+            Accessible.onPressAction: bubble.editRequested(bubble.eventId, bubble.body)
             color: editMouse.containsMouse ? Theme.bg3 : Theme.bg1
             border.color: Theme.line
             border.width: 1
@@ -751,6 +875,13 @@ Item {
                 id: senderAvatar
                 width: 40
                 height: 40
+                // Same target as the sender name beside it, so it gets
+                // the same label rather than a second, differently-worded
+                // route to the same profile.
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("%1, open profile").arg(bubble.senderDisplayName)
+                Accessible.onPressAction: bubble.senderClicked(
+                    bubble.sender, bubble.senderDisplayName)
                 // Rounded square, not a circle. Every other avatar in
                 // the tree is one — UserSettings.qml says so in as many
                 // words ("64x64 rounded-square ... instead of a circle")
@@ -777,6 +908,9 @@ Item {
                         var s = n.replace(/^[^a-zA-Z0-9]+/, "");
                         return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
                     }
+                    // One letter of decoration. The sender's full name is
+                    // in the bubble's sentence.
+                    Accessible.ignored: true
                     font.family: Theme.fontSans
                     font.pixelSize: 16
                     font.weight: Theme.fontWeight.semibold
@@ -817,6 +951,11 @@ Item {
                     var date = new Date(bubble.timestamp);
                     return date.toLocaleTimeString(Qt.locale(), "HH:mm");
                 }
+                // Reveal-on-hover gutter clock for grouped messages. The
+                // time is in the bubble's sentence whether or not this is
+                // showing, which is the better answer for a reader who
+                // has no hover.
+                Accessible.ignored: true
                 font.pixelSize: 10
                 color: Theme.fg2
                 visible: bubble.bubbleHovered
@@ -835,6 +974,14 @@ Item {
 
                 Text {
                     text: bubble.senderDisplayName
+                    // The name is spoken as part of the message. What is
+                    // worth reaching separately is the ACTION on it, so
+                    // this element is a button onto the profile rather
+                    // than a second reading of the name.
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("%1, open profile").arg(bubble.senderDisplayName)
+                    Accessible.onPressAction: bubble.senderClicked(
+                        bubble.sender, bubble.senderDisplayName)
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.md
                     font.weight: Theme.fontWeight.semibold
@@ -868,6 +1015,11 @@ Item {
                 BotBadge {
                     visible: bubble.senderIsBot
                     Layout.alignment: Qt.AlignVCenter
+                    // The badge names itself "Bot account" for the places
+                    // it stands alone. Here the bubble's sentence already
+                    // says it, so speaking it again would interrupt the
+                    // message between the name and the body.
+                    Accessible.ignored: true
                 }
 
                 Text {
@@ -886,6 +1038,7 @@ Item {
                         }
                         return date.toLocaleDateString(Qt.locale(), "MM/dd/yyyy") + " " + timeStr;
                     }
+                    Accessible.ignored: true
                     font.family: Theme.fontMono
                     font.pixelSize: 11
                     color: Theme.fg3
@@ -912,6 +1065,14 @@ Item {
             Item {
                 Layout.fillWidth: true
                 Layout.preferredHeight: visible ? replyPreambleRow.implicitHeight + 4 : 0
+                // The quoted text is already read as part of the bubble's
+                // sentence (see Accessible.name above), so what this node
+                // is FOR, to a screen reader, is the jump.
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Go to the message from %1 that this replies to")
+                                   .arg(bubble.replyToSender !== "" ? bubble.replyToSender
+                                                                    : qsTr("an unknown sender"))
+                Accessible.onPressAction: bubble.jumpToEvent(bubble.replyToEventId)
                 visible: bubble.replyToEventId !== ""
 
                 RowLayout {
@@ -940,6 +1101,7 @@ Item {
                     Text {
                         text: bubble.replyToSender !== ""
                               ? bubble.replyToSender : "unknown"
+                        Accessible.ignored: true
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm
                         font.weight: Theme.fontWeight.semibold
@@ -950,6 +1112,7 @@ Item {
                         text: bubble.replyPreview !== ""
                               ? bubble.replyPreview
                               : "(message unavailable)"
+                        Accessible.ignored: true
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm
                         color: Theme.fg3
@@ -1068,6 +1231,11 @@ Item {
                                 anchors.fill: parent
                                 color: Theme.bg2
                                 radius: Theme.r2
+                                // Transient chrome over an image whose
+                                // description is already in the bubble's
+                                // sentence. "Loading…" is a spinner in
+                                // words, not information.
+                                Accessible.ignored: true
                                 visible: mediaImage.status === Image.Loading
 
                                 ColumnLayout {
@@ -1082,6 +1250,7 @@ Item {
                                     }
                                     Text {
                                         Layout.alignment: Qt.AlignHCenter
+                                        Accessible.ignored: true
                                         text: "Loading…"
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.sm
@@ -1110,6 +1279,13 @@ Item {
                                 anchors.fill: parent
                                 color: Theme.bg2
                                 radius: Theme.r2
+                                // The failure IS worth saying, and the
+                                // sighted version of it is two lines of
+                                // copy plus an icon. One node, one
+                                // sentence. The two Texts inside stay
+                                // visible; they are read through this.
+                                Accessible.role: Accessible.StaticText
+                                Accessible.name: qsTr("This image could not be loaded")
                                 visible: mediaImage.status === Image.Error
 
                                 ColumnLayout {
@@ -1123,6 +1299,7 @@ Item {
                                     }
                                     Text {
                                         Layout.alignment: Qt.AlignHCenter
+                                        Accessible.ignored: true
                                         text: "Couldn't load image"
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.sm
@@ -1131,6 +1308,7 @@ Item {
                                     }
                                     Text {
                                         Layout.alignment: Qt.AlignHCenter
+                                        Accessible.ignored: true
                                         text: "Middle-click to open it"
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.xs
@@ -1140,6 +1318,17 @@ Item {
                             }
 
                             MouseArea {
+                                // Named on the handler's own node rather
+                                // than on the frame, because the frame
+                                // also holds the loading and error
+                                // states, which speak for themselves.
+                                Accessible.role: Accessible.Button
+                                Accessible.name: bubble.mediaFileName !== ""
+                                    ? qsTr("Open the image %1").arg(bubble.mediaFileName)
+                                    : qsTr("Open this image")
+                                Accessible.onPressAction: bubble.imageOpenRequested(
+                                    bubble.mediaUrl, bubble.mediaMxc,
+                                    bubble.mediaFileName, bubble.mediaFileSize)
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
                                 acceptedButtons: Qt.LeftButton | Qt.MiddleButton
@@ -1175,6 +1364,7 @@ Item {
 
                             Text {
                                 text: bubble.mediaFileName
+                                Accessible.ignored: true
                                 font.pixelSize: Theme.fontSize.sm
                                 color: Theme.fg2
                                 elide: Text.ElideMiddle
@@ -1183,6 +1373,7 @@ Item {
 
                             Text {
                                 text: bubble.mediaFileSize > 0 ? formatFileSize(bubble.mediaFileSize) : ""
+                                Accessible.ignored: true
                                 font.pixelSize: Theme.fontSize.sm
                                 color: Theme.fg2
                                 visible: text !== ""
@@ -1206,6 +1397,23 @@ Item {
                 sourceComponent: Component {
                     Rectangle {
                         id: fileCard
+                        // Size belongs here rather than in the bubble's
+                        // sentence: it is what you want before deciding
+                        // to download, and it is the wrong thing to hear
+                        // in the middle of a conversation.
+                        Accessible.role: Accessible.Button
+                        Accessible.name: bubble.mediaFileName !== ""
+                            ? qsTr("Open the file %1").arg(bubble.mediaFileName)
+                            : qsTr("Open this file")
+                        Accessible.description: bubble.mediaFileSize > 0
+                            ? qsTr("%1, downloads and opens it")
+                                .arg(bubble.formatFileSize(bubble.mediaFileSize))
+                            : qsTr("Downloads and opens it")
+                        Accessible.onPressAction: {
+                            if (serverManager.activeServer)
+                                serverManager.activeServer
+                                    .openMediaExternally(bubble.mediaMxc);
+                        }
                         implicitHeight: fileRow.implicitHeight + Theme.sp.s7
                         implicitWidth: fileRow.implicitWidth + Theme.sp.s7 * 2
                         width: Math.min(360, implicitWidth)
@@ -1252,6 +1460,7 @@ Item {
                                 spacing: 2
                                 Text {
                                     text: bubble.mediaFileName
+                                    Accessible.ignored: true
                                     font.family: Theme.fontSans
                                     font.pixelSize: Theme.fontSize.md
                                     font.weight: Theme.fontWeight.semibold
@@ -1264,6 +1473,10 @@ Item {
                                         ? formatFileSize(bubble.mediaFileSize)
                                           + " · click to open"
                                         : "File · click to open"
+                                    // "click to open" is mouse advice,
+                                    // and the card says what it does in
+                                    // its own description.
+                                    Accessible.ignored: true
                                     font.family: Theme.fontSans
                                     font.pixelSize: Theme.fontSize.sm
                                     color: Theme.fg3
@@ -1301,6 +1514,13 @@ Item {
             // Discord uses.
             TextEdit {
                 Layout.fillWidth: true
+                // The single most important ignore in the file. This is a
+                // RichText TextEdit: its accessible text is the MARKUP,
+                // and the markdown renderer has already cut prose into
+                // styled spans. Left in the tree a screen reader reads
+                // the message a second time, in pieces, with the span
+                // attributes. The plain body is in the bubble's sentence.
+                Accessible.ignored: true
                 visible: bubble.msgtype === "m.text"
                       || (bubble.msgtype !== "m.image"
                           && bubble.msgtype !== "m.video"
@@ -1411,6 +1631,24 @@ Item {
                         id: chip
                         property var entry: modelData
                         property bool reacted: entry && entry.reacted === true
+                        // A chip is a toggle, so it declares checkable /
+                        // checked rather than flipping its label between
+                        // "React" and "Unreact" — docs/accessibility.md
+                        // §5. The count goes in the name because there is
+                        // no attribute for it.
+                        Accessible.role: Accessible.CheckBox
+                        Accessible.checkable: true
+                        Accessible.checked: chip.reacted
+                        Accessible.name: qsTr("%1 reaction, %n so far", "",
+                                              chip.entry ? chip.entry.count : 0)
+                                           .arg(chip.entry ? chip.entry.emoji : "")
+                        Accessible.description: chip.reacted
+                            ? qsTr("You reacted. Activate to take it back.")
+                            : qsTr("Activate to react with this.")
+                        Accessible.onToggleAction: if (chip.entry)
+                            bubble.reactionToggled(bubble.eventId, chip.entry.emoji)
+                        Accessible.onPressAction: if (chip.entry)
+                            bubble.reactionToggled(bubble.eventId, chip.entry.emoji)
                         height: 22
                         width: chipRow.implicitWidth + 14
                         // r5 per SPEC — pill-ish rounded tag.
@@ -1441,12 +1679,14 @@ Item {
                             spacing: 5
                             Text {
                                 text: entry ? entry.emoji : ""
+                                Accessible.ignored: true
                                 font.family: Theme.fontSans
                                 font.pixelSize: 13
                                 anchors.verticalCenter: parent.verticalCenter
                             }
                             Text {
                                 text: entry ? entry.count : 0
+                                Accessible.ignored: true
                                 font.family: Theme.fontMono
                                 font.pixelSize: 11
                                 font.weight: chip.reacted
@@ -1559,6 +1799,8 @@ Item {
             anchors.fill: parent
             spacing: Theme.sp.s3
             Text {
+                Accessible.role: Accessible.StaticText
+                Accessible.name: qsTr("Select text")
                 text: "Select text"
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.md
@@ -1595,6 +1837,11 @@ Item {
                 // new users a clear affordance.
                 Button {
                     text: "Copy"
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Copy")
+                    Accessible.description: qsTr("Copies the selection, or the whole message if nothing is selected")
+                    Accessible.onPressAction: copyAllButton.clicked()
+                    id: copyAllButton
                     onClicked: {
                         var toCopy = bodyEdit.selectedText.length > 0
                             ? bodyEdit.selectedText : bubble.body;
@@ -1623,7 +1870,12 @@ Item {
                 }
 
                 Button {
+                    id: selectionDoneButton
                     text: "Done"
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Done")
+                    Accessible.description: qsTr("Closes the text selection sheet")
+                    Accessible.onPressAction: selectionDoneButton.clicked()
                     onClicked: textSelectionSheet.close()
                     contentItem: Text {
                         text: parent.text
@@ -1655,6 +1907,7 @@ Item {
         anchors.bottom: parent.bottom
         width: 2
         color: Theme.danger
+        Accessible.ignored: true
     }
 
     Text {
@@ -1663,6 +1916,8 @@ Item {
         anchors.rightMargin: Theme.sp.s3
         anchors.top: parent.top
         text: qsTr("Not sent")
+        // Already the last clause of the bubble's sentence.
+        Accessible.ignored: true
         color: Theme.danger
         font.family: Theme.fontSans
         font.pixelSize: Theme.fontSize.xs

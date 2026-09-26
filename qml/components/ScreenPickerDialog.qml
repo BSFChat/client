@@ -33,9 +33,14 @@ Dialog {
     modal: true
     title: ""
 
+
     // Window lists churn constantly — re-enumerate on every open so
     // the user sees what's on their desktop right now.
     onOpened: {
+        // §9. No field here and no primary button — the thing to do is pick
+        // a target — so focus starts on the window list. Before the early
+        // return below, which is about enumeration, not about focus.
+        windowList.forceActiveFocus();
         if (typeof screenShare === "undefined") return;
         screenShare.refreshWindows();
         // Default to whatever the user asked for globally, re-read on every
@@ -52,6 +57,12 @@ Dialog {
         border.color: Theme.line
         border.width: 1
     }
+
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: qsTr("Share your screen")
 
     contentItem: ColumnLayout {
         spacing: Theme.sp.s4
@@ -92,6 +103,8 @@ Dialog {
         ColumnLayout {
             Layout.fillWidth: true
             spacing: Theme.sp.s2
+            Accessible.role: Accessible.List
+            Accessible.name: qsTr("Displays")
 
             Repeater {
                 model: typeof screenShare !== "undefined"
@@ -108,6 +121,26 @@ Dialog {
                     border.color: rowHover.containsMouse ? Theme.accent : Theme.line
                     border.width: 1
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                    // A tile with no name is a thumbnail, i.e. nothing at all,
+                    // to a screen reader. The name carries everything the card
+                    // shows: which display, its size, and the Primary badge,
+                    // which is why that badge is ignored below (§6, §7).
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: row.modelData.primary === true
+                        ? qsTr("%1, primary display, %2 by %3")
+                              .arg(row.modelData.name)
+                              .arg(row.modelData.width)
+                              .arg(row.modelData.height)
+                        : qsTr("%1, %2 by %3")
+                              .arg(row.modelData.name)
+                              .arg(row.modelData.width)
+                              .arg(row.modelData.height)
+                    Accessible.description: qsTr("Share this display with the call")
+                    Accessible.onPressAction: {
+                        screenShare.startForScreen(row.modelData.index);
+                        dialog.close();
+                    }
 
                     RowLayout {
                         id: rowContent
@@ -147,6 +180,8 @@ Dialog {
 
                         Rectangle {
                             visible: row.modelData.primary === true
+                            // Said by the tile's own name already (§7).
+                            Accessible.ignored: true
                             implicitWidth: primaryLabel.implicitWidth + Theme.sp.s2 * 2
                             implicitHeight: primaryLabel.implicitHeight + Theme.sp.s1 * 2
                             radius: Theme.r1
@@ -205,6 +240,8 @@ Dialog {
         ListView {
             id: windowList
             Layout.fillWidth: true
+            Accessible.role: Accessible.List
+            Accessible.name: qsTr("Windows")
             implicitHeight: Math.min(contentHeight, 240)
             visible: count > 0
             clip: true
@@ -225,6 +262,16 @@ Dialog {
                 border.color: winHover.containsMouse ? Theme.accent : Theme.line
                 border.width: 1
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                // Named after the window it would share — the one fact that
+                // tells these tiles apart (§4).
+                Accessible.role: Accessible.ListItem
+                Accessible.name: winRow.modelData.name
+                Accessible.description: qsTr("Share this window with the call")
+                Accessible.onPressAction: {
+                    screenShare.startForWindow(winRow.modelData.index);
+                    dialog.close();
+                }
 
                 RowLayout {
                     id: winContent
@@ -311,6 +358,10 @@ Dialog {
 
             ThemedSwitch {
                 id: hideIpSwitch
+                // ThemedSwitch declares the CheckBox role and the
+                // checkable/checked pair; it has no `text`, so without a name
+                // here it announces as an unnamed control (§5).
+                Accessible.name: qsTr("Hide my IP address while sharing")
                 // Offered disabled, with the reason above, rather than hidden:
                 // an option that silently is not there teaches nobody why.
                 enabled: typeof screenShare !== "undefined"
@@ -326,6 +377,9 @@ Dialog {
             Button {
                 text: "Cancel"
                 flat: true
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Cancel")
+                Accessible.onPressAction: dialog.close()
                 contentItem: Text {
                     text: parent.text
                     font.family: Theme.fontSans

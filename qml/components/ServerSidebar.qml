@@ -48,6 +48,15 @@ Rectangle {
                 Behavior on radius { NumberAnimation { duration: Theme.motion.fastMs } }
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
+                // The chip is a peer of the server tiles below and takes
+                // part in the same single selection, so it gets the same
+                // role. Icon-only: without this it is an unnamed square.
+                Accessible.role: Accessible.ListItem
+                Accessible.name: dmEntry._active
+                    ? qsTr("Direct messages, showing")
+                    : qsTr("Direct messages")
+                Accessible.onPressAction: serverManager.setViewingDms(true)
+
                 Icon {
                     anchors.centerIn: parent
                     name: "at"
@@ -80,6 +89,8 @@ Rectangle {
                 height: 28
                 radius: 2
                 color: Theme.fg0
+                // Draws the selection the chip already announces.
+                Accessible.ignored: true
             }
         }
 
@@ -90,6 +101,7 @@ Rectangle {
             Layout.preferredWidth: 28
             Layout.preferredHeight: 1
             color: Theme.lineSoft
+            Accessible.ignored: true
         }
 
         // Server icons.
@@ -119,6 +131,24 @@ Rectangle {
                 readonly property bool hasUnread: (model.unreadCount || 0) > 0
                 readonly property bool isHovered: hoverArea.containsMouse
 
+                // The whole tile is one row: name, whether it is the one
+                // being shown, and unread. The letter/icon inside it and
+                // the unread dot beside it are ignored below, so this is
+                // read once rather than as three fragments.
+                Accessible.role: Accessible.ListItem
+                Accessible.name: {
+                    var n = model.displayName || "";
+                    if (row.isActive) return qsTr("%1, showing").arg(n);
+                    if (row.hasUnread)
+                        return qsTr("%1, %n unread", "", model.unreadCount || 0)
+                               .arg(n);
+                    return n;
+                }
+                Accessible.onPressAction: {
+                    serverManager.setViewingDms(false);
+                    serverManager.setActiveServer(index);
+                }
+
                 // Left-edge active / hover indicator bar. Active = tall,
                 // hover (inactive) = half-height nudge, unread (inactive,
                 // not hovered) = short dot, otherwise hidden.
@@ -134,6 +164,9 @@ Rectangle {
                           : row.hasUnread ? 8
                           : 0
                     visible: height > 0
+                    // Pure affordance for the row's selected / unread
+                    // state, both of which the row's name carries.
+                    Accessible.ignored: true
                     Behavior on height {
                         NumberAnimation { duration: Theme.motion.fastMs
                                           easing.type: Easing.BezierSpline
@@ -180,6 +213,8 @@ Rectangle {
                         font.pixelSize: 18
                         font.weight: Theme.fontWeight.semibold
                         color: row.isActive ? Theme.onAccent : Theme.fg0
+                        // A picture of the server's initial, not a fact.
+                        Accessible.ignored: true
                     }
 
                     // Uploaded server icon. The containing Rectangle is
@@ -218,6 +253,8 @@ Rectangle {
                     anchors.rightMargin: -1
                     anchors.bottomMargin: -1
                     visible: !row.isActive && row.hasUnread
+                    // "Unread" is already in the row's name.
+                    Accessible.ignored: true
                 }
 
                 MouseArea {
@@ -278,6 +315,12 @@ Rectangle {
                                                       easing.type: Easing.BezierSpline
                                                       easing.bezierCurve: Theme.motion.bezier } }
 
+                // Icon-only: the tooltip below is the name it would have
+                // had, so it is the name it gets.
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Add server")
+                Accessible.onPressAction: Window.window.openLoginDialog()
+
                 Icon {
                     anchors.centerIn: parent
                     name: "plus"
@@ -328,6 +371,19 @@ Rectangle {
         MenuItem {
             enabled: false
             implicitHeight: headerCol.implicitHeight + Theme.sp.s3 * 2
+            // Not a control — it is the menu's title, and it is the only
+            // place the address and the live connection state are said.
+            // Said once, here, with the dot and both lines below ignored.
+            Accessible.role: Accessible.StaticText
+            Accessible.name: {
+                var c = serverContextMenu.conn;
+                var st = !c ? qsTr("Unknown")
+                       : c.connectionStatus === 1 ? qsTr("Connected")
+                       : c.connectionStatus === 2 ? qsTr("Reconnecting")
+                       : (c.syncErrorMessage && c.syncErrorMessage.length > 0
+                          ? c.syncErrorMessage : qsTr("Disconnected"));
+                return qsTr("%1, %2").arg(serverContextMenu.url).arg(st);
+            }
             contentItem: Column {
                 id: headerCol
                 spacing: 2
@@ -339,6 +395,7 @@ Rectangle {
                     color: Theme.fg1
                     elide: Text.ElideMiddle
                     width: 240 - Theme.sp.s3 * 2
+                    Accessible.ignored: true
                 }
                 Row {
                     spacing: Theme.sp.s2
@@ -357,6 +414,7 @@ Rectangle {
                         color: parent.st === 1 ? Theme.online
                              : parent.st === 2 ? Theme.warn
                              : Theme.danger
+                        Accessible.ignored: true
                     }
                     Text {
                         text: {
@@ -374,6 +432,7 @@ Rectangle {
                              : Theme.danger
                         elide: Text.ElideRight
                         width: 240 - Theme.sp.s3 * 2 - 14
+                        Accessible.ignored: true
                     }
                 }
             }
@@ -393,6 +452,14 @@ Rectangle {
             height: implicitHeight
             property string iconName: ""
             property color labelColor: Theme.fg0
+
+            // Floor for every row in this menu. Each instance names the
+            // server it acts on, because "Remove server…" read out of
+            // context does not say which one.
+            Accessible.role: Accessible.Button
+            Accessible.name: mi.text
+            Accessible.onPressAction: mi.triggered()
+
             contentItem: RowLayout {
                 spacing: Theme.sp.s3
                 Icon {
@@ -408,6 +475,7 @@ Rectangle {
                     color: !mi.enabled ? Theme.fg3 : mi.labelColor
                     Layout.fillWidth: true
                     verticalAlignment: Text.AlignVCenter
+                    Accessible.ignored: true
                 }
             }
             background: Rectangle {
@@ -420,11 +488,13 @@ Rectangle {
         ServerCtxItem {
             text: "Copy address"
             iconName: "copy"
+            Accessible.name: qsTr("Copy address %1").arg(serverContextMenu.url)
             onTriggered: serverManager.copyToClipboard(serverContextMenu.url)
         }
         ServerCtxItem {
             text: "Edit address…"
             iconName: "edit"
+            Accessible.name: qsTr("Edit address %1").arg(serverContextMenu.url)
             onTriggered: {
                 editServerDialog.serverIndex = serverContextMenu.serverIndex;
                 editServerDialog.originalUrl = serverContextMenu.url;
@@ -434,6 +504,7 @@ Rectangle {
         ServerCtxItem {
             text: "Reconnect"
             iconName: "signal"
+            Accessible.name: qsTr("Reconnect to %1").arg(serverContextMenu.url)
             // Hidden once the homeserver has rejected our token: a redial
             // cannot help, and offering it there is what sent people round
             // the loop in the 2026-09-19 purge. "Sign in again" replaces it.
@@ -446,6 +517,12 @@ Rectangle {
                   && serverContextMenu.conn.reauthInProgress
                   ? "Signing in…" : "Sign in again"
             iconName: "signal"
+            // The label flips to a progress word mid-action; the name
+            // stays the action and the progress moves to the description.
+            Accessible.name: qsTr("Sign in again to %1").arg(serverContextMenu.url)
+            Accessible.description: serverContextMenu.conn
+                                    && serverContextMenu.conn.reauthInProgress
+                ? qsTr("Signing in") : qsTr("This server rejected the saved login")
             visible: !!serverContextMenu.conn
                      && serverContextMenu.conn.needsReauth === true
             enabled: visible
@@ -465,6 +542,7 @@ Rectangle {
             text: "Remove server…"
             iconName: "x"
             labelColor: Theme.danger
+            Accessible.name: qsTr("Remove server %1").arg(serverContextMenu.url)
             onTriggered: {
                 removeServerDialog.serverIndex = serverContextMenu.serverIndex;
                 removeServerDialog.open();
@@ -521,6 +599,8 @@ Rectangle {
             TextField {
                 id: editUrlField
                 Layout.fillWidth: true
+                Accessible.role: Accessible.EditableText
+                Accessible.name: qsTr("Server address")
                 placeholderText: "http://localhost:8448"
                 placeholderTextColor: Theme.fg3
                 color: Theme.fg0
@@ -543,12 +623,19 @@ Rectangle {
                 Button {
                     text: "Cancel"
                     flat: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Cancel")
+                    Accessible.description: qsTr("Leave the address unchanged")
+                    Accessible.onPressAction: editServerDialog.close()
                     contentItem: Text {
                         text: parent.text
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md
                         color: Theme.fg1
                         horizontalAlignment: Text.AlignHCenter
+                        // The button is the node; its label is not a
+                        // second one. Same everywhere below.
+                        Accessible.ignored: true
                     }
                     background: Rectangle {
                         color: parent.hovered ? Theme.bg2 : "transparent"
@@ -559,6 +646,9 @@ Rectangle {
                 Button {
                     text: "Save"
                     enabled: editUrlField.text.trim().length > 0
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Save server address")
+                    Accessible.onPressAction: editServerDialog.saveAndClose()
                     contentItem: Text {
                         text: parent.text
                         font.family: Theme.fontSans
@@ -566,6 +656,7 @@ Rectangle {
                         font.weight: Theme.fontWeight.semibold
                         color: parent.enabled ? Theme.onAccent : Theme.fg3
                         horizontalAlignment: Text.AlignHCenter
+                        Accessible.ignored: true
                     }
                     background: Rectangle {
                         color: parent.enabled
@@ -632,12 +723,17 @@ Rectangle {
                 Button {
                     text: "Cancel"
                     flat: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Cancel")
+                    Accessible.description: qsTr("Keep the server")
+                    Accessible.onPressAction: removeServerDialog.close()
                     contentItem: Text {
                         text: parent.text
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md
                         color: Theme.fg1
                         horizontalAlignment: Text.AlignHCenter
+                        Accessible.ignored: true
                     }
                     background: Rectangle {
                         color: parent.hovered ? Theme.bg2 : "transparent"
@@ -647,6 +743,14 @@ Rectangle {
                 }
                 Button {
                     text: "Remove"
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Remove server")
+                    Accessible.description: qsTr(
+                        "Removes the server and its saved login from this device")
+                    Accessible.onPressAction: {
+                        serverManager.removeServer(removeServerDialog.serverIndex);
+                        removeServerDialog.close();
+                    }
                     contentItem: Text {
                         text: parent.text
                         font.family: Theme.fontSans
@@ -654,6 +758,7 @@ Rectangle {
                         font.weight: Theme.fontWeight.semibold
                         color: Theme.onAccent
                         horizontalAlignment: Text.AlignHCenter
+                        Accessible.ignored: true
                     }
                     background: Rectangle {
                         color: parent.hovered ? Qt.lighter(Theme.danger, 1.1) : Theme.danger

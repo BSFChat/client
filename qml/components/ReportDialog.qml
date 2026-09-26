@@ -81,6 +81,7 @@ Popup {
     closePolicy: Popup.CloseOnEscape
     padding: Theme.sp.s7
 
+
     enter: Transition {
         NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 150; easing.type: Easing.OutCubic }
         NumberAnimation { property: "scale"; from: 0.95; to: 1.0; duration: 150; easing.type: Easing.OutCubic }
@@ -160,6 +161,14 @@ Popup {
         }
     }
 
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: reportDialog.kind === "message"
+        ? qsTr("Report this message")
+        : qsTr("Report %1").arg(reportDialog.targetName)
+
     contentItem: Flickable {
         id: contentFlick
         // The Popup takes its implicitHeight from this, and a Flickable's own
@@ -193,6 +202,8 @@ Popup {
                     Layout.preferredHeight: Theme.controlHeight.sm
                     radius: Theme.r2
                     color: Qt.rgba(Theme.warn.r, Theme.warn.g, Theme.warn.b, 0.15)
+                    // Decorative tint behind the title glyph (§6).
+                    Accessible.ignored: true
                     Icon {
                         anchors.centerIn: parent
                         name: "bolt"
@@ -288,6 +299,9 @@ Popup {
                 placeholderTextColor: Theme.fg3
                 color: Theme.fg0
                 wrapMode: TextEdit.Wrap
+                Accessible.role: Accessible.EditableText
+                Accessible.name: qsTr("What is wrong with it?")
+                Accessible.description: qsTr("Optional. The administrators read this alongside the report.")
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.md
                 leftPadding: Theme.sp.s4
@@ -325,6 +339,9 @@ Popup {
                 visible: !reportDialog.alreadyBlocked
                 enabled: !reportDialog.busy
                 text: "Also block " + reportDialog.targetName
+                // ThemedCheckBox already declares the CheckBox role and the
+                // checkable/checked pair (§5); only the name is per-call-site.
+                Accessible.name: qsTr("Also block %1").arg(reportDialog.targetName)
             }
             Text {
                 Layout.fillWidth: true
@@ -352,6 +369,13 @@ Popup {
                 Layout.fillWidth: true
                 visible: reportDialog.errorMessage.length > 0
                 text: reportDialog.errorMessage
+                // The rate-limit refusal says WHEN to try again, which is no
+                // use to somebody who never hears it (§8).
+                Accessible.role: Accessible.AlertMessage
+                Accessible.name: reportDialog.errorMessage
+                onVisibleChanged: if (visible)
+                                      Accessible.announce(Accessible.name,
+                                                          Accessible.Assertive)
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
                 color: Theme.danger
@@ -368,6 +392,9 @@ Popup {
                 Button {
                     id: reportCancelBtn
                     enabled: !reportDialog.busy
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Cancel")
+                    Accessible.onPressAction: reportDialog.close()
                     implicitHeight: Theme.controlHeight.md
                     contentItem: Text {
                         text: "Cancel"
@@ -392,6 +419,11 @@ Popup {
                 Button {
                     id: reportSendBtn
                     enabled: !reportDialog.busy && reasonField.text.length <= 1024
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Send report")
+                    Accessible.description: qsTr("Sends this to the administrators of this server")
+                    Accessible.onPressAction: if (reportSendBtn.enabled)
+                                                  reportSendBtn.clicked()
                     implicitHeight: Theme.controlHeight.md
                     contentItem: Text {
                         text: reportDialog.busy ? "Sending…" : "Send report"

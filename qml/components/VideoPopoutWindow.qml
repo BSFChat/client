@@ -74,6 +74,18 @@ Window {
     flags: Qt.Window | (pop.pinned ? Qt.WindowStaysOnTopHint : 0)
     property bool pinned: false
 
+    // Spoken name for this window and for the picture in it. Built with
+    // qsTr() rather than reused from VideoWindows.windowTitle(), which
+    // assembles a VISIBLE OS title out of untranslated fragments.
+    readonly property string _a11yName: {
+        var who = pop.displayName || (pop.feed ? pop.feed.userId : "");
+        if (pop.feed && pop.feed.isSelf === true)
+            return pop._isScreen ? qsTr("Your screen share")
+                                 : qsTr("Your camera");
+        return pop._isScreen ? qsTr("Screen share from %1").arg(who)
+                             : qsTr("Camera from %1").arg(who);
+    }
+
     minimumWidth: VideoWindows.minimumSize().width
     minimumHeight: VideoWindows.minimumSize().height
 
@@ -182,6 +194,14 @@ Window {
         anchors.fill: parent
         fillMode: VideoOutput.PreserveAspectFit
         visible: pop._live
+        // The picture is the whole window's content. Accessible attaches
+        // only to an Item, so this — not the Window root — is the node
+        // that says whose feed this is; the window itself is announced
+        // by `title` above.
+        Accessible.role: Accessible.Graphic
+        Accessible.name: pop._a11yName
+        Accessible.description:
+            qsTr("Popped-out video window. Press Escape to close.")
         Component.onCompleted: {
             var s = serverManager.activeServer;
             VideoWindows.attachFeed(
@@ -214,6 +234,9 @@ Window {
 
     MouseArea {
         id: hover
+        // Hover detector for the toolbar, not a control: its double-click
+        // is a shortcut for the named Full screen button below.
+        Accessible.ignored: true
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton
@@ -249,6 +272,15 @@ Window {
                 radius: Theme.r1
                 color: pop.pinned ? Theme.accentGlow
                      : (pinHover.containsMouse ? Theme.bg3 : "transparent")
+                Accessible.role: Accessible.CheckBox
+                Accessible.checkable: true
+                Accessible.checked: pop.pinned
+                Accessible.name: qsTr("Keep on top")
+                Accessible.description: pop.pinned
+                    ? qsTr("Currently kept on top. Activate to stop.")
+                    : qsTr("Currently ordered with other windows. Activate to keep on top.")
+                Accessible.onToggleAction: pop.pinned = !pop.pinned
+                Accessible.onPressAction: pop.pinned = !pop.pinned
                 Icon {
                     anchors.centerIn: parent
                     name: "pin"
@@ -274,6 +306,10 @@ Window {
                 anchors.verticalCenter: parent.verticalCenter
                 radius: Theme.r1
                 color: fsHover.containsMouse ? Theme.bg3 : "transparent"
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Full screen")
+                Accessible.description: qsTr("Fill the screen with this feed")
+                Accessible.onPressAction: pop.toggleFullscreen()
                 Icon {
                     anchors.centerIn: parent
                     name: "expand"

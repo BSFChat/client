@@ -98,6 +98,21 @@ Rectangle {
         property bool   danger:  false
         property string tooltip: ""
         property bool   enabled2: true
+
+        // ── Accessibility ────────────────────────────────────────────
+        //
+        // Every control in this dock is a bare glyph. Without a name a
+        // screen-reader user running a call gets five identical unnamed
+        // buttons in a row, one of which hangs up.
+        //
+        // The default here is the tooltip, which is the label a sighted
+        // user gets on hover. Every button that is a TOGGLE overrides it
+        // with a stable noun plus checkable/checked, because the tooltip
+        // flips wording ("Mute" → "Unmute") and a name that changes under
+        // you is not a name. docs/accessibility.md §5.
+        Accessible.role: Accessible.Button
+        Accessible.name: btn.tooltip
+        Accessible.onPressAction: if (btn.enabled2) btn.clicked()
         signal clicked()
         // Secondary action. Only the camera button uses it so far (its
         // per-share IP-privacy option); every other DockButton simply has no
@@ -182,8 +197,8 @@ Rectangle {
         // The one control in here a screen-reader user must be able to
         // find by name. It had no Accessible block at all.
         Accessible.role: Accessible.Button
-        Accessible.name: "Leave voice channel"
-        Accessible.description: "Disconnect from the call"
+        Accessible.name: qsTr("Leave voice channel")
+        Accessible.description: qsTr("Disconnect from the call")
         Accessible.onPressAction: leaveBtn.clicked()
         onClicked: if (serverManager.activeServer)
                        serverManager.activeServer.leaveVoiceChannel()
@@ -234,6 +249,11 @@ Rectangle {
 
             MouseArea {
                 id: leftClusterHover
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Show the call")
+                Accessible.description: qsTr("Switches the main area back to the voice room")
+                Accessible.onPressAction: if (serverManager.activeServer)
+                                              serverManager.activeServer.showVoiceRoom()
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: !serverManager.activeServer.viewingVoiceRoom
@@ -357,6 +377,21 @@ Rectangle {
                     // from the one surface that answers "can they see my IP?".
                     implicitWidth: ipShieldRow.implicitWidth + Theme.sp.s3
                     Layout.minimumWidth: 0
+                    // On a phone this badge is a shield glyph and nothing
+                    // else — the four words are dropped for width and the
+                    // sentence is behind a tap. Spoken, it can carry both
+                    // at once, so the accessible name is the badge plus
+                    // the whole detail. This is the client's answer to
+                    // "can the other people in this call see my IP
+                    // address?" and it should not be behind a gesture.
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: serverManager.activeServer
+                        ? (serverManager.activeServer.voiceIpPrivacyDetail.length > 0
+                            ? qsTr("%1. %2")
+                                .arg(serverManager.activeServer.voiceIpPrivacyBadge)
+                                .arg(serverManager.activeServer.voiceIpPrivacyDetail)
+                            : serverManager.activeServer.voiceIpPrivacyBadge)
+                        : ""
                     implicitHeight: 20
                     radius: Theme.r1
                     color: Theme.accentGlow
@@ -374,6 +409,9 @@ Rectangle {
                         }
                         Text {
                             id: ipShieldText
+                            // Read through the badge above, together with
+                            // the detail it only hints at.
+                            Accessible.ignored: true
                             visible: !Theme.isMobile
                             text: serverManager.activeServer
                                 ? serverManager.activeServer.voiceIpPrivacyBadge : ""
@@ -397,6 +435,10 @@ Rectangle {
                     // treatment as VoiceRoom's protection badge.
                     MouseArea {
                         id: ipShieldHover
+                        // Pins the hover tooltip open on touch. The
+                        // sentence it reveals is already in the badge's
+                        // name, so there is nothing here to activate.
+                        Accessible.ignored: true
                         anchors.fill: parent
                         hoverEnabled: true
                         onClicked: {
@@ -455,6 +497,15 @@ Rectangle {
                 active: serverManager.activeServer
                         && serverManager.activeServer.pttPressed
                 tooltip: active ? "Transmitting" : "Hold to talk"
+                // Held, not pressed: `checked` here means "your voice is
+                // going out right now", which is the single fact this
+                // control exists to report.
+                Accessible.name: qsTr("Push to talk")
+                Accessible.checkable: true
+                Accessible.checked: pttBtn.active
+                Accessible.description: pttBtn.active
+                    ? qsTr("Transmitting. Release to stop.")
+                    : qsTr("Hold to transmit.")
 
                 MouseArea {
                     anchors.fill: parent
@@ -477,6 +528,19 @@ Rectangle {
                 toggled: serverManager.activeServer
                          && serverManager.activeServer.voiceMuted
                 tooltip: toggled ? "Unmute" : "Mute"
+                // "Mute, checked" means muted. The noun stays put and
+                // the state is the state — the tooltip's Mute/Unmute
+                // flip is right for a hover label and wrong for a name.
+                Accessible.name: qsTr("Mute")
+                Accessible.checkable: true
+                Accessible.checked: serverManager.activeServer
+                                    && serverManager.activeServer.voiceMuted
+                Accessible.description: (serverManager.activeServer
+                                         && serverManager.activeServer.voiceMuted)
+                    ? qsTr("Your microphone is off. Activate to turn it on.")
+                    : qsTr("Your microphone is live. Activate to mute it.")
+                Accessible.onToggleAction: if (serverManager.activeServer)
+                                               serverManager.activeServer.toggleMute()
                 onClicked: if (serverManager.activeServer)
                                serverManager.activeServer.toggleMute()
             }
@@ -488,6 +552,16 @@ Rectangle {
                 toggled: serverManager.activeServer
                          && serverManager.activeServer.voiceDeafened
                 tooltip: toggled ? "Undeafen" : "Deafen"
+                Accessible.name: qsTr("Deafen")
+                Accessible.checkable: true
+                Accessible.checked: serverManager.activeServer
+                                    && serverManager.activeServer.voiceDeafened
+                Accessible.description: (serverManager.activeServer
+                                         && serverManager.activeServer.voiceDeafened)
+                    ? qsTr("You cannot hear the call and nobody can hear you. Activate to rejoin the audio.")
+                    : qsTr("Activate to silence the call and mute yourself.")
+                Accessible.onToggleAction: if (serverManager.activeServer)
+                                               serverManager.activeServer.toggleDeafen()
                 onClicked: if (serverManager.activeServer)
                                serverManager.activeServer.toggleDeafen()
             }
@@ -507,6 +581,14 @@ Rectangle {
                 // A share that is up is a live transmission, not a
                 // suppressed state — accent, never the disconnect red.
                 active: visible && screenShare.active
+                Accessible.name: qsTr("Share screen")
+                Accessible.checkable: true
+                Accessible.checked: typeof screenShare !== "undefined"
+                                    && screenShare.active
+                Accessible.description: (typeof screenShare !== "undefined"
+                                         && screenShare.active)
+                    ? qsTr("You are sharing your screen. Activate to stop.")
+                    : qsTr("Activate to pick a screen or window to share.")
                 onClicked: {
                     if (!visible) return;
                     if (screenShare.active) {
@@ -556,6 +638,12 @@ Rectangle {
                 // The button the owner photographed. A running camera is
                 // the reassuring state, and it is now the accent one.
                 active: visible && camera.active
+                Accessible.name: qsTr("Camera")
+                Accessible.checkable: true
+                Accessible.checked: typeof camera !== "undefined" && camera.active
+                Accessible.description: (typeof camera !== "undefined" && camera.active)
+                    ? qsTr("Your camera is on. Activate to turn it off.")
+                    : qsTr("Activate to turn your camera on.")
                 // Right-click is where the per-share option lives for the
                 // camera. There is no camera picker to put it in — the button
                 // starts the camera on click — and a second permanently
@@ -577,6 +665,15 @@ Rectangle {
                     MenuItem {
                         id: cameraHideIpItem
                         text: "Hide my IP address while my camera is on"
+                        Accessible.role: Accessible.CheckBox
+                        Accessible.name: cameraHideIpItem.text
+                        Accessible.checkable: true
+                        Accessible.checked: cameraHideIpItem.checked
+                        Accessible.description: cameraHideIpItem.enabled
+                            ? qsTr("Routes this camera share through the relay")
+                            : qsTr("Unavailable: this server has no relay to use")
+                        Accessible.onToggleAction: if (cameraHideIpItem.enabled)
+                            cameraHideIpItem.triggered()
                         checkable: true
                         // Shown disabled with no relay to use, for the same
                         // reason the picker's switch is: an option that is

@@ -190,6 +190,11 @@ Rectangle {
     MouseArea {
         anchors.fill: parent
         acceptedButtons: Qt.RightButton
+        // Right-click-only backdrop, not a control: it covers the whole
+        // sidebar and naming it would put an unreachable "button" over
+        // every row in it. The same create menu is on the "+" in the
+        // CHANNELS header, which IS named.
+        Accessible.ignored: true
         onClicked: (mouse) => {
             channelListRoot.openCreateMenu(mouse.x, mouse.y, "");
         }
@@ -277,10 +282,13 @@ Rectangle {
                         font.weight: Theme.fontWeight.semibold
                         color: Theme.fg0
                         Layout.fillWidth: true
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: qsTr("Direct messages")
                     }
                 }
                 Rectangle { anchors.bottom: parent.bottom; width: parent.width
-                    height: 1; color: Theme.line }
+                    height: 1; color: Theme.line
+                    Accessible.ignored: true }
             }
 
             // "New DM" inline composer — accepts @user:host and
@@ -312,6 +320,10 @@ Rectangle {
                         TextField {
                             id: newDmField
                             Layout.fillWidth: true
+                            Accessible.role: Accessible.EditableText
+                            Accessible.name: qsTr("New direct message")
+                            Accessible.description: qsTr(
+                                "Search by name, or type a full user ID")
                             placeholderText: "New DM — search name or @user:server"
                             background: Item {}
                             color: Theme.fg0
@@ -330,6 +342,15 @@ Rectangle {
                                    && newDmField.text.trim().length > 0
                                    ? Theme.accentDim : Theme.accent
                             opacity: newDmField.text.trim().length > 0 ? 1.0 : 0.5
+                            // Icon-only send affordance for the field above.
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Start direct message")
+                            Accessible.description: newDmField.text.trim().length > 0
+                                ? qsTr("Open a conversation with %1").arg(
+                                      newDmField.text.trim())
+                                : qsTr("Type a name or user ID first")
+                            Accessible.onPressAction: if (newDmField.text.trim().length > 0)
+                                                          dmView._submitNewDm()
                             Icon { anchors.centerIn: parent; name: "send"
                                    size: 12; color: Theme.onAccent }
                             MouseArea {
@@ -377,6 +398,18 @@ Rectangle {
                             Behavior on color {
                                 ColorAnimation { duration: Theme.motion.fastMs }
                             }
+                            // Name, id and hosting server are one hit, not
+                            // three; the three Texts below are ignored.
+                            Accessible.role: Accessible.ListItem
+                            Accessible.name: {
+                                var n = modelData.displayName || modelData.userId;
+                                return modelData.serverName
+                                    ? qsTr("%1, %2 on %3").arg(n)
+                                          .arg(modelData.userId)
+                                          .arg(modelData.serverName)
+                                    : qsTr("%1, %2").arg(n).arg(modelData.userId);
+                            }
+                            Accessible.onPressAction: dmView._pickSuggestion(modelData)
                             RowLayout {
                                 anchors.fill: parent
                                 anchors.leftMargin: Theme.sp.s3
@@ -401,6 +434,7 @@ Rectangle {
                                         font.pixelSize: 11
                                         font.weight: Theme.fontWeight.semibold
                                         color: Theme.onAccent
+                                        Accessible.ignored: true
                                     }
                                 }
                                 ColumnLayout {
@@ -414,6 +448,7 @@ Rectangle {
                                         color: Theme.fg0
                                         elide: Text.ElideRight
                                         Layout.fillWidth: true
+                                        Accessible.ignored: true
                                     }
                                     Text {
                                         text: modelData.userId
@@ -425,6 +460,7 @@ Rectangle {
                                         color: Theme.fg3
                                         elide: Text.ElideMiddle
                                         Layout.fillWidth: true
+                                        Accessible.ignored: true
                                     }
                                 }
                             }
@@ -479,6 +515,39 @@ Rectangle {
                          : rowMouse.containsMouse ? Theme.bg2 : "transparent"
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
+                    // One sentence for the row: who, where, and what is
+                    // new. Everything inside it is ignored, so a screen
+                    // reader does not walk avatar-letter, name, subtitle,
+                    // typing dots and unread pill one at a time.
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: {
+                        var out = modelData.peerDisplayName || modelData.peerId;
+                        if (modelData.peerPresence === "online")
+                            out = qsTr("%1, online").arg(out);
+                        else if (modelData.peerPresence === "unavailable")
+                            out = qsTr("%1, away").arg(out);
+                        if (modelData.peerStatusMessage
+                            && modelData.peerStatusMessage.length > 0)
+                            out = qsTr("%1, %2").arg(out)
+                                      .arg(modelData.peerStatusMessage);
+                        else
+                            out = qsTr("%1, on %2").arg(out).arg(
+                                      modelData.serverName || modelData.serverUrl);
+                        if (modelData.peerTyping === true)
+                            out = qsTr("%1, typing").arg(out);
+                        else if (modelData.unreadCount > 0)
+                            out = qsTr("%1, %n unread", "", modelData.unreadCount)
+                                      .arg(out);
+                        return out;
+                    }
+                    Accessible.onPressAction: {
+                        serverManager.setActiveServer(modelData.serverIndex);
+                        if (serverManager.activeServer) {
+                            serverManager.activeServer
+                                .setActiveRoom(modelData.roomId);
+                        }
+                    }
+
                     RowLayout {
                         anchors.fill: parent
                         anchors.leftMargin: Theme.sp.s4
@@ -505,6 +574,7 @@ Rectangle {
                                     font.pixelSize: 13
                                     font.weight: Theme.fontWeight.semibold
                                     color: Theme.onAccent
+                                    Accessible.ignored: true
                                 }
                             }
                             // Presence dot overlaid on the bottom-
@@ -532,6 +602,8 @@ Rectangle {
                                     default:            return Theme.fg3;
                                     }
                                 }
+                                // Presence is in the row's name.
+                                Accessible.ignored: true
                             }
                         }
 
@@ -549,6 +621,7 @@ Rectangle {
                                 color: Theme.fg0
                                 elide: Text.ElideRight
                                 Layout.fillWidth: true
+                                Accessible.ignored: true
                             }
                             // Sub-label: prefer the peer's custom
                             // status message if they've set one,
@@ -571,6 +644,7 @@ Rectangle {
                                 color: Theme.fg3
                                 elide: Text.ElideRight
                                 Layout.fillWidth: true
+                                Accessible.ignored: true
                             }
                         }
 
@@ -583,6 +657,8 @@ Rectangle {
                         Row {
                             visible: modelData.peerTyping === true
                             spacing: 3
+                            // Pulse dots — "typing" is in the row's name.
+                            Accessible.ignored: true
                             Repeater {
                                 model: 3
                                 delegate: Rectangle {
@@ -609,6 +685,8 @@ Rectangle {
                             implicitHeight: 18
                             radius: 9
                             color: Theme.danger
+                            // The count is already in the row's name.
+                            Accessible.ignored: true
                             Text {
                                 id: unreadText
                                 anchors.centerIn: parent
@@ -618,6 +696,7 @@ Rectangle {
                                 font.family: Theme.fontSans
                                 font.pixelSize: 10
                                 font.weight: Theme.fontWeight.semibold
+                                Accessible.ignored: true
                             }
                         }
                     }
@@ -723,6 +802,11 @@ Rectangle {
                     font.letterSpacing: Theme.trackTight.lg
                     color: Theme.fg0
                     elide: Text.ElideRight
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: serverManager.activeServer
+                        ? qsTr("Server %1").arg(
+                              serverManager.activeServer.serverName)
+                        : qsTr("BSFChat")
                 }
 
                 // Settings gear.
@@ -781,6 +865,21 @@ Rectangle {
                         : ("Server Settings — not available to "
                            + (serverManager.activeServer
                               ? serverManager.activeServer.userId : ""))
+
+                    // Icon.qml ignores every icon, on the grounds that an
+                    // icon is ornament inside a named control. This one is
+                    // the control, so it opts back in. The locked case
+                    // names the account for the same reason the tooltip
+                    // does — "which account am I?" is the whole question.
+                    Accessible.ignored: false
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Server settings")
+                    Accessible.description: settingsGear.unlocked
+                        ? qsTr("Open this server's settings")
+                        : qsTr("Not available to %1").arg(
+                              serverManager.activeServer
+                              ? serverManager.activeServer.userId : "")
+                    Accessible.onPressAction: serverSettings.open()
 
                     MouseArea {
                         id: settingsGearMouse
@@ -857,6 +956,11 @@ Rectangle {
                         color: Theme.fg3
                         Layout.fillWidth: true
                         verticalAlignment: Text.AlignVCenter
+                        // Named rather than left to the raw string: a
+                        // wide-tracked all-caps label is spelled out
+                        // letter by letter by some bridges.
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: qsTr("Direct messages")
                     }
                     Text {
                         id: dmPlus
@@ -864,6 +968,11 @@ Rectangle {
                         font.pixelSize: Theme.fontSize.xl
                         color: dmPlusMouse.containsMouse ? Theme.fg0 : Theme.fg2
                         Layout.alignment: Qt.AlignVCenter
+                        // A "+" is not a name. This is the control, so it
+                        // carries one; the glyph is what it looks like.
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("New direct message")
+                        Accessible.onPressAction: newDmPrompt.open()
                         MouseArea {
                             id: dmPlusMouse
                             anchors.fill: parent
@@ -899,6 +1008,23 @@ Rectangle {
                                  : (dmRowMouse.containsMouse ? Theme.bg2 : "transparent")
                             Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
+                            // Peer + presence in one announcement; the
+                            // avatar letter, the dot and the name Text are
+                            // ignored so it is not read four times.
+                            Accessible.role: Accessible.ListItem
+                            Accessible.name: {
+                                var s = serverManager.activeServer;
+                                var n = modelData.peerDisplayName || modelData.peerId;
+                                var p = s ? s.presenceFor(modelData.peerId) : "offline";
+                                var out = p === "online" ? qsTr("%1, online").arg(n)
+                                                         : qsTr("%1, offline").arg(n);
+                                return _active ? qsTr("%1, showing").arg(out) : out;
+                            }
+                            Accessible.onPressAction: {
+                                if (serverManager.activeServer)
+                                    serverManager.activeServer.setActiveRoom(modelData.roomId);
+                            }
+
                             RowLayout {
                                 anchors.fill: parent
                                 anchors.leftMargin: Theme.sp.s3
@@ -923,6 +1049,7 @@ Rectangle {
                                             font.pixelSize: 11
                                             font.weight: Theme.fontWeight.semibold
                                             color: Theme.onAccent
+                                            Accessible.ignored: true
                                         }
                                     }
                                     // Tiny presence dot bottom-right.
@@ -939,6 +1066,7 @@ Rectangle {
                                         color: _state === "online" ? Theme.online : Theme.bg1
                                         border.width: 1.5
                                         border.color: _state === "offline" ? Theme.fg3 : Theme.bg1
+                                        Accessible.ignored: true
                                     }
                                 }
 
@@ -949,6 +1077,7 @@ Rectangle {
                                     color: _active ? Theme.fg0 : Theme.fg1
                                     elide: Text.ElideRight
                                     Layout.fillWidth: true
+                                    Accessible.ignored: true
                                 }
                             }
 
@@ -974,6 +1103,7 @@ Rectangle {
                     Layout.topMargin: Theme.sp.s3
                     Layout.preferredHeight: 1
                     color: Theme.lineSoft
+                    Accessible.ignored: true
                 }
             }
         }
@@ -997,6 +1127,8 @@ Rectangle {
                     font.letterSpacing: Theme.trackWidest.xs
                     color: Theme.fg3
                     Layout.fillWidth: true
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: qsTr("Channels")
                 }
 
                 // Create room/category button — opens the same context menu
@@ -1007,6 +1139,17 @@ Rectangle {
                     font.pixelSize: Theme.fontSize.xl
                     color: topPlusMouse.containsMouse ? Theme.fg0 : Theme.fg2
                     Layout.alignment: Qt.AlignVCenter
+
+                    // Opens the create menu (category / text / voice), the
+                    // same one the sidebar's right-click backdrop opens —
+                    // and, for a screen-reader user, the only one of the
+                    // two that can be reached at all.
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Create channel or category")
+                    Accessible.onPressAction: {
+                        var p = topPlus.mapToItem(channelListRoot, 0, topPlus.height);
+                        channelListRoot.openCreateMenu(p.x, p.y, "");
+                    }
 
                     MouseArea {
                         id: topPlusMouse
@@ -1064,6 +1207,9 @@ Rectangle {
                             anchors.margins: 2
                             z: -1
                             radius: Theme.r2
+                            // Drag affordance only, and drag is a
+                            // desktop-pointer gesture to begin with.
+                            Accessible.ignored: true
                             visible: channelListRoot.dropHoverCategoryId === categoryDelegate.categoryId
                             color: Qt.rgba(Theme.accent.r, Theme.accent.g,
                                            Theme.accent.b, 0.12)
@@ -1085,6 +1231,25 @@ Rectangle {
                             height: modelData.categoryId !== ""
                                 ? (Theme.isMobile ? Theme.touchTarget : 32) : 0
                             visible: modelData.categoryId !== ""
+
+                            // The header is the collapse control, so it is
+                            // the node the state hangs off. `checked` means
+                            // collapsed; the name stays the category so it
+                            // does not flip under the user, and the
+                            // description says which way round "checked" is.
+                            Accessible.role: Accessible.CheckBox
+                            Accessible.name: modelData.categoryName || ""
+                            Accessible.checkable: true
+                            Accessible.checked: channelListRoot.isCategoryCollapsed(
+                                                    modelData.categoryId)
+                            Accessible.description:
+                                channelListRoot.isCategoryCollapsed(modelData.categoryId)
+                                ? qsTr("Collapsed. Activate to show its channels.")
+                                : qsTr("Expanded. Activate to hide its channels.")
+                            Accessible.onToggleAction:
+                                channelListRoot.toggleCategoryCollapsed(modelData.categoryId)
+                            Accessible.onPressAction:
+                                channelListRoot.toggleCategoryCollapsed(modelData.categoryId)
 
                             // Backdrop click handler — left-click toggles
                             // collapse/expand; right-click opens the
@@ -1150,6 +1315,8 @@ Rectangle {
                                         ? Theme.fg1 : Theme.fg3
                                     Layout.fillWidth: true
                                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                    // The header above is named after this.
+                                    Accessible.ignored: true
                                 }
 
                                 // "+" to add channel in this category.
@@ -1178,6 +1345,20 @@ Rectangle {
                                           || catPlusMouse.containsMouse ? 1.0 : 0.0
                                     Behavior on color   { ColorAnimation { duration: Theme.motion.fastMs } }
                                     Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
+
+                                    // Icon-only, and reveal-on-hover: a
+                                    // screen-reader user never sees it
+                                    // appear, so the name has to carry the
+                                    // whole thing, category included.
+                                    Accessible.role: Accessible.Button
+                                    Accessible.name: qsTr("Add channel to %1").arg(
+                                                         modelData.categoryName || "")
+                                    Accessible.onPressAction: {
+                                        var p = catPlus.mapToItem(channelListRoot,
+                                                                  0, catPlus.height);
+                                        channelListRoot.openCreateMenu(
+                                            p.x, p.y, modelData.categoryId);
+                                    }
 
                                     Icon {
                                         anchors.centerIn: parent
@@ -1346,6 +1527,69 @@ Rectangle {
                                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                         Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
 
+                                        // THE channel row. This item owns the
+                                        // click handler, so this is where the
+                                        // announcement lives; the icon, the
+                                        // label, the badges and the dots
+                                        // inside it are all ignored, and the
+                                        // row is read as one sentence.
+                                        //
+                                        // Everything the eye gets off the row
+                                        // is in here: what kind of channel it
+                                        // is, its name, whether someone is
+                                        // typing, mentions before plain
+                                        // unread (a mention is a different
+                                        // class of thing), muted, and how
+                                        // many people are already in a voice
+                                        // channel.
+                                        Accessible.role: Accessible.ListItem
+                                        Accessible.name: {
+                                            var s = serverManager.activeServer;
+                                            // Dependency, not a value — see the
+                                            // typing Row below, which reads the
+                                            // same counter for the same reason.
+                                            if (s) s.typingGeneration;
+                                            var out = modelData.isVoice
+                                                ? qsTr("Voice channel %1").arg(modelData.displayName)
+                                                : qsTr("Channel %1").arg(modelData.displayName);
+                                            if (s && modelData.roomId !== s.activeRoomId
+                                                && s.roomHasTyping(modelData.roomId))
+                                                out = qsTr("%1, someone is typing").arg(out);
+                                            if (channelDelegate.mentionCount > 0)
+                                                out = qsTr("%1, %n mention(s)", "",
+                                                           channelDelegate.mentionCount).arg(out);
+                                            else if (channelDelegate.hasUnread)
+                                                out = qsTr("%1, unread").arg(out);
+                                            if (channelDelegate.isMuted)
+                                                out = qsTr("%1, muted").arg(out);
+                                            if (modelData.isVoice
+                                                && channelDelegate.voiceRoster.length > 0)
+                                                out = qsTr("%1, %n in call", "",
+                                                           channelDelegate.voiceRoster.length).arg(out);
+                                            return out;
+                                        }
+                                        // Mirrors what a click does on each
+                                        // platform. Joining voice on mobile
+                                        // runs an asynchronous microphone +
+                                        // notification permission chain that
+                                        // lives in the click handler below and
+                                        // cannot be invoked from here without
+                                        // duplicating it, so that one case is
+                                        // left to the real tap.
+                                        Accessible.onPressAction: {
+                                            var srv = serverManager.activeServer;
+                                            if (!srv) return;
+                                            if (!modelData.isVoice) {
+                                                srv.setActiveRoom(modelData.roomId);
+                                                return;
+                                            }
+                                            if (Theme.isMobile) return;
+                                            if (srv.activeVoiceRoomId === modelData.roomId)
+                                                srv.showVoiceRoom();
+                                            else
+                                                srv.joinVoiceChannel(modelData.roomId);
+                                        }
+
                                         // Invisible proxy for MouseArea.drag.target. We don't
                                         // actually move this item (it's unanchored, stays at
                                         // 0,0) — but handing MouseArea a drag target is what
@@ -1367,6 +1611,8 @@ Rectangle {
                                             anchors.verticalCenter: parent.verticalCenter
                                             radius: 1
                                             color: Theme.accent
+                                            // Selection stripe — decoration.
+                                            Accessible.ignored: true
                                         }
 
                                         Column {
@@ -1385,22 +1631,15 @@ Rectangle {
                                                 height: Theme.isMobile ? 44 : 28
                                                 spacing: Theme.sp.s3
 
-                                                // Screen reader: announce
-                                                // as "Channel displayName,
-                                                // N unread" (or "Voice
-                                                // channel…") with Button
-                                                // role so TalkBack treats
-                                                // it as activatable.
-                                                Accessible.role: Accessible.Button
-                                                Accessible.name: (modelData.isVoice
-                                                    ? "Voice channel " : "Channel ")
-                                                    + modelData.displayName
-                                                    + (channelDelegate.mentionCount > 0
-                                                       ? ", " + channelDelegate.mentionCount
-                                                         + " mentions you" : "")
-                                                    + (modelData.unreadCount > 0
-                                                       ? ", " + modelData.unreadCount
-                                                         + " unread" : "")
+                                                // This layout used to carry
+                                                // the row's name. It has moved
+                                                // up to channelItemBg, which is
+                                                // the item that owns the click
+                                                // handler and therefore the one
+                                                // a screen reader can activate;
+                                                // announcing from both would
+                                                // read every channel twice.
+                                                Accessible.ignored: true
 
                                                 Icon {
                                                     name: modelData.isVoice ? "volume" : "hash"
@@ -1425,6 +1664,7 @@ Rectangle {
                                                               : Theme.fg1)
                                                     elide: Text.ElideRight
                                                     Layout.fillWidth: true
+                                                    Accessible.ignored: true
                                                 }
 
                                                 // Typing indicator — three pulsing accent
@@ -1449,6 +1689,9 @@ Rectangle {
                                                     visible: hasTyping
                                                     spacing: 2
                                                     Layout.alignment: Qt.AlignVCenter
+                                                    // Pulse dots; the row says
+                                                    // "someone is typing".
+                                                    Accessible.ignored: true
                                                     Repeater {
                                                         model: 3
                                                         delegate: Rectangle {
@@ -1493,6 +1736,8 @@ Rectangle {
                                                     Layout.alignment: Qt.AlignVCenter
                                                     radius: 8
                                                     color: Theme.danger
+                                                    // Count is in the row name.
+                                                    Accessible.ignored: true
                                                     Text {
                                                         id: mentionBadgeText
                                                         anchors.centerIn: parent
@@ -1502,6 +1747,7 @@ Rectangle {
                                                         font.family: Theme.fontSans
                                                         font.pixelSize: 10
                                                         font.weight: Theme.fontWeight.semibold
+                                                        Accessible.ignored: true
                                                     }
                                                 }
 
@@ -1518,6 +1764,8 @@ Rectangle {
                                                     Layout.alignment: Qt.AlignVCenter
                                                     radius: 4
                                                     color: Theme.accent
+                                                    // "unread" is in the row name.
+                                                    Accessible.ignored: true
                                                 }
 
                                                 // Voice participant count pill — subtle
@@ -1547,6 +1795,9 @@ Rectangle {
                                                             ? serverManager.activeServer.activeVoiceRoomId : "")
                                                         ? Theme.accent : Theme.line
                                                     border.width: 1
+                                                    // "N in call" is in the
+                                                    // row's name.
+                                                    Accessible.ignored: true
 
                                                     Row {
                                                         id: voiceCountRow
@@ -1566,6 +1817,7 @@ Rectangle {
                                                             font.family: Theme.fontMono
                                                             font.pixelSize: 11
                                                             font.weight: Theme.fontWeight.semibold
+                                                            Accessible.ignored: true
                                                             color: modelData.roomId === (serverManager.activeServer
                                                                     ? serverManager.activeServer.activeVoiceRoomId : "")
                                                                 ? Theme.accent : Theme.fg2
@@ -1825,6 +2077,23 @@ Rectangle {
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                 Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
 
+                // The card is one thing: "you are in voice, here". Its
+                // three stacked Texts are ignored below. The disconnect
+                // button inside it is NOT — it stays separately reachable,
+                // because it is separately actionable.
+                Accessible.role: Accessible.Button
+                Accessible.name: {
+                    var s = serverManager.activeServer;
+                    if (!s || !s.activeVoiceRoomId) return qsTr("Voice connected");
+                    var n = s.roomListModel
+                            ? s.roomListModel.roomDisplayName(s.activeVoiceRoomId)
+                            : s.activeVoiceRoomId;
+                    return qsTr("Voice connected to %1").arg(n);
+                }
+                Accessible.description: qsTr("Open the call")
+                Accessible.onPressAction: if (serverManager.activeServer)
+                                              serverManager.activeServer.showVoiceRoom()
+
                 // Faint accent tab along the left edge — echoes the active-
                 // channel stripe in the list above so the connection status
                 // reads at a glance.
@@ -1836,6 +2105,7 @@ Rectangle {
                     anchors.leftMargin: 0
                     radius: 1.5
                     color: Theme.accent
+                    Accessible.ignored: true
                 }
 
                 // Click anywhere on the card (except the disconnect button)
@@ -1883,6 +2153,8 @@ Rectangle {
                             font.letterSpacing: Theme.trackWidest.xl
                             color: Theme.fg3
                             Layout.fillWidth: true
+                            // Part of the card's one announcement.
+                            Accessible.ignored: true
                         }
                         // Active voice channel name — the "#room" line.
                         Text {
@@ -1900,6 +2172,7 @@ Rectangle {
                             color: Theme.fg0
                             elide: Text.ElideRight
                             Layout.fillWidth: true
+                            Accessible.ignored: true
                         }
                         // Latency placeholder — the controller doesn't
                         // publish one yet, so we fall back to the server
@@ -1912,6 +2185,7 @@ Rectangle {
                             color: Theme.fg2
                             elide: Text.ElideRight
                             Layout.fillWidth: true
+                            Accessible.ignored: true
                         }
                     }
 
@@ -1927,6 +2201,16 @@ Rectangle {
                         border.width: disconnectArea.containsMouse ? 0 : 1
                         border.color: Theme.line
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                        // Same action, and so the same name, as the one in
+                        // VoiceDock.qml. Icon-only; the tooltip says
+                        // "Disconnect", which on its own does not say from
+                        // what.
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Leave voice channel")
+                        Accessible.description: qsTr("Disconnect from the call")
+                        Accessible.onPressAction: if (serverManager.activeServer)
+                                                      serverManager.activeServer.leaveVoiceChannel()
 
                         Icon {
                             anchors.centerIn: parent
@@ -1999,6 +2283,15 @@ Rectangle {
                        : fbtnHover.containsMouse ? Theme.bg3 : "transparent"
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
+                // Floor for all three buttons: icon-only, so the tooltip
+                // is the name it would have had. The two that are toggles
+                // override this with a stable noun plus checked state —
+                // a name that flips between "Mute" and "Unmute" is a name
+                // that never says which way round you currently are.
+                Accessible.role: Accessible.Button
+                Accessible.name: fbtn.tooltip
+                Accessible.onPressAction: fbtn.clicked()
+
                 Icon {
                     anchors.centerIn: parent
                     name: fbtn.icon
@@ -2037,6 +2330,22 @@ Rectangle {
                     radius: Theme.r1
                     color: userInfoMouse.containsMouse ? Theme.bg2 : "transparent"
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+
+                    // The account row: one announcement carrying both the
+                    // name and the full mxid, un-elided. "Which account am
+                    // I signed in as" is the question this block exists to
+                    // answer, and a screen reader cannot hover the tooltip
+                    // that answers it for everyone else.
+                    Accessible.role: Accessible.Button
+                    Accessible.name: serverManager.activeServer
+                        ? qsTr("Account %1, %2").arg(
+                              UserIdentity.accountTitle(
+                                  serverManager.activeServer.userId,
+                                  serverManager.activeServer.displayName))
+                              .arg(serverManager.activeServer.userId)
+                        : qsTr("Account")
+                    Accessible.description: qsTr("Open the account menu")
+                    Accessible.onPressAction: userMenu.popup(0, -userMenu.implicitHeight)
 
                     RowLayout {
                         anchors.fill: parent
@@ -2090,6 +2399,7 @@ Rectangle {
                                     font.weight: Theme.fontWeight.semibold
                                     color: Theme.onAccent
                                     visible: !serverManager.activeServer || serverManager.activeServer.avatarUrl === ""
+                                    Accessible.ignored: true
                                 }
                             }
 
@@ -2113,6 +2423,9 @@ Rectangle {
                                     }
                                 }
                                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                                // Connection state; the banner in the main
+                                // pane is what announces it.
+                                Accessible.ignored: true
                             }
                         }
 
@@ -2138,6 +2451,8 @@ Rectangle {
                                 color: Theme.fg0
                                 elide: Text.ElideRight
                                 Layout.fillWidth: true
+                                // Both lines are in the row's name above.
+                                Accessible.ignored: true
                             }
 
                             Text {
@@ -2157,6 +2472,7 @@ Rectangle {
                                 elide: Text.ElideMiddle
                                 visible: text.length > 0
                                 Layout.fillWidth: true
+                                Accessible.ignored: true
                             }
                         }
                     }
@@ -2198,6 +2514,17 @@ Rectangle {
                     toggled: serverManager.activeServer
                              && serverManager.activeServer.voiceMuted
                     tooltip: toggled ? "Unmute" : "Mute microphone"
+                    Accessible.role: Accessible.CheckBox
+                    Accessible.checkable: true
+                    Accessible.checked: !!serverManager.activeServer
+                                        && serverManager.activeServer.voiceMuted
+                    Accessible.name: qsTr("Microphone")
+                    Accessible.description: serverManager.activeServer
+                                            && serverManager.activeServer.voiceMuted
+                        ? qsTr("Currently muted. Activate to unmute.")
+                        : qsTr("Currently live. Activate to mute.")
+                    Accessible.onToggleAction: if (serverManager.activeServer)
+                                                   serverManager.activeServer.toggleMute()
                     onClicked: if (serverManager.activeServer)
                                    serverManager.activeServer.toggleMute()
                 }
@@ -2209,6 +2536,17 @@ Rectangle {
                     toggled: serverManager.activeServer
                              && serverManager.activeServer.voiceDeafened
                     tooltip: toggled ? "Undeafen" : "Deafen headphones"
+                    Accessible.role: Accessible.CheckBox
+                    Accessible.checkable: true
+                    Accessible.checked: !!serverManager.activeServer
+                                        && serverManager.activeServer.voiceDeafened
+                    Accessible.name: qsTr("Headphones")
+                    Accessible.description: serverManager.activeServer
+                                            && serverManager.activeServer.voiceDeafened
+                        ? qsTr("Currently deafened. Activate to hear others again.")
+                        : qsTr("Currently hearing others. Activate to deafen.")
+                    Accessible.onToggleAction: if (serverManager.activeServer)
+                                                   serverManager.activeServer.toggleDeafen()
                     onClicked: if (serverManager.activeServer)
                                    serverManager.activeServer.toggleDeafen()
                 }
@@ -2216,6 +2554,7 @@ Rectangle {
                     Layout.alignment: Qt.AlignVCenter
                     icon: "settings"
                     tooltip: "Client settings"
+                    Accessible.name: qsTr("Client settings")
                     onClicked: Window.window.openClientSettings()
                 }
             }
@@ -2239,6 +2578,13 @@ Rectangle {
             height: implicitHeight
                     property string iconName: ""
                     property color labelColor: Theme.fg0
+
+                    // Every row here is a press-once action and its label
+                    // already says what it does, so the label is the name.
+                    Accessible.role: Accessible.Button
+                    Accessible.name: ui.text
+                    Accessible.onPressAction: ui.triggered()
+
                     contentItem: RowLayout {
                         spacing: Theme.sp.s3
                         Icon {
@@ -2254,6 +2600,7 @@ Rectangle {
                             color: ui.labelColor
                             Layout.fillWidth: true
                             verticalAlignment: Text.AlignVCenter
+                            Accessible.ignored: true
                         }
                     }
                     background: Rectangle {
@@ -2287,6 +2634,18 @@ Rectangle {
                 Rectangle {
                     implicitHeight: identityColumn.implicitHeight + Theme.sp.s3 * 2
                     color: "transparent"
+
+                    // Three Texts that are one fact. Read as one sentence,
+                    // with the mxid whole — the elision this block exists
+                    // to undo is exactly what a fragmented announcement
+                    // would reintroduce.
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: serverManager.activeServer
+                        ? qsTr("Signed in as %1, %2")
+                              .arg(serverManager.activeServer.displayName)
+                              .arg(serverManager.activeServer.userId)
+                        : qsTr("Not signed in")
+
                     ColumnLayout {
                         id: identityColumn
                         anchors.left: parent.left
@@ -2304,6 +2663,7 @@ Rectangle {
                             font.letterSpacing: Theme.trackWidest.xs
                             color: Theme.fg3
                             Layout.fillWidth: true
+                            Accessible.ignored: true
                         }
                         // The NAME — what the member list prints for this same
                         // account, from the same fold (see the self branch in
@@ -2324,6 +2684,7 @@ Rectangle {
                             color: Theme.fg0
                             wrapMode: Text.Wrap
                             Layout.fillWidth: true
+                            Accessible.ignored: true
                         }
                         // Wrapped, never elided. The whole point of this line
                         // is the characters an elide would eat; a menu that
@@ -2337,6 +2698,7 @@ Rectangle {
                             color: Theme.fg2
                             wrapMode: Text.WrapAnywhere
                             Layout.fillWidth: true
+                            Accessible.ignored: true
                         }
                     }
                 }
@@ -2483,6 +2845,9 @@ Rectangle {
             Layout.alignment: Qt.AlignHCenter
             Layout.topMargin: Theme.sp.s2
             visible: serverManager.servers && serverManager.servers.rowCount() === 0
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Add a server")
+            Accessible.onPressAction: Window.window.openLoginDialog()
             contentItem: RowLayout {
                 spacing: Theme.sp.s2
                 Icon {
@@ -2496,6 +2861,7 @@ Rectangle {
                     font.pixelSize: Theme.fontSize.md
                     font.weight: Theme.fontWeight.semibold
                     Layout.alignment: Qt.AlignVCenter
+                    Accessible.ignored: true
                 }
             }
             background: Rectangle {
@@ -2520,6 +2886,11 @@ Rectangle {
             id: joinByAddressCta
             Layout.alignment: Qt.AlignHCenter
             visible: serverManager.servers && serverManager.servers.rowCount() === 0
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Join a server by address")
+            Accessible.description: qsTr(
+                "For when someone has given you a server's address")
+            Accessible.onPressAction: Window.window.openJoinByAddress()
             contentItem: Text {
                 text: "Join a server by address"
                 color: joinByAddressCta.hovered ? Theme.fg0 : Theme.fg1
@@ -2528,6 +2899,7 @@ Rectangle {
                 font.weight: Theme.fontWeight.medium
                 horizontalAlignment: Text.AlignHCenter
                 verticalAlignment: Text.AlignVCenter
+                Accessible.ignored: true
             }
             background: Rectangle {
                 color: joinByAddressCta.hovered ? Theme.bg3 : "transparent"
@@ -2575,6 +2947,15 @@ Rectangle {
             height: implicitHeight
             property string iconName: ""
             property color labelColor: Theme.fg0
+
+            // Floor for the menu. Every instance below overrides the name
+            // to say which channel it acts on: this menu is opened by
+            // right-clicking a row, so out of context "Delete Channel"
+            // does not say which channel is about to go.
+            Accessible.role: Accessible.Button
+            Accessible.name: ri.text
+            Accessible.onPressAction: ri.triggered()
+
             contentItem: RowLayout {
                 spacing: Theme.sp.s3
                 Icon {
@@ -2591,6 +2972,7 @@ Rectangle {
                     color: !ri.enabled ? Theme.fg3 : ri.labelColor
                     Layout.fillWidth: true
                     verticalAlignment: Text.AlignVCenter
+                    Accessible.ignored: true
                 }
             }
             background: Rectangle {
@@ -2603,6 +2985,7 @@ Rectangle {
         ThemedRoomItem {
             text: "Mark as Read"
             iconName: "check"
+            Accessible.name: qsTr("Mark %1 as read").arg(roomContextMenu.roomName)
             // Newest origin_server_ts in the menu's room, 0 if unknown.
             readonly property real lastMessageTs: {
                 if (!serverManager.activeServer) return 0;
@@ -2646,6 +3029,14 @@ Rectangle {
             text: appSettings.isRoomMuted(roomContextMenu.roomId)
                   ? "Unmute Channel" : "Mute Channel"
             iconName: "volume-off"
+            // A menu row, not a toggle: the label is the action that is
+            // about to happen, and the name follows it.
+            Accessible.name: {
+                channelListRoot.muteGeneration;   // dep — QSettings is not reactive
+                return appSettings.isRoomMuted(roomContextMenu.roomId)
+                    ? qsTr("Unmute %1").arg(roomContextMenu.roomName)
+                    : qsTr("Mute %1").arg(roomContextMenu.roomName);
+            }
             onTriggered: {
                 var rid = roomContextMenu.roomId;
                 appSettings.setRoomMuted(rid, !appSettings.isRoomMuted(rid));
@@ -2690,10 +3081,19 @@ Rectangle {
             channelListRoot.muteGeneration++;
         }
 
+        // The three rows below are one three-way choice, and the only
+        // thing that says which one is current is a "✓" glued onto the
+        // label. RadioButton + checked is how that tick is said out loud;
+        // the name stays the level so it does not flip, and the tick is
+        // left out of it because the state attribute now carries it.
         ThemedRoomItem {
             text: roomContextMenu.notifyLevel === "all"
                   ? "Notifications: All ✓" : "Notifications: All"
             iconName: "inbox"
+            Accessible.role: Accessible.RadioButton
+            Accessible.name: qsTr("Notifications: all messages")
+            Accessible.checkable: true
+            Accessible.checked: roomContextMenu.notifyLevel === "all"
             onTriggered: roomContextMenu._setNotifyLevel("all")
         }
         ThemedRoomItem {
@@ -2701,6 +3101,10 @@ Rectangle {
                   ? "Notifications: @Mentions only ✓"
                   : "Notifications: @Mentions only"
             iconName: "at"
+            Accessible.role: Accessible.RadioButton
+            Accessible.name: qsTr("Notifications: mentions only")
+            Accessible.checkable: true
+            Accessible.checked: roomContextMenu.notifyLevel === "mentions"
             onTriggered: roomContextMenu._setNotifyLevel("mentions")
         }
         ThemedRoomItem {
@@ -2708,6 +3112,10 @@ Rectangle {
                   ? "Notifications: None ✓"
                   : "Notifications: None"
             iconName: "minus"
+            Accessible.role: Accessible.RadioButton
+            Accessible.name: qsTr("Notifications: none")
+            Accessible.checkable: true
+            Accessible.checked: roomContextMenu.notifyLevel === "none"
             onTriggered: roomContextMenu._setNotifyLevel("none")
         }
 
@@ -2726,6 +3134,7 @@ Rectangle {
         ThemedRoomItem {
             text: "Add member…"
             iconName: "users"
+            Accessible.name: qsTr("Add member to %1").arg(roomContextMenu.roomName)
             enabled: {
                 if (!serverManager.activeServer) return false;
                 if (serverManager.activeServer.permissionsGeneration < 0) return false;
@@ -2743,6 +3152,7 @@ Rectangle {
         ThemedRoomItem {
             text: "Channel Settings…"
             iconName: "settings"
+            Accessible.name: qsTr("Settings for %1").arg(roomContextMenu.roomName)
             enabled: {
                 if (!serverManager.activeServer) return false;
                 if (serverManager.activeServer.permissionsGeneration < 0) return false;
@@ -2759,6 +3169,7 @@ Rectangle {
             text: "Delete Channel"
             iconName: "x"
             labelColor: Theme.danger
+            Accessible.name: qsTr("Delete %1").arg(roomContextMenu.roomName)
             enabled: {
                 if (!serverManager.activeServer) return false;
                 if (serverManager.activeServer.permissionsGeneration < 0) return false;
@@ -2852,6 +3263,10 @@ Rectangle {
 
                 Button {
                     id: deleteCancelBtn
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Cancel")
+                    Accessible.description: qsTr("Keep the channel")
+                    Accessible.onPressAction: deleteChannelConfirm.close()
                     contentItem: Text {
                         text: "Cancel"
                         font.family: Theme.fontSans
@@ -2860,6 +3275,7 @@ Rectangle {
                         color: Theme.fg1
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
+                        Accessible.ignored: true
                     }
                     background: Rectangle {
                         color: deleteCancelBtn.hovered ? Theme.bg3 : "transparent"
@@ -2874,6 +3290,20 @@ Rectangle {
                 }
                 Button {
                     id: deleteConfirmBtn
+                    Accessible.role: Accessible.Button
+                    // Names the channel: a confirmation whose button says
+                    // only "Delete channel" tells someone who cannot see
+                    // the title above it nothing about which one.
+                    Accessible.name: qsTr("Delete channel %1").arg(
+                                         deleteChannelConfirm.roomName)
+                    Accessible.description: qsTr(
+                        "Removes it and every message in it, for everyone. Cannot be undone.")
+                    Accessible.onPressAction: {
+                        if (serverManager.activeServer && deleteChannelConfirm.roomId !== "") {
+                            serverManager.activeServer.deleteChannel(deleteChannelConfirm.roomId);
+                        }
+                        deleteChannelConfirm.close();
+                    }
                     contentItem: Text {
                         text: "Delete channel"
                         font.family: Theme.fontSans
@@ -2882,6 +3312,7 @@ Rectangle {
                         color: Theme.onAccent
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
+                        Accessible.ignored: true
                     }
                     background: Rectangle {
                         color: deleteConfirmBtn.hovered ? Qt.lighter(Theme.danger, 1.1) : Theme.danger
@@ -2932,6 +3363,13 @@ Rectangle {
             implicitHeight: visible ? 34 : 0
             height: implicitHeight
             property string iconName: ""
+
+            // Three press-once rows whose labels already say exactly what
+            // they make, so the label is the name.
+            Accessible.role: Accessible.Button
+            Accessible.name: ci.text
+            Accessible.onPressAction: ci.triggered()
+
             contentItem: RowLayout {
                 spacing: Theme.sp.s3
                 Icon {
@@ -2947,6 +3385,7 @@ Rectangle {
                     color: Theme.fg0
                     Layout.fillWidth: true
                     verticalAlignment: Text.AlignVCenter
+                    Accessible.ignored: true
                 }
             }
             background: Rectangle {
@@ -3055,6 +3494,9 @@ Rectangle {
             TextField {
                 id: nameInput
                 Layout.fillWidth: true
+                Accessible.role: Accessible.EditableText
+                Accessible.name: createPrompt.kind === "category"
+                    ? qsTr("Category name") : qsTr("Channel name")
                 placeholderText: createPrompt.placeholder
                 placeholderTextColor: Theme.fg2
                 color: Theme.fg0
@@ -3096,6 +3538,13 @@ Rectangle {
                     }
                 }
                 ThemedSwitch {
+                    // ThemedSwitch is a Switch, so the role and the
+                    // checked state are Qt's; only the label was missing,
+                    // and it lives in the left column where a screen
+                    // reader would never associate it with this control.
+                    Accessible.name: qsTr("Private channel")
+                    Accessible.description: qsTr(
+                        "Only roles that explicitly allow View channel will see it")
                     checked: createPrompt.makePrivate
                     onToggled: createPrompt.makePrivate = checked
                 }
@@ -3110,6 +3559,9 @@ Rectangle {
 
                 Button {
                     id: createCancelBtn
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Cancel")
+                    Accessible.onPressAction: createPrompt.close()
                     contentItem: Text {
                         text: "Cancel"
                         font.family: Theme.fontSans
@@ -3118,6 +3570,7 @@ Rectangle {
                         color: Theme.fg1
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
+                        Accessible.ignored: true
                     }
                     background: Rectangle {
                         color: createCancelBtn.hovered ? Theme.bg3 : "transparent"
@@ -3133,6 +3586,17 @@ Rectangle {
                 Button {
                     id: createSubmitBtn
                     enabled: nameInput.text.trim().length > 0
+                    Accessible.role: Accessible.Button
+                    Accessible.name: createPrompt.kind === "category"
+                        ? qsTr("Create category")
+                        : (createPrompt.kind === "voice"
+                           ? qsTr("Create voice channel")
+                           : qsTr("Create channel"))
+                    Accessible.description: createSubmitBtn.enabled
+                        ? qsTr("Create it with the name you typed")
+                        : qsTr("Type a name first")
+                    Accessible.onPressAction: if (createSubmitBtn.enabled)
+                                                  createPrompt.submit()
                     contentItem: Text {
                         text: createPrompt.kind === "category"
                               ? "Create category"
@@ -3145,6 +3609,7 @@ Rectangle {
                         color: createSubmitBtn.enabled ? Theme.onAccent : Theme.fg3
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
+                        Accessible.ignored: true
                     }
                     background: Rectangle {
                         color: !createSubmitBtn.enabled
@@ -3242,6 +3707,10 @@ Rectangle {
             TextField {
                 id: dmTargetField
                 Layout.fillWidth: true
+                Accessible.role: Accessible.EditableText
+                Accessible.name: qsTr("User ID")
+                Accessible.description: qsTr(
+                    "The Matrix ID of a user on this server")
                 placeholderText: "@alice:bsfchat.com"
                 color: Theme.fg0
                 placeholderTextColor: Theme.fg3
@@ -3268,6 +3737,9 @@ Rectangle {
 
                 Button {
                     text: "Cancel"
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Cancel")
+                    Accessible.onPressAction: newDmPrompt.close()
                     onClicked: newDmPrompt.close()
                     contentItem: Text {
                         text: parent.text
@@ -3276,6 +3748,7 @@ Rectangle {
                         color: Theme.fg1
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
+                        Accessible.ignored: true
                     }
                     background: Rectangle {
                         color: parent.hovered ? Theme.bg3 : Theme.bg2
@@ -3290,6 +3763,14 @@ Rectangle {
                     id: dmSubmitBtn
                     text: "Start DM"
                     enabled: dmTargetField.text.trim().length > 0
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Start direct message")
+                    Accessible.description: dmSubmitBtn.enabled
+                        ? qsTr("Open a conversation with %1").arg(
+                              dmTargetField.text.trim())
+                        : qsTr("Type a user ID first")
+                    Accessible.onPressAction: if (dmSubmitBtn.enabled)
+                                                  newDmPrompt.submit()
                     onClicked: newDmPrompt.submit()
                     contentItem: Text {
                         text: parent.text
@@ -3299,6 +3780,7 @@ Rectangle {
                         color: dmSubmitBtn.enabled ? Theme.onAccent : Theme.fg3
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
+                        Accessible.ignored: true
                     }
                     background: Rectangle {
                         color: !dmSubmitBtn.enabled

@@ -47,12 +47,22 @@ Popup {
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
     padding: 0
 
+
+    // No field in this dialog, so focus lands on the primary action.
+    onOpened: doneBtn.forceActiveFocus()
+
     background: Rectangle {
         color: Theme.bg1
         radius: Theme.r3
         border.color: Theme.line
         border.width: 1
     }
+
+    // On the Popup, which Qt warns about and supports anyway — see
+    // docs/accessibility.md §11 for why this is the right place and why
+    // the warning in the log is a Qt wart rather than a mistake here.
+    Accessible.role: Accessible.Dialog
+    Accessible.name: qsTr("Your roles")
 
     contentItem: ColumnLayout {
         anchors.fill: parent
@@ -73,6 +83,7 @@ Popup {
                     spacing: 0
                     Text {
                         text: "Your roles"
+                        Accessible.ignored: true
                         color: Theme.fg0
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.lg
@@ -96,6 +107,9 @@ Popup {
                     Layout.topMargin: 2
                     radius: Theme.r1
                     color: closeXMouse.containsMouse ? Theme.bg3 : "transparent"
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Close")
+                    Accessible.onPressAction: popup.close()
                     Icon {
                         anchors.centerIn: parent
                         name: "x"; size: 14
@@ -115,6 +129,7 @@ Popup {
                 width: parent.width
                 height: 1
                 color: Theme.line
+                Accessible.ignored: true
             }
         }
 
@@ -128,6 +143,8 @@ Popup {
             Layout.preferredHeight: visible ? errorRow.implicitHeight + Theme.sp.s5 * 2 : 0
             visible: popup.model && popup.model.errorText !== ""
             color: Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.12)
+            Accessible.role: Accessible.AlertMessage
+            Accessible.name: popup.model ? popup.model.errorText : ""
 
             RowLayout {
                 id: errorRow
@@ -141,6 +158,7 @@ Popup {
                 Text {
                     Layout.fillWidth: true
                     text: popup.model ? popup.model.errorText : ""
+                    Accessible.ignored: true
                     color: Theme.danger
                     wrapMode: Text.WordWrap
                     font.family: Theme.fontSans
@@ -152,6 +170,9 @@ Popup {
                     Layout.alignment: Qt.AlignTop
                     radius: Theme.r1
                     color: errDismiss.containsMouse ? Theme.bg3 : "transparent"
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Dismiss error")
+                    Accessible.onPressAction: { if (popup.model) popup.model.dismissError(); }
                     Icon {
                         anchors.centerIn: parent
                         name: "x"; size: 12
@@ -236,6 +257,18 @@ Popup {
                         // A blocked row is readable, not interactive — it is
                         // there to explain a role the member is stuck with.
                         opacity: roleRow.blocked ? 0.75 : 1.0
+                        // The whole row is the two-state control; the tick, the
+                        // colour dot and the label are one announcement. The
+                        // name stays the role, so it does not flip with state.
+                        Accessible.role: Accessible.CheckBox
+                        Accessible.checkable: true
+                        Accessible.checked: roleRow.held
+                        Accessible.name: roleRow.modelData.name || roleRow.roleId
+                        Accessible.description: roleRow.blocked
+                            ? (roleRow.modelData.blockedReason || qsTr("You cannot change this role"))
+                            : roleRow.pending ? qsTr("Saving…") : ""
+                        Accessible.onPressAction: if (roleHover.enabled) roleHover.clicked(null)
+                        Accessible.onToggleAction: if (roleHover.enabled) roleHover.clicked(null)
 
                         ColumnLayout {
                             id: rowCol
@@ -252,6 +285,7 @@ Popup {
 
                                 ThemedCheckBox {
                                     id: roleBox
+                                    Accessible.ignored: true
                                     checked: roleRow.held
                                     enabled: !roleRow.blocked && !roleRow.pending
                                     // The model owns the tick. Without this
@@ -273,11 +307,13 @@ Popup {
                                     color: roleRow.modelData.color || Theme.accent
                                     border.color: Theme.bg0
                                     border.width: 1
+                                    Accessible.ignored: true
                                 }
                                 Text {
                                     Layout.alignment: Qt.AlignVCenter
                                     Layout.fillWidth: true
                                     text: roleRow.modelData.name || roleRow.roleId
+                                    Accessible.ignored: true
                                     color: roleRow.modelData.color || Theme.fg0
                                     font.family: Theme.fontSans
                                     font.pixelSize: Theme.fontSize.md
@@ -293,6 +329,7 @@ Popup {
                                 Text {
                                     visible: roleRow.pending
                                     text: "…"
+                                    Accessible.ignored: true
                                     color: Theme.fg3
                                     font.family: Theme.fontSans
                                     font.pixelSize: Theme.fontSize.md
@@ -304,6 +341,7 @@ Popup {
                                 Layout.leftMargin: 18 + Theme.sp.s3
                                 visible: roleRow.blocked
                                 text: roleRow.modelData.blockedReason || ""
+                                Accessible.ignored: true
                                 wrapMode: Text.WordWrap
                                 color: Theme.fg3
                                 font.family: Theme.fontSans
@@ -341,6 +379,7 @@ Popup {
                 width: parent.width
                 height: 1
                 color: Theme.line
+                Accessible.ignored: true
             }
             RowLayout {
                 anchors.fill: parent
@@ -362,6 +401,10 @@ Popup {
 
                 Button {
                     id: doneBtn
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Done")
+                    Accessible.description: qsTr("Close. Changes are already saved.")
+                    Accessible.onPressAction: doneBtn.clicked()
                     contentItem: Text {
                         text: "Done"
                         font.family: Theme.fontSans

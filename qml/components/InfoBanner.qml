@@ -14,6 +14,14 @@ Rectangle {
 
     Layout.fillWidth: true
     Layout.preferredHeight: bannerText.implicitHeight + Theme.sp.s4 * 2
+
+    // One node carrying the callout's text. The stripe and the icon are
+    // ornament (the Icon type is globally ignored); the Text below is
+    // ignored so the callout is read once, as a sentence, rather than
+    // twice — here and again as a child.
+    Accessible.role: Accessible.StaticText
+    Accessible.name: root.text
+
     radius: Theme.r2
     color: Theme.bg2
     border.color: Theme.line
@@ -52,6 +60,7 @@ Rectangle {
             color: Theme.fg2
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
+            Accessible.ignored: true
         }
     }
 }

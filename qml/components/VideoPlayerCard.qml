@@ -163,6 +163,20 @@ ColumnLayout {
         radius: Theme.r2
         clip: true
 
+        // The picture is itself the primary control: a click anywhere on
+        // it toggles play/pause (cardMouse, below). Attached accessibility
+        // only takes effect on an Item, so the name lives here and not on
+        // that MouseArea.
+        Accessible.role: Accessible.Button
+        Accessible.name: root.fileName !== ""
+            ? qsTr("Video %1").arg(root.fileName)
+            : qsTr("Video")
+        Accessible.description:
+            mediaPlayer.playbackState === MediaPlayer.PlayingState
+                ? qsTr("Playing. Activate to pause.")
+                : qsTr("Paused. Activate to play.")
+        Accessible.onPressAction: root.togglePlay()
+
         // Single MediaPlayer drives BOTH the inline VideoOutput and
         // the fullscreen one. Two MediaPlayer instances on the same
         // local file fight over Android MediaCodec's tiny decoder
@@ -195,6 +209,9 @@ ColumnLayout {
             id: videoOutput
             anchors.fill: parent
             fillMode: VideoOutput.PreserveAspectFit
+            // videoCard above is the named node for this picture; a
+            // second node here would announce the same video twice.
+            Accessible.ignored: true
             Component.onCompleted: {
                 if (root._videoOutputTarget === null)
                     root._videoOutputTarget = videoOutput;
@@ -206,6 +223,7 @@ ColumnLayout {
         Rectangle {
             anchors.fill: parent
             color: Qt.rgba(0, 0, 0, 0.35)
+            Accessible.ignored: true
             opacity: mediaPlayer.playbackState !== MediaPlayer.PlayingState ? 1.0 : 0.0
             Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
         }
@@ -222,6 +240,9 @@ ColumnLayout {
             visible: mediaPlayer.playbackState !== MediaPlayer.PlayingState
                   && mediaPlayer.error === MediaPlayer.NoError
                   && !root.downloading
+            // Pure decoration: the hit target is videoCard, which is
+            // already named and already says whether it is playing.
+            Accessible.ignored: true
             Icon {
                 anchors.centerIn: parent
                 // Nudge the triangle half a pixel right so it's
@@ -243,6 +264,9 @@ ColumnLayout {
             anchors.fill: parent
             color: Qt.rgba(0, 0, 0, 0.55)
             visible: root.downloading
+            Accessible.role: Accessible.StaticText
+            Accessible.name: qsTr("Buffering video, %1 percent")
+                .arg(Math.round(root.downloadProgress * 100))
             ColumnLayout {
                 anchors.centerIn: parent
                 spacing: Theme.sp.s2
@@ -255,6 +279,8 @@ ColumnLayout {
                     Layout.alignment: Qt.AlignHCenter
                     text: "Buffering video… "
                         + Math.round(root.downloadProgress * 100) + "%"
+                    // Said by the overlay above; not said twice.
+                    Accessible.ignored: true
                     color: "white"
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.sm
@@ -267,6 +293,7 @@ ColumnLayout {
                 height: 3
                 width: parent.width * root.downloadProgress
                 color: Theme.accent
+                Accessible.ignored: true
                 Behavior on width { NumberAnimation { duration: 120 } }
             }
         }
@@ -281,6 +308,13 @@ ColumnLayout {
             visible: (mediaPlayer.error !== MediaPlayer.NoError
                       && !root.downloading)
                   || root.downloadFailed
+            // One announcement for the whole error state; the headline
+            // and the codec string below are folded into this name
+            // rather than read out as separate nodes.
+            Accessible.role: Accessible.AlertMessage
+            Accessible.name: mediaPlayer.errorString
+                ? qsTr("Couldn't play video. %1").arg(mediaPlayer.errorString)
+                : qsTr("Couldn't play video")
             ColumnLayout {
                 anchors.centerIn: parent
                 anchors.leftMargin: Theme.sp.s5
@@ -293,6 +327,7 @@ ColumnLayout {
                 Text {
                     Layout.alignment: Qt.AlignHCenter
                     text: "Couldn't play video"
+                    Accessible.ignored: true
                     color: Theme.fg0
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.sm
@@ -304,6 +339,7 @@ ColumnLayout {
                     horizontalAlignment: Text.AlignHCenter
                     text: mediaPlayer.errorString || ""
                     visible: text.length > 0
+                    Accessible.ignored: true
                     color: Theme.fg2
                     font.family: Theme.fontMono
                     font.pixelSize: Theme.fontSize.xs
@@ -358,6 +394,8 @@ ColumnLayout {
                 anchors.fill: parent
                 acceptedButtons: Qt.AllButtons
                 cursorShape: Qt.ArrowCursor
+                // Event boundary, not a control.
+                Accessible.ignored: true
                 onClicked: (m) => { m.accepted = true; }
                 onPressed: (m) => { m.accepted = true; }
             }
@@ -375,6 +413,17 @@ ColumnLayout {
                     radius: Theme.r1
                     color: playPauseMouse.containsMouse
                         ? Qt.rgba(1, 1, 1, 0.15) : "transparent"
+                    Accessible.role: Accessible.CheckBox
+                    Accessible.checkable: true
+                    Accessible.checked:
+                        mediaPlayer.playbackState === MediaPlayer.PlayingState
+                    Accessible.name: qsTr("Playback")
+                    Accessible.description:
+                        mediaPlayer.playbackState === MediaPlayer.PlayingState
+                            ? qsTr("Currently playing. Activate to pause.")
+                            : qsTr("Currently paused. Activate to play.")
+                    Accessible.onToggleAction: root.togglePlay()
+                    Accessible.onPressAction: root.togglePlay()
                     Icon {
                         anchors.centerIn: parent
                         anchors.horizontalCenterOffset:
@@ -409,6 +458,13 @@ ColumnLayout {
                 // the dark video chrome.
                 Slider {
                     id: seekSlider
+                    Accessible.role: Accessible.Slider
+                    Accessible.name: qsTr("Playback position")
+                    Accessible.description: mediaPlayer.duration > 0
+                        ? qsTr("%1 of %2")
+                            .arg(root.spokenTime(mediaPlayer.position))
+                            .arg(root.spokenTime(mediaPlayer.duration))
+                        : qsTr("Length not known yet")
                     Layout.fillWidth: true
                     // Fill the bar's height so the whole strip around the
                     // 3px groove is a seek target rather than a hole that
@@ -491,6 +547,16 @@ ColumnLayout {
                         radius: Theme.r1
                         color: volumeHover.containsMouse
                             ? Qt.rgba(1, 1, 1, 0.15) : "transparent"
+                        Accessible.role: Accessible.CheckBox
+                        Accessible.checkable: true
+                        Accessible.checked: root.muted || root.volume <= 0.001
+                        Accessible.name: qsTr("Mute")
+                        Accessible.description:
+                            (root.muted || root.volume <= 0.001)
+                                ? qsTr("Currently muted. Activate to unmute.")
+                                : qsTr("Currently audible. Activate to mute.")
+                        Accessible.onToggleAction: root.muted = !root.muted
+                        Accessible.onPressAction: root.muted = !root.muted
                         Icon {
                             anchors.centerIn: parent
                             name: (root.muted || root.volume <= 0.001)
@@ -539,12 +605,20 @@ ColumnLayout {
                             anchors.fill: parent
                             acceptedButtons: Qt.AllButtons
                             cursorShape: Qt.ArrowCursor
+                            // Event boundary, not a control.
+                            Accessible.ignored: true
                             onClicked: (m) => { m.accepted = true; }
                             onPressed: (m) => { m.accepted = true; }
                         }
 
                         Slider {
                             id: volumeSlider
+                            Accessible.role: Accessible.Slider
+                            Accessible.name: qsTr("Volume")
+                            Accessible.description: root.muted
+                                ? qsTr("Muted")
+                                : qsTr("%1 percent")
+                                    .arg(Math.round(root.volume * 100))
                             focusPolicy: Qt.NoFocus
                             anchors.centerIn: parent
                             height: parent.height - 16
@@ -599,6 +673,8 @@ ColumnLayout {
                             anchors.fill: parent
                             hoverEnabled: true
                             acceptedButtons: Qt.NoButton
+                            // Hover detector only.
+                            Accessible.ignored: true
                         }
                     }
                 }
@@ -615,6 +691,10 @@ ColumnLayout {
                     radius: Theme.r1
                     color: fullscreenHover.containsMouse
                         ? Qt.rgba(1, 1, 1, 0.15) : "transparent"
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Fullscreen")
+                    Accessible.description: qsTr("Show this video full screen")
+                    Accessible.onPressAction: root.openFullscreen()
                     Icon {
                         anchors.centerIn: parent
                         name: "expand"
@@ -723,6 +803,17 @@ ColumnLayout {
         if (mediaPlayer.duration <= 0) return;
         mediaPlayer.position = PlaybackMath.clampSeek(
             mediaPlayer.position, deltaMs, mediaPlayer.duration);
+    }
+
+    // Spoken form of a media position, for Accessible.description only.
+    // A screen reader reads formatTime()'s "1:05" as "one colon zero
+    // five"; everything drawn on screen still uses formatTime().
+    function spokenTime(ms) {
+        var total = Math.max(0, Math.floor((ms || 0) / 1000));
+        var mins = Math.floor(total / 60);
+        var secs = total % 60;
+        return mins > 0 ? qsTr("%1 minutes %2 seconds").arg(mins).arg(secs)
+                        : qsTr("%1 seconds").arg(secs);
     }
 
     function formatTime(ms) { return PlaybackMath.formatTime(ms); }
@@ -838,6 +929,14 @@ ColumnLayout {
             id: fsKeys
             anchors.fill: parent
             focus: true
+            // Root of the modal lightbox, and the named node standing in
+            // for the full-bleed click-to-toggle MouseArea below.
+            Accessible.role: Accessible.Dialog
+            Accessible.name: root.fileName !== ""
+                ? qsTr("Fullscreen video %1").arg(root.fileName)
+                : qsTr("Fullscreen video")
+            Accessible.description:
+                qsTr("Press Escape or F to leave fullscreen")
 
             // Keyboard transport, matching what people already have in
             // their fingers from every other player. Escape is left to
@@ -873,6 +972,10 @@ ColumnLayout {
                 id: fsVideoOutput
                 anchors.fill: parent
                 fillMode: VideoOutput.PreserveAspectFit
+                Accessible.role: Accessible.Graphic
+                Accessible.name: root.fileName !== ""
+                    ? qsTr("Video %1").arg(root.fileName)
+                    : qsTr("Video")
             }
 
             // Clicking the picture toggles play/pause — the same thing
@@ -894,6 +997,9 @@ ColumnLayout {
                 color: Qt.rgba(0, 0, 0, 0.55)
                 border.color: "white"; border.width: 2
                 visible: mediaPlayer.playbackState !== MediaPlayer.PlayingState
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Play")
+                Accessible.onPressAction: mediaPlayer.play()
                 Icon {
                     anchors.centerIn: parent
                     anchors.horizontalCenterOffset: 2
@@ -919,6 +1025,8 @@ ColumnLayout {
                 height: 116
                 hoverEnabled: true
                 acceptedButtons: Qt.NoButton
+                // Reveal zone for the bar, not a control.
+                Accessible.ignored: true
             }
 
             // Bottom transport bar — same vocabulary as inline, but
@@ -953,6 +1061,8 @@ ColumnLayout {
                     anchors.fill: parent
                     acceptedButtons: Qt.AllButtons
                     cursorShape: Qt.ArrowCursor
+                    // Event boundary, not a control.
+                    Accessible.ignored: true
                     onClicked: (m) => { m.accepted = true; }
                     onPressed: (m) => { m.accepted = true; }
                 }
@@ -969,6 +1079,17 @@ ColumnLayout {
                         radius: Theme.r1
                         color: fsPlayPauseMouse.containsMouse
                             ? Qt.rgba(1, 1, 1, 0.15) : "transparent"
+                        Accessible.role: Accessible.CheckBox
+                        Accessible.checkable: true
+                        Accessible.checked:
+                            mediaPlayer.playbackState === MediaPlayer.PlayingState
+                        Accessible.name: qsTr("Playback")
+                        Accessible.description:
+                            mediaPlayer.playbackState === MediaPlayer.PlayingState
+                                ? qsTr("Currently playing. Activate to pause.")
+                                : qsTr("Currently paused. Activate to play.")
+                        Accessible.onToggleAction: root.togglePlay()
+                        Accessible.onPressAction: root.togglePlay()
                         Icon {
                             anchors.centerIn: parent
                             anchors.horizontalCenterOffset:
@@ -999,6 +1120,13 @@ ColumnLayout {
                     }
                     Slider {
                         id: fsSeekSlider
+                        Accessible.role: Accessible.Slider
+                        Accessible.name: qsTr("Playback position")
+                        Accessible.description: mediaPlayer.duration > 0
+                            ? qsTr("%1 of %2")
+                                .arg(root.spokenTime(mediaPlayer.position))
+                                .arg(root.spokenTime(mediaPlayer.duration))
+                            : qsTr("Length not known yet")
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         from: 0
@@ -1061,6 +1189,16 @@ ColumnLayout {
                         radius: Theme.r1
                         color: fsMuteMouse.containsMouse
                             ? Qt.rgba(1, 1, 1, 0.15) : "transparent"
+                        Accessible.role: Accessible.CheckBox
+                        Accessible.checkable: true
+                        Accessible.checked: root.muted || root.volume <= 0.001
+                        Accessible.name: qsTr("Mute")
+                        Accessible.description:
+                            (root.muted || root.volume <= 0.001)
+                                ? qsTr("Currently muted. Activate to unmute.")
+                                : qsTr("Currently audible. Activate to mute.")
+                        Accessible.onToggleAction: root.muted = !root.muted
+                        Accessible.onPressAction: root.muted = !root.muted
                         Icon {
                             anchors.centerIn: parent
                             name: (root.muted || root.volume <= 0.001)
@@ -1083,6 +1221,11 @@ ColumnLayout {
                         radius: Theme.r1
                         color: fsExitMouse.containsMouse
                             ? Qt.rgba(1, 1, 1, 0.15) : "transparent"
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Exit fullscreen")
+                        Accessible.description:
+                            qsTr("Return the video to the message")
+                        Accessible.onPressAction: fullscreenPopup.close()
                         Icon {
                             anchors.centerIn: parent
                             name: "x"

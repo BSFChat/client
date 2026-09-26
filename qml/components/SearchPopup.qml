@@ -54,6 +54,7 @@ Popup {
     readonly property var _server: serverManager.activeServer
 
     background: Rectangle {
+        Accessible.ignored: true
         color: Theme.bg1
         radius: Theme.r3
         border.color: Theme.line
@@ -175,6 +176,9 @@ Popup {
     contentItem: ColumnLayout {
         spacing: 0
 
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Search messages")
+
         // Search field — accent border on focus (also serves as our
         // "focus ring" prototype for the accessibility pass).
         Rectangle {
@@ -208,6 +212,9 @@ Popup {
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.base
                     selectByMouse: true
+                    Accessible.role: Accessible.EditableText
+                    Accessible.name: qsTr("Search messages")
+                    Accessible.description: qsTr("Searches every channel you can see")
                     onTextChanged: searchPopup.runSearch(text)
                     // Enter re-issues immediately rather than waiting out the
                     // debounce, and opens the top hit once results are in.
@@ -222,6 +229,7 @@ Popup {
                 }
 
                 BusyIndicator {
+                    Accessible.ignored: true
                     running: searchPopup.searching
                     visible: running
                     implicitWidth: 18
@@ -232,6 +240,12 @@ Popup {
                     visible: !searchPopup.searching
                              && searchPopup.errorText === ""
                              && searchPopup.totalMatches > 0
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: (searchPopup.results.length < searchPopup.totalMatches)
+                        ? qsTr("Showing %1 of %2 matches")
+                          .arg(searchPopup.results.length)
+                          .arg(searchPopup.totalMatches)
+                        : qsTr("%n match(es)", "", searchPopup.totalMatches)
                     // Distinguish "showing all of them" from "showing the first
                     // page of many", so the count never looks like a lie.
                     text: searchPopup.results.length < searchPopup.totalMatches
@@ -247,7 +261,7 @@ Popup {
             }
         }
 
-        Item { Layout.preferredHeight: Theme.sp.s3 }
+        Item { Accessible.ignored: true; Layout.preferredHeight: Theme.sp.s3 }
 
         // Results list.
         ListView {
@@ -278,6 +292,7 @@ Popup {
                 visible: searchPopup.loadingMore
                 BusyIndicator {
                     anchors.centerIn: parent
+                    Accessible.ignored: true
                     running: searchPopup.loadingMore
                     implicitWidth: 20
                     implicitHeight: 20
@@ -295,6 +310,23 @@ Popup {
                 color: resultMouse.containsMouse ? Theme.bg2 : "transparent"
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
+                // One announcement for the whole hit: who, where, what, when.
+                // The rows inside are ignored so the row is not walked
+                // four times to hear one result.
+                Accessible.role: Accessible.ListItem
+                Accessible.name: {
+                    var when = new Date(modelData.timestamp)
+                        .toLocaleString(Qt.locale(), "MMM d, h:mm ap");
+                    return modelData.roomName
+                        ? qsTr("%1 in #%2: %3, %4").arg(modelData.sender)
+                              .arg(modelData.roomName).arg(modelData.body)
+                              .arg(when)
+                        : qsTr("%1: %2, %3").arg(modelData.sender)
+                              .arg(modelData.body).arg(when);
+                }
+                Accessible.description: qsTr("Jump to this message")
+                Accessible.onPressAction: searchPopup._activate(index)
+
                 ColumnLayout {
                     anchors.fill: parent
                     anchors.leftMargin: Theme.sp.s4
@@ -307,6 +339,7 @@ Popup {
                         Layout.fillWidth: true
                         spacing: Theme.sp.s3
                         Text {
+                            Accessible.ignored: true
                             text: modelData.sender
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.base
@@ -318,6 +351,7 @@ Popup {
                         // server-side search is that it isn't the current one.
                         Text {
                             visible: text.length > 1
+                            Accessible.ignored: true
                             text: modelData.roomName ? "#" + modelData.roomName : ""
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.xs
@@ -326,6 +360,7 @@ Popup {
                             Layout.fillWidth: true
                         }
                         Text {
+                            Accessible.ignored: true
                             text: {
                                 var d = new Date(modelData.timestamp);
                                 return d.toLocaleString(Qt.locale(), "MMM d, h:mm ap");
@@ -336,6 +371,7 @@ Popup {
                         }
                     }
                     Text {
+                        Accessible.ignored: true
                         text: searchPopup._renderBody(modelData.body)
                         textFormat: Text.StyledText
                         font.family: Theme.fontSans
@@ -374,6 +410,15 @@ Popup {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: {
+                        if (searchPopup.errorText !== "")
+                            return searchPopup.errorText;
+                        if (searchPopup.searching) return qsTr("Searching");
+                        if (searchField.text.trim().length > 0)
+                            return qsTr("No messages matched");
+                        return qsTr("Search messages across every channel you can see");
+                    }
                     text: {
                         if (searchPopup.errorText !== "") return searchPopup.errorText;
                         if (searchPopup.searching) return "Searching…";
@@ -389,6 +434,10 @@ Popup {
                     Layout.alignment: Qt.AlignHCenter
                     visible: searchPopup.errorText !== ""
                              && searchField.text.trim().length > 0
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Try again")
+                    Accessible.description: qsTr("Run the search again")
+                    Accessible.onPressAction: searchPopup._issue(searchField.text, "")
                     text: "Try again"
                     onClicked: searchPopup._issue(searchField.text, "")
                 }
