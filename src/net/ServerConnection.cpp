@@ -2680,12 +2680,25 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
         [this](const QString& userId, float level) {
             m_peerLevels[userId] = level;
             emit peerLevelChanged(userId);
+            // Same number, second consumer: the member list needs to be able
+            // to say who is talking (a screen-reader user has no speaking
+            // ring to look at). The model thresholds and debounces it — see
+            // MemberListModel's voice block — so this stays a raw forward of
+            // the one level signal rather than a parallel notion of speech.
+            m_memberListModel->setVoiceLevel(userId, level);
         });
 
     // Mic level → transmit indicator + silence detection.
     m_zeroLevelFrames = 0;
     m_micSilent = false;
     connect(m_voiceEngine, &VoiceEngine::micLevelChanged, this, [this](float level) {
+        // BEFORE the jitter gate below, deliberately. That gate exists to
+        // stop a 50 Hz property notification for a meter that cannot show
+        // the difference; the member list needs the opposite guarantee — a
+        // steady, loud level that happens not to move by 0.005 between
+        // frames must keep re-arming the speaking hold, or our own row
+        // would blink off mid-sentence.
+        m_memberListModel->setVoiceLevel(m_userId, level);
         if (qAbs(level - m_micLevel) < 0.005f) return;
         m_micLevel = level;
         emit micLevelChanged();
@@ -2725,6 +2738,9 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
         m_videoRegistry->dropUser(userId);
         if (m_peerLevels.remove(userId))
             emit peerLevelChanged(userId);
+        // Don't make a departed peer wait out the speaking hold — they are
+        // gone, not pausing between words.
+        m_memberListModel->clearVoiceLevel(userId);
         emitVoiceMembersIfChanged();
         // Losing a peer can move the claim in either direction — it can be the
         // last unconfirmed one (so "hidden" becomes provable) or the last one
@@ -2883,6 +2899,9 @@ void ServerConnection::teardownVoiceSession()
         m_micLevel = 0.0f;
         emit micLevelChanged();
     }
+    // Same immediacy for the member rows: leaving the call ends everybody's
+    // turn at once, rather than 400 ms of holds draining one by one.
+    m_memberListModel->clearVoiceLevels();
 }
 
 QObject* ServerConnection::videoRegistryObject() const

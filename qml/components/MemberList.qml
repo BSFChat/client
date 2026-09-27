@@ -251,17 +251,44 @@ Rectangle {
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
                     // One announcement for the whole row (docs/accessibility
-                    // §7): name, bot-ness, presence, hoisted role, custom
-                    // status — in the order the eye takes them off the row.
-                    // Every Text inside is ignored so this is read as one
+                    // §7): name, speaking, bot-ness, presence, hoisted role,
+                    // custom status — in the order the eye takes them off the
+                    // row. Every Text inside is ignored so this is read as one
                     // sentence instead of four fragments. The name is here
                     // rather than on the delegate Item because this is the
                     // item that owns the MouseArea.
+                    //
+                    // SPEAKING IS IN THE NAME, AND IS NOT ANNOUNCED.
+                    // docs/accessibility §5 puts non-binary state in the name
+                    // because there is no platform attribute for it, and this
+                    // is the case it names. It is also the only tolerable
+                    // design: an Accessible.announce() on each transition
+                    // would fire every time anyone in the call started a
+                    // sentence, and in a six-person call that is a screen
+                    // reader talking over itself for the duration. In the
+                    // name, the state is there the moment the user navigates
+                    // to the row and silent until they do — which is how a
+                    // sighted user reads the ring too. The binding does the
+                    // rest: Qt raises NameChanged when it re-evaluates, so a
+                    // reader parked on the row follows the change without
+                    // anything imperative here.
+                    //
+                    // Second, immediately after the name, rather than last:
+                    // presence, role and status are things you already know
+                    // about a person, and in a call this is the one fact you
+                    // are navigating the list to find. It should not be
+                    // behind four static clauses.
+                    //
+                    // Silence says nothing. A ", not speaking" on every other
+                    // row would double the length of every announcement in a
+                    // fifty-person list to carry no information.
                     Accessible.role: Accessible.ListItem
                     Accessible.name: {
                         memberListRoot._presenceGen;   // dep — see below
                         var s = serverManager.activeServer;
                         var out = model.displayName || model.userId;
+                        if (model.isSpeaking === true)
+                            out = qsTr("%1, speaking").arg(out);
                         if (model.isBot === true)
                             out = qsTr("%1, bot").arg(out);
                         var p = s ? s.presenceFor(model.userId) : "offline";
@@ -318,6 +345,32 @@ Rectangle {
                                     // the row already announces.
                                     Accessible.ignored: true
                                 }
+                            }
+
+                            // Speaking ring — the accent halo the voice grid
+                            // already uses for this (ParticipantTile.qml),
+                            // at member-row scale. Sits OUTSIDE the avatar
+                            // on negative margins, exactly as the presence
+                            // dot below does, so lighting it cannot resize
+                            // the avatar or shift the name beside it.
+                            // Opacity rather than visible, for the same
+                            // reason and to give the fade something to
+                            // animate. Declared before the presence dot so
+                            // the dot stays on top of it.
+                            Rectangle {
+                                anchors.fill: parent
+                                anchors.margins: -2
+                                radius: Theme.r2 + 2
+                                color: "transparent"
+                                border.width: 2
+                                border.color: Theme.accent
+                                opacity: model.isSpeaking === true ? 1.0 : 0.0
+                                Behavior on opacity {
+                                    NumberAnimation { duration: Theme.motion.fastMs }
+                                }
+                                // The row's name already says "speaking";
+                                // this is the picture of that.
+                                Accessible.ignored: true
                             }
 
                             // Presence dot — online/idle/dnd/offline colour,
