@@ -777,6 +777,217 @@ private slots:
         }
     }
 
+    // ── speaking state ──────────────────────────────────────────────────
+    //
+    // IsSpeakingRole is the only role on this model that no member event
+    // carries. ServerConnection pushes VoiceEngine's levels in — the same
+    // numbers the voice grid reads through peerLevel()/micLevel() — and the
+    // model turns a stream of floats into an edge.
+    //
+    // Everything below drives setVoiceLevelAt()/expireSpeakingAt() with an
+    // explicit clock rather than the wall one. A test that slept out a 400 ms
+    // hold would cost 400 ms per case and would still be a flake on a loaded
+    // machine, which is the wrong trade for an assertion about a threshold.
+
+    void testSpeakingIsFalseUntilSomebodySaysOtherwise()
+    {
+        MemberListModel model;
+        model.processEvent(makeMemberEvent("@alice:server", "Alice", "join"));
+        QCOMPARE(model.data(model.index(0), MemberListModel::IsSpeakingRole).toBool(),
+                 false);
+        QCOMPARE(model.isSpeaking("@alice:server"), false);
+        // Role name, because the QML reads `model.isSpeaking` and a rename
+        // here would fail nowhere else.
+        QCOMPARE(model.roleNames().value(MemberListModel::IsSpeakingRole),
+                 QByteArray("isSpeaking"));
+    }
+
+    void testALevelOverTheFloorMakesAMemberSpeak()
+    {
+        MemberListModel model;
+        model.processEvent(makeMemberEvent("@alice:server", "Alice", "join"));
+
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        model.setVoiceLevelAt("@alice:server", 0.30f, 1000);
+
+        QCOMPARE(model.data(model.index(0), MemberListModel::IsSpeakingRole).toBool(),
+                 true);
+        QCOMPARE(spy.count(), 1);
+        // Exactly one role, and the right one: an empty role list means
+        // "every role changed", which re-evaluates every binding on the row —
+        // avatar, presence, role colour — 12 times a second for the length of
+        // the call.
+        const auto roles = spy.at(0).at(2).value<QList<int>>();
+        QCOMPARE(roles, QList<int>{int(MemberListModel::IsSpeakingRole)});
+    }
+
+    void testALevelUnderTheFloorIsNotSpeech()
+    {
+        MemberListModel model;
+        model.processEvent(makeMemberEvent("@alice:server", "Alice", "join"));
+
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        // Room tone, and the floor itself — the comparison is strictly
+        // greater-than, so the boundary value is silence.
+        model.setVoiceLevelAt("@alice:server", 0.01f, 1000);
+        model.setVoiceLevelAt("@alice:server",
+                              MemberListModel::kSpeakingLevelFloor, 1000);
+
+        QCOMPARE(model.isSpeaking("@alice:server"), false);
+        QCOMPARE(spy.count(), 0);
+    }
+
+    // The reason the hold exists. Speech is gaps: the silence between two
+    // words drops below the floor, and without a hold the ring would strobe
+    // and the accessible name would change mid-sentence.
+    void testTheHoldCarriesAMemberAcrossTheGapBetweenWords()
+    {
+        MemberListModel model;
+        model.processEvent(makeMemberEvent("@alice:server", "Alice", "join"));
+
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        model.setVoiceLevelAt("@alice:server", 0.30f, 1000);
+        QCOMPARE(model.isSpeaking("@alice:server"), true);
+
+        // 200 ms later, mid-gap. Nothing arrives that clears the floor, and
+        // nothing expires.
+        QCOMPARE(model.expireSpeakingAt(1200), 0);
+        QCOMPARE(model.isSpeaking("@alice:server"), true);
+
+        // Next word. The hold is re-armed, and — this is the part that keeps
+        // the screen reader quiet — no second dataChanged is emitted, because
+        // nothing the view can see has changed.
+        model.setVoiceLevelAt("@alice:server", 0.40f, 1250);
+        QCOMPARE(spy.count(), 1);
+
+        // What was the original deadline (1400) is now past, but the re-arm
+        // moved it to 1650.
+        QCOMPARE(model.expireSpeakingAt(1450), 0);
+        QCOMPARE(model.isSpeaking("@alice:server"), true);
+    }
+
+    void testTheHoldRunsOutWhenTheTalkingStops()
+    {
+        MemberListModel model;
+        model.processEvent(makeMemberEvent("@alice:server", "Alice", "join"));
+
+        model.setVoiceLevelAt("@alice:server", 0.30f, 1000);
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+
+        // Exactly on the deadline, which is the release edge.
+        QCOMPARE(model.expireSpeakingAt(1000 + MemberListModel::kSpeakingHoldMs), 1);
+        QCOMPARE(model.isSpeaking("@alice:server"), false);
+        QCOMPARE(model.data(model.index(0), MemberListModel::IsSpeakingRole).toBool(),
+                 false);
+        QCOMPARE(spy.count(), 1);
+        const auto roles = spy.at(0).at(2).value<QList<int>>();
+        QCOMPARE(roles, QList<int>{int(MemberListModel::IsSpeakingRole)});
+
+        // Idempotent: a second sweep has nothing to release and says nothing.
+        QCOMPARE(model.expireSpeakingAt(9999), 0);
+        QCOMPARE(spy.count(), 1);
+    }
+
+    void testEachSpeakerIsHeldSeparately()
+    {
+        MemberListModel model;
+        model.processEvent(makeMemberEvent("@alice:server", "Alice", "join"));
+        model.processEvent(makeMemberEvent("@bob:server", "Bob", "join"));
+
+        model.setVoiceLevelAt("@alice:server", 0.30f, 1000);
+        model.setVoiceLevelAt("@bob:server", 0.30f, 1300);
+
+        QCOMPARE(model.expireSpeakingAt(1400), 1);
+        QCOMPARE(model.isSpeaking("@alice:server"), false);
+        QCOMPARE(model.isSpeaking("@bob:server"), true);
+        QCOMPARE(model.data(model.index(1), MemberListModel::IsSpeakingRole).toBool(),
+                 true);
+    }
+
+    // peerDisconnected. Somebody who has left the call is not pausing between
+    // words, so they do not get the hold.
+    void testADepartedPeerStopsSpeakingImmediately()
+    {
+        MemberListModel model;
+        model.processEvent(makeMemberEvent("@alice:server", "Alice", "join"));
+        model.processEvent(makeMemberEvent("@bob:server", "Bob", "join"));
+        model.setVoiceLevelAt("@alice:server", 0.30f, 1000);
+        model.setVoiceLevelAt("@bob:server", 0.30f, 1000);
+
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        model.clearVoiceLevel("@alice:server");
+
+        QCOMPARE(model.isSpeaking("@alice:server"), false);
+        QCOMPARE(model.isSpeaking("@bob:server"), true);
+        QCOMPARE(spy.count(), 1);
+
+        // Clearing somebody who was not speaking is a no-op, not a spurious
+        // repaint.
+        model.clearVoiceLevel("@alice:server");
+        QCOMPARE(spy.count(), 1);
+    }
+
+    // teardownVoiceSession. Leaving ends everybody's turn at once rather than
+    // draining 400 ms of holds one by one.
+    void testLeavingTheCallSilencesEveryone()
+    {
+        MemberListModel model;
+        model.processEvent(makeMemberEvent("@alice:server", "Alice", "join"));
+        model.processEvent(makeMemberEvent("@bob:server", "Bob", "join"));
+        model.setVoiceLevelAt("@alice:server", 0.30f, 1000);
+        model.setVoiceLevelAt("@bob:server", 0.30f, 1000);
+
+        QSignalSpy spy(&model, &QAbstractItemModel::dataChanged);
+        model.clearVoiceLevels();
+
+        QCOMPARE(model.isSpeaking("@alice:server"), false);
+        QCOMPARE(model.isSpeaking("@bob:server"), false);
+        QCOMPARE(spy.count(), 2);
+        QCOMPARE(model.data(model.index(0), MemberListModel::IsSpeakingRole).toBool(),
+                 false);
+        QCOMPARE(model.data(model.index(1), MemberListModel::IsSpeakingRole).toBool(),
+                 false);
+    }
+
+    // The race the state is keyed by user id for: a voice level can land
+    // before the m.room.member event that creates the row (joining a call and
+    // a channel at once), and the roster is cleared and rebuilt on every room
+    // switch while the call carries on. Neither may lose the state, and
+    // neither may crash.
+    void testSpeakingSurvivesTheRowNotBeingThereYet()
+    {
+        MemberListModel model;
+        model.setVoiceLevelAt("@alice:server", 0.30f, 1000);
+        QCOMPARE(model.rowCount(), 0);
+        QCOMPARE(model.isSpeaking("@alice:server"), true);
+
+        model.processEvent(makeMemberEvent("@alice:server", "Alice", "join"));
+        QCOMPARE(model.data(model.index(0), MemberListModel::IsSpeakingRole).toBool(),
+                 true);
+    }
+
+    void testSpeakingSurvivesARoomSwitch()
+    {
+        MemberListModel model;
+        model.processEvent(makeMemberEvent("@alice:server", "Alice", "join"));
+        model.setVoiceLevelAt("@alice:server", 0.30f, 1000);
+
+        // clear() is the room switch. The call did not end, so Alice is still
+        // talking when the next channel's roster arrives.
+        model.clear();
+        QCOMPARE(model.rowCount(), 0);
+        model.processEvent(makeMemberEvent("@alice:server", "Alice", "join"));
+        QCOMPARE(model.data(model.index(0), MemberListModel::IsSpeakingRole).toBool(),
+                 true);
+    }
+
+    void testAnEmptyUserIdIsIgnored()
+    {
+        MemberListModel model;
+        model.setVoiceLevelAt(QString(), 0.30f, 1000);
+        QCOMPARE(model.isSpeaking(QString()), false);
+    }
+
     // MarkdownParser tests
     void testMarkdownBold()
     {
