@@ -24,6 +24,15 @@
 //   * the `serverManager` CONTEXT PROPERTY, which is what the banner reads
 //     its four connection properties from and what its button calls.
 //
+// VoiceMemberChip.qml needs the same two and nothing else, plus three more
+// members on the fake connection: `userId` (so a row can be recognised as
+// ourselves), `micLevel` (a Q_PROPERTY, our own level) and `peerLevel(userId)`
+// (a Q_INVOKABLE with a peerLevelChanged(userId) signal, everyone else's).
+// Those three are the REAL shape of ServerConnection's level surface, and the
+// shape is the point: an invokable plus a signal is not a binding dependency,
+// which is precisely the trap the chip's `_levelGen` counter exists to avoid
+// and which a property-only fake would hide.
+//
 // Both are stubbed rather than real, deliberately, and for different reasons:
 //
 //   * Settings' constructor builds a QMediaDevices on desktop to keep the
@@ -41,6 +50,7 @@
 // The stubs are the ENVIRONMENT. The component is not stubbed.
 #include <QtQuickTest>
 
+#include <QMap>
 #include <QObject>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -86,6 +96,11 @@ class FakeServerConnection : public QObject
                WRITE setNeedsReauth NOTIFY needsReauthChanged)
     Q_PROPERTY(bool reauthInProgress READ reauthInProgress
                WRITE setReauthInProgress NOTIFY reauthInProgressChanged)
+    // The voice surface VoiceMemberChip reads. userId and micLevel are
+    // Q_PROPERTYs on the real class too; peerLevel is deliberately NOT one.
+    Q_PROPERTY(QString userId READ userId WRITE setUserId NOTIFY userIdChanged)
+    Q_PROPERTY(float micLevel READ micLevel WRITE setMicLevel
+               NOTIFY micLevelChanged)
 
     // ── the surface qml/components/MessageView.qml reads ───────────────
     //
@@ -439,6 +454,41 @@ public:
         m_presence.clear();
     }
 
+    float micLevel() const { return m_micLevel; }
+    void setMicLevel(float v)
+    {
+        if (qFuzzyCompare(m_micLevel + 1.0f, v + 1.0f)) return;
+        m_micLevel = v;
+        emit micLevelChanged();
+    }
+
+    // ServerConnection::peerLevel is Q_INVOKABLE and answers 0 for an unknown
+    // peer. Copied exactly, because "0 for someone we have no media connection
+    // to" is what makes a roster row for a channel we are not in show no ring.
+    Q_INVOKABLE float peerLevel(const QString& userId) const
+    {
+        return m_peerLevels.value(userId, 0.0f);
+    }
+
+    // The writer a test drives. Separate from the reader, and emitting the
+    // signal rather than a property change, so that a chip which forgot to
+    // depend on peerLevelChanged simply never updates — the failure the real
+    // component's `_levelGen` counter is there to prevent, reproduced here
+    // instead of papered over.
+    Q_INVOKABLE void setPeerLevel(const QString& userId, float level)
+    {
+        m_peerLevels[userId] = level;
+        emit peerLevelChanged(userId);
+    }
+
+    Q_INVOKABLE void clearPeerLevels()
+    {
+        const auto ids = m_peerLevels.keys();
+        m_peerLevels.clear();
+        for (const QString& id : ids)
+            emit peerLevelChanged(id);
+    }
+
 signals:
     void connectionStatusChanged();
     void syncErrorMessageChanged();
@@ -463,6 +513,8 @@ signals:
     void messageReceived(const QString& roomId, const QString& senderDisplayName,
                          const QString& body, const QString& eventId,
                          bool mentionsMe);
+    void micLevelChanged();
+    void peerLevelChanged(const QString& userId);
 
 private:
     // Default to the healthy state, so every test case starts from "the
@@ -490,6 +542,8 @@ private:
     MemberListModel* m_members = new MemberListModel(this);
     QString m_userId = QStringLiteral("@me:test");
     QHash<QString, QString> m_presence;
+    float m_micLevel = 0.0f;
+    QMap<QString, float> m_peerLevels;
 };
 
 // A stand-in for src/net/ServerManager.h with the three members the banner
@@ -547,6 +601,9 @@ public:
         m_connection->setCanSendForTest(true);
         m_connection->setActiveRoomId(QStringLiteral("!room:test.invalid"));
         m_connection->resetMembersForTest();
+        m_connection->setUserId(QStringLiteral("@me:example.org"));
+        m_connection->setMicLevel(0.0f);
+        m_connection->clearPeerLevels();
         setActiveServer(m_connection);
         setActiveServerIndex(0);
         m_reauthCalls = 0;

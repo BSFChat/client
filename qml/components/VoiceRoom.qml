@@ -709,90 +709,16 @@ Rectangle {
                 model: serverManager.activeServer
                     ? serverManager.activeServer.voiceMembers : []
 
-                delegate: Item {
+                // The shipped chip, not a restatement of it. The
+                // delegate this replaces read `modelData.speaking`, a key
+                // nothing has ever written, so its ring never lit for
+                // anybody; VoiceMemberChip.qml reads the live level the
+                // way ParticipantTile does and explains why at length.
+                delegate: VoiceMemberChip {
                     required property var modelData
+                    member: modelData
                     width: 56
                     height: memberStripList.height
-
-                    readonly property bool speaking: modelData.speaking === true
-                    readonly property bool muted: modelData.muted === true
-                    readonly property bool deafened: modelData.deafened === true
-                    readonly property string peerId: modelData.user_id || ""
-                    readonly property string peerName:
-                        modelData.displayName || modelData.user_id || "?"
-
-                    ColumnLayout {
-                        anchors.fill: parent
-                        spacing: 2
-
-                        // Speaking ring + avatar tile.
-                        Item {
-                            Layout.preferredWidth: 44
-                            Layout.preferredHeight: 44
-                            Layout.alignment: Qt.AlignHCenter
-
-                            Rectangle {
-                                anchors.centerIn: parent
-                                width: parent.width + 6
-                                height: parent.height + 6
-                                radius: width / 2
-                                color: "transparent"
-                                border.width: 2
-                                border.color: Theme.online
-                                opacity: speaking ? 0.9 : 0
-                                visible: opacity > 0.01
-                                Behavior on opacity { NumberAnimation { duration: 120 } }
-                            }
-
-                            Rectangle {
-                                anchors.fill: parent
-                                radius: Theme.r2
-                                color: Theme.senderColor(peerId)
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: (peerName.replace(/^[^a-zA-Z0-9]+/, "")
-                                          .charAt(0) || "?").toUpperCase()
-                                    font.family: Theme.fontSans
-                                    font.pixelSize: 16
-                                    font.weight: Theme.fontWeight.semibold
-                                    color: Theme.onAccent
-                                }
-                            }
-
-                            // Status glyph in the bottom-right.
-                            Item {
-                                anchors.right: parent.right
-                                anchors.bottom: parent.bottom
-                                anchors.margins: -2
-                                width: 14; height: 14
-                                visible: muted || deafened
-                                Rectangle {
-                                    anchors.fill: parent
-                                    radius: width / 2
-                                    color: Theme.danger
-                                    border.color: Theme.bg1
-                                    border.width: 1.5
-                                }
-                                Icon {
-                                    anchors.centerIn: parent
-                                    name: deafened ? "headphones-off" : "mic-off"
-                                    size: 8
-                                    color: "white"
-                                }
-                            }
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            Layout.alignment: Qt.AlignHCenter
-                            horizontalAlignment: Text.AlignHCenter
-                            text: peerName
-                            font.family: Theme.fontSans
-                            font.pixelSize: 10
-                            color: Theme.fg2
-                            elide: Text.ElideRight
-                        }
-                    }
                 }
             }
         }
