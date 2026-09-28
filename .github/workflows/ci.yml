@@ -143,6 +143,41 @@ jobs:
           # RESIDUAL: CVE-2026-6210 (QtSvg marker heap overflow, High)
           # was fixed in 6.8.8 / 6.11.1 and is NOT in the 6.10 line —
           # revisit when 6.11.x publishes Windows x64 packages.
+          #
+          # RESIDUAL 2 — a CRASH, not just a CVE, and the stronger
+          # reason to get off 6.10: QTBUG-145704, "[macOS]
+          # DeviceDisconnectMonitor crashes when removing an audio
+          # device". Fixed by qtmultimedia cd4fc6bca122 ("CoreAudio:
+          # check if devices is alive before removing listener"),
+          # Pick-to said "6.11 6.10 6.8" but only 6.11 and lts-6.8 ever
+          # got it. Fix versions 6.8.8 / 6.11.1 / 6.12.0 — no 6.10.
+          # 6.10.3 is the last 6.10 release, so this never lands here.
+          #
+          # It bites us in the field. bsfchat-app 0.0.48 on macOS 26.3
+          # died twice this way (2026-09-25 17:36, 2026-09-28 21:23):
+          # SIGSEGV in AudioObjectRemovePropertyListenerBlock on the
+          # main thread, no app frames. Confirmed trigger, from the
+          # unified log at the second crash: a Bluetooth headset
+          # relinquished its CoreAudio device and the default output
+          # switched to BuiltInHeadphoneOutputDevice between 21:22:45
+          # and 21:22:47.66 — the process died at 21:22:47.48, inside
+          # that window. Qt then removes the kAudioDevicePropertyDevice-
+          # IsAlive ('livn') listener from an AudioObjectID that is
+          # already dead and CoreAudio faults in its own internals.
+          # Verified unpatched in the exact shipped binary: the arm64
+          # slice of Qt/6.10.3/macos/.../QtMultimedia (UUID
+          # 60A0E9F2-7D6D-3EAA-B43F-D440B65B71B8, matching the crash)
+          # tail-calls AudioObjectRemovePropertyListenerBlock at +0x9436c
+          # with no AudioObjectGetPropertyData alive-check in front of it.
+          #
+          # There is no app-side fix — the whole failing path is inside
+          # QtMultimedia and no bsfchat frame appears on the stack. The
+          # fix is the version bump, and it is blocked by the same
+          # Windows gap as CVE-2026-6210: verified 2026-09-28 that aqt
+          # resolves 6.11.2 for mac (clang_64) and linux (linux_gcc_64)
+          # but for NO windows desktop arch, while 6.10.3 still resolves
+          # win64_msvc2022_64. Revisit both together.
+          #
           # Verified locally against Qt 6.10.2.
           version: '6.10.3'
           modules: 'qtmultimedia'

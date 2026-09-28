@@ -170,6 +170,67 @@ private slots:
         QVERIFY2(!code.contains(QStringLiteral("CGWindowListCreateImage")),
                  "MacScreenCapturer.mm uses a legacy capture API.");
     }
+
+    // --- Callback lifetime --------------------------------------------
+    //
+    // Crash 2026-09-25 01:00 (bsfchat-app 0.0.48, macOS 26.3): SIGSEGV at
+    // 0x458 on thread com.apple.NSXPCConnection.m-user.com.apple.replayd,
+    //
+    //     QObject::thread()
+    //     QMetaObject::invokeMethodImpl(QObject*, ...)
+    //     bsfchat-app                                  <- grabWithFilter's block
+    //     __78+[SCScreenshotManager captureImageWith...]_block_invoke
+    //
+    // while the main thread was in ~QQmlApplicationEngine inside main().
+    // `screenShare` is a main() local declared AFTER the engine, so it
+    // and its child MacScreenCapturer were already destroyed. Nothing
+    // cancels an in-flight SCScreenshotManager capture — not stop(), not
+    // the destructor — so the completion handler ran against freed
+    // memory. invokeMethod() is not a safe "post and forget": it reads
+    // QObject::thread() off the target before it can queue anything, so
+    // passing a raw `this` from the XPC queue dereferences it there.
+    //
+    // This cannot be reproduced headlessly: driving it needs a real
+    // ScreenCaptureKit capture, which needs the picker and the very TCC
+    // prompts this whole file exists to avoid. So the ownership rule is
+    // pinned in the source instead of exercised.
+
+    void capturerNeverInvokesIntoARawThisFromACallback()
+    {
+        const QString code = capturerCode();
+        QVERIFY2(!code.contains(QStringLiteral("QMetaObject::invokeMethod(this")),
+                 "MacScreenCapturer.mm posts to a raw `this`. Its "
+                 "SCScreenshotManager completion runs on replayd's XPC "
+                 "queue and can outlive the capturer; invokeMethod "
+                 "dereferences the target (QObject::thread()) before "
+                 "queueing. Hop to the main queue and re-check a "
+                 "QPointer there instead.");
+    }
+
+    void capturerGuardsItsCompletionHandlerWithAQPointer()
+    {
+        const QString code = capturerCode();
+        QVERIFY2(code.contains(QStringLiteral("QPointer<MacScreenCapturer>")),
+                 "MacScreenCapturer.mm no longer holds a QPointer guard "
+                 "for its async completion handlers.");
+        QVERIFY2(code.contains(QStringLiteral("dispatch_get_main_queue")),
+                 "MacScreenCapturer.mm no longer hops off the capture "
+                 "callback's queue before touching Qt state.");
+    }
+
+    void capturerClearsTheObserverBackPointerOnDestruction()
+    {
+        const QString code = capturerCode();
+        // Same trap on the picker side: MacPickerObserver's delegate
+        // methods dispatch to the main queue and their blocks retain the
+        // observer, so one can still land after ~MacScreenCapturer.
+        // `owner` is an assign property, so it must be cleared, not just
+        // released.
+        QVERIFY2(code.contains(QStringLiteral(".owner = nullptr")),
+                 "~MacScreenCapturer releases MacPickerObserver without "
+                 "clearing its `owner` back-pointer; an in-flight picker "
+                 "callback would call into a freed capturer.");
+    }
 };
 
 QTEST_GUILESS_MAIN(TestScreenCapturePolicy)
