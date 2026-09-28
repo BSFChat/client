@@ -5,6 +5,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 #include <QDebug>
+#include <QPointer>
 
 // ScreenCaptureKit (macOS 12.3+) is Apple's sanctioned replacement
 // for the now-obsolete CGDisplayCreateImage path. We use
@@ -78,6 +79,14 @@ MacScreenCapturer::~MacScreenCapturer() {
     }
     if (@available(macOS 14.0, *)) {
         if (m_observer) {
+            // Clear the back-pointer BEFORE dropping our reference. The
+            // observer's delegate methods hop to the main queue and
+            // their blocks retain the observer, so one can still be in
+            // flight after this release — and it reads `_owner`. Same
+            // lifetime trap as the SCScreenshotManager completion in
+            // grabWithFilter(): with `owner` left dangling it would
+            // call into a freed MacScreenCapturer.
+            ((MacPickerObserver*)m_observer).owner = nullptr;
             [[SCContentSharingPicker sharedPicker]
                 removeObserver:(MacPickerObserver*)m_observer];
             [(id)m_observer release];
@@ -274,6 +283,27 @@ void MacScreenCapturer::grabWithFilter()
 
     if (@available(macOS 14.0, *)) {
         const quint64 selection = m_selection;
+        // SCScreenshotManager's completion handler runs on an
+        // NSXPCConnection queue owned by replayd, and NOTHING cancels
+        // an in-flight capture — not stop(), not ~MacScreenCapturer().
+        // It used to capture a raw `this` and call
+        // QMetaObject::invokeMethod(this, ...) from that queue, which
+        // dereferences the QObject (invokeMethod reads
+        // QObject::thread() before it can queue anything). When a
+        // capture was still in flight while the app shut down, the
+        // completion landed on a freed capturer and segfaulted on the
+        // replayd XPC thread — crash 2026-09-25 01:00, where main() was
+        // already inside ~QQmlApplicationEngine and `screenShare` (a
+        // main() local declared after the engine, so destroyed before
+        // it) had taken this object with it.
+        //
+        // The guard is a QPointer, made here on the Qt thread and read
+        // only after hopping to the main queue — the same thread that
+        // destroys this object, so the check cannot race the delete.
+        // Copying/destroying the QPointer on the XPC queue is fine (its
+        // refcount is atomic); what is NOT fine is touching the QObject
+        // there, so nothing below dereferences `guard` off-thread.
+        QPointer<MacScreenCapturer> guard = this;
         auto completion = ^(CGImageRef image, NSError *err) {
             if (err || !image) {
                 static int s_failCount = 0;
@@ -293,10 +323,11 @@ void MacScreenCapturer::grabWithFilter()
                 QString desc = err
                     ? QString::fromNSString(err.localizedDescription)
                     : QStringLiteral("capture returned no image");
-                QMetaObject::invokeMethod(this,
-                    [this, selection, isSCK, code, desc]() {
-                        handleCaptureFailure(selection, isSCK, code, desc);
-                    }, Qt::QueuedConnection);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    MacScreenCapturer* owner = guard.data();
+                    if (!owner) return;
+                    owner->handleCaptureFailure(selection, isSCK, code, desc);
+                });
                 return;
             }
             static int s_okCount = 0;
@@ -325,16 +356,19 @@ void MacScreenCapturer::grabWithFilter()
             QImage qimg(buf.data(), int(w), int(h), int(bpr),
                         QImage::Format_ARGB32_Premultiplied);
             QImage owned = qimg.copy();
-            QMetaObject::invokeMethod(this, [this, owned]() {
+            dispatch_async(dispatch_get_main_queue(), ^{
                 // Captures are async — several can be in flight when
                 // stop() lands, and a straggler frame delivered after
                 // the stop would flip the controller back to "active"
                 // (the stop-only-works-if-you-spam-click bug). Drop
-                // anything that completes once we're no longer live.
-                if (!m_active) return;
-                m_consecutiveFails = 0;
-                emit frameReady(owned);
-            }, Qt::QueuedConnection);
+                // anything that completes once we're no longer live —
+                // or once the capturer itself is gone.
+                MacScreenCapturer* owner = guard.data();
+                if (!owner) return;
+                if (!owner->m_active) return;
+                owner->m_consecutiveFails = 0;
+                emit owner->frameReady(owned);
+            });
         };
 
         SCStreamConfiguration *config = [[SCStreamConfiguration alloc] init];
