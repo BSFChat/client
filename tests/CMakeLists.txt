@@ -1151,6 +1151,23 @@ add_test(NAME test_video_registry COMMAND test_video_registry)
 set_tests_properties(test_video_registry PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# The mobile keyboard bridge's cursor watch. Links src/core/MobileKeyboard.cpp
+# directly rather than bsfchat-lib: the class depends on nothing but Qt Gui,
+# and the whole point of the file is that it can be reasoned about on its own.
+# Offscreen, and it constructs no window — the iOS half (MobileKeyboardIos.mm)
+# is not built here at all, so iosPlatformScrollOffset() is the inline stub.
+qt_add_executable(test_mobile_keyboard
+    test_mobile_keyboard.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/MobileKeyboard.cpp
+)
+target_include_directories(test_mobile_keyboard PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_mobile_keyboard PRIVATE Qt6::Gui Qt6::Test)
+add_test(NAME test_mobile_keyboard COMMAND test_mobile_keyboard)
+# Headless like every other GUI-linked test here: it must not open a window
+# or steal focus from whoever is at the keyboard during ctest.
+set_tests_properties(test_mobile_keyboard PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 # Source-text guards for QML hazards no test binary can reach (the BSFChat
 # QML module lives inside the app). See the file header for the rc.6 story.
 qt_add_executable(test_qml_hygiene test_qml_hygiene.cpp)
