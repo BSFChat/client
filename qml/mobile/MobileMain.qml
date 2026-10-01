@@ -139,6 +139,35 @@ ApplicationWindow {
     // resize has never been animated.
     onBottomGapChanged: keyboardSettle.kick()
 
+    // The gap is not the only thing that makes the platform reconsider.
+    // QIOSInputContext re-runs scrollToCursor() whenever the text cursor
+    // moves (Qt::ImCursorRectangle, and nothing else in the query set),
+    // and the composer moves it without the keyboard, the window or the
+    // gap changing at all: swiping a message to reply grows MessageInput
+    // by the reply banner's height and nudges the text area down with it
+    // (qml/components/MessageInput.qml, _bannerHeight and inputCore's
+    // topMargin). bottomGap is identical either side of that, so none of
+    // the four triggers above fired and the cadence never ran.
+    //
+    // Qt does ask the platform once by itself — republishing the cursor
+    // rectangle is what raises this signal in the first place — and that
+    // single ask is the problem rather than the cure: it lands DURING
+    // the layout pass that moved the cursor, which is the moment the
+    // comment on the Timer below is about. The plugin answers from a
+    // half-moved layout, keeps the answer, and nothing afterwards asks
+    // it again or re-reads how far it translated the scene. When the
+    // answer was to translate, that is the whole channel area — header
+    // included — sitting off the top of the screen until the next time
+    // the keyboard or the window happens to change.
+    //
+    // Kicks the SAME cadence rather than doing anything of its own: the
+    // fix is to let the existing convergence run at a moment it was
+    // missing, not to add a second correction that could fight it.
+    Connections {
+        target: mobileKeyboard
+        function onCursorMoved() { keyboardSettle.kick(); }
+    }
+
     // The platform recomputes its scroll from whatever it sees when
     // asked, so asking once — before the QML layout pass, before the
     // scene graph sync that republishes the cursor rectangle, and long

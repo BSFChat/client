@@ -61,6 +61,15 @@ MobileKeyboard::MobileKeyboard(QObject* parent) : QObject(parent)
                 this, &MobileKeyboard::onKeyboardChanged);
         connect(im, &QInputMethod::keyboardRectangleChanged,
                 this, &MobileKeyboard::onKeyboardChanged);
+        // The composer can move the cursor without touching any of the
+        // above: a reply or edit banner grows it while the keyboard is
+        // already up and settled. That is the case the device still
+        // showed, because QIOSInputContext re-runs scrollToCursor() on
+        // this change and, until this connection existed, nothing asked
+        // it to recompute afterwards and nothing re-read how far it had
+        // moved the scene.
+        connect(im, &QInputMethod::cursorRectangleChanged,
+                this, &MobileKeyboard::onCursorRectangleChanged);
     }
 }
 
@@ -107,6 +116,7 @@ void MobileKeyboard::onKeyboardChanged()
         m_assumedScroll = false;
         setPlatformScroll(0);
         measureShrink();
+        rememberCursorRect();
         return;
     }
 
@@ -124,6 +134,12 @@ void MobileKeyboard::onKeyboardChanged()
     // composer floating over a void.
     m_assumedScroll = !m_resizeApplied;
     setPlatformScroll(m_resizeApplied ? 0 : keyboard);
+
+    // Fresh baseline for the cursor watch. The keyboard opening moves
+    // the cursor too, and that move is already handled by the path above
+    // — re-reporting it as a composer-driven move would start a second
+    // settle cadence on top of the one the gap change starts.
+    rememberCursorRect();
 }
 
 void MobileKeyboard::onScreenGeometryChanged()
@@ -144,6 +160,44 @@ void MobileKeyboard::onScreenGeometryChanged()
         ? int(qCeil(im->keyboardRectangle().height())) : 0;
     applyWindowGeometry(keyboard);
     measureShrink();
+}
+
+void MobileKeyboard::onCursorRectangleChanged()
+{
+    // Our own provocation, arriving back inside settle()'s call to
+    // QInputMethod::update(). Not a cursor move; not news.
+    if (m_settling) return;
+
+    QInputMethod* im = QGuiApplication::inputMethod();
+    if (!im) return;
+
+    // Only while the keyboard is up. With it down there is no platform
+    // scroll to provoke and no gap to converge on, so every caret move
+    // in the composer would start a 400ms timer for nothing.
+    if (!im->isVisible()) {
+        rememberCursorRect();
+        return;
+    }
+
+    // The move has to be a real one. This is what makes the guard
+    // total rather than merely likely: settle() re-reads the rectangle
+    // AFTER asking the platform to recompute, so an echo — whether it
+    // arrives inside that call or a turn of the event loop later — is
+    // by construction the rectangle we already have, and stops here.
+    // A loop would need the cursor to keep landing somewhere new, which
+    // needs the layout to keep moving, which is exactly the thing that
+    // stops once the push reaches its fixed point.
+    const QRectF now = im->cursorRectangle();
+    if (now == m_lastCursorRect) return;
+    m_lastCursorRect = now;
+
+    Q_EMIT cursorMoved();
+}
+
+void MobileKeyboard::rememberCursorRect()
+{
+    if (QInputMethod* im = QGuiApplication::inputMethod())
+        m_lastCursorRect = im->cursorRectangle();
 }
 
 void MobileKeyboard::applyWindowGeometry(int keyboardHeight)
@@ -227,8 +281,13 @@ void MobileKeyboard::settle(const QVariantMap& state)
     // ask the text responder to reconfigure, which can make the keyboard
     // itself flicker — so this is deliberately the single narrowest flag
     // that does the job.
+    m_settling = true;
     if (QInputMethod* im = QGuiApplication::inputMethod())
         im->update(Qt::ImCursorRectangle);
+    m_settling = false;
+    // Taken after the recompute, so the rectangle we now hold is the one
+    // our own request produced. See onCursorRectangleChanged().
+    rememberCursorRect();
 
     const int after = bsfchat::platform::iosPlatformScrollOffset();
     const bool wasAssumed = m_assumedScroll;

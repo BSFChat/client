@@ -66,6 +66,7 @@
 #include <QObject>
 #include <QPointer>
 #include <QRect>
+#include <QRectF>
 #include <QVariantMap>
 
 class QWindow;
@@ -103,6 +104,24 @@ Q_SIGNALS:
     void platformScrollChanged();
     void windowShrinkChanged();
 
+    // The text cursor moved for a reason that was not the keyboard.
+    //
+    // The shell answers this by kicking the same settle cadence a gap
+    // change kicks, and it has to, because the three signals above
+    // cannot see the event: opening a reply banner grows the composer
+    // (qml/components/MessageInput.qml) while the keyboard's visibility,
+    // its rectangle and the screen's geometry all stay exactly as they
+    // were. QIOSInputContext::update() re-runs scrollToCursor() for
+    // Qt::ImCursorRectangle and nothing else, so the platform DOES
+    // reconsider — Qt republishes the rectangle as part of the very
+    // layout pass that moved it. That single ask is the problem, not the
+    // cure: the plugin answers from a layout still in motion, keeps the
+    // answer, and until this signal existed nothing asked it again once
+    // the layout had settled or re-read how far it had translated the
+    // scene. An answer taken mid-flight and never revisited is the
+    // header sitting off the top of the screen.
+    void cursorMoved();
+
 private Q_SLOTS:
     // The platform emits keyboardRectangleChanged BEFORE it scrolls — the
     // scroll is the tail call of its own keyboardWillShow handler — so
@@ -114,11 +133,19 @@ private Q_SLOTS:
     // nothing else will resize it back.
     void onScreenGeometryChanged();
 
+    // QInputMethod::cursorRectangleChanged — the one platform event that
+    // re-runs scrollToCursor() with the keyboard, the window and the gap
+    // all unchanged. Emits cursorMoved() when the move is a real one and
+    // the keyboard is up; see the two guards in the implementation,
+    // which between them are why this cannot feed back on itself.
+    void onCursorRectangleChanged();
+
 private:
     void trackWindow();
     void applyWindowGeometry(int keyboardHeight);
     void measureShrink();
     void setPlatformScroll(int value);
+    void rememberCursorRect();
 
     QPointer<QWindow> m_window;
     // The window as it is with no keyboard: the thing we shrink from and
@@ -128,6 +155,21 @@ private:
     int m_platformScroll = 0;
     int m_windowShrink = 0;
     bool m_assumedScroll = false;
+
+    // Half one of the loop guard: settle() provokes the platform by
+    // republishing the cursor rectangle, and that comes straight back
+    // here as cursorRectangleChanged. Taking our own provocation for a
+    // fresh cursor move would be a settle that re-arms itself for as
+    // long as the keyboard is up, which is worse than the bug.
+    bool m_settling = false;
+
+    // Half two, and the half that matters: the cursor rectangle as it
+    // was the last time we looked or provoked. A settle only starts if
+    // the cursor is somewhere NEW, which our own republish can never
+    // make true — so the guard holds even when the platform delivers
+    // its echo through the event loop rather than inside our call,
+    // where m_settling is already false again.
+    QRectF m_lastCursorRect;
 
     // Latched off after the platform ignores the geometry we ask for,
     // which hands keyboard avoidance back to it.

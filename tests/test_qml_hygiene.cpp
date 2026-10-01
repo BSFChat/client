@@ -1977,6 +1977,108 @@ private slots:
                                 .arg(m.captured(0))));
     }
 
+    void aComposerThatGrowsUnderTheKeyboardRestartsTheSettleCadence()
+    {
+        // The reply defect, and the reason it survived the window-shrink
+        // commit. Every trigger the mechanism had went through the gap:
+        //
+        //     onBottomGapChanged: keyboardSettle.kick()
+        //
+        // and the gap is the one thing that does NOT change when you swipe
+        // a message to reply mid-sentence. MessageInput grows by the reply
+        // banner's height, the text area moves with it, and the keyboard's
+        // visibility, its rectangle, the window and the gap are identical
+        // either side.
+        //
+        // QIOSInputContext re-runs scrollToCursor() for Qt::ImCursorRectangle
+        // regardless — Qt republishes the rectangle as part of the same
+        // layout pass — so the platform re-decides the scroll from a layout
+        // that is still moving, and then nothing asks it again. That is what
+        // the cadence is for, and it is what was not running: an answer
+        // taken mid-flight and never revisited, which when the answer is to
+        // translate the scene means the header off the top of the screen.
+        //
+        // Behavioural coverage of the C++ half (that the bridge really
+        // subscribes to the signal, and stands down with the keyboard
+        // down) is in tests/test_mobile_keyboard.cpp. This is the QML half,
+        // which no binary here can reach: Theme.isMobile is readonly and
+        // derived from Qt.platform.os, so MobileMain cannot be instantiated
+        // into its mobile branch on a desktop host.
+        const QString src = withoutComments(readQml(QStringLiteral("/mobile/MobileMain.qml")));
+
+        static const QRegularExpression handler(
+            QStringLiteral(R"(function\s+onCursorMoved\s*\([^)]*\)\s*\{([^}]*)\})"));
+        const auto m = handler.match(src);
+        QVERIFY2(m.hasMatch(),
+                 "MobileMain never handles mobileKeyboard.cursorMoved, so a "
+                 "composer that grows under an already-settled keyboard "
+                 "never asks the platform to recompute its scroll");
+        QVERIFY2(m.captured(1).contains(QStringLiteral("keyboardSettle.kick()")),
+                 "onCursorMoved does something other than kick the existing "
+                 "settle cadence. It must kick THAT one: a second correction "
+                 "alongside the converging one is two things moving the "
+                 "layout, which is the doubled push all over again");
+
+        // The handler is only reached if the Connections block names the
+        // bridge; a `target:` typo is a silent no-op in QML.
+        QVERIFY2(src.contains(QStringLiteral("target: mobileKeyboard")),
+                 "nothing binds the cursorMoved handler to the bridge");
+    }
+
+    void theCursorWatchCannotFeedItself()
+    {
+        // The hazard the fix had to avoid, asserted where it lives.
+        // settle() provokes the platform by republishing the cursor
+        // rectangle (QInputMethod::update(Qt::ImCursorRectangle)), and that
+        // comes straight back as cursorRectangleChanged. A slot that took
+        // its own provocation for a fresh cursor move would re-arm the
+        // cadence forever, which is worse than the defect it fixes.
+        //
+        // Structural, and honestly so: exercising the echo needs a real
+        // input panel, which a Mac running ctest does not have. Both halves
+        // of the guard are named here so neither can be deleted quietly.
+        const QString src = withoutComments(
+            readAll(QStringLiteral(BSFCHAT_SRC_DIR "/core/MobileKeyboard.cpp")));
+        QVERIFY2(!src.isEmpty(), "MobileKeyboard.cpp not found");
+
+        QVERIFY2(src.contains(QStringLiteral("cursorRectangleChanged")),
+                 "MobileKeyboard no longer watches the cursor rectangle");
+
+        // Half one: the re-entrant echo, delivered inside settle()'s own
+        // call to update().
+        QVERIFY2(src.contains(QStringLiteral("m_settling = true"))
+                     && src.contains(QStringLiteral("m_settling = false"))
+                     && src.contains(QStringLiteral("if (m_settling) return;")),
+                 "settle()'s provocation is no longer fenced, so the "
+                 "cursor watch can be re-entered by its own update() call");
+
+        // Half two, and the half that survives a queued echo: a settle only
+        // starts for a rectangle we have not already seen, and settle()
+        // re-reads the rectangle AFTER provoking the platform.
+        QVERIFY2(src.contains(QStringLiteral("m_lastCursorRect")),
+                 "the cursor watch no longer compares against the last "
+                 "rectangle it saw; an echo arriving a turn of the event "
+                 "loop later would read as a fresh move and loop");
+        static const QRegularExpression dedup(
+            QStringLiteral(R"(if\s*\(\s*now\s*==\s*m_lastCursorRect\s*\)\s*return;)"));
+        QVERIFY2(dedup.match(src).hasMatch(),
+                 "the cursor watch emits without checking the rectangle "
+                 "actually moved");
+
+        // And the gate in front of both: nothing to converge on with the
+        // keyboard down, so a caret moving in a desktop text field must
+        // not start the cadence. Structural for the same reason as the
+        // rest — QInputMethod::isVisible() is hardwired false on a host
+        // with no software keyboard, so the Mac-side test in
+        // test_mobile_keyboard.cpp cannot tell this guard apart from the
+        // one above it.
+        static const QRegularExpression gate(
+            QStringLiteral(R"(if\s*\(\s*!\s*im->isVisible\(\)\s*\))"));
+        QVERIFY2(gate.match(src).hasMatch(),
+                 "the cursor watch no longer checks that the keyboard is "
+                 "actually up before kicking the settle cadence");
+    }
+
     void theMobileKeyboardBridgeIsReachableFromQml()
     {
         // MobileMain binds to `mobileKeyboard.platformScroll` on every
