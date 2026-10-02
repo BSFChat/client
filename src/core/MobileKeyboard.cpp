@@ -84,6 +84,11 @@ void MobileKeyboard::trackWindow()
     // file.
     m_window = QGuiApplication::focusWindow();
     if (!m_window) return;
+    // Taken here, before applyWindowGeometry() has had a chance to take it
+    // away, so what gets handed back on a screen change is the state the
+    // shell actually declared rather than one hardcoded here.
+    if (m_window->windowStates() != Qt::WindowNoState)
+        m_shellWindowState = m_window->windowStates();
     if (QScreen* screen = m_window->screen()) {
         connect(screen, &QScreen::availableGeometryChanged,
                 this, &MobileKeyboard::onScreenGeometryChanged,
@@ -144,22 +149,86 @@ void MobileKeyboard::onKeyboardChanged()
 
 void MobileKeyboard::onScreenGeometryChanged()
 {
-    // Once the window is NoState it is ours to place, so nothing else
-    // will resize it back after a rotation. Re-baseline from the screen
-    // and re-apply.
+    // Re-baseline, because the rectangle we were restoring to belongs to
+    // the screen as it was. The question is which rectangle, and it has
+    // one answer: applyWindowGeometry() calls QWindow::setGeometry(), so
+    // the baseline must be in the space QWindow::geometry() reports, and
+    // it must be the rectangle the platform itself gives this window with
+    // no keyboard up. That is what onKeyboardChanged() reads when the
+    // keyboard goes down, and this path has to agree with it.
+    //
+    // QScreen::availableGeometry() is NOT that rectangle, which is what
+    // this used to use. Since Qt 6.9 the iOS plugin reports the whole
+    // screen as available — QIOSScreen::updateProperties() is now plainly
+    // `m_availableGeometry = m_geometry`, where it used to subtract the
+    // safe-area insets — and insets the WINDOW instead:
+    // QIOSWindow::setWindowState() reduces screen()->geometry() by the
+    // UIWindow's safeAreaInsets and intersects that with the UIWindow's
+    // bounds. On the captured device (iPhone 16 Pro Max, commit 1f5887b)
+    // that is the difference between 440x956 at y=0 and the window's real
+    // 440x860 at y=62. Restoring to the former moves the window origin
+    // 62pt up, putting the top message row under the Dynamic Island —
+    // the exact symptom this whole file exists to have fixed — and makes
+    // measureShrink() subtract from a baseline 96pt too tall, which feeds
+    // keyboardPush in qml/mobile/MobileMain.qml.
+    //
+    // Nor can it be rebuilt by intersecting the screen with the window's
+    // safe area. QWindow::safeAreaMargins() is QIOSWindow::
+    // safeAreaMargins(), i.e. the Qt view's own insets, and those read
+    // 0/0/0/0 on the device precisely BECAUSE the window is already inside
+    // the safe area (MobileMain.qml's safe-area comment says the same, and
+    // 860 = 956 - 62 - 34 is the arithmetic). Intersecting with zero
+    // margins changes nothing and would leave this bug where it was.
+    //
+    // So: ask the platform rather than re-deriving its arithmetic out
+    // here, then read its answer off the window.
     if (!m_window) return;
-    QScreen* screen = m_window->screen();
-    if (!screen) return;
 
-    const QRect available = screen->availableGeometry();
-    if (!available.isValid()) return;
-    m_baseGeometry = available;
+    restoreShellWindowState();
+
+    const QRect base = m_window->geometry();
+    if (!base.isValid()) return;
+    m_baseGeometry = base;
 
     QInputMethod* im = QGuiApplication::inputMethod();
     const int keyboard = (im && im->isVisible())
         ? int(qCeil(im->keyboardRectangle().height())) : 0;
     applyWindowGeometry(keyboard);
     measureShrink();
+}
+
+void MobileKeyboard::restoreShellWindowState()
+{
+    // Only where we take the state away in the first place. Off iOS
+    // applyWindowGeometry() never touches the window, the platform keeps
+    // resizing it across a rotation by itself, and putting an Android
+    // window through a state change it did not ask for would be a change
+    // in shipped behaviour for a bug that cannot reach it.
+    if (!bsfchat::platform::kShrinkWindowForKeyboard) return;
+    if (!m_window) return;
+
+    // Unconditional, including when the window already holds this state.
+    // That is not a no-op and the asymmetry matters: QIOSWindow computes
+    // the maximized rectangle INSIDE setWindowState(), and
+    // QWindow::setWindowStates() does not short-circuit a state it already
+    // holds — it calls through to the platform every time. So this is the
+    // one public call that makes the plugin recompute that rectangle
+    // against the screen as it is now.
+    //
+    // It has to be unconditional for a second reason. The plugin's other
+    // route to the same recompute is QIOSDesktopManagerView's layoutView:,
+    // which skips any window that is not maximized or fullscreen, and Qt
+    // itself resizes nothing on a screen geometry change
+    // (QGuiApplicationPrivate::processScreenGeometryChange only updates the
+    // QScreen). So while the keyboard is up and we hold the window at
+    // NoState, nothing recomputes it; and while the keyboard is down, the
+    // layout pass that would has not necessarily run yet when this signal
+    // arrives. Asking here removes the ordering question entirely.
+    //
+    // No frame is shown at the restored size: QIOSWindow::applyGeometry()
+    // sets the geometry synchronously, and the caller re-applies the
+    // keyboard shrink before returning to the event loop.
+    m_window->setWindowStates(m_shellWindowState);
 }
 
 void MobileKeyboard::onCursorRectangleChanged()
@@ -225,8 +294,10 @@ void MobileKeyboard::applyWindowGeometry(int keyboardHeight)
     // state second makes the flip apply the rectangle we want, so the
     // window is never shown at a stale size in between.
     m_window->setGeometry(target);
-    if (m_window->windowState() != Qt::WindowNoState)
+    if (m_window->windowStates() != Qt::WindowNoState) {
+        m_shellWindowState = m_window->windowStates();
         m_window->setWindowState(Qt::WindowNoState);
+    }
 
     const QRect actual = m_window->geometry();
     const bool accepted = (actual.height() == target.height());
