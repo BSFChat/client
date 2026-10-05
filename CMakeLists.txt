@@ -292,6 +292,28 @@ qt_add_library(bsfchat-lib STATIC
     # QJsonObject, QString and QStringList; there is nothing here to
     # gate.
     src/voice/VoiceTransportSelector.cpp
+    # Native gamepad input. Compiled on EVERY platform, including the two
+    # where SDL is not built (Android, iOS — see cmake/Dependencies.cmake
+    # for why). Without BSFCHAT_HAVE_SDL_GAMEPAD, GamepadBridge still
+    # constructs, still answers its properties and simply reports no
+    # controller, the same way core/Haptics no-ops on desktop.
+    #
+    # That is the point: the alternative — gating the .cpp on the option —
+    # is the mistake VoiceTransportSelector.cpp's comment above records,
+    # where a conditionally-compiled source left an undefined symbol in
+    # every build with the option off and the iOS target had silently
+    # never linked. Here it would also push a platform #ifdef into
+    # main.cpp and a `typeof gamepad !== "undefined"` guard into QML.
+    src/input/GamepadCore.cpp
+    src/input/GamepadBridge.cpp
+    # Listed as a SOURCE although it is a header, so AUTOMOC definitely
+    # processes it: it carries Q_NAMESPACE + Q_ENUM_NS for the button /
+    # axis / direction enums, which needs a moc_GamepadTypes.cpp to exist
+    # for the enums to be nameable from QML. AUTOMOC does find headers
+    # adjacent to a listed source, but relying on that for a file whose
+    # whole purpose is its meta-object is a silent failure waiting to
+    # happen — the symptom is enum values arriving in QML as bare ints.
+    src/input/GamepadTypes.h
 )
 
 # The application: main.cpp and nothing else. Everything it does lives in
@@ -552,6 +574,41 @@ if(BSFCHAT_ENABLE_VOICE)
         # future NDK that stops re-exporting it does not break the link.
         target_link_libraries(bsfchat-lib PUBLIC mediandk log)
     endif()
+endif()
+
+# Native gamepad input: link SDL3 and turn the backend on.
+#
+# BSFCHAT_HAVE_SDL_GAMEPAD (not BSFCHAT_ENABLE_GAMEPAD) is the name the
+# source tests, and the distinction is deliberate: the option is the
+# user's request, the definition is the fact that a backend was actually
+# built. They can differ — a desktop configure where FetchContent could
+# not reach GitHub should leave a working client with no gamepad support,
+# not a failed build.
+#
+# SDL3::SDL3-static, never SDL3::SDL3: the latter is an alias that
+# resolves to the SHARED target when one exists. SDL_SHARED is forced OFF
+# in cmake/Dependencies.cmake so today they are the same target, but
+# naming the alias would mean a future configure that enables the shared
+# build silently starts shipping an SDL3.dll that nothing packages — the
+# exact failure mode the voice block's "static" comment records for
+# aom.dll in v0.0.42.
+#
+# SDL3main is deliberately NOT linked. It exists to rename main(), which
+# would fight Qt for src/main.cpp's entry point.
+if(BSFCHAT_ENABLE_GAMEPAD)
+    if(TARGET SDL3::SDL3-static)
+        target_link_libraries(bsfchat-lib PUBLIC SDL3::SDL3-static)
+        target_compile_definitions(bsfchat-lib PUBLIC BSFCHAT_HAVE_SDL_GAMEPAD)
+        set(BSFCHAT_HAVE_SDL_GAMEPAD ON)
+        message(STATUS "Gamepad input: SDL3 (static)")
+    else()
+        message(WARNING
+            "BSFCHAT_ENABLE_GAMEPAD is ON but no SDL3::SDL3-static target "
+            "exists. Building WITHOUT gamepad support: GamepadBridge will "
+            "report no controller. Check the SDL3 FetchContent step above.")
+    endif()
+else()
+    message(STATUS "Gamepad input: disabled for this target")
 endif()
 
 # Bundle ID / Android application id — resolved HERE, above the

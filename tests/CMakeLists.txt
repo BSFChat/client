@@ -1458,3 +1458,37 @@ target_compile_definitions(test_android_runtime PRIVATE
     BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test_android_runtime PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_android_runtime COMMAND test_android_runtime)
+
+# Native gamepad input — the deadzone maths, the auto-repeat cadence and
+# the hotplug bookkeeping.
+#
+# GamepadCore.cpp is compiled INTO this binary and SDL is not linked at
+# all, which is the whole reason the layer is split the way it is: every
+# case worth testing needs a device AND a stopwatch AND an adversarial
+# hand at once, so none of them can be tested by hand twice. The worst
+# of them — a controller unplugged with push-to-talk still held down —
+# leaves an open microphone with no controller left to close it with.
+#
+# Runs on every platform including the two where SDL is not built, since
+# nothing here touches it. No device, no event loop, no GUI; the clock is
+# a parameter.
+#
+# This does NOT claim the feature works on hardware. See the header
+# comment in test_gamepad.cpp for the four things that still need a real
+# controller in the owner's hands.
+#
+# GamepadTypes.h is listed as a source, exactly as it is for bsfchat-lib,
+# and for a reason that showed up as a link failure rather than a wrong
+# result: it carries Q_NAMESPACE, so bsfchat::input::staticMetaObject only
+# exists if AUTOMOC generates its moc file in THIS target. QTest reaches
+# for that symbol to print an enum's name when a QCOMPARE on one fails —
+# so without this line the test binary does not link at all, and the error
+# names QTest internals rather than anything recognisable.
+qt_add_executable(test_gamepad
+    test_gamepad.cpp
+    ${CMAKE_SOURCE_DIR}/src/input/GamepadCore.cpp
+    ${CMAKE_SOURCE_DIR}/src/input/GamepadTypes.h
+)
+target_include_directories(test_gamepad PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_gamepad PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_gamepad COMMAND test_gamepad)

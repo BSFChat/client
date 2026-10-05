@@ -188,10 +188,16 @@ jobs:
         run: |
           sudo apt-get update
           # nasm: libaom (AV1 lossless tier) needs it on x86 builders.
+          # libudev-dev: SDL3's gamepad backend (src/input/) compiles its
+          #   udev hotplug path only when libudev.h is present. SDL
+          #   dlopen()s the library at runtime, so this is a header-only
+          #   build requirement and adds no runtime .so to the tarball —
+          #   but without it SDL silently falls back to rescanning
+          #   /dev/input on a timer and Linux hotplug goes sluggish.
           sudo apt-get install -y libssl-dev libgl1-mesa-dev libxkbcommon-dev \
             libxcb-xkb-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-shape0-dev \
             libxcb-randr0-dev libxcb-icccm4-dev libxcb-image0-dev libegl1-mesa-dev \
-            libpulse-dev libasound2-dev nasm
+            libpulse-dev libasound2-dev libudev-dev nasm
           pip3 install --break-system-packages cmake==3.30.5
 
       - name: Install macOS dependencies

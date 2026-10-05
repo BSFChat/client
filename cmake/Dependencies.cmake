@@ -152,3 +152,126 @@ if(BSFCHAT_ENABLE_VOICE)
     set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(opus)
 endif()
+
+# Native gamepad input (SDL3) — src/input/.
+#
+# Qt 6 deleted QtGamepad and shipped nothing in its place, so the choice
+# was SDL or three hand-written platform backends (evdev, XInput,
+# IOKit/GameController). SDL's *gamepad* API — as opposed to its joystick
+# API — carries a ~900-entry mapping database compiled into the library,
+# which is what makes "the south face button" and "the left trigger" mean
+# the same thing on an Xbox pad, a DualSense, a Switch Pro controller and
+# a Steam Deck with no per-device code on our side. There is no data file
+# to ship or keep current. See src/input/GamepadBridge.h.
+#
+# DESKTOP ONLY, and gated OFF for both mobile targets rather than fought:
+#
+#   * Android. SDL's Android backend is not a library you link, it is an
+#     Activity: it expects SDLActivity (its own Java class) to own the
+#     process's lifecycle, surface and input dispatch. This app's Android
+#     entry point is Qt's QtActivity, via our own patched manifest and
+#     package source dir (see cmake/AndroidJdk.cmake and android/). Two
+#     frameworks cannot both own the Activity. Even if they could, the
+#     feature is pointless there: nobody plays with a pad in one hand and
+#     a phone running a chat client in the other, and the Deck — the
+#     device this is actually for — runs the desktop Linux build.
+#
+#   * iOS. SDL's MFi backend would technically work, but it would add a
+#     static library, GameController framework linkage and an
+#     unexplained-input-device line to every App Store review, for a
+#     feature with no iOS use case. The mobile builds are already the
+#     tightest constraint this project has (see docs/ios-release.md);
+#     spending any of that budget here would be a poor trade.
+#
+# With this OFF, src/input still compiles and GamepadBridge still exists
+# and is still registered — it simply reports no controller, exactly as
+# core/Haptics no-ops on desktop. That is deliberate: it keeps the
+# platform gate out of main.cpp and out of QML.
+if(ANDROID OR IOS)
+    set(BSFCHAT_ENABLE_GAMEPAD OFF)
+else()
+    option(BSFCHAT_ENABLE_GAMEPAD
+        "Native gamepad input via SDL3 (desktop only)" ON)
+endif()
+
+if(BSFCHAT_ENABLE_GAMEPAD)
+    FetchContent_Declare(
+        SDL3
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        # 3.4.x is a stable line (SDL uses even minors for stable, odd for
+        # development). Pinned to a tag, not a branch: a mapping-database
+        # change is exactly the kind of thing that would alter which
+        # physical button our South means, and that must never move
+        # without someone choosing to move it.
+        GIT_TAG        release-3.4.18
+        GIT_SHALLOW    TRUE
+    )
+
+    # Static, for the same reason the codec deps are (see the comment at
+    # the top of the voice block): windeployqt gathers only Qt DLLs, so
+    # every non-Qt runtime DLL needs a hand-written packaging step, and
+    # the one time that was missed it shipped a broken installer.
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+    set(SDL_INSTALL_CPACK OFF CACHE BOOL "" FORCE)
+    set(SDL_UNINSTALL OFF CACHE BOOL "" FORCE)
+
+    # ONLY the gamepad path. This is the load-bearing part of this block.
+    #
+    # This application already owns its audio devices (src/voice/), its
+    # rendering (Qt Quick) and its event loop. A second library that also
+    # believes it owns any of those is not a larger dependency, it is a
+    # conflict: SDL's audio backend opens the same CoreAudio / WASAPI /
+    # PulseAudio devices AudioWorker is holding, and SDL_INIT_VIDEO
+    # installs platform event hooks that compete with Qt's. Compiling
+    # those subsystems out means the conflict is not merely unused at
+    # runtime, it is absent from the binary — so a later SDL_Init flag
+    # typo cannot resurrect it.
+    #
+    # JOYSTICK is the subsystem the gamepad API is built on; there is no
+    # separate SDL_GAMEPAD option. HIDAPI stays on because it is what
+    # gives DualSense / Switch Pro / 8BitDo pads their correct mappings
+    # and full button sets rather than a generic fallback.
+    #
+    # Not needed, and each one off for its own reason:
+    #   AUDIO/VIDEO/RENDER/GPU/CAMERA — owned by this app, see above.
+    #   HAPTIC  — the rumble we might want later is SDL_RumbleGamepad,
+    #             which is joystick-side and needs no haptic subsystem.
+    #   POWER   — system battery. Controller battery is SDL_GetGamepadPowerInfo,
+    #             also joystick-side.
+    #   SENSOR  — DualSense gyro/accelerometer. No use case here.
+    #   DIALOG  — native file pickers. Qt's are already used.
+    #   TRAY    — tray icon. QSystemTrayIcon already does this.
+    set(SDL_JOYSTICK ON CACHE BOOL "" FORCE)
+    set(SDL_HIDAPI ON CACHE BOOL "" FORCE)
+    set(SDL_AUDIO OFF CACHE BOOL "" FORCE)
+    set(SDL_VIDEO OFF CACHE BOOL "" FORCE)
+    set(SDL_RENDER OFF CACHE BOOL "" FORCE)
+    set(SDL_GPU OFF CACHE BOOL "" FORCE)
+    set(SDL_CAMERA OFF CACHE BOOL "" FORCE)
+    set(SDL_HAPTIC OFF CACHE BOOL "" FORCE)
+    set(SDL_POWER OFF CACHE BOOL "" FORCE)
+    set(SDL_SENSOR OFF CACHE BOOL "" FORCE)
+    set(SDL_DIALOG OFF CACHE BOOL "" FORCE)
+    set(SDL_TRAY OFF CACHE BOOL "" FORCE)
+
+    # Linux desktop integration bits that only exist to serve a window.
+    # With SDL_VIDEO off there is no window, and leaving these on would
+    # add libdbus / libibus / libfcitx header requirements to the Linux
+    # builder for code that cannot run.
+    set(SDL_DBUS OFF CACHE BOOL "" FORCE)
+    set(SDL_IBUS OFF CACHE BOOL "" FORCE)
+
+    # libudev stays ON (the default) and is the one Linux system
+    # dependency this adds. It is how SDL learns about a controller being
+    # plugged in; without it SDL falls back to rescanning /dev/input on a
+    # timer, which still works but makes hotplug sluggish. SDL dlopen()s
+    # libudev at runtime (SDL_UDEV_DYNAMIC), so this is a HEADER-only
+    # build requirement — hence libudev-dev in the Linux CI apt list and
+    # no new runtime .so in the tarball.
+    set(SDL_LIBUDEV ON CACHE BOOL "" FORCE)
+
+    FetchContent_MakeAvailable(SDL3)
+endif()
