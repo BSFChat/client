@@ -127,59 +127,49 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          # 6.10.3: highest version installable on ALL three CI platforms.
-          # Clears the 2025-2026 QtSvg Criticals (CVE-2025-10728/10729),
-          # the QML SVG code-injection (CVE-2025-14576), Schannel TLS DoS
-          # (CVE-2025-6338) and the markdown/image/TLS fixes.
+          # 6.11.3: clears the two things the 6.10 line can never get,
+          # because 6.10.3 was its last release:
           #
-          # Why NOT 6.8.x: 6.8 is LTS; the patch releases where these
-          # fixes landed (6.8.4+) are commercial-license only — the
-          # open-source aqt mirror carries just 6.8.0-6.8.3.
-          # Why NOT 6.11.1: the open-source mirror publishes NO Windows
-          # x64 desktop packages for 6.11.1 (windows_arm64 only), so the
-          # win64_msvc2022_64 job can't fetch it. 6.10.3 is the newest
-          # release present for windows/mac/linux desktop x64.
+          #  * QTBUG-145704, "[macOS] DeviceDisconnectMonitor crashes
+          #    when removing an audio device". bsfchat-app 0.0.48 died
+          #    this way every time a headset disconnected (2026-09-25,
+          #    09-28, twice on 10-10): SIGSEGV in
+          #    AudioObjectRemovePropertyListenerBlock on the main
+          #    thread, no app frames — Qt removed the
+          #    kAudioDevicePropertyDeviceIsAlive listener from an
+          #    AudioObjectID that was already dead. There is no
+          #    app-side fix; the whole path is inside QtMultimedia.
+          #    Fixed upstream by cd4fc6bca122, on the 6.11 branch as
+          #    4d9d108653 (in v6.11.1 onwards). Checked in the binary:
+          #    6.11.3's arm64 QtMultimedia calls
+          #    AudioObjectGetPropertyData immediately before each
+          #    listener removal on that path; 6.10.3's tail-calls the
+          #    removal with no check.
+          #  * CVE-2026-6210 (QtSvg marker heap overflow, High), fixed
+          #    in 6.8.8 / 6.11.1.
           #
-          # RESIDUAL: CVE-2026-6210 (QtSvg marker heap overflow, High)
-          # was fixed in 6.8.8 / 6.11.1 and is NOT in the 6.10 line —
-          # revisit when 6.11.x publishes Windows x64 packages.
+          # Why NOT 6.8.x: 6.8 is LTS; its patch releases from 6.8.4
+          # are commercial-only — the open-source mirror stops at
+          # 6.8.3.
+          # Why NOT 6.12.0: smallest jump that carries both fixes.
           #
-          # RESIDUAL 2 — a CRASH, not just a CVE, and the stronger
-          # reason to get off 6.10: QTBUG-145704, "[macOS]
-          # DeviceDisconnectMonitor crashes when removing an audio
-          # device". Fixed by qtmultimedia cd4fc6bca122 ("CoreAudio:
-          # check if devices is alive before removing listener"),
-          # Pick-to said "6.11 6.10 6.8" but only 6.11 and lts-6.8 ever
-          # got it. Fix versions 6.8.8 / 6.11.1 / 6.12.0 — no 6.10.
-          # 6.10.3 is the last 6.10 release, so this never lands here.
+          # aqtsource is load-bearing, do not drop it. From 6.11 Qt
+          # publishes Windows desktop in a per-arch directory layout
+          # (windows_x86/desktop/qt6_6113/qt6_6113_msvc2022_64/) that
+          # the newest aqtinstall on PyPI, 3.3.0, cannot read: it
+          # reports no win64_msvc2022_64 at all, which is what this
+          # comment used to record as "the mirror publishes no Windows
+          # x64 packages". The mirror does; the fix is
+          # miurahr/aqtinstall#1000, merged 2026-03-24 and still
+          # unreleased. Pinned to a commit rather than a branch;
+          # verified 2026-10-10 that it resolves 6.11.3 + qtmultimedia
+          # for win64_msvc2022_64, clang_64 and linux_gcc_64. Drop the
+          # line once an aqtinstall release contains #1000.
           #
-          # It bites us in the field. bsfchat-app 0.0.48 on macOS 26.3
-          # died twice this way (2026-09-25 17:36, 2026-09-28 21:23):
-          # SIGSEGV in AudioObjectRemovePropertyListenerBlock on the
-          # main thread, no app frames. Confirmed trigger, from the
-          # unified log at the second crash: a Bluetooth headset
-          # relinquished its CoreAudio device and the default output
-          # switched to BuiltInHeadphoneOutputDevice between 21:22:45
-          # and 21:22:47.66 — the process died at 21:22:47.48, inside
-          # that window. Qt then removes the kAudioDevicePropertyDevice-
-          # IsAlive ('livn') listener from an AudioObjectID that is
-          # already dead and CoreAudio faults in its own internals.
-          # Verified unpatched in the exact shipped binary: the arm64
-          # slice of Qt/6.10.3/macos/.../QtMultimedia (UUID
-          # 60A0E9F2-7D6D-3EAA-B43F-D440B65B71B8, matching the crash)
-          # tail-calls AudioObjectRemovePropertyListenerBlock at +0x9436c
-          # with no AudioObjectGetPropertyData alive-check in front of it.
-          #
-          # There is no app-side fix — the whole failing path is inside
-          # QtMultimedia and no bsfchat frame appears on the stack. The
-          # fix is the version bump, and it is blocked by the same
-          # Windows gap as CVE-2026-6210: verified 2026-09-28 that aqt
-          # resolves 6.11.2 for mac (clang_64) and linux (linux_gcc_64)
-          # but for NO windows desktop arch, while 6.10.3 still resolves
-          # win64_msvc2022_64. Revisit both together.
-          #
-          # Verified locally against Qt 6.10.2.
-          version: '6.10.3'
+          # The android and ios jobs below deliberately stay on 6.10.3
+          # — see the notes on their install steps.
+          version: '6.11.3'
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@076e1659807d0b362a3ed684d54c2e9c775eb9c7'
           modules: 'qtmultimedia'
           cache: true
 
@@ -1041,8 +1031,13 @@ jobs:
       #            qmlimportscanner — androiddeployqt runs these on the
       #            builder, so they must be host binaries)
       #   cross -> $GITHUB_WORKSPACE/Qt/6.10.3/android_arm64_v8a
-      # Version stays in lockstep with the desktop `build` job — see the
-      # long comment there for why 6.10.3 and not 6.8/6.11.
+      # Deliberately NOT in lockstep with the desktop `build` job, which
+      # moved to 6.11.3 for a macOS-only crash. Qt 6.11 for Android is a
+      # toolchain change, not a patch bump: AGP 8.10.1 -> 9.0.0, Gradle
+      # 8.14.3 -> 9.3.1, JDK 17 -> 21 (NDK r27c is unchanged), and
+      # cmake/AndroidJdk.cmake pins the JDK window to exactly 17. That
+      # wants its own change and a run on a real device. Until then this
+      # job still carries CVE-2026-6210 (QtSvg), fixed in 6.11.1.
       - name: Install Qt (host tools)
         uses: jurplel/install-qt-action@v4
         with:
@@ -1340,8 +1335,10 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          # Keep in lockstep with the build job above.
-          version: '6.10.3'
+          # Keep in lockstep with the build job above, aqtsource
+          # included (see the note there).
+          version: '6.11.3'
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@076e1659807d0b362a3ed684d54c2e9c775eb9c7'
           modules: 'qtmultimedia'
           cache: true
 
@@ -1505,9 +1502,14 @@ jobs:
       - name: Install Qt (host, macOS)
         uses: jurplel/install-qt-action@v4
         with:
-          # Lockstep with the build job's pin — see the long note there
-          # for why 6.10.3 and not 6.8 LTS or 6.11. scripts/build-ios.sh
-          # is pinned to the same version for the same reason.
+          # Deliberately behind the desktop `build` job, which moved to
+          # 6.11.3 for a macOS-only crash (QTBUG-145704). The iOS voice
+          # and camera paths were verified against 6.10.3's iOS backend
+          # specifically (docs/ios-voice.md) and only on a real iPhone,
+          # so this moves when someone can re-run that, not before.
+          # Until then iOS still carries CVE-2026-6210 (QtSvg), fixed
+          # in 6.11.1. scripts/build-ios.sh is pinned to the same
+          # version as this job.
           version: '6.10.3'
           host: mac
           target: desktop
