@@ -1154,8 +1154,10 @@ set_tests_properties(test_video_registry PROPERTIES
 # The mobile keyboard bridge's cursor watch. Links src/core/MobileKeyboard.cpp
 # directly rather than bsfchat-lib: the class depends on nothing but Qt Gui,
 # and the whole point of the file is that it can be reasoned about on its own.
-# Offscreen, and it constructs no window — the iOS half (MobileKeyboardIos.mm)
-# is not built here at all, so iosPlatformScrollOffset() is the inline stub.
+# Offscreen; the iOS half (MobileKeyboardIos.mm) is not built here at all, so
+# iosPlatformScrollOffset() is the inline stub. One case does construct a
+# QWindow, because the baseline the bridge shrinks from is a window rectangle
+# and the bug worth a test was it being taken from the screen instead.
 qt_add_executable(test_mobile_keyboard
     test_mobile_keyboard.cpp
     ${CMAKE_SOURCE_DIR}/src/core/MobileKeyboard.cpp

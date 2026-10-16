@@ -29,6 +29,12 @@
 // and that the slot stands down when the keyboard is down instead of
 // starting a 400ms timer every time a caret moves in a desktop text field.
 //
+// Offscreen does give us a real QScreen and a real QWindow, though, and
+// those are enough for the one quantity in this class that is pure
+// arithmetic over rectangles: the no-keyboard baseline, and which of the
+// two rectangles on offer it is taken from. See
+// aScreenChangeReBaselinesFromTheWindowAndNotTheScreen().
+//
 // The loop guard itself — settle() provokes the platform by republishing
 // the cursor rectangle, which comes straight back as
 // cursorRectangleChanged — needs a real input panel to exercise, and is
@@ -39,7 +45,9 @@
 #include <QtTest>
 #include <QGuiApplication>
 #include <QInputMethod>
+#include <QScreen>
 #include <QSignalSpy>
+#include <QWindow>
 
 #include "core/MobileKeyboard.h"
 
@@ -114,6 +122,92 @@ private Q_SLOTS:
         QSignalSpy moved(&kb, &MobileKeyboard::cursorMoved);
         QCoreApplication::processEvents();
         QCOMPARE(moved.count(), 0);
+    }
+
+    void aScreenChangeReBaselinesFromTheWindowAndNotTheScreen()
+    {
+        // THE BUG THIS PINS DOWN
+        //
+        // m_baseGeometry is "the window with no keyboard": the rectangle
+        // applyWindowGeometry() shrinks from and restores to, and the one
+        // measureShrink() subtracts the live window height from. Two paths
+        // set it, and they used to set it from two different rectangles —
+        // onKeyboardChanged() from the WINDOW, onScreenGeometryChanged()
+        // from QScreen::availableGeometry().
+        //
+        // Those are not the same space on the platform the file exists
+        // for. Since Qt 6.9 the iOS plugin reports the whole screen as
+        // available and insets the window instead, so on the captured
+        // device (iPhone 16 Pro Max) the window is 440x860 at y=62 and
+        // availableGeometry() is 440x956 at y=0. A baseline taken from the
+        // screen moves the window origin 62pt up into the Dynamic Island
+        // and measures shrink against a rectangle 96pt too tall.
+        //
+        // WHAT A MAC PROVES AND WHAT IT DOES NOT
+        //
+        // Offscreen has a real QScreen and a real QWindow, and
+        // availableGeometry() here is the whole offscreen screen — much
+        // taller than a small window — so the two candidate baselines are
+        // far apart and this test can tell them apart. windowShrink is the
+        // probe: it is exactly baseline − window height, so the right
+        // baseline reads 0 and the screen's reads the whole difference.
+        //
+        // It does NOT prove the origin half. kShrinkWindowForKeyboard is
+        // false off iOS, so applyWindowGeometry() never calls setGeometry()
+        // here and the y=62 error has nothing to move. Only a device shows
+        // that, and the window-origin field in the settle() log is what
+        // reports it there.
+        QWindow w;
+        w.setGeometry(40, 30, 300, 200);
+        w.show();
+        w.requestActivate();
+        QTRY_COMPARE(QGuiApplication::focusWindow(), &w);
+
+        const QScreen* screen = w.screen();
+        QVERIFY2(screen, "no QScreen for the test window");
+        const int available = screen->availableGeometry().height();
+
+        MobileKeyboard kb;
+        // Gets the bridge to adopt the window; the keyboard is down, so
+        // this takes the baseline from the window and measures no shrink.
+        QVERIFY2(QMetaObject::invokeMethod(&kb, "onKeyboardChanged"),
+                 "MobileKeyboard has no onKeyboardChanged slot");
+        QCOMPARE(kb.windowShrink(), 0);
+
+        // Stand in for what a rotation leaves behind: the window is a
+        // different shape and the baseline we hold belongs to the old one.
+        w.setGeometry(40, 30, 300, 150);
+        QCoreApplication::processEvents();
+        QCOMPARE(w.height(), 150);
+
+        // The premise, asserted rather than assumed, so this cannot quietly
+        // become a test of two numbers that happen to be equal: the stale
+        // baseline (200), the screen's (the whole offscreen height) and the
+        // window's own (150) all have to be distinguishable.
+        QVERIFY2(available > 150 + 64,
+                 qPrintable(QStringLiteral("offscreen available height %1 is "
+                                           "too close to the window's 150 for "
+                                           "this test to discriminate")
+                                .arg(available)));
+
+        QVERIFY2(QMetaObject::invokeMethod(&kb, "onScreenGeometryChanged"),
+                 "MobileKeyboard has no onScreenGeometryChanged slot");
+
+        // 0 is the window's own rectangle. A stale baseline would read 50
+        // and QScreen::availableGeometry() would read the whole difference.
+        QCOMPARE(kb.windowShrink(), 0);
+    }
+
+    void aScreenChangeWithNoTrackedWindowIsInert()
+    {
+        // availableGeometryChanged is only ever connected once a window is
+        // adopted, but the slot is reachable by name and the guard is the
+        // only thing between it and a null QPointer deref.
+        MobileKeyboard kb;
+        QVERIFY2(QMetaObject::invokeMethod(&kb, "onScreenGeometryChanged"),
+                 "MobileKeyboard has no onScreenGeometryChanged slot");
+        QCOMPARE(kb.windowShrink(), 0);
+        QCOMPARE(kb.platformScroll(), 0);
     }
 
     void settleIsSafeWithNoKeyboardAndNoWindow()
