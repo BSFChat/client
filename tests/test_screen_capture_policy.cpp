@@ -231,6 +231,48 @@ private slots:
                  "clearing its `owner` back-pointer; an in-flight picker "
                  "callback would call into a freed capturer.");
     }
+
+    // --- One stream, not a screenshot per frame -----------------------
+    //
+    // 2026-10-16: tccd logged ~13,500 kTCCServiceScreenCapture checks in
+    // 15 minutes of sharing, attributed to bsfchat-app via replayd — one
+    // per +[SCScreenshotManager captureImageWithFilter:] at ~5 fps. The
+    // owner's Mac froze for seconds at a time and re-showed the
+    // screen-recording prompt. An SCStream is checked once, at start.
+
+    void capturerStreamsInsteadOfPollingScreenshots()
+    {
+        const QString code = capturerCode();
+        QVERIFY2(!code.contains(QStringLiteral("SCScreenshotManager")),
+                 "MacScreenCapturer.mm captures with SCScreenshotManager "
+                 "again. Each call is a TCC check through replayd; per "
+                 "frame that is the tccd storm. Use the SCStream.");
+        QVERIFY2(code.contains(QStringLiteral("startCaptureWithCompletionHandler")),
+                 "MacScreenCapturer.mm no longer starts an SCStream.");
+        QVERIFY2(code.contains(QStringLiteral("minimumFrameInterval")),
+                 "MacScreenCapturer.mm no longer throttles the stream to "
+                 "the target fps.");
+    }
+
+    void capturerRetargetsTheStreamOnRepick()
+    {
+        const QString code = capturerCode();
+        // A mid-share re-pick restarting the stream would be a second
+        // TCC check and a gap in the video; retarget it instead.
+        QVERIFY2(code.contains(QStringLiteral("updateContentFilter")),
+                 "MacScreenCapturer.mm no longer retargets the running "
+                 "stream when the picker hands back a new filter.");
+    }
+
+    void capturerStopsItsStreamBeforeDying()
+    {
+        const QString code = capturerCode();
+        QVERIFY2(code.contains(QStringLiteral("stopCaptureWithCompletionHandler")),
+                 "MacScreenCapturer.mm never stops its SCStream.");
+        QVERIFY2(code.contains(QStringLiteral("dispatch_semaphore_wait")),
+                 "~MacScreenCapturer no longer waits for the stream stop "
+                 "to complete before the object goes.");
+    }
 };
 
 QTEST_GUILESS_MAIN(TestScreenCapturePolicy)
