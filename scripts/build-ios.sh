@@ -9,7 +9,8 @@ set -e
 
 TARGET=${1:-simulator}
 
-# 6.10.3, in lockstep with .github/workflows/ci.yml. It used to say
+# 6.10.3, in lockstep with the `ios` job in .github/workflows/ci.yml
+# (the desktop jobs are on 6.11.3; see the note there). It used to say
 # 6.8.0, which is a problem beyond drift: QQuickWindow.safeAreaMargins
 # and the QML SafeArea attached property — the fix for the iPhone notch
 # and home indicator — only exist from Qt 6.9, so a 6.8 toolchain
