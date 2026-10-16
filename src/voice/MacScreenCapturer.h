@@ -79,6 +79,10 @@ signals:
     // again, which re-offers the picker — never a wider capture.
     void shareEnded(const QString& message);
 
+public:
+    // Plain methods, NOT signals: moc emits a body for every signal, so a
+    // declaration under `signals:` with a definition in the .mm is a
+    // duplicate symbol at link time.
     // Internal, Qt thread: called by MacStreamSink (after its hop to
     // the main queue and QPointer check).
     void _onStreamFrame(quint64 streamGen, const QImage& frame);
