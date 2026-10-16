@@ -89,7 +89,7 @@ TestCase {
     // rendering glitch. Only the three states with something to say show.
     function test_an_unknown_status_shows_nothing_rather_than_an_empty_strip_data() {
         return [
-            { tag: "4",         s: 4 },
+            { tag: "5",         s: 5 },
             { tag: "-1",        s: -1 },
             { tag: "undefined", s: undefined },
             { tag: "string",    s: "reconnecting" }
@@ -99,6 +99,17 @@ TestCase {
         var v = view(d.s, "", false, false);
         compare(Banner.tone(v), Banner.None);
         verify(!Banner.isShowing(v));
+    }
+
+    // Launch, before the first /sync answers: a neutral strip, never the
+    // red "Disconnected" or amber "Reconnecting" of a connection that was lost.
+    function test_connecting_is_neutral_and_says_so() {
+        var v = view(Banner.Connecting, "some sync error", false, false);
+        compare(Banner.tone(v), Banner.Info);
+        verify(Banner.isConnecting(v));
+        compare(Banner.message(v), "Connecting to server…");
+        verify(!Banner.showsReauth(v));
+        verify(!Banner.isConnecting(view(Banner.Reconnecting, "", false, false)));
     }
 
     // ── 2. The way out ───────────────────────────────────────────────

@@ -178,6 +178,22 @@ TestCase {
         compare(messageText().text, "Reconnecting to server…");
     }
 
+    function test_c2_connecting_waits_then_shows_a_spinner() {
+        setState(Banner.Connecting, "", false, false);
+        // The grace period: not on screen straight away.
+        verify(!banner.visible);
+        tryCompare(banner, "visible", true);
+        compare(String(banner.color), String(Theme.accent));
+        compare(messageText().text, "Connecting to server…");
+        // A fast first sync inside the grace period never shows the strip.
+        setState(Banner.Connected, "", false, false);
+        tryCompare(banner, "visible", false);
+        setState(Banner.Connecting, "", false, false);
+        setState(Banner.Connected, "", false, false);
+        wait(600);
+        verify(!banner.visible);
+    }
+
     function test_d_disconnected_is_red() {
         setState(Banner.Disconnected, "", false, false);
         tryCompare(banner, "visible", true);

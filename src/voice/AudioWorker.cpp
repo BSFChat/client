@@ -980,7 +980,8 @@ void AudioWorker::createBackend() {
 
 #if defined(BSFCHAT_DARWIN_VPIO)
     if (choice.kind == AudioBackendKind::DarwinVpio)
-        m_backend = std::make_unique<bsfchat::voice::DarwinVpioBackend>();
+        m_backend = std::make_unique<bsfchat::voice::DarwinVpioBackend>(
+            prefs.value("audio/duckOtherAudio", false).toBool());
 #endif
     if (!m_backend) {
         // No parent: the unique_ptr owns it, and a QObject with two

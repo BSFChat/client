@@ -1,6 +1,7 @@
 #include "net/ServerConnection.h"
 #include "net/MatrixClient.h"
 #include "net/SyncLoop.h"
+#include "net/SyncBackoff.h"
 #include "net/AuthError.h"
 #include "net/TokenedReply.h"
 #include "net/SnapshotGate.h"
@@ -507,9 +508,21 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         // sync loop is stopped while the session is expired, but a request
         // that was already in flight can still land here afterwards.
         if (m_auth.needsReauth()) return;
-        m_connectionStatus = 2; // reconnecting
         m_syncErrorMessage = error;
-        emit connectionStatusChanged();
+        // Still connecting: a client that has not synced once this run has
+        // nothing to RE-connect to. The common launch case is SyncLoop
+        // burning its resume attempts on a cached `since` the server no
+        // longer accepts before it falls back to a full sync — seconds of
+        // failures on a server that is perfectly up. Bounded, though: past
+        // the resume attempts plus a couple of full-sync tries the server
+        // really is unreachable, and saying so beats spinning forever.
+        if (m_connectionStatus == 4
+            && ++m_connectingFailures <= SyncBackoff::kMaxResumeAttempts + 2) {
+            // still connecting
+        } else {
+            m_connectionStatus = 2; // reconnecting
+            emit connectionStatusChanged();
+        }
         emit syncErrorMessageChanged();
     });
 
@@ -1029,10 +1042,13 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
     }
 
     m_connected = true;
-    m_connectionStatus = 1;
-    // Optimistic — nothing has synced yet — but it used to be set without
-    // telling anybody, so a rebuilt connection sat showing whatever the dead
+    // Connecting until the first /sync answers (processSyncResponse). It
+    // used to be an optimistic 1, which the first failed poll turned into
+    // "Reconnecting" — a launch that read as a lost connection. Emitted
+    // because a rebuilt connection must not sit showing whatever the dead
     // one last said until the first reply landed.
+    m_connectionStatus = 4;
+    m_connectingFailures = 0;
     emit connectedChanged();
     emit connectionStatusChanged();
     startSync();
