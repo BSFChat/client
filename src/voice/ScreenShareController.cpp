@@ -76,7 +76,7 @@ ScreenShareController::ScreenShareController(QObject* parent)
 #ifdef Q_OS_MACOS
     // Homebrew Qt is built without QT_FEATURE_screen_capture, so
     // QScreenCapture is unusable on macOS in this environment.
-    // Replace it with our CGDisplayCreateImage-based polling capturer.
+    // Replace it with our ScreenCaptureKit (SCStream) capturer.
     m_mac = new MacScreenCapturer(this);
     connect(m_mac, &MacScreenCapturer::captureFailed, this,
         [this](const QString& desc) {
@@ -321,10 +321,11 @@ videosend::Window ScreenShareController::sampleSendWindow(int askedFps)
     c.pushTicks = m_statPushTicks;
     c.emptyTicks = m_statEmptyTicks;
 #ifdef Q_OS_MACOS
-    // MacScreenCapturer polls — one screenshot per timer tick, whether
-    // or not anything moved — so a missing frame there means capture
-    // was late or failed, not that the screen was still.
-    constexpr bool kCapturePolled = true;
+    // MacScreenCapturer runs an SCStream, which (unlike the per-tick
+    // screenshots it replaced) delivers a frame only when the content
+    // changes; a still share gets a 1 fps heartbeat. A missing frame
+    // there proves nothing, so this is not a capture bottleneck signal.
+    constexpr bool kCapturePolled = false;
 #else
     // QScreenCapture / QWindowCapture deliver on change on some
     // backends; a missing frame proves nothing.
@@ -676,8 +677,8 @@ void ScreenShareController::startForScreen(int screenIndex)
     // DO NOT call CGRequestScreenCaptureAccess here — on modern
     // macOS that pops System Settings to the Screen Recording pane
     // on every invocation. We already know the user has granted
-    // access (otherwise SCScreenshotManager will just fail the
-    // capture call silently, which MacScreenCapturer logs).
+    // access (otherwise the capture stream fails to start, which
+    // MacScreenCapturer logs).
     // CGPreflight is informational only.
     qInfo("[screenshare] CGPreflight=%d",
           int(CGPreflightScreenCaptureAccess()));
