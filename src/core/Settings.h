@@ -59,6 +59,12 @@ class Settings : public QObject {
     Q_PROPERTY(bool voiceProcessing READ voiceProcessing WRITE setVoiceProcessing NOTIFY voiceProcessingChanged)
     // True on the platforms where the switch above does anything.
     Q_PROPERTY(bool voiceProcessingAvailable READ voiceProcessingAvailable CONSTANT)
+    // Whether joining voice may turn other apps' audio down. Only the
+    // macOS VoiceProcessingIO path ducks, and it does by default; off
+    // (the default here) asks it for the minimum. Read at voice join.
+    Q_PROPERTY(bool duckOtherAudio READ duckOtherAudio WRITE setDuckOtherAudio NOTIFY duckOtherAudioChanged)
+    // True where the switch above does anything: macOS with VPIO built in.
+    Q_PROPERTY(bool duckOtherAudioAvailable READ duckOtherAudioAvailable CONSTANT)
     // Notifications (placeholder — not yet routed through the OS; setting
     // persists so the UI keeps the user's choice across restarts.)
     Q_PROPERTY(bool notificationsEnabled READ notificationsEnabled WRITE setNotificationsEnabled NOTIFY notificationsEnabledChanged)
@@ -199,6 +205,9 @@ public:
     bool voiceProcessing() const;
     void setVoiceProcessing(bool on);
     bool voiceProcessingAvailable() const;
+    bool duckOtherAudio() const;
+    void setDuckOtherAudio(bool on);
+    bool duckOtherAudioAvailable() const;
     bool voiceAudioSuspended() const;
     bool voiceAudioNeedsResume() const;
     QString voiceAudioReason() const;
@@ -463,6 +472,7 @@ signals:
     // The device the voice pipeline is on has changed.
     void audioInUseChanged();
     void voiceProcessingChanged();
+    void duckOtherAudioChanged();
     // The pipeline was interrupted, or came back.
     void voiceAudioStateChanged();
 

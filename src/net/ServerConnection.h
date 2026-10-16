@@ -282,7 +282,8 @@ public:
     QString activeRoomTopic() const { return m_activeRoomTopic; }
 
     // 0 = disconnected, 1 = connected/syncing, 2 = reconnecting,
-    // 3 = session expired (see needsReauth)
+    // 3 = session expired (see needsReauth), 4 = connecting (credentials
+    // set, no /sync answered yet — launch)
     int connectionStatus() const { return m_connectionStatus; }
     QString syncErrorMessage() const { return m_syncErrorMessage; }
     bool needsReauth() const { return m_auth.needsReauth(); }
@@ -1284,8 +1285,11 @@ private:
     QString m_activeRoomName;
     QString m_activeRoomTopic;
     bool m_connected = false;
-    // 0=disconnected, 1=connected, 2=reconnecting, 3=session expired
+    // 0=disconnected, 1=connected, 2=reconnecting, 3=session expired,
+    // 4=connecting
     int m_connectionStatus = 0;
+    // Sync failures seen while still connecting; see the syncError handler.
+    int m_connectingFailures = 0;
     // Where we stand with the homeserver's opinion of our token, and what a
     // reconnect is allowed to do about it. See net/SessionAuth.h.
     bsfchat::client::SessionAuth m_auth;

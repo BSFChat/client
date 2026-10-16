@@ -129,8 +129,11 @@ private Q_SLOTS:
     // keyboard's way and have the plugin find nothing to do.
     void onKeyboardChanged();
 
-    // Rotation. The window is ours to place once it is NoState, so
-    // nothing else will resize it back.
+    // Rotation, split view, an inset change. Re-takes the baseline,
+    // because the rectangle we were restoring to belongs to the screen
+    // as it was. The window is ours to place once it is NoState, which
+    // is also why nothing else will resize it back and why the baseline
+    // has to be re-derived here rather than waited for.
     void onScreenGeometryChanged();
 
     // QInputMethod::cursorRectangleChanged — the one platform event that
@@ -142,6 +145,10 @@ private Q_SLOTS:
 
 private:
     void trackWindow();
+    // Hand the window back to the platform in the state the shell asked
+    // for, which is what makes it recompute its own maximized rectangle
+    // against the screen as it is now. See onScreenGeometryChanged().
+    void restoreShellWindowState();
     void applyWindowGeometry(int keyboardHeight);
     void measureShrink();
     void setPlatformScroll(int value);
@@ -150,7 +157,21 @@ private:
     QPointer<QWindow> m_window;
     // The window as it is with no keyboard: the thing we shrink from and
     // restore to. Re-taken whenever the keyboard is down.
+    //
+    // Always read off m_window, never off the screen. applyWindowGeometry()
+    // feeds it to QWindow::setGeometry(), so it has to be the rectangle
+    // QWindow::geometry() reports, and QScreen::availableGeometry() is not
+    // that rectangle on the platform this file exists for —
+    // onScreenGeometryChanged() has the numbers.
     QRect m_baseGeometry;
+
+    // The window state the shell asked for, remembered before we take it
+    // away. applyWindowGeometry() has to hold the window at
+    // Qt::WindowNoState for QIOSWindow::setGeometry() to apply at all, and
+    // this is what gets given back when the screen changes under us.
+    // Defaults to what qml/mobile/MobileMain.qml actually asks for, for
+    // the case where the screen changes before any keyboard ever appears.
+    Qt::WindowStates m_shellWindowState = Qt::WindowMaximized;
 
     int m_platformScroll = 0;
     int m_windowShrink = 0;

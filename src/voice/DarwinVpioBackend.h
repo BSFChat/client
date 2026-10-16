@@ -134,7 +134,10 @@ public:
     // the scratch buffers are sized from.
     static constexpr int kMaxFramesPerSlice = 4096;
 
-    DarwinVpioBackend();
+    // `duckOtherAudio` is Settings::duckOtherAudio. VoiceProcessingIO
+    // turns every other app's audio down while it runs; false asks it for
+    // the least ducking macOS allows (see configureUnit()).
+    explicit DarwinVpioBackend(bool duckOtherAudio = false);
     ~DarwinVpioBackend() override;
 
     // Whether the VoiceProcessingIO component exists at all on this
@@ -216,6 +219,7 @@ private:
 
     AudioComponentInstance m_unit = nullptr;
     bool m_unitRunning = false;
+    const bool m_duckOtherAudio;
     bool m_failed = false;
     QString m_failureReason;
 

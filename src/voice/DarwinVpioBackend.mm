@@ -262,8 +262,9 @@ OSStatus renderConverterInput(AudioConverterRef, UInt32* ioPackets,
 // Construction and availability
 // ---------------------------------------------------------------------
 
-DarwinVpioBackend::DarwinVpioBackend()
-    : m_captureSource(std::make_unique<ConverterSource>())
+DarwinVpioBackend::DarwinVpioBackend(bool duckOtherAudio)
+    : m_duckOtherAudio(duckOtherAudio)
+    , m_captureSource(std::make_unique<ConverterSource>())
     , m_renderSource(std::make_unique<ConverterSource>())
 {
 }
@@ -485,6 +486,29 @@ bool DarwinVpioBackend::configureUnit()
     const UInt32 agc = 1;
     AudioUnitSetProperty(m_unit, kAUVoiceIOProperty_VoiceProcessingEnableAGC,
                          kAudioUnitScope_Global, 0, &agc, sizeof(agc));
+
+    // Other apps' audio. VPIO ducks it by default, which on a desktop
+    // means joining voice turns the user's game and music down. There is
+    // no "off" in the API — kAUVoiceIOOtherAudioDuckingLevelMin is the
+    // floor — so the setting picks between that and Apple's default.
+    // macOS only: iOS ducking is the AVAudioSession's business
+    // (IosAudioSession) and the setting is not offered there. Before
+    // macOS 14 the property does not exist and the default stands.
+#if TARGET_OS_OSX
+    if (@available(macOS 14.0, *)) {
+        AUVoiceIOOtherAudioDuckingConfiguration ducking = {};
+        ducking.mEnableAdvancedDucking = false;
+        ducking.mDuckingLevel = m_duckOtherAudio
+            ? kAUVoiceIOOtherAudioDuckingLevelDefault
+            : kAUVoiceIOOtherAudioDuckingLevelMin;
+        const OSStatus duckSt = AudioUnitSetProperty(
+            m_unit, kAUVoiceIOProperty_OtherAudioDuckingConfiguration,
+            kAudioUnitScope_Global, 0, &ducking, sizeof(ducking));
+        if (duckSt != noErr)
+            qWarning("[voice] VPIO ducking configuration refused: %s",
+                     qPrintable(statusString(duckSt)));
+    }
+#endif
 
     st = AudioUnitInitialize(m_unit);
     if (st != noErr) {

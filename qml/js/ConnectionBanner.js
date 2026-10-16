@@ -50,17 +50,24 @@
 
 // ServerConnection::connectionStatus. Documented at src/net/ServerConnection.h
 // ("0 = disconnected, 1 = connected/syncing, 2 = reconnecting, 3 = session
-// expired"), named here so the rules below read as states rather than digits.
+// expired, 4 = connecting"), named here so the rules below read as states rather than digits.
 var Disconnected = 0;
 var Connected    = 1;
 var Reconnecting = 2;
 var Expired      = 3;
+// Launch: credentials are set but no /sync has come back yet. Its own state
+// because the old optimistic `Connected` turned into `Reconnecting` the
+// moment the first poll failed, so a slow first sync read as a lost
+// connection on a client that had never been connected.
+var Connecting   = 4;
 
 // The banner's three tones. Not colours: ConnectionBanner.qml maps these onto
 // Theme.warn / Theme.danger, so a theme change does not come through here.
 var None   = "none";
 var Warn   = "warn";
 var Danger = "danger";
+// Neutral: nothing is wrong yet, the client is still getting there.
+var Info   = "info";
 
 // The property is `int` on the C++ side, so always a number from a real
 // connection — but a plain JS object in a test, or a connection read before
@@ -87,6 +94,7 @@ function _text(v) {
 function tone(view) {
     switch (_status(view)) {
     case Reconnecting: return Warn;
+    case Connecting:   return Info;
     // Expired is red rather than amber deliberately. It is a permanent state
     // until the user signs in again, not a transient one the client can
     // recover from by waiting, so it must not look like the amber one that
@@ -101,11 +109,19 @@ function isShowing(view) {
     return tone(view) !== None;
 }
 
+// The banner draws a spinner instead of the pulse dot, and waits a moment
+// before showing at all, so a fast launch does not flash a strip.
+function isConnecting(view) {
+    return _status(view) === Connecting;
+}
+
 // The line in the strip.
 function message(view) {
     switch (_status(view)) {
     case Reconnecting:
         return "Reconnecting to server…";
+    case Connecting:
+        return "Connecting to server…";
     case Expired:
         // The server's own words when it gave any. It does not always: the
         // 401 paths in ServerConnection set status 3 before every one of them

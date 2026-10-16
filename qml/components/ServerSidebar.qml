@@ -380,6 +380,7 @@ Rectangle {
                 var st = !c ? qsTr("Unknown")
                        : c.connectionStatus === 1 ? qsTr("Connected")
                        : c.connectionStatus === 2 ? qsTr("Reconnecting")
+                       : c.connectionStatus === 4 ? qsTr("Connecting")
                        : (c.syncErrorMessage && c.syncErrorMessage.length > 0
                           ? c.syncErrorMessage : qsTr("Disconnected"));
                 return qsTr("%1, %2").arg(serverContextMenu.url).arg(st);
@@ -413,6 +414,7 @@ Rectangle {
                         anchors.verticalCenter: parent.verticalCenter
                         color: parent.st === 1 ? Theme.online
                              : parent.st === 2 ? Theme.warn
+                             : parent.st === 4 ? Theme.fg3
                              : Theme.danger
                         Accessible.ignored: true
                     }
@@ -422,6 +424,7 @@ Rectangle {
                             if (!c) return "Unknown";
                             if (c.connectionStatus === 1) return "Connected";
                             if (c.connectionStatus === 2) return "Reconnecting…";
+                            if (c.connectionStatus === 4) return "Connecting…";
                             return c.syncErrorMessage && c.syncErrorMessage.length > 0
                                    ? c.syncErrorMessage : "Disconnected";
                         }
@@ -429,6 +432,7 @@ Rectangle {
                         font.pixelSize: Theme.fontSize.sm
                         color: parent.st === 1 ? Theme.fg2
                              : parent.st === 2 ? Theme.warn
+                             : parent.st === 4 ? Theme.fg2
                              : Theme.danger
                         elide: Text.ElideRight
                         width: 240 - Theme.sp.s3 * 2 - 14

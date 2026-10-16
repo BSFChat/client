@@ -616,6 +616,23 @@ bool Settings::voiceProcessingAvailable() const {
 #endif
 }
 
+bool Settings::duckOtherAudio() const {
+    return m_settings.value("audio/duckOtherAudio", false).toBool();
+}
+void Settings::setDuckOtherAudio(bool on) {
+    if (duckOtherAudio() == on) return;
+    // Read by AudioWorker::createBackend() at join, like voiceProcessing.
+    m_settings.setValue("audio/duckOtherAudio", on);
+    emit duckOtherAudioChanged();
+}
+bool Settings::duckOtherAudioAvailable() const {
+#if defined(BSFCHAT_DARWIN_VPIO) && defined(Q_OS_MACOS)
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool Settings::voiceAudioSuspended() const {
     return bsfchat::AudioDeviceStatus::instance().voiceAudioSuspended();
 }

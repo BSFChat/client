@@ -698,6 +698,24 @@ Popup {
                         }
                     }
 
+                    // Only the macOS echo-cancellation path ducks, so the row
+                    // follows that switch.
+                    SettingRow {
+                        title: "Lower other audio during voice"
+                        description: "Turns down music, games and other apps while you are in a voice channel. When off, macOS still lowers them slightly. Applies the next time you join voice."
+                        visible: appSettings.duckOtherAudioAvailable && appSettings.voiceProcessing
+                        ThemedSwitch {
+                            Accessible.name: qsTr("Lower other audio during voice")
+                            checked: appSettings.duckOtherAudio
+                            onToggled: {
+                                appSettings.duckOtherAudio = checked;
+                                checked = Qt.binding(function() {
+                                    return appSettings.duckOtherAudio;
+                                });
+                            }
+                        }
+                    }
+
                     SettingRow {
                         title: "Input volume"
                         description: "How loud you are to others, applied after automatic gain control. 100% leaves it unchanged."

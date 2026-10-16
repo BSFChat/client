@@ -2432,6 +2432,7 @@ Rectangle {
                                     switch (serverManager.activeServer.connectionStatus) {
                                     case 1: return Theme.online;
                                     case 2: return Theme.warn;
+                                    case 4: return Theme.fg3;  // connecting
                                     default: return Theme.danger;
                                     }
                                 }

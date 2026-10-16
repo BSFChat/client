@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
 import BSFChat
+import "js/WindowGeometry.js" as WindowGeometry
 
 ApplicationWindow {
     id: root
@@ -35,9 +36,18 @@ ApplicationWindow {
     // geometry — a more thorough "is any screen covering this rect"
     // sweep would be nicer but this handles the common case.
     Component.onCompleted: {
-        var w = appSettings.windowWidth;
-        var h = appSettings.windowHeight;
-        if (w > 0 && h > 0) { width = w; height = h; }
+        // Clamped to the screen we are actually on. An unclamped restore
+        // opens taller than the display when the size came from a bigger
+        // one, and everything below the fold — the bottom of both side
+        // panels, the composer — is then unreachable, because the controls
+        // that would resize the window are themselves off-screen. Hit for
+        // real on a Steam Deck (1280x800). See qml/js/WindowGeometry.js.
+        var g = WindowGeometry.clampToScreen(
+                    appSettings.windowWidth, appSettings.windowHeight,
+                    Screen ? Screen.desktopAvailableWidth : 0,
+                    Screen ? Screen.desktopAvailableHeight : 0,
+                    root.minimumWidth, root.minimumHeight);
+        if (g) { width = g.width; height = g.height; }
 
         var x_ = appSettings.windowX;
         var y_ = appSettings.windowY;
