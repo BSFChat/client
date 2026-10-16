@@ -5,8 +5,9 @@ import BSFChat
 import "../js/ConnectionBanner.js" as Banner
 
 // Connection / sync / re-auth strip — 28h, full width, at the top of the
-// shell's main column. Reconnecting = amber warn; disconnected or expired =
-// danger red. Small animated dot on the left signals live state.
+// shell's main column. Connecting (launch) = accent with a spinner;
+// reconnecting = amber warn; disconnected or expired = danger red. Small
+// animated dot on the left signals live state.
 //
 // A LAYOUT ROW, mounted by both shells as a sibling of the main StackLayout
 // (qml/main.qml, qml/mobile/MobileMain.qml). It must not be anchored over the
@@ -37,7 +38,22 @@ Rectangle {
 
     Layout.fillWidth: true
     Layout.preferredHeight: visible ? 28 : 0
-    visible: Banner.isShowing(connView)
+    // Connecting waits out a short grace period first: most launches sync in
+    // well under it, and a strip that appears and vanishes in 100 ms reads
+    // as a glitch. Every other state shows at once.
+    readonly property bool _connecting: Banner.isConnecting(connView)
+    property bool _connectingGraceOver: false
+    on_ConnectingChanged: {
+        _connectingGraceOver = false;
+        if (_connecting) connectingGrace.restart(); else connectingGrace.stop();
+    }
+    Component.onCompleted: if (_connecting) connectingGrace.restart()
+    Timer {
+        id: connectingGrace
+        interval: 400
+        onTriggered: root._connectingGraceOver = true
+    }
+    visible: Banner.isShowing(connView) && (!_connecting || _connectingGraceOver)
 
     // ── Accessibility ────────────────────────────────────────────────
     //
@@ -79,6 +95,7 @@ Rectangle {
         var t = Banner.tone(connView);
         if (t === Banner.Warn) return Theme.warn;
         if (t === Banner.Danger) return Theme.danger;
+        if (t === Banner.Info) return Theme.accent;
         return "transparent";
     }
 
@@ -95,6 +112,7 @@ Rectangle {
         // static warning."
         Rectangle {
             Layout.alignment: Qt.AlignVCenter
+            visible: !root._connecting
             // Layout.preferred*, not width/height: this is a RowLayout child,
             // and a plain width on one is undefined behaviour that qmllint
             // flags (Quick.layout-positioning). It was written that way when
@@ -112,6 +130,37 @@ Rectangle {
                 running: root.visible
                 NumberAnimation { to: 0.3; duration: 600; easing.type: Easing.InOutQuad }
                 NumberAnimation { to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
+            }
+        }
+
+        // Spinner, while connecting: work in progress rather than a state.
+        // A three-quarter ring, turned. Ornament, as the dot is.
+        Item {
+            id: connectingSpinner
+            Layout.alignment: Qt.AlignVCenter
+            Layout.preferredWidth: 12
+            Layout.preferredHeight: 12
+            visible: root._connecting
+            Accessible.ignored: true
+            Canvas {
+                anchors.fill: parent
+                onPaint: {
+                    var ctx = getContext("2d");
+                    ctx.reset();
+                    ctx.lineWidth = 2;
+                    ctx.lineCap = "round";
+                    ctx.strokeStyle = Theme.onAccent;
+                    ctx.beginPath();
+                    ctx.arc(width / 2, height / 2, width / 2 - 1.5,
+                            0, Math.PI * 1.5);
+                    ctx.stroke();
+                }
+            }
+            RotationAnimation on rotation {
+                loops: Animation.Infinite
+                running: connectingSpinner.visible && root.visible
+                from: 0; to: 360
+                duration: 900
             }
         }
 
