@@ -321,6 +321,38 @@ void Updater::openReleasePage()
 }
 
 #if defined(Q_OS_MACOS)
+// $1 pid to wait for, $2 mount point, $3 dmg, $4 installed bundle, $5 its
+// parent directory. See applyMac for why these are arguments, not text.
+static const char kMacUpdateScript[] = R"SH(
+LOG="$HOME/Library/Logs/BSFChat/update.log"
+mkdir -p "$(dirname "$LOG")"
+exec >>"$LOG" 2>&1
+echo; echo "=== Update started $(date) ==="
+echo "  pid_to_wait=$1 mount=$2 dmg=$3 dest=$4 parent=$5"
+while kill -0 "$1" 2>/dev/null; do sleep 0.2; done
+echo "  old process exited, mounting dmg"
+hdiutil attach -nobrowse -mountpoint "$2" "$3" || { echo "ERROR: hdiutil attach failed"; exit 1; }
+SRC=$(find "$2" -maxdepth 2 -iname '*.app' -type d | head -1)
+echo "  src=$SRC"
+if [ -n "$SRC" ]; then
+  # Finder is on Apple's permanent App Management allowlist; routing the
+  # duplicate through it sidesteps the TCC gate that blocks our own process
+  # from writing to /Applications. `as alias` coerces the POSIX file refs
+  # into the form Finder's duplicate verb expects.
+  osascript -e 'on run argv' \
+            -e 'tell application "Finder" to duplicate (POSIX file (item 1 of argv) as alias) to (POSIX file (item 2 of argv) as alias) with replacing' \
+            -e 'end run' "$SRC" "$5" \
+    && echo "  Finder duplicate OK" \
+    || echo "ERROR: Finder duplicate failed (TCC denied?)"
+else
+  echo "ERROR: no .app found inside DMG"
+fi
+hdiutil detach "$2" -force
+echo "  relaunching $4"
+open "$4"
+echo "=== Update done $(date) ==="
+)SH";
+
 void Updater::applyMac(const QString& dmgPath)
 {
     // Spawn a detached shell helper that:
@@ -357,40 +389,21 @@ void Updater::applyMac(const QString& dmgPath)
     QString mountPt = QStringLiteral("/Volumes/BSFChatUpdate-%1")
         .arg(QCoreApplication::applicationPid());
 
-    QString script = QStringLiteral(
-        "LOG=\"$HOME/Library/Logs/BSFChat/update.log\"; "
-        "mkdir -p \"$(dirname \"$LOG\")\"; "
-        "exec >>\"$LOG\" 2>&1; "
-        "echo; echo \"=== Update started $(date) ===\"; "
-        "echo \"  pid_to_wait=%1 mount=%2 dmg=%3 dest=%4 parent=%5\"; "
-        "while kill -0 %1 2>/dev/null; do sleep 0.2; done; "
-        "echo \"  old process exited, mounting dmg\"; "
-        "hdiutil attach -nobrowse -mountpoint %2 %3 || { echo \"ERROR: hdiutil attach failed\"; exit 1; }; "
-        "SRC=$(find %2 -maxdepth 2 -iname '*.app' -type d | head -1); "
-        "echo \"  src=$SRC\"; "
-        "if [ -n \"$SRC\" ]; then "
-        // Finder is on Apple's permanent App Management allowlist;
-        // routing the duplicate through it sidesteps the TCC gate
-        // that blocks our own process from writing to /Applications.
-        // `as alias` coerces the POSIX file refs into the form
-        // Finder's duplicate verb expects.
-        "  osascript -e 'tell application \"Finder\" to duplicate (POSIX file \"'\"$SRC\"'\" as alias) to (POSIX file \"%5\" as alias) with replacing' "
-        "    && echo \"  Finder duplicate OK\" "
-        "    || echo \"ERROR: Finder duplicate failed (TCC denied?)\"; "
-        "else "
-        "  echo \"ERROR: no .app found inside DMG\"; "
-        "fi; "
-        "hdiutil detach %2 -force; "
-        "echo \"  relaunching %4\"; "
-        "open %4; "
-        "echo \"=== Update done $(date) ===\"")
-        .arg(QCoreApplication::applicationPid())
-        .arg(mountPt)
-        .arg(dmgPath)
-        .arg(bundlePath)
-        .arg(installParent);
-
-    QProcess::startDetached("/bin/bash", {"-c", script});
+    // The paths are passed as POSITIONAL ARGUMENTS ($1..$5) and quoted at
+    // every use, never spliced into the script text. They used to be
+    // interpolated with chained .arg() — unquoted into hdiutil/open, and
+    // inside an AppleScript string literal — so an app at
+    // "/Applications/BSFChat Beta.app", a home directory with a space, or a
+    // '"' anywhere split the arguments and the update aborted AFTER the old
+    // app had already quit. Chained .arg() also re-expanded any "%N" that
+    // appeared inside an earlier path. The AppleScript gets its paths through
+    // `on run argv` for the same reason. kMacUpdateScript is a plain constant
+    // so the whole script can be exercised off macOS.
+    QProcess::startDetached(QStringLiteral("/bin/bash"),
+                            {QStringLiteral("-c"), QString::fromUtf8(kMacUpdateScript),
+                             QStringLiteral("bsfchat-update"),
+                             QString::number(QCoreApplication::applicationPid()), mountPt,
+                             dmgPath, bundlePath, installParent});
     QCoreApplication::quit();
 }
 #else
