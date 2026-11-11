@@ -499,6 +499,7 @@ signals:
     void windowVisibilityChanged();
 
 private:
+    void writeServers(const QList<ServerEntry>& servers);
     mutable QSettings m_settings;
     // One instance for the whole process, owned here because Settings is
     // a QML singleton on the GUI thread and QMediaDevices wants a thread

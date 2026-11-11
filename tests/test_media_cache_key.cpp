@@ -87,6 +87,37 @@ private slots:
         const QString key = MediaDownloader::cacheKeyForUrl(QStringLiteral(
             "https://bsfchat.com/_matrix/media/v3/download/s/clip.mp4?access_token=aa.bbb"));
         QVERIFY(key.endsWith(QStringLiteral(".mp4")));
+        QCOMPARE(MediaDownloader::cacheExtensionFor(QStringLiteral(
+                     "https://bsfchat.com/_matrix/media/v3/download/s/clip.MP4?ticket=aa.bbb")),
+                 QStringLiteral(".mp4"));
+    }
+
+    // A sender chooses the content.url of an m.file. QNAM drops the fragment, so
+    // `mxc://hs/<id>#.exe` downloads the real object — and the cached copy used
+    // to be saved as <sha1>.exe and handed to ShellExecute by "Open".
+    void aFragmentIsNotPartOfTheObject()
+    {
+        const QString base = QStringLiteral(
+            "https://bsfchat.com/_matrix/media/v3/download/bsfchat.com/0123abcd");
+        QCOMPARE(MediaDownloader::cacheKeyForUrl(base + QStringLiteral("#.exe")), base);
+        QCOMPARE(MediaDownloader::cacheKeyForUrl(base + QStringLiteral("#x?y")), base);
+        QCOMPARE(MediaDownloader::cacheExtensionFor(base + QStringLiteral("#.exe")), QString());
+    }
+
+    void onlyPassiveExtensionsAreKept()
+    {
+        const QString dir = QStringLiteral("https://h/_matrix/media/v3/download/h/");
+        for (const char* bad : {"a.exe", "a.bat", "a.cmd", "a.com", "a.scr", "a.hta", "a.js",
+                                "a.vbs", "a.ps1", "a.lnk", "a.msi", "a.jar", "a.app",
+                                "a.command", "a.sh", "a.html", "a.svg", "a.desktop"}) {
+            QVERIFY2(MediaDownloader::cacheExtensionFor(dir + QLatin1String(bad)).isEmpty(), bad);
+        }
+        for (const char* good : {"a.png", "a.jpg", "a.webp", "a.mp4", "a.ogg", "a.pdf"}) {
+            QVERIFY2(!MediaDownloader::cacheExtensionFor(dir + QLatin1String(good)).isEmpty(),
+                     good);
+        }
+        // No dot after the last slash: no extension, as before.
+        QCOMPARE(MediaDownloader::cacheExtensionFor(QStringLiteral("https://h.png/abc")), QString());
     }
 };
 

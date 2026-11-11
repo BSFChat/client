@@ -62,6 +62,13 @@ public:
     // static so the property can be tested without a cache directory.
     static QString cacheKeyForUrl(const QString& url);
 
+    // The extension the cached copy is saved under: one from a short list of
+    // passive media/document types, or empty. The URL is sender-controlled and
+    // openDownloaded() hands the cached file to the OS, so an extension taken
+    // from it verbatim decides what the OS RUNS — ".exe", ".bat", ".hta" on
+    // Windows. Public and static so that property is testable.
+    static QString cacheExtensionFor(const QString& url);
+
 signals:
     void completed(QString remoteUrl, QString localFileUrl);
     void failed(QString remoteUrl, QString error);

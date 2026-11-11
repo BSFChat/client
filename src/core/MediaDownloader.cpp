@@ -43,8 +43,44 @@ QString MediaDownloader::cacheKeyForUrl(const QString& url)
     // (util/MediaUrl.h) — and the rule matters more than it did, not less. A
     // ticket is replaced every few minutes, so a key that included it would
     // miss on essentially every fetch and the cache would never hit at all.
-    const int q = url.indexOf(QLatin1Char('?'));
-    return q < 0 ? url : url.left(q);
+    //
+    // The fragment is not part of it either, and that one is a security rule:
+    // QNetworkAccessManager never sends a fragment, so `mxc://hs/<id>#.exe`
+    // fetches exactly the object `mxc://hs/<id>` does — but a key that kept
+    // "#.exe" gave cachePathFor a sender-chosen extension to save it under.
+    qsizetype cut = url.size();
+    for (const QChar c : {QLatin1Char('?'), QLatin1Char('#')}) {
+        const qsizetype i = url.indexOf(c);
+        if (i >= 0 && i < cut) cut = i;
+    }
+    return url.left(cut);
+}
+
+QString MediaDownloader::cacheExtensionFor(const QString& url)
+{
+    // Kept for sniffing — platform decoders and the desktop pick a viewer by
+    // extension — but only from this list. Everything a sender can put in a
+    // URL is attacker-controlled, and openDownloaded() passes the cached file
+    // to QDesktopServices, which on Windows is ShellExecute: an extension
+    // outside this list is an instruction to run the download. SVG and HTML
+    // are deliberately absent (they open in a browser and carry script).
+    static const QStringList kPassive = {
+        QStringLiteral(".png"),  QStringLiteral(".jpg"),  QStringLiteral(".jpeg"),
+        QStringLiteral(".gif"),  QStringLiteral(".webp"), QStringLiteral(".bmp"),
+        QStringLiteral(".avif"), QStringLiteral(".heic"),
+        QStringLiteral(".mp4"),  QStringLiteral(".m4v"),  QStringLiteral(".mov"),
+        QStringLiteral(".webm"), QStringLiteral(".mkv"),
+        QStringLiteral(".mp3"),  QStringLiteral(".m4a"),  QStringLiteral(".aac"),
+        QStringLiteral(".ogg"),  QStringLiteral(".oga"),  QStringLiteral(".opus"),
+        QStringLiteral(".wav"),  QStringLiteral(".flac"),
+        QStringLiteral(".pdf"),  QStringLiteral(".txt"),
+    };
+    const QString key = cacheKeyForUrl(url);
+    const qsizetype dot = key.lastIndexOf(QLatin1Char('.'));
+    const qsizetype slash = key.lastIndexOf(QLatin1Char('/'));
+    if (dot <= slash || (key.size() - dot) > 6) return {};
+    const QString ext = key.mid(dot).toLower();
+    return kPassive.contains(ext) ? ext : QString();
 }
 
 QString MediaDownloader::cachePathFor(const QString& url) const
@@ -59,12 +95,7 @@ QString MediaDownloader::cachePathFor(const QString& url) const
     QByteArray h = QCryptographicHash::hash(key.toUtf8(),
                                             QCryptographicHash::Sha1)
                        .toHex();
-    QString ext;
-    int dot = key.lastIndexOf('.');
-    int slash = key.lastIndexOf('/');
-    if (dot > slash && (key.size() - dot) <= 6)
-        ext = key.mid(dot);
-    return cacheDirPath() + "/" + QString::fromLatin1(h) + ext;
+    return cacheDirPath() + "/" + QString::fromLatin1(h) + cacheExtensionFor(url);
 }
 
 void MediaDownloader::request(const QString& remoteUrl)
