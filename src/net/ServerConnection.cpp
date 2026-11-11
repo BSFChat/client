@@ -992,8 +992,24 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         emitFeedback(text, QStringLiteral("error"));
     });
 
+    // A deleted channel never arrives as an incremental-sync delta, so the
+    // cache has to be told, or the next resume hydrates it back.
+    connect(m_client, &MatrixClient::deleteRoomSuccess, this, [this](const QString& roomId) {
+        if (m_cacheWired) m_cache->forgetRooms({roomId});
+    });
+    connect(m_client, &MatrixClient::deleteRoomError, this,
+            [this](const QString& roomId, int status, const QString& error) {
+        Q_UNUSED(roomId);
+        // The sidebar removed the room optimistically; the next full sync puts
+        // a room that still exists back. What must not happen is silence.
+        QString text = error.isEmpty() ? tr("Could not delete the channel.") : error;
+        if (status == 403) text = tr("Not allowed: %1").arg(text);
+        emitFeedback(text, QStringLiteral("error"));
+    });
+
     // Handle leave room success
     connect(m_client, &MatrixClient::leaveRoomSuccess, this, [this](const QString& roomId) {
+        if (m_cacheWired) m_cache->forgetRooms({roomId});
         if (roomId == m_activeRoomId) {
             m_activeRoomId.clear();
             m_activeRoomName.clear();
@@ -1511,11 +1527,19 @@ void ServerConnection::startSync()
         // Snapshots go stale in ways an incremental sync will never correct:
         // a room we lost VIEW_CHANNEL on, or were removed from, simply stops
         // appearing rather than arriving as a delta. Bound the exposure.
+        //
+        // Bounded by the last FULL sync, not only by the token: the token is
+        // refreshed on every incremental sync, so for anyone who opens the app
+        // at least weekly the token-age cap never fired and a room lost while
+        // offline lingered indefinitely. A full sync is the only thing that
+        // reconciles that, so resuming is allowed only within a week of one.
         constexpr qint64 kMaxSnapshotAgeMs = 7LL * 24 * 60 * 60 * 1000;
+        const qint64 fullSyncAgeMs = m_cache->fullSyncAgeMs();
         bsfchat::SyncResponse hydrated;
         if (mayResume
             && LocalCache::isValidSyncToken(token)
             && ageMs >= 0 && ageMs < kMaxSnapshotAgeMs
+            && fullSyncAgeMs >= 0 && fullSyncAgeMs < kMaxSnapshotAgeMs
             && m_cache->buildHydrationSync(hydrated)) {
             m_hydratingFromCache = true;
             // Replayed through the normal path on purpose: the state-event
@@ -4620,6 +4644,12 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 visible.insert(QString::fromStdString(roomIdStr));
             }
             auto removed = m_roomListModel->pruneRoomsNotIn(visible);
+            // The prune used to stop at the model, so every room it removed was
+            // still in the cache and came back on the next resumed launch.
+            if (m_cacheWired) {
+                m_cache->forgetRooms(removed);
+                m_cache->markFullSync();
+            }
             if (!removed.isEmpty() && removed.contains(m_activeRoomId)) {
                 // Active room was pruned; clear the view.
                 m_activeRoomId.clear();

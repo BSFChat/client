@@ -92,6 +92,22 @@ public:
     // Returns false when the snapshot is empty or unreadable.
     bool buildHydrationSync(bsfchat::SyncResponse& out) const;
 
+    // Remove every cached row for these rooms — membership row, state and
+    // timeline. A room leaves the server's world without ever arriving as an
+    // incremental-sync delta (deleted, left, VIEW_CHANNEL lost), so unless it
+    // is forgotten here the next resume hydrates it straight back into the
+    // sidebar, where it sits until the cache is wiped.
+    void forgetRooms(const QStringList& roomIds);
+
+    // When the last FULL (token-less) sync was folded in — the only kind whose
+    // room set is the whole world rather than a delta, and therefore the only
+    // thing that can reconcile rooms that disappeared while we were offline.
+    // syncTokenAgeMs() cannot bound that: every incremental sync refreshes the
+    // token, so for a user who opens the app daily it never ages at all.
+    // -1 when no full sync has been recorded (a cache from an older build).
+    void markFullSync();
+    qint64 fullSyncAgeMs() const;
+
     // ── room timeline ────────────────────────────────────────────────
     //
     // The newest slice of one room's timeline, oldest first. This is the

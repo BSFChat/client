@@ -23,6 +23,7 @@ constexpr auto kMetaOwnerUser = "owner_user_id";
 constexpr auto kMetaOwnerHost = "owner_homeserver";
 constexpr auto kMetaSyncToken = "sync_token";
 constexpr auto kMetaSyncTokenAt = "sync_token_at";
+constexpr auto kMetaFullSyncAt = "full_sync_at";
 
 // One database file per (user, homeserver). The host prefix keeps the
 // directory browsable; the digest carries the actual identity, including the
@@ -456,6 +457,46 @@ void LocalCache::recordSync(const bsfchat::SyncResponse& response)
         qWarning() << "LocalCache: commit failed:" << db.lastError().text();
         db.rollback();
     }
+}
+
+void LocalCache::forgetRooms(const QStringList& roomIds)
+{
+    if (!m_open || roomIds.isEmpty()) return;
+    auto db = QSqlDatabase::database(m_connectionName, false);
+    const bool inTransaction = db.transaction();
+    QSqlQuery q(db);
+    bool ok = true;
+    for (const QString& roomId : roomIds) {
+        for (const auto& sql : { QStringLiteral("DELETE FROM rooms WHERE room_id = ?"),
+                                 QStringLiteral("DELETE FROM room_state WHERE room_id = ?"),
+                                 QStringLiteral("DELETE FROM timeline WHERE room_id = ?") }) {
+            q.prepare(sql);
+            q.addBindValue(roomId);
+            if (!q.exec()) {
+                qWarning() << "LocalCache: forget failed:" << q.lastError().text();
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) break;
+    }
+    if (!inTransaction) return;
+    if (!ok || !db.commit()) db.rollback();
+}
+
+void LocalCache::markFullSync()
+{
+    if (!m_open) return;
+    setMeta(QString::fromLatin1(kMetaFullSyncAt),
+            QString::number(QDateTime::currentMSecsSinceEpoch()));
+}
+
+qint64 LocalCache::fullSyncAgeMs() const
+{
+    bool ok = false;
+    const qint64 at = meta(QString::fromLatin1(kMetaFullSyncAt)).toLongLong(&ok);
+    if (!ok || at <= 0) return -1;
+    return qMax<qint64>(0, QDateTime::currentMSecsSinceEpoch() - at);
 }
 
 QStringList LocalCache::cachedRoomIds() const
