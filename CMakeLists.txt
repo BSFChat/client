@@ -842,6 +842,11 @@ if(IOS)
     set_target_properties(bsfchat-app PROPERTIES
         XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1")
 
+    # Associated domains for the sign-in's claimed https callback. See the
+    # comment in the file, and oidc::kNativeRedirectUri.
+    set_target_properties(bsfchat-app PROPERTIES
+        XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/ios/BSFChat.entitlements")
+
     # Launch screen. Committed rather than left to Qt's generated
     # default so that UILaunchStoryboardName in ios/Info.plist.in
     # resolves to a file we control: without a launch storyboard iOS

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyLists/1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  The sign-in returns to https://bsfchat.com/oauth/callback
+	  (oidc::kNativeRedirectUri). ASWebAuthenticationSession completes an
+	  https callback only for an app whose associated domains list
+	  webcredentials:<host> AND whose Team ID + bundle id that host's
+	  /.well-known/apple-app-site-association names. That pairing is what
+	  stops another app from finishing a sign-in as BSFChat.
+
+	  The App ID must have the Associated Domains capability enabled in the
+	  Apple Developer portal, and the provisioning profile regenerated, or
+	  signing fails. See docs/ios-release.md.
+	-->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>webcredentials:bsfchat.com</string>
+	</array>
+</dict>
+</plist>

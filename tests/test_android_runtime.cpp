@@ -215,8 +215,13 @@ void TestAndroidRuntime::oauthIntentFilterIsBrowsableAndHostScoped()
     // BROWSABLE as well as DEFAULT, and the data element must name both
     // scheme and host or it matches nothing.
     QVERIFY(m.contains(QStringLiteral("android.intent.category.BROWSABLE")));
-    QVERIFY(m.contains(
-        QStringLiteral("<data android:scheme=\"bsfchat\" android:host=\"oauth\" />")));
+    QVERIFY(m.contains(QStringLiteral(
+        "<data android:scheme=\"https\" android:host=\"bsfchat.com\" "
+        "android:path=\"/oauth/callback\" />")));
+    // Verified, or Android offers the link to any app that claims the host.
+    QVERIFY(m.contains(QStringLiteral("<intent-filter android:autoVerify=\"true\">")));
+    // And the custom-scheme sign-in callback is gone: any app could claim it.
+    QVERIFY(!m.contains(QStringLiteral("android:host=\"oauth\"")));
 
     // The scheme is NOT claimed bare. That is deliberate (a room deep link
     // is not a sign-in callback), and it is also what keeps this filter
@@ -226,9 +231,9 @@ void TestAndroidRuntime::oauthIntentFilterIsBrowsableAndHostScoped()
              "through the sign-in filter");
 
     // And the C++ side agrees on what a callback looks like.
-    const QString oidc = readAll(srcDir() + "/identity/OidcRequest.h");
+    const QString oidc = readAll(srcDir() + "/identity/OidcCallback.h");
     QVERIFY(oidc.contains(
-        QStringLiteral("kNativeRedirectUri = \"bsfchat://oauth/callback\"")));
+        QStringLiteral("kNativeRedirectUri = \"https://bsfchat.com/oauth/callback\"")));
 }
 
 void TestAndroidRuntime::everyServiceClassExistsAndHasItsFgsPermission()

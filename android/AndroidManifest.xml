@@ -216,44 +216,42 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- bsfchat:// deep links, and the OIDC sign-in callback.
-                 BROWSABLE is what lets a browser hand the URL back to
-                 us, which is the whole point here: the sign-in used to
-                 redirect to a loopback port this app listens on, and
-                 that can never arrive on Android — Qt's Android event
-                 dispatcher stops servicing socket notifiers the moment
-                 the activity pauses, so the browser's connection sits
-                 unaccepted in the backlog until the user comes back by
-                 hand. The provider now redirects to
-                 bsfchat://oauth/callback and the OS resolves it here.
+            <!-- The OIDC sign-in callback: an App Link (RFC 8252 7.2).
+                 The provider redirects to https://bsfchat.com/oauth/callback
+                 (oidc::kNativeRedirectUri) and, because of autoVerify,
+                 Android hands that URL ONLY to the app whose signing
+                 certificate https://bsfchat.com/.well-known/assetlinks.json
+                 names. That is the point: the sign-in used to return through
+                 bsfchat://oauth/callback, and any app can claim a custom
+                 scheme, so any app could start a sign-in as BSFChat and get
+                 the code. If verification fails (assetlinks.json missing or
+                 naming another key) the URL opens in the browser instead and
+                 the sign-in does not complete; it is never handed to an
+                 unverified app.
 
-                 Host-scoped to "oauth" deliberately: this filter exists
-                 for the sign-in, and claiming the bare scheme would
-                 also claim every message deep link for an intent path
-                 that has no reason to handle them. Note the consequence:
-                 a bsfchat://room/... link opened from a browser is NOT
-                 claimed on Android. In-app notification taps are
-                 unaffected, because AndroidNotifier builds an EXPLICIT
-                 intent (setClass on this activity) which needs no filter
-                 to be delivered.
+                 Path-scoped deliberately: claiming all of bsfchat.com would
+                 swallow the website's own pages.
 
-                 The activity is singleTask, so the redirect resumes the
-                 one running instance rather than starting a second one in
-                 a second task, and onNewIntent -> nativeOnNewIntent ->
-                 UrlHandler::checkAndroidLaunchIntent picks it up. See the
-                 launchMode note above for why singleTop was not enough.
+                 BROWSABLE is what lets a browser hand the URL back to us
+                 (a loopback redirect can never arrive on Android: Qt stops
+                 servicing socket notifiers when the activity pauses). The
+                 activity is singleTask, so the redirect resumes the running
+                 instance and onNewIntent -> nativeOnNewIntent ->
+                 UrlHandler::checkAndroidLaunchIntent picks it up.
 
                  Cold start is the case this cannot rescue: if the process
-                 dies while the browser has the foreground, the redirect
-                 relaunches us and arrives as the launch intent, but the
-                 PKCE verifier it needs died with the old process.
-                 IdentityClient::deliverCallbackUrl consumes it with a
-                 warning rather than mistaking it for a room link. -->
-            <intent-filter>
+                 dies while the browser has the foreground, the PKCE verifier
+                 died with it. IdentityClient::deliverCallbackUrl consumes the
+                 callback with a warning.
+
+                 bsfchat://room/... deep links are still not claimed on
+                 Android; in-app notification taps use an EXPLICIT intent
+                 (AndroidNotifier, setClass) and need no filter. -->
+            <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="bsfchat" android:host="oauth" />
+                <data android:scheme="https" android:host="bsfchat.com" android:path="/oauth/callback" />
             </intent-filter>
 
             <!-- Share target: let other apps "Share to BSFChat" a

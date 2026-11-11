@@ -443,3 +443,17 @@ works on a device.
   alone; cross-platform mobile QML is somebody else's change.
 * **API 28/29 devices.** The gates are right on paper. Nobody has run
   the app on one.
+
+## Sign-in: App Links verification (required from the claimed-https sign-in on)
+
+The sign-in returns to `https://bsfchat.com/oauth/callback`, an App Link
+(`android:autoVerify="true"` in `AndroidManifest.xml`). Android hands it to the
+app only if `https://bsfchat.com/.well-known/assetlinks.json` (in the `web`
+repo) lists the SHA-256 fingerprint of the certificate the installed APK is
+signed with. With Play App Signing that is **Google's app-signing key**
+(Play Console → Test and release → Setup → App signing), not the upload key;
+list the upload key too if you sideload CI builds. Without a match the
+callback opens in the browser and sign-in does not complete.
+
+Check on a device after install:
+`adb shell pm get-app-links com.bsfchat.app` should show `bsfchat.com: verified`.

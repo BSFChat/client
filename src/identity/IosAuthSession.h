@@ -38,17 +38,24 @@ enum class Outcome {
 using Handler = std::function<void(Outcome outcome, const QUrl& callbackUrl,
                                    const QString& error)>;
 
-// Present `authUrl` and watch for a redirect to `<callbackScheme>://…`.
-// `callbackScheme` is the bare scheme with no "://" — that is what
-// ASWebAuthenticationSession wants, and passing the full URI silently never
-// matches.
+// Present `authUrl` and watch for a redirect to https://<host><path>.
+//
+// The claimed-https callback (ASWebAuthenticationSessionCallback, iOS 17.4+):
+// the system completes the session only when the app's associated domains
+// entitlement lists `webcredentials:<host>` AND that host's
+// apple-app-site-association names this app — which is what stops another
+// app finishing a sign-in that returns to the same URL. There is no
+// custom-scheme fallback on purpose: a custom scheme is exactly what let any
+// app sign in as BSFChat. Earlier iOS gets Outcome::Failed with a message
+// saying so.
 //
 // Returns false (and does not call `handler`) if the session could not be
 // created at all; every other ending arrives through `handler`.
 //
 // Only one session may be live at a time; starting a second cancels the
 // first, whose handler then fires with Outcome::Cancelled.
-bool start(const QUrl& authUrl, const QString& callbackScheme, Handler handler);
+bool start(const QUrl& authUrl, const QString& callbackHost, const QString& callbackPath,
+           Handler handler);
 
 // Tear down any live session without invoking its handler. Used by
 // IdentityClient::cancel(), which is also what the sign-in timeout calls, so

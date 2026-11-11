@@ -455,3 +455,19 @@ Ordered by how visible they are to a reviewer holding a phone.
    text-chat client — which is a coherent thing to ship, but the store
    listing and screenshots must not promise voice, or it is a 2.3.1
    ("accurate metadata") rejection.
+
+## Sign-in: Associated Domains (required from the claimed-https sign-in on)
+
+The sign-in returns to `https://bsfchat.com/oauth/callback` and is completed by
+`ASWebAuthenticationSession`'s https callback (iOS 17.4+; earlier iOS is told to
+update). iOS only completes it for this app when both halves are in place:
+
+1. **Entitlement:** `ios/BSFChat.entitlements` lists `webcredentials:bsfchat.com`
+   (wired by `CMakeLists.txt`). In the Apple Developer portal, enable
+   **Associated Domains** on the App ID and regenerate the provisioning
+   profile, or signing fails.
+2. **Site file:** `https://bsfchat.com/.well-known/apple-app-site-association`
+   (in the `web` repo) names `<APPLE_TEAM_ID>.<bundle id>` under
+   `webcredentials`. Fill in the real Team ID before the release that ships
+   this, and confirm Apple's CDN has fetched it:
+   `curl https://app-site-association.cdn-apple.com/a/v1/bsfchat.com`.

@@ -39,32 +39,13 @@
 #include <QUrl>
 #include <QUrlQuery>
 
+#include "identity/OidcCallback.h"
+
 namespace oidc {
 
-inline constexpr const char* kClientId = "bsfchat-desktop";
-
-// ---- Redirect URIs ------------------------------------------------------
-//
-// Desktop redirects to a loopback server the client owns for the duration of
-// the sign-in (RFC 8252 §7.3). iOS cannot: the moment the browser takes over,
-// the app is suspended, the listening socket stops being serviced, and the
-// callback connection is never accepted — sign-in hangs forever. iOS uses the
-// private-use URI scheme instead (RFC 8252 §7.1), delivered by
-// ASWebAuthenticationSession straight back into the still-running app.
-//
-// The scheme is the same `bsfchat` the app already claims for deep links
-// (CFBundleURLTypes / HKCU\Software\Classes\bsfchat / x-scheme-handler), so
-// nothing new is registered with the OS for this.
-//
-// A private-use scheme cannot be reserved by anyone, so it is worth being
-// explicit about what carries the security here: PKCE. Another app on the
-// device can claim `bsfchat://` and race us for the redirect, but the
-// authorization code it steals is useless without the S256 verifier that
-// never left this process. That is exactly why the provider MUST refuse a
-// token request from this client without a valid `code_verifier` — see the
-// identity provider's client registration.
-inline constexpr const char* kNativeCallbackScheme = "bsfchat";
-inline constexpr const char* kNativeRedirectUri = "bsfchat://oauth/callback";
+// Client ids, the mobile redirect and isNativeCallbackUrl() live in
+// OidcCallback.h, which has no dependency on the protocol library so the URL
+// routing in core/UrlHandler can use them too.
 
 // The `resource` to request for a homeserver base URL: the canonical form
 // the provider and the server also compute (bsfchat::canonical_audience_url),
@@ -129,26 +110,6 @@ struct CallbackParse {
     QString code;  // set iff status == Code
     QString error; // user-facing reason, set for every other status
 };
-
-// Is `url` the private-use-scheme redirect this client asked for?
-// Case-insensitive on scheme and host because the OS and the browser both
-// feel free to normalise them; the query is left exactly as delivered.
-//
-// Deliberately strict about the path: `bsfchat://room/...` deep links share
-// this scheme, and a deep link must never be mistaken for a sign-in callback
-// (nor the reverse — see main.cpp, where a callback must not be handed to
-// openMessageLink).
-inline bool isNativeCallbackUrl(const QUrl& url)
-{
-    if (url.scheme().compare(QLatin1String(kNativeCallbackScheme),
-                             Qt::CaseInsensitive) != 0)
-        return false;
-    // "bsfchat://oauth/callback" parses as host=oauth, path=/callback.
-    QString path = url.path();
-    while (path.endsWith('/')) path.chop(1);
-    return url.host().compare(QLatin1String("oauth"), Qt::CaseInsensitive) == 0
-        && path.compare(QLatin1String("/callback"), Qt::CaseInsensitive) == 0;
-}
 
 // The one place that decides what a callback means.
 //
