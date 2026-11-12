@@ -31,10 +31,20 @@ if(BSFCHAT_ENABLE_KEYCHAIN)
         GIT_SHALLOW    TRUE
     )
     set(BUILD_WITH_QT6 ON CACHE BOOL "" FORCE)
-    set(QTKEYCHAIN_STATIC ON CACHE BOOL "" FORCE)
+    # Static by default here (BUILD_SHARED_LIBS is OFF); QtKeychain's own
+    # QTKEYCHAIN_STATIC switch is deprecated in favour of that.
     set(BUILD_TEST_APPLICATION OFF CACHE BOOL "" FORCE)
     set(BUILD_TRANSLATIONS OFF CACHE BOOL "" FORCE)
+    # Its own autotests need a live keyring and are not ours to run. Its
+    # include(CTest) declares option(BUILD_TESTING ON); a plain OFF here
+    # (respected under CMP0077 NEW) keeps them out. Left set afterwards on
+    # purpose: before QtKeychain nothing defined BUILD_TESTING, so the other
+    # dependencies (opus, libaom) saw it false and registered no tests of
+    # their own. Our tests/ do not depend on it.
+    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+    set(BUILD_TESTING OFF)
     FetchContent_MakeAvailable(qtkeychain)
+    unset(CMAKE_POLICY_DEFAULT_CMP0077)
 endif()
 
 # Voice chat dependencies (libdatachannel + opus)

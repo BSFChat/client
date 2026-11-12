@@ -7,7 +7,7 @@
 #include <QEventLoop>
 
 #ifdef BSFCHAT_HAVE_KEYCHAIN
-#  include <qt6keychain/keychain.h>
+#  include <qtkeychain/keychain.h> // the in-tree (FetchContent) layout
 #endif
 
 namespace {
@@ -54,12 +54,24 @@ public:
 
     bool available() const override
     {
-        // QtKeychain answers this per platform (on Linux: whether a Secret
-        // Service or KWallet is reachable on the session bus).
-        return QKeychain::isAvailable();
+        // Probed, not asked: QKeychain::isAvailable() answers true on Linux
+        // whenever libsecret is linked, even with no Secret Service running,
+        // and the first write then fails. One throwaway write+delete per run
+        // is the only reliable answer. Cached: it does not change mid-run.
+        if (!m_probed) {
+            m_probed = true;
+            auto* self = const_cast<KeychainSecretStore*>(this);
+            const QString key = QStringLiteral("availability-probe");
+            m_available = QKeychain::isAvailable() && self->write(key, QStringLiteral("probe"));
+            if (m_available) self->remove(key);
+        }
+        return m_available;
     }
 
 private:
+    mutable bool m_probed = false;
+    mutable bool m_available = false;
+
     static QString service()
     {
         // Profile-aware, like every other piece of persisted state

@@ -1095,6 +1095,19 @@ if(BSFCHAT_ENABLE_KEYCHAIN)
 endif()
 add_test(NAME test_identity_session COMMAND test_identity_session)
 
+# The real OS credential store via QtKeychain. Skips where none is reachable.
+if(BSFCHAT_ENABLE_KEYCHAIN)
+    qt_add_executable(test_secret_store
+        test_secret_store.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/SecretStore.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
+    )
+    target_include_directories(test_secret_store PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_secret_store PRIVATE Qt6::Core Qt6::Test qt6keychain)
+    target_compile_definitions(test_secret_store PRIVATE BSFCHAT_HAVE_KEYCHAIN)
+    add_test(NAME test_secret_store COMMAND test_secret_store)
+endif()
+
 # One browser, one sign-in at a time (the 2026-09-24 mobile 403). Compiles the
 # real IdentityClient and drives its process-wide serialisation through a test
 # presenter, so no system browser is launched by the suite. Gui is for

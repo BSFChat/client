@@ -16,6 +16,11 @@ scripts/build-openssl-ios.sh       # iOS only
 scripts/fetch-livekit-sdk.sh       # only with -DBSFCHAT_ENABLE_LIVEKIT=ON
 ```
 
+QtKeychain (OS credential storage for the BSFChat ID sign-in) is also pulled
+by `FetchContent`; on Linux install `libsecret-1-dev` first so it can use the
+Secret Service (GNOME Keyring). `-DBSFCHAT_ENABLE_KEYCHAIN=OFF` builds without
+it, and the sign-in is then kept in memory only.
+
 Qt itself comes from Homebrew locally (`/opt/homebrew/lib/cmake/Qt6`) and
 from `jurplel/install-qt-action` in CI. Also needed: `cmake`, `ninja`,
 `ccache`, `nasm` (libaom's assembly).
