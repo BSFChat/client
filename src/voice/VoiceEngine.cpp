@@ -107,25 +107,29 @@ bool VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
     });
     connect(m_audioEngine, &AudioEngine::peerLevelChanged,
             this, &VoiceEngine::peerLevelChanged);
-    if (!m_audioEngine->start()) {
-        // V-H4: this used to be a warning and a toast, and start()
-        // returned true anyway — the user joined the channel deaf and
-        // mute, the member poll kept their server-side heartbeat alive,
-        // and the ghost reaper therefore never removed them. There is no
-        // way back from that state, so refuse the session and let the
-        // caller unwind the join.
-        qCWarning(logVoice) << "AudioEngine::start failed — refusing the "
-                               "voice session";
+    // Opened WITHOUT blocking the GUI thread. On macOS opening the devices
+    // (VoiceProcessingIO, a Bluetooth headset changing profile) takes one
+    // to three seconds, and the blocking start() froze the whole window
+    // for that long on every join. The peer connections below are set up
+    // meanwhile; audio arriving before the devices open waits in the
+    // bounded packet queue and the jitter buffer sheds the backlog.
+    //
+    // V-H4 still holds: if the devices cannot be opened the session must
+    // not carry on deaf and mute behind a live heartbeat. The verdict now
+    // arrives later, so instead of start() returning false the engine
+    // reports audioStartFailed and the owner leaves the channel, which
+    // drops the server-side membership the same way.
+    connect(m_audioEngine, &AudioEngine::startFinished, this, [this](bool ok) {
+        if (ok) {
+            qCInfo(logVoice, "AudioEngine started OK");
+            return;
+        }
+        qCWarning(logVoice) << "AudioEngine failed to open the audio devices — "
+                               "leaving the voice session";
         emit error(voice::refusalMessage(voice::StartRefusal::AudioUnavailable));
-        m_audioEngine->stop();
-        delete m_audioEngine;
-        m_audioEngine = nullptr;
-        m_running = false;
-        m_roomId.clear();
-        m_turnConfig = QJsonObject();
-        return false;
-    }
-    qCInfo(logVoice, "AudioEngine started OK");
+        emit audioStartFailed();
+    });
+    m_audioEngine->startAsync();
 
     m_candidateBatchTimer.start();
     m_rrTimer.start();

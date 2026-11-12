@@ -311,6 +311,11 @@ signals:
     void peerDisconnected(const QString& userId);
     void peerStateChanged(const QString& userId, const QString& state);
     void error(const QString& message);
+    // The audio devices could not be opened. They open asynchronously, so
+    // this arrives after start() returned true; error() has already said
+    // why. The owner must leave the channel so the user is not left in it
+    // deaf and mute behind a live heartbeat (V-H4).
+    void audioStartFailed();
 
     // ---- Audio levels (drive the QML speaking indicators) ----
     void micLevelChanged(float level);

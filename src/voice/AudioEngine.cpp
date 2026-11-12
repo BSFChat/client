@@ -66,7 +66,7 @@ void AudioEngine::applyGainSettings()
     m_worker->setAutoGain(gains.autoGain());
 }
 
-void AudioEngine::pushDeviceSnapshot(bool input, bool live)
+void AudioEngine::pushDeviceSnapshot(bool input, bool live, bool blocking)
 {
     AudioWorker* worker = m_worker;
     // No pipeline to reconfigure. start() seeds the worker itself, from
@@ -88,9 +88,11 @@ void AudioEngine::pushDeviceSnapshot(bool input, bool live)
             worker->onSystemDevicesChanged(dir, devices, def);
         }, Qt::QueuedConnection);
     } else {
+        // Non-blocking for startAsync(): queued ahead of startDevices() on
+        // the same thread, so the worker still sees the snapshot first.
         QMetaObject::invokeMethod(worker, [worker, dir, devices, def]() {
             worker->setDeviceSnapshot(dir, devices, def);
-        }, Qt::BlockingQueuedConnection);
+        }, blocking ? Qt::BlockingQueuedConnection : Qt::QueuedConnection);
     }
 }
 
@@ -98,9 +100,8 @@ AudioEngine::~AudioEngine() {
     stop();
 }
 
-bool AudioEngine::start() {
-    if (m_thread) return true;
-
+void AudioEngine::prepareThread() {
+    ++m_startGeneration;
     m_thread = new QThread();
     m_thread->setObjectName(QStringLiteral("bsfchat-audio"));
 
@@ -153,28 +154,10 @@ bool AudioEngine::start() {
     // so the join resolves through exactly the same policy as every
     // later change rather than through a parallel path that only runs
     // once.
-    pushDeviceSnapshot(true, false);
-    pushDeviceSnapshot(false, false);
 
-    // Open the devices on the audio thread and wait for the verdict.
-    // Blocking is safe in both directions: this thread is not the audio
-    // thread, and the audio thread cannot be waiting on us. The event is
-    // delivered even though the loop may not be up yet — invokeMethod
-    // posts and then waits on the semaphore.
-    bool ok = false;
-    QMetaObject::invokeMethod(m_worker, [w = m_worker, &ok]() {
-        ok = w->startDevices();
-    }, Qt::BlockingQueuedConnection);
+}
 
-    if (!ok) {
-        // Encoder creation failed; don't leave a thread running for a
-        // pipeline that will never produce anything. teardownThread()
-        // leaves us in the never-started state, so a later stop() from
-        // VoiceEngine is a no-op and a later start() can retry cleanly.
-        teardownThread();
-        return false;
-    }
-
+void AudioEngine::finishStart() {
     // Per-user volumes for everyone who has one. Pushed from here, on the
     // GUI thread, before this function returns — and so ahead of any
     // packet from those users, since receivePeerAudio() runs on this
@@ -196,7 +179,67 @@ bool AudioEngine::start() {
     // has nothing to lose in it.
     bsfchat::ios_audio::setEventHandler(&AudioEngine::platformAudioEventTrampoline);
     publishAudioState();
+    m_running = true;
+}
+
+bool AudioEngine::start() {
+    if (m_thread) return true;
+    prepareThread();
+    pushDeviceSnapshot(true, false);
+    pushDeviceSnapshot(false, false);
+    // Open the devices on the audio thread and wait for the verdict.
+    // Blocking is safe in both directions: this thread is not the audio
+    // thread, and the audio thread cannot be waiting on us. The event is
+    // delivered even though the loop may not be up yet — invokeMethod
+    // posts and then waits on the semaphore.
+    bool ok = false;
+    QMetaObject::invokeMethod(m_worker, [w = m_worker, &ok]() {
+        ok = w->startDevices();
+    }, Qt::BlockingQueuedConnection);
+
+    if (!ok) {
+        // Encoder creation failed; don't leave a thread running for a
+        // pipeline that will never produce anything. teardownThread()
+        // leaves us in the never-started state, so a later stop() from
+        // VoiceEngine is a no-op and a later start() can retry cleanly.
+        teardownThread();
+        return false;
+    }
+
+    finishStart();
     return true;
+}
+
+void AudioEngine::startAsync() {
+    if (m_thread) {
+        // Already running or already starting; a second verdict would be
+        // a lie about a pipeline nobody asked to open again.
+        if (m_running) QMetaObject::invokeMethod(this, [this]() { emit startFinished(true); },
+                                                 Qt::QueuedConnection);
+        return;
+    }
+    prepareThread();
+    const quint64 generation = m_startGeneration;
+    AudioWorker* worker = m_worker;
+    // Queued, and this object is GUI-affine: the verdict lands on the GUI
+    // thread. Matched by generation, because a stop() + startAsync() pair
+    // can leave an earlier worker's verdict in the event queue.
+    connect(worker, &AudioWorker::devicesStartFinished, this,
+            [this, generation](bool ok) {
+        if (generation != m_startGeneration || !m_thread) return;
+        if (!ok) {
+            teardownThread();
+            emit startFinished(false);
+            return;
+        }
+        finishStart();
+        emit startFinished(true);
+    }, Qt::QueuedConnection);
+    pushDeviceSnapshot(true, false, /*blocking=*/false);
+    pushDeviceSnapshot(false, false, /*blocking=*/false);
+    QMetaObject::invokeMethod(worker, [worker]() {
+        emit worker->devicesStartFinished(worker->startDevices());
+    }, Qt::QueuedConnection);
 }
 
 void AudioEngine::stop() {
@@ -206,6 +249,7 @@ void AudioEngine::stop() {
 
 void AudioEngine::teardownThread() {
     if (!m_thread) return;
+    m_running = false;
 
     // FIRST, before anything that waits. This is a direct atomic store
     // rather than a queued call, so it takes effect even though the

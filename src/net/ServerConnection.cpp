@@ -2766,6 +2766,12 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
 
     connect(m_voiceEngine, &VoiceEngine::error,
             this, [this](const QString& message) { setVoiceError(message); });
+    // The async half of start()'s refusal: the devices failed to open
+    // after the join went ahead. Leave, which unwinds the server-side
+    // membership exactly as a refused start used to.
+    connect(m_voiceEngine, &VoiceEngine::audioStartFailed, this, [this]() {
+        if (m_voiceSession) m_voiceSession->requestLeave();
+    });
 
     // start() refuses sessions that cannot possibly connect (relay-only
     // policy with no TURN server; no usable audio device — V-H4). It has

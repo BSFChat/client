@@ -1077,6 +1077,19 @@ target_include_directories(test_oidc_request PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_oidc_request PRIVATE bsfchat_protocol Qt6::Core Qt6::Test)
 add_test(NAME test_oidc_request COMMAND test_oidc_request)
 
+# Joining voice must not freeze the window while the audio devices open:
+# AudioEngine::startAsync() returns at once and reports later, exactly once,
+# and never lets a stale verdict through after a stop. Real AudioEngine and
+# AudioWorker from bsfchat-lib; works with or without audio devices.
+if(BSFCHAT_ENABLE_VOICE)
+    qt_add_executable(test_audio_engine_async test_audio_engine_async.cpp)
+    target_include_directories(test_audio_engine_async PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_audio_engine_async PRIVATE bsfchat-lib Qt6::Test)
+    add_test(NAME test_audio_engine_async COMMAND test_audio_engine_async)
+    set_tests_properties(test_audio_engine_async PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
+
 # One browser, one sign-in at a time (the 2026-09-24 mobile 403). Compiles the
 # real IdentityClient and drives its process-wide serialisation through a test
 # presenter, so no system browser is launched by the suite. Gui is for

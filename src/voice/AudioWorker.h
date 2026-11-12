@@ -307,6 +307,9 @@ signals:
     // metatype registration. AudioEngine publishes it for the settings
     // dialog's "In use:" caption.
     void deviceInUseChanged(bool input, const QString& description);
+    // startDevices() finished, as AudioEngine::startAsync() asked. Emitted
+    // from the audio thread; AudioEngine receives it queued.
+    void devicesStartFinished(bool ok);
 
 private:
     // Pulls everything the backend has captured and encodes whole
