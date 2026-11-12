@@ -95,6 +95,13 @@ public:
                                                const QString& serverUrl,
                                                const QString& serverName);
     Q_INVOKABLE void removeServer(int index);
+    // The user removing or signing out of a server: removeServer, plus taking
+    // it off the account's server list when signed in to BSFChat ID, so the
+    // launch-time restore (and the user's other devices) do not quietly join
+    // it again. removeServer alone is for internal clean-up — a failed join,
+    // or "not you?" dropping someone else's servers — and must not edit the
+    // account's list.
+    Q_INVOKABLE void leaveServer(int index);
     Q_INVOKABLE void setActiveServer(int index);
     // Repoint an already-added server at a new base URL (e.g. the
     // machine's IP changed, or http vs https was wrong). Persists the

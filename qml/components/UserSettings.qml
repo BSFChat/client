@@ -391,7 +391,7 @@ Popup {
                 // before anything can dereference it (U-C1).
                 var idx = serverManager.activeServerIndex;
                 userSettings.close();
-                if (idx >= 0) serverManager.removeServer(idx);
+                if (idx >= 0) serverManager.leaveServer(idx);
             }
         }
 

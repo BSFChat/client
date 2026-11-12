@@ -623,7 +623,7 @@ ApplicationWindow {
                         onTriggered: {
                             var idx = serverManager.activeServerIndex;
                             if (idx < 0) return;
-                            serverManager.removeServer(idx);
+                            serverManager.leaveServer(idx);
                         }
                     }
                 }

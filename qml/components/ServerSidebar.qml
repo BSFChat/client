@@ -752,7 +752,7 @@ Rectangle {
                     Accessible.description: qsTr(
                         "Removes the server and its saved login from this device")
                     Accessible.onPressAction: {
-                        serverManager.removeServer(removeServerDialog.serverIndex);
+                        serverManager.leaveServer(removeServerDialog.serverIndex);
                         removeServerDialog.close();
                     }
                     contentItem: Text {
@@ -769,7 +769,7 @@ Rectangle {
                         radius: Theme.r2
                     }
                     onClicked: {
-                        serverManager.removeServer(removeServerDialog.serverIndex);
+                        serverManager.leaveServer(removeServerDialog.serverIndex);
                         removeServerDialog.close();
                     }
                 }

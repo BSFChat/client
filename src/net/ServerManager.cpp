@@ -15,6 +15,7 @@
 
 #include <QClipboard>
 #include <QPointer>
+#include <QTimer>
 #include <QDebug>
 #include <QDateTime>
 #include <QDir>
@@ -410,6 +411,31 @@ void ServerManager::removeServer(int index)
     // moves, retire the connection last — lives in ServerRoster::remove so
     // it can be tested without a network (see tests/test_server_roster.cpp).
     m_roster.remove(index);
+}
+
+void ServerManager::leaveServer(int index)
+{
+    if (index < 0 || index >= m_roster.count()) return;
+    ServerConnection* conn = m_roster.at(index);
+    const QString url = conn ? conn->serverUrl() : QString();
+    // Both spellings: the identity service records the canonical audience
+    // form for sign-ins it saw, and the raw URL for ones the app registered.
+    const QString canonical = conn ? conn->signInResource() : QString();
+    removeServer(index);
+    if (url.isEmpty() || !m_identitySession->isSignedIn()) return;
+    m_identitySession->requestAccessToken(
+        [this, url, canonical](const QString& accessToken, const QString& error) {
+            if (accessToken.isEmpty()) {
+                qWarning().noquote() << "[identity] could not take" << url
+                                     << "off the server list:" << error;
+                return;
+            }
+            auto* api = new IdentityApiClient(m_identityUrl, accessToken, this);
+            api->unregisterServer(url);
+            if (!canonical.isEmpty() && canonical != url) api->unregisterServer(canonical);
+            // Two fire-and-forget requests on one client; it outlives both.
+            QTimer::singleShot(30000, api, &QObject::deleteLater);
+        });
 }
 
 void ServerManager::updateServerUrl(int index, const QString& newUrl)
