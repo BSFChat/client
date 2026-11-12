@@ -570,6 +570,22 @@ public:
     Q_INVOKABLE void resetUnreadForRoom(const QString& roomId);
 
     Q_INVOKABLE void loginWithOidc(const QString& providerUrl);
+
+    // Sign in with an id_token obtained without a browser (IdentitySession's
+
+    // refresh grant). The token must already be checked for this server's
+
+    // audience — signInResource() is the value it was requested for.
+
+    void loginWithIdToken(const QString& idToken);
+
+    // The RFC 8707 resource a BSFChat ID token for this server must name:
+
+    // derived from the homeserver it will be POSTED to, never from anything
+
+    // the server advertised. Empty when the address cannot be an audience.
+
+    QString signInResource() const;
     // Discard whatever credential we are holding and run the server's
     // current login flow from scratch. The only thing that recovers a
     // session the homeserver has purged.

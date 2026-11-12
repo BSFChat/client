@@ -17,6 +17,26 @@ set(GAMECHAT_PROTOCOL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(bsfchat_protocol)
 
+# OS secure storage (macOS/iOS Keychain, Windows Credential Manager, Linux
+# Secret Service via libsecret, Android Keystore) for the BSFChat ID refresh
+# token, which can mint sign-ins to any server and so must never sit in the
+# plain settings file. See src/core/SecretStore.h. OFF builds keep the token
+# in memory only: signed in until the app quits, never on disk.
+option(BSFCHAT_ENABLE_KEYCHAIN "Store sign-in secrets in the OS keychain" ON)
+if(BSFCHAT_ENABLE_KEYCHAIN)
+    FetchContent_Declare(
+        qtkeychain
+        GIT_REPOSITORY https://github.com/frankosterfeld/qtkeychain.git
+        GIT_TAG        0.15.0
+        GIT_SHALLOW    TRUE
+    )
+    set(BUILD_WITH_QT6 ON CACHE BOOL "" FORCE)
+    set(QTKEYCHAIN_STATIC ON CACHE BOOL "" FORCE)
+    set(BUILD_TEST_APPLICATION OFF CACHE BOOL "" FORCE)
+    set(BUILD_TRANSLATIONS OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(qtkeychain)
+endif()
+
 # Voice chat dependencies (libdatachannel + opus)
 if(BSFCHAT_ENABLE_VOICE)
     # Codec/media deps link static. Something in the dependency graph

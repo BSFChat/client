@@ -14,6 +14,7 @@ class Settings;
 class MatrixClient;
 class IdentityClient;
 class IdentityApiClient;
+class IdentitySession;
 
 class ServerManager : public QObject {
     Q_OBJECT
@@ -42,6 +43,11 @@ class ServerManager : public QObject {
                NOTIFY identityAccountChanged)
     Q_PROPERTY(QString identityAccountId READ identityAccountId
                NOTIFY identityAccountChanged)
+    // Auth first: whether this device holds a BSFChat ID session (so joining
+    // a server that uses that ID needs no browser), and whether it survives
+    // a restart (false = no OS keychain; kept for this run only).
+    Q_PROPERTY(bool identitySignedIn READ identitySignedIn NOTIFY identityAccountChanged)
+    Q_PROPERTY(bool identityRemembered READ identityRemembered NOTIFY identityAccountChanged)
 
 public:
     explicit ServerManager(Settings* settings, QObject* parent = nullptr);
@@ -127,6 +133,12 @@ public:
     // the authorize request, which lives in the OIDC flow. Until that
     // lands the UI says so in words rather than pretending.
     Q_INVOKABLE void forgetIdentitySession();
+
+    // Does a server whose login flows name `providerUrl` use the BSFChat ID
+    // this device is signed in to? If so, joining it needs no browser.
+    Q_INVOKABLE bool usesSignedInIdentity(const QString& providerUrl) const;
+    bool identitySignedIn() const;
+    bool identityRemembered() const;
 
     // Aggregate every connection's `directRooms()` into a single
     // flat list with the server's URL + human name stamped on each
@@ -227,6 +239,8 @@ signals:
     // dead-end wearing different words.
     void identityHasNoServers();
     void identityAccountChanged();
+    // The provider ended this device's BSFChat ID session (expired, revoked).
+    void identitySessionEnded(const QString& reason);
     // No browser opened for a sign-in — the account-level one or any
     // server's — and `authUrl` is the page the user must open by hand to
     // finish it. One manager-level signal for every sign-in path, because
@@ -294,6 +308,10 @@ private:
     // /api/servers endpoints with the resulting access token.
     IdentityClient* m_identityClient = nullptr;
     IdentityApiClient* m_identityApi = nullptr;
+    IdentitySession* m_identitySession = nullptr;
+    void restoreIdentitySession();
+    void fetchIdentityServers(bool interactive);
+    void signInWithSessionOrBrowser(ServerConnection* conn, const QString& providerUrl);
     QString m_identityUrl;
     QString m_identityAccessToken;
     bsfchat::IdTokenAccount m_identityAccount;

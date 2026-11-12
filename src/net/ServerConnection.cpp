@@ -1256,6 +1256,17 @@ void ServerConnection::setIdentityProviderUrl(const QString& url)
     m_storedIdentityProviderUrl = url;
 }
 
+QString ServerConnection::signInResource() const
+{
+    return oidc::resourceForHomeserver(m_client->homeserver());
+}
+
+void ServerConnection::loginWithIdToken(const QString& idToken)
+{
+    awaitLoginReply();
+    m_client->loginWithToken(idToken);
+}
+
 void ServerConnection::loginWithOidc(const QString& providerUrl)
 {
     // "Fail loudly" — startLogin("") opens no browser, makes no request and

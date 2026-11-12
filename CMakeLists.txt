@@ -248,6 +248,8 @@ qt_add_library(bsfchat-lib STATIC
     # still uses the loopback path. See src/identity/IosAuthSession.h.
     $<$<BOOL:${IOS}>:src/identity/IosAuthSession.mm>
     src/identity/IdentityApiClient.cpp
+    src/identity/IdentitySession.cpp
+    src/core/SecretStore.cpp
     src/net/MatrixClient.cpp
     src/net/MediaTicketCache.cpp
     src/net/SyncBackoff.cpp
@@ -1381,6 +1383,10 @@ target_link_libraries(bsfchat-lib PUBLIC
     bsfchat_protocol
     Qt6::Core Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::QuickDialogs2 Qt6::Sql Qt6::Multimedia Qt6::Svg Qt6::Widgets
 )
+if(BSFCHAT_ENABLE_KEYCHAIN)
+    target_link_libraries(bsfchat-lib PUBLIC qt6keychain)
+    target_compile_definitions(bsfchat-lib PUBLIC BSFCHAT_HAVE_KEYCHAIN)
+endif()
 
 if(BSFCHAT_ENABLE_VOICE)
     target_link_libraries(bsfchat-lib PUBLIC datachannel-static opus yuv)

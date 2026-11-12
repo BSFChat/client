@@ -11,8 +11,10 @@
 #include "core/Settings.h"
 #include "identity/IdentityClient.h"
 #include "identity/IdentityApiClient.h"
+#include "identity/IdentitySession.h"
 
 #include <QClipboard>
+#include <QPointer>
 #include <QDebug>
 #include <QDateTime>
 #include <QDir>
@@ -122,6 +124,20 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
     if (savedIndex >= 0 && savedIndex < m_roster.count()) {
         setActiveServer(savedIndex);
     }
+
+    // Auth first: the BSFChat ID session (refresh token in the OS keychain).
+    m_identitySession = new IdentitySession(this);
+    connect(m_identitySession, &IdentitySession::signedOut, this, [this](const QString& reason) {
+        // Expired, revoked, or replayed elsewhere. The chat servers already
+        // joined stay signed in (they hold their own sessions); only new
+        // joins need the browser again.
+        m_settings->clearIdentityRecord();
+        m_identityAccessToken.clear();
+        m_identityAccount = {};
+        emit identityAccountChanged();
+        emit identitySessionEnded(reason);
+    });
+    restoreIdentitySession();
 }
 
 ServerManager::~ServerManager() = default;
@@ -358,7 +374,7 @@ void ServerManager::addServerWithOidcResolved(const QString& rawUrl)
             emit loginError(conn->serverUrl(), "Server does not provide an identity provider URL");
             return;
         }
-        conn->loginWithOidc(providerUrl);
+        signInWithSessionOrBrowser(conn, providerUrl);
     }, Qt::SingleShotConnection);
 
     connect(tempClient, &MatrixClient::loginError, this, [this, conn, tempClient](const QString& error) {
@@ -823,6 +839,11 @@ void ServerManager::onLoginFailed(ServerConnection* conn, const QString& error)
 
 void ServerManager::forgetIdentitySession()
 {
+    // Signing out of BSFChat ID on this device removes the refresh token
+    // from the keychain too; otherwise the next launch would quietly sign
+    // straight back in.
+    m_identitySession->signOut();
+    m_settings->clearIdentityRecord();
     m_identityAccessToken.clear();
     m_identityAccount = {};
     if (m_identityApi) {
@@ -834,6 +855,155 @@ void ServerManager::forgetIdentitySession()
     // tearing it down from here is how you get a second flow racing the
     // first. loginWithIdentityAndSync already disconnects it before reuse.
     emit identityAccountChanged();
+}
+
+// Fetch the account's server list with the current identity access token and
+// join every server not already in the roster. With a signed-in session each
+// join is silent (addServerWithOidcResolved -> IdentitySession); that is what
+// makes a new device fill itself in after one sign-in. `interactive` is false
+// for the restore at launch, which must not pop errors or close dialogs.
+// Join without the browser when we can. A server that trusts the BSFChat ID
+// this device is signed in to gets an id_token straight from the identity
+// session (one refresh, no page, no consent click: choosing the server in
+// the app IS the consent). Anything else — another identity provider, no
+// session, or a session the provider has ended — falls back to the browser
+// sign-in, exactly as before.
+void ServerManager::signInWithSessionOrBrowser(ServerConnection* conn, const QString& providerUrl)
+{
+    if (!m_identitySession->servesProvider(providerUrl)) {
+        conn->loginWithOidc(providerUrl);
+        return;
+    }
+    const QString resource = conn->signInResource();
+    QPointer<ServerConnection> guard(conn);
+    m_identitySession->requestServerToken(resource,
+        [this, guard, providerUrl](const QString& idToken, const QString& error) {
+            if (!guard) return; // removed while we waited
+            if (!idToken.isEmpty()) {
+                guard->loginWithIdToken(idToken);
+                return;
+            }
+            qInfo().noquote() << "[identity] silent join failed, using the browser:" << error;
+            guard->loginWithOidc(providerUrl);
+        });
+}
+
+bool ServerManager::usesSignedInIdentity(const QString& providerUrl) const
+{
+    return m_identitySession->servesProvider(providerUrl);
+}
+
+bool ServerManager::identitySignedIn() const
+{
+    return m_identitySession->isSignedIn();
+}
+
+bool ServerManager::identityRemembered() const
+{
+    return m_identitySession->isPersisted();
+}
+
+// At launch: pick the BSFChat ID session back up from the keychain, renew it,
+// and join any server on the account's list this device does not have yet.
+// Silent throughout — nothing here may pop a dialog or open a browser.
+void ServerManager::restoreIdentitySession()
+{
+    const auto record = m_settings->identityRecord();
+    if (record.providerUrl.isEmpty()) return;
+    if (!m_identitySession->restore(record.providerUrl)) {
+        // The keychain no longer has it (removed, another machine's
+        // settings copied over, or no keychain this run): signed out.
+        m_settings->clearIdentityRecord();
+        return;
+    }
+    m_identityUrl = m_identitySession->providerUrl();
+    m_identityAccount.name = record.accountName;
+    m_identityAccount.subject = record.accountId;
+    emit identityAccountChanged();
+    m_identitySession->requestAccessToken(
+        [this](const QString& accessToken, const QString& error) {
+            if (accessToken.isEmpty()) {
+                qWarning().noquote() << "[identity] could not renew the session at launch:" << error;
+                return;
+            }
+            m_identityAccessToken = accessToken;
+            fetchIdentityServers(/*interactive=*/false);
+        });
+}
+
+void ServerManager::fetchIdentityServers(bool interactive)
+{
+    // (Re)build the API client bound to this fresh token.
+    if (m_identityApi) {
+        // disconnect BEFORE deleteLater: the old object outlives this
+        // statement by an event-loop turn, and a /api/servers reply
+        // still in flight on it would deliver a second serversFetched
+        // into the handler below — which adds servers, which starts
+        // sign-ins. Once was the design; twice is the fan-out.
+        m_identityApi->disconnect(this);
+        m_identityApi->deleteLater();
+        m_identityApi = nullptr;
+    }
+    m_identityApi = new IdentityApiClient(m_identityUrl, m_identityAccessToken, this);
+
+    connect(m_identityApi, &IdentityApiClient::serversFetched, this,
+        [this, interactive](const QJsonArray& servers) {
+            QStringList addedUrls;
+            for (const auto& v : servers) {
+                QJsonObject obj = v.toObject();
+                QString serverUrl = obj.value("server_url").toString();
+                if (serverUrl.isEmpty()) continue;
+
+                // Skip servers we're already connected to — the user
+                // might re-run the sync while connections exist.
+                //
+                // Through the shared comparison, not a raw string
+                // ==. This check DID exist and could still miss: it
+                // compared the URL the identity service returned
+                // against the normalised one already in the roster,
+                // so a trailing slash, a difference in case or an
+                // explicit :443 was enough to add a second
+                // connection to a homeserver already open. See
+                // net/ServerDedup.h.
+                if (existingServerIndex(serverUrl, QString()) >= 0) continue;
+
+                addedUrls.append(serverUrl);
+                // Already a canonical homeserver URL from the
+                // identity service — normalise it, but don't spend
+                // a .well-known round trip per server re-deriving
+                // what it just told us.
+                addServerWithOidcResolved(serverUrl);
+            }
+
+            // D-M8: an identity account that belongs to NO server used
+            // to reach here with an empty list, and identityLoginComplete
+            // closes the login dialog — so the sign-in appeared to
+            // succeed, the dialog vanished, and the user was left
+            // looking at an empty app with nothing said. Report it on
+            // the error channel instead, which the dialog already
+            // surfaces inline while staying open, so the "add a server
+            // by URL" path is still in front of them.
+            //
+            // Note the condition is on the SERVER LIST, not on
+            // addedUrls: adding nothing because every server is already
+            // connected is an ordinary success (the user re-ran the
+            // sync), and must not be reported as a failure.
+            if (!interactive) return; // a silent restore at launch says nothing
+            if (servers.isEmpty()) {
+                emit identityHasNoServers();
+                return;
+            }
+
+            emit identityLoginComplete(addedUrls);
+        }, Qt::SingleShotConnection);
+
+    connect(m_identityApi, &IdentityApiClient::fetchFailed, this,
+        [this, interactive](const QString& error) {
+            if (interactive) emit identityLoginFailed(error);
+            else qWarning().noquote() << "[identity] server list sync failed:" << error;
+        });
+
+    m_identityApi->fetchServers();
 }
 
 void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
@@ -873,85 +1043,21 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
             // a ServerConnection to ask afterwards. Read-only; the token
             // was already checked for audience and nonce upstream.
             m_identityAccount = bsfchat::idTokenAccount(idToken);
+
+            // Auth first: keep the session. The refresh token goes to the OS
+            // keychain only (IdentitySession / SecretStore), and is what lets
+            // every later join, and the next launch, skip the browser. Adopted
+            // BEFORE the server list is fetched, so the joins that fetch
+            // starts already go through it rather than opening the browser
+            // once per server.
+            if (!refreshToken.isEmpty()) {
+                m_identitySession->adopt(m_identityUrl, refreshToken);
+                m_settings->setIdentityRecord(
+                    {m_identityUrl, m_identityAccount.name, m_identityAccount.subject});
+            }
             emit identityAccountChanged();
 
-            // (Re)build the API client bound to this fresh token.
-            if (m_identityApi) {
-                // disconnect BEFORE deleteLater: the old object outlives this
-                // statement by an event-loop turn, and a /api/servers reply
-                // still in flight on it would deliver a second serversFetched
-                // into the handler below — which adds servers, which starts
-                // sign-ins. Once was the design; twice is the fan-out.
-                m_identityApi->disconnect(this);
-                m_identityApi->deleteLater();
-                m_identityApi = nullptr;
-            }
-            m_identityApi = new IdentityApiClient(m_identityUrl, accessToken, this);
-
-            connect(m_identityApi, &IdentityApiClient::serversFetched, this,
-                [this](const QJsonArray& servers) {
-                    QStringList addedUrls;
-                    for (const auto& v : servers) {
-                        QJsonObject obj = v.toObject();
-                        QString serverUrl = obj.value("server_url").toString();
-                        if (serverUrl.isEmpty()) continue;
-
-                        // Skip servers we're already connected to — the user
-                        // might re-run the sync while connections exist.
-                        //
-                        // Through the shared comparison, not a raw string
-                        // ==. This check DID exist and could still miss: it
-                        // compared the URL the identity service returned
-                        // against the normalised one already in the roster,
-                        // so a trailing slash, a difference in case or an
-                        // explicit :443 was enough to add a second
-                        // connection to a homeserver already open. See
-                        // net/ServerDedup.h.
-                        if (existingServerIndex(serverUrl, QString()) >= 0) continue;
-
-                        addedUrls.append(serverUrl);
-                        // Already a canonical homeserver URL from the
-                        // identity service — normalise it, but don't spend
-                        // a .well-known round trip per server re-deriving
-                        // what it just told us.
-                        addServerWithOidcResolved(serverUrl);
-                    }
-
-                    // D-M8: an identity account that belongs to NO server used
-                    // to reach here with an empty list, and identityLoginComplete
-                    // closes the login dialog — so the sign-in appeared to
-                    // succeed, the dialog vanished, and the user was left
-                    // looking at an empty app with nothing said. Report it on
-                    // the error channel instead, which the dialog already
-                    // surfaces inline while staying open, so the "add a server
-                    // by URL" path is still in front of them.
-                    //
-                    // Note the condition is on the SERVER LIST, not on
-                    // addedUrls: adding nothing because every server is already
-                    // connected is an ordinary success (the user re-ran the
-                    // sync), and must not be reported as a failure.
-                    if (servers.isEmpty()) {
-                        emit identityHasNoServers();
-                        return;
-                    }
-
-                    emit identityLoginComplete(addedUrls);
-                }, Qt::SingleShotConnection);
-
-            connect(m_identityApi, &IdentityApiClient::fetchFailed, this,
-                [this](const QString& error) {
-                    emit identityLoginFailed(error);
-                });
-
-            m_identityApi->fetchServers();
-
-            // Persist the refresh token so a future launch can silently
-            // renew the identity session if we add it to that flow. We
-            // store it against a placeholder entry keyed by identityUrl —
-            // since ServerEntry already has identityRefreshToken/
-            // identityProviderUrl fields, but those are per-server. For
-            // now we just keep it in memory; MVP behaviour per the spec.
-            Q_UNUSED(refreshToken);
+            fetchIdentityServers(/*interactive=*/true);
         });
 
     connect(m_identityClient, &IdentityClient::loginFailed, this,

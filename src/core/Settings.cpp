@@ -214,6 +214,25 @@ void Settings::updateServer(int index, const ServerEntry& entry)
     writeServers(servers);
 }
 
+Settings::IdentityRecord Settings::identityRecord() const
+{
+    return {m_settings.value("identity/providerUrl").toString(),
+            m_settings.value("identity/accountName").toString(),
+            m_settings.value("identity/accountId").toString()};
+}
+
+void Settings::setIdentityRecord(const IdentityRecord& record)
+{
+    m_settings.setValue("identity/providerUrl", record.providerUrl);
+    m_settings.setValue("identity/accountName", record.accountName);
+    m_settings.setValue("identity/accountId", record.accountId);
+}
+
+void Settings::clearIdentityRecord()
+{
+    m_settings.remove("identity");
+}
+
 int Settings::activeServerIndex() const
 {
     return m_settings.value("activeServerIndex", -1).toInt();

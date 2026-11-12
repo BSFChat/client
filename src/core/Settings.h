@@ -163,6 +163,18 @@ public:
     int activeServerIndex() const;
     void setActiveServerIndex(int index);
 
+    // The BSFChat ID this device is signed in to: which provider, and who.
+    // Not secret, so it lives here; the refresh token that proves it lives
+    // only in SecretStore (the OS keychain). Empty provider = signed out.
+    struct IdentityRecord {
+        QString providerUrl;
+        QString accountName;
+        QString accountId;
+    };
+    IdentityRecord identityRecord() const;
+    void setIdentityRecord(const IdentityRecord& record);
+    void clearIdentityRecord();
+
     // UI preferences
     int fontSize() const;
     void setFontSize(int size);
