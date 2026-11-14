@@ -54,6 +54,7 @@
 // (which has a native Objective-C++ wrapper to work around Qt
 // Multimedia's AVFoundation quirks). Header is portable.
 #include "voice/CameraController.h"
+#include "voice/AudioEngine.h"
 #endif
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -461,5 +462,12 @@ int main(int argc, char *argv[])
             if (settings) settings->flush();
         });
 
-    return app.exec();
+    const int rc = app.exec();
+#ifdef BSFCHAT_VOICE_ENABLED
+    // A voice session left just before quitting closes its devices on the
+    // audio thread (AudioEngine::stop no longer waits). Let that finish,
+    // bounded, before the process starts tearing Qt down underneath it.
+    AudioEngine::waitForRetiredThreads(2000);
+#endif
+    return rc;
 }

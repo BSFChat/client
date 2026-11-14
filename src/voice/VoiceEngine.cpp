@@ -122,6 +122,7 @@ bool VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
     connect(m_audioEngine, &AudioEngine::startFinished, this, [this](bool ok) {
         if (ok) {
             qCInfo(logVoice, "AudioEngine started OK");
+            emit audioStarted();
             return;
         }
         qCWarning(logVoice) << "AudioEngine failed to open the audio devices — "

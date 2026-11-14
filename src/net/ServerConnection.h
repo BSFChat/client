@@ -1492,6 +1492,9 @@ public:
     // `m_voiceTurnFetchPending` bool that used to be the join's only
     // guard; read src/net/VoiceSession.h for what that bool could not do.
     VoiceSession* m_voiceSession = nullptr;
+    // Set when a join is accepted, cleared when the join chime plays once
+    // the audio pipeline is running (or the start fails).
+    bool m_joinChimePending = false;
     // Wire the session to MatrixClient, to the engine, and to the mirrors
     // above. Called once from the constructor.
     void setupVoiceSession();

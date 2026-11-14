@@ -79,6 +79,7 @@
 // polls.
 
 #include <QObject>
+#include <QTimer>
 #include <QByteArray>
 #include <QString>
 
@@ -114,8 +115,15 @@ public:
     void startAsync();
     // True from a successful start/startAsync until stop().
     bool isRunning() const { return m_running; }
-    // Tears the pipeline and the thread down, deterministically: devices
-    // are closed on the audio thread, then the thread is joined. Safe to
+
+    // Pipelines stopped but still closing their devices on their own
+    // thread (stop() no longer waits for them). Process-wide.
+    static bool retiringInProgress();
+    // Wait (bounded) for them. For quitting, where nothing may be left
+    // running behind the application, and for the blocking start().
+    static bool waitForRetiredThreads(int timeoutMs);
+    // Tears the pipeline down WITHOUT blocking: the audio thread closes its
+    // devices and exits on its own; the next start waits for that. Safe to
     // call when never started, and safe to call twice.
     void stop();
 
@@ -175,6 +183,14 @@ private:
     // since been torn down (stop, then start again) is recognised and
     // dropped rather than applied to the new pipeline.
     quint64 m_startGeneration = 0;
+    // Bumped by every deferred startAsync() and by stop(): a deferred
+    // start runs only if nothing has superseded it.
+    quint64 m_deferredStart = 0;
+    void retireThread();
+    // Device-list notifications, coalesced (see the constructor).
+    static constexpr int kDeviceChangeCoalesceMs = 250;
+    QTimer m_inputsChangedTimer;
+    QTimer m_outputsChangedTimer;
     bool m_running = false;
 
     // Performs one VoiceAudioAction against the worker, marshalling to

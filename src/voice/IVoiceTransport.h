@@ -316,6 +316,8 @@ signals:
     // why. The owner must leave the channel so the user is not left in it
     // deaf and mute behind a live heartbeat (V-H4).
     void audioStartFailed();
+    // The audio devices are open and the pipeline is running.
+    void audioStarted();
 
     // ---- Audio levels (drive the QML speaking indicators) ----
     void micLevelChanged(float level);

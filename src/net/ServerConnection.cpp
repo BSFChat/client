@@ -2626,7 +2626,13 @@ void ServerConnection::setupVoiceSession()
                 m_voicePollTimer->start();
                 clearVoiceError();
 #ifdef BSFCHAT_VOICE_ENABLED
-                m_sounds->playJoin();
+                // Not now: the server has accepted the join, which is the
+                // moment the audio thread starts opening the devices. On
+                // macOS that reconfigures the output hardware, and a
+                // QSoundEffect opening its own stream on the GUI thread at
+                // the same instant both stalls on CoreAudio and glitches.
+                // Played on audioStarted instead, through the settled device.
+                m_joinChimePending = true;
 #endif
             } else if (room.isEmpty()) {
                 m_voicePollTimer->stop();
@@ -2769,7 +2775,13 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
     // The async half of start()'s refusal: the devices failed to open
     // after the join went ahead. Leave, which unwinds the server-side
     // membership exactly as a refused start used to.
+    connect(m_voiceEngine, &VoiceEngine::audioStarted, this, [this]() {
+        if (!m_joinChimePending) return;
+        m_joinChimePending = false;
+        m_sounds->playJoin();
+    });
     connect(m_voiceEngine, &VoiceEngine::audioStartFailed, this, [this]() {
+        m_joinChimePending = false;
         if (m_voiceSession) m_voiceSession->requestLeave();
     });
 

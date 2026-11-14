@@ -65,6 +65,50 @@ private slots:
         engine.stop();
     }
 
+    // Leaving or switching channels used to block while the devices closed.
+    // stop() now hands that to the audio thread; the next start waits for
+    // it, so two pipelines never overlap (two VoiceProcessingIO units
+    // fighting over the hardware on macOS).
+    void stopReturnsAtOnceAndTheNextStartWaitsForIt()
+    {
+        AudioEngine first;
+        QSignalSpy firstSpy(&first, &AudioEngine::startFinished);
+        first.startAsync();
+        QVERIFY(firstSpy.wait(15000));
+        first.stop();
+        QVERIFY(!first.isRunning());
+        // The old thread is reaped on this thread's event loop, which has
+        // not run since stop(): it is still listed as retiring.
+        QVERIFY(AudioEngine::retiringInProgress());
+
+        AudioEngine second;
+        QSignalSpy secondSpy(&second, &AudioEngine::startFinished);
+        second.startAsync();
+        QVERIFY(!second.isRunning()); // deferred, not started over it
+        QVERIFY(secondSpy.wait(15000));
+        QVERIFY(!AudioEngine::retiringInProgress());
+        QCOMPARE(second.isRunning(), secondSpy.at(0).at(0).toBool());
+        second.stop();
+        QVERIFY(AudioEngine::waitForRetiredThreads(5000));
+    }
+
+    void aDeferredStartCanBeCancelled()
+    {
+        AudioEngine first;
+        QSignalSpy firstSpy(&first, &AudioEngine::startFinished);
+        first.startAsync();
+        QVERIFY(firstSpy.wait(15000));
+        first.stop();
+
+        AudioEngine second;
+        QSignalSpy secondSpy(&second, &AudioEngine::startFinished);
+        second.startAsync(); // deferred behind first's teardown
+        second.stop();       // and cancelled before it ran
+        QVERIFY(!secondSpy.wait(1500));
+        QVERIFY(!second.isRunning());
+        QVERIFY(!AudioEngine::retiringInProgress());
+    }
+
     void theBlockingStartStillWorks()
     {
         // Kept for callers that need the verdict inline; same pipeline.
