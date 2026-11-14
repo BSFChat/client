@@ -137,9 +137,22 @@ QString deviceString(AudioObjectID dev, AudioObjectPropertySelector selector)
     return out;
 }
 
+#endif  // TARGET_OS_OSX
+
+// QAudioDevice::id() is the CoreAudio UID as UTF-8. Decode it as UTF-8:
+// USB audio UIDs embed the vendor and product names, and Latin-1 turned
+// "RØDE NT-USB+" into a string that matched no device. That bug made
+// every call with a Rode silently use the system default input instead
+// (seen in a user's logs from October to 2026-11-14).
+QString uidFromQtId(const QByteArray& id)
+{
+    return QString::fromUtf8(id);
+}
+
+#if TARGET_OS_OSX
 // QAudioDevice::id() on macOS is the device's kAudioDevicePropertyDeviceUID
-// as UTF-8 — verified in Qt's (dev branch, Nov 2026)
-// coreaudio/qmacosaudiodatautils.cpp, QCoreAudioUtils::uniqueId(). So a
+// as UTF-8 — verified in Qt 6.11.3's darwin/qmacosaudiodatautils.cpp,
+// QCoreAudioUtils::readPersistentDeviceId(). So a
 // Qt device id maps back to an AudioDeviceID by walking the hardware's
 // device list and comparing UIDs.
 AudioDeviceID deviceForUid(const QString& uid)
@@ -819,11 +832,11 @@ void DarwinVpioBackend::prepareDevices(const QAudioDevice& input, const QAudioDe
     // A later openCapture/openRender still sets its own id, so a device
     // that changes between here and the open is honoured as before.
     if (!input.isNull()) {
-        m_captureDeviceId = QString::fromLatin1(input.id());
+        m_captureDeviceId = uidFromQtId(input.id());
         m_captureDeviceDesc = input.description();
     }
     if (!output.isNull()) {
-        m_renderDeviceId = QString::fromLatin1(output.id());
+        m_renderDeviceId = uidFromQtId(output.id());
         m_renderDeviceDesc = output.description();
     }
 }
@@ -847,7 +860,7 @@ bool DarwinVpioBackend::openCapture(const QAudioDevice& device,
               qPrintable(device.description()));
     }
 #endif
-    m_captureDeviceId = QString::fromLatin1(device.id());
+    m_captureDeviceId = uidFromQtId(device.id());
     m_captureDeviceDesc = device.description();
     m_captureWanted = true;
 
@@ -898,7 +911,7 @@ bool DarwinVpioBackend::openRender(const QAudioDevice& device,
     m_pipeline.channels = format.channelCount();
     m_pipeline.frameSamples = int(std::lround(format.sampleRate() * 0.02));
 
-    m_renderDeviceId = QString::fromLatin1(device.id());
+    m_renderDeviceId = uidFromQtId(device.id());
     m_renderDeviceDesc = device.description();
     m_renderWanted = true;
     // The depth AudioWorker asked for, honoured through bytesFree()
