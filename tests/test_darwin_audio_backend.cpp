@@ -32,6 +32,7 @@
 #include "voice/AudioRingBuffer.h"
 #include "voice/DarwinVoiceLifecycle.h"
 #include "voice/IosAudioSession.h"
+#include "voice/VpioDeviceCheck.h"
 #include "voice/VpioFormat.h"
 
 #include <vector>
@@ -59,6 +60,43 @@ class DarwinAudioBackendTest : public QObject {
     Q_OBJECT
 
 private slots:
+    // ---- did VPIO open the device we asked for (VpioDeviceCheck.h) ----
+
+    void sameDeviceIsHonoured()
+    {
+        QCOMPARE(checkDeviceHonoured("rode-uid", DeviceReadback{"rode-uid", false, {}}),
+                 DeviceCheck::Honoured);
+    }
+
+    // The reported bug: settings said RODE, the AirPods mic was live.
+    void aDifferentPhysicalDeviceIsCaught()
+    {
+        QCOMPARE(checkDeviceHonoured("rode-uid", DeviceReadback{"airpods-uid", false, {}}),
+                 DeviceCheck::NotHonoured);
+    }
+
+    void anAggregateHoldingTheDeviceIsHonoured()
+    {
+        const DeviceReadback agg{"vpio-agg", true, {"airpods-uid", "rode-uid"}};
+        QCOMPARE(checkDeviceHonoured("rode-uid", agg), DeviceCheck::Honoured);
+    }
+
+    void anAggregateWithoutTheDeviceIsCaught()
+    {
+        const DeviceReadback agg{"vpio-agg", true, {"airpods-uid"}};
+        QCOMPARE(checkDeviceHonoured("rode-uid", agg), DeviceCheck::NotHonoured);
+    }
+
+    // Anything we could not read must NOT cost the user echo cancellation.
+    void unreadableIsUnknownNotAFailure()
+    {
+        QCOMPARE(checkDeviceHonoured("rode-uid", DeviceReadback{}), DeviceCheck::Unknown);
+        QCOMPARE(checkDeviceHonoured("rode-uid", DeviceReadback{"vpio-agg", true, {}}),
+                 DeviceCheck::Unknown);
+        QCOMPARE(checkDeviceHonoured(QString(), DeviceReadback{"airpods-uid", false, {}}),
+                 DeviceCheck::Unknown);
+    }
+
     // ---- format negotiation ----
 
     // The expected case on both platforms: we ask the unit for the
