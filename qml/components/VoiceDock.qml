@@ -37,8 +37,11 @@ Rectangle {
     id: dock
     color: Theme.bg1
     implicitHeight: visible ? Theme.layout.voiceDockH : 0
+    // From the click, not from the server's answer: voiceConnecting is set
+    // the moment the user asks to join, so the dock itself acknowledges it.
     visible: serverManager.activeServer
-             && serverManager.activeServer.inVoiceChannel
+             && (serverManager.activeServer.inVoiceChannel
+                 || serverManager.activeServer.voiceConnecting)
 
     // Top-edge divider.
     Rectangle {
@@ -326,10 +329,37 @@ Rectangle {
                         Layout.fillWidth: true
                         Layout.minimumWidth: 0
                     }
+                    RowLayout {
+                        spacing: Theme.sp.s1
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                    // Pulsing while connecting; gone once audio is running,
+                    // which is the "you are in" moment (the chime plays then).
+                    Rectangle {
+                        visible: !!serverManager.activeServer
+                                 && serverManager.activeServer.voiceConnecting
+                        width: 6; height: 6; radius: 3
+                        color: Theme.accent
+                        Layout.alignment: Qt.AlignVCenter
+                        SequentialAnimation on opacity {
+                            running: parent.visible
+                            loops: Animation.Infinite
+                            NumberAnimation { from: 1.0; to: 0.25; duration: 600 }
+                            NumberAnimation { from: 0.25; to: 1.0; duration: 600 }
+                        }
+                    }
                     Text {
                         text: {
                             var s = serverManager.activeServer;
-                            if (!s || !s.activeVoiceRoomId) return "";
+                            if (!s) return "";
+                            if (s.voiceConnecting) {
+                                var cn = s.roomListModel
+                                         ? s.roomListModel.roomDisplayName(s.voiceConnectingRoomId)
+                                         : s.voiceConnectingRoomId;
+                                return (Theme.isMobile ? "Connecting… #" : "Connecting to #") + cn
+                                       + (Theme.isMobile ? "" : "…");
+                            }
+                            if (!s.activeVoiceRoomId) return "";
                             var name = s.roomListModel
                                        ? s.roomListModel.roomDisplayName(s.activeVoiceRoomId)
                                        : s.activeVoiceRoomId;
@@ -346,6 +376,7 @@ Rectangle {
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                         Layout.minimumWidth: 0
+                    }
                     }
                 }
 

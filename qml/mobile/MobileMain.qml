@@ -881,8 +881,11 @@ ApplicationWindow {
             // target and a way to flip back to the chat view.
             VoiceDock {
                 Layout.fillWidth: true
+                // From the tap (voiceConnecting), so the join is acknowledged
+                // before the server has answered.
                 visible: serverManager.activeServer
-                      && serverManager.activeServer.inVoiceChannel
+                      && (serverManager.activeServer.inVoiceChannel
+                          || serverManager.activeServer.voiceConnecting)
             }
         }
     }

@@ -83,6 +83,7 @@
 #include <QByteArray>
 #include <QString>
 
+#include <functional>
 #include <memory>
 
 #include "voice/DarwinVoiceLifecycle.h"
@@ -122,6 +123,12 @@ public:
     // Wait (bounded) for them. For quitting, where nothing may be left
     // running behind the application, and for the blocking start().
     static bool waitForRetiredThreads(int timeoutMs);
+    // Run `fn` (on the GUI thread) once no pipeline is retiring — at once
+    // if none is. Dropped if `context` is destroyed first. For anything
+    // that must not overlap the device teardown, like the leave beep: on
+    // macOS closing VoiceProcessingIO reconfigures the output hardware and
+    // a sound playing through it at that moment glitches.
+    static void afterRetired(QObject* context, std::function<void()> fn);
     // Tears the pipeline down WITHOUT blocking: the audio thread closes its
     // devices and exits on its own; the next start waits for that. Safe to
     // call when never started, and safe to call twice.

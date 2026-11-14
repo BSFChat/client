@@ -2068,8 +2068,10 @@ Rectangle {
             Layout.rightMargin: Theme.sp.s3
             Layout.topMargin: Theme.sp.s3
             Layout.preferredHeight: visible ? 72 : 0
+            // From the click (voiceConnecting), not from the server's answer.
             visible: serverManager.activeServer !== null
-                     && serverManager.activeServer.inVoiceChannel
+                     && (serverManager.activeServer.inVoiceChannel
+                         || serverManager.activeServer.voiceConnecting)
 
             Rectangle {
                 id: voiceStatusCard
@@ -2097,6 +2099,12 @@ Rectangle {
                 Accessible.role: Accessible.Button
                 Accessible.name: {
                     var s = serverManager.activeServer;
+                    if (s && s.voiceConnecting) {
+                        var cn = s.roomListModel
+                                 ? s.roomListModel.roomDisplayName(s.voiceConnectingRoomId)
+                                 : s.voiceConnectingRoomId;
+                        return qsTr("Connecting to voice in %1").arg(cn);
+                    }
                     if (!s || !s.activeVoiceRoomId) return qsTr("Voice connected");
                     var n = s.roomListModel
                             ? s.roomListModel.roomDisplayName(s.activeVoiceRoomId)
@@ -2159,7 +2167,9 @@ Rectangle {
                         // "Voice connected" label in fg2, small caps wide-
                         // tracked so it reads as a status line not a title.
                         Text {
-                            text: "VOICE CONNECTED"
+                            text: serverManager.activeServer
+                                  && serverManager.activeServer.voiceConnecting
+                                  ? "CONNECTING…" : "VOICE CONNECTED"
                             font.family: Theme.fontSans
                             font.pixelSize: 10
                             font.weight: Theme.fontWeight.semibold
@@ -2173,10 +2183,13 @@ Rectangle {
                         Text {
                             text: {
                                 var s = serverManager.activeServer;
-                                if (!s || !s.activeVoiceRoomId) return "";
+                                if (!s) return "";
+                                var rid = s.voiceConnecting ? s.voiceConnectingRoomId
+                                                            : s.activeVoiceRoomId;
+                                if (!rid) return "";
                                 var n = s.roomListModel
-                                        ? s.roomListModel.roomDisplayName(s.activeVoiceRoomId)
-                                        : s.activeVoiceRoomId;
+                                        ? s.roomListModel.roomDisplayName(rid)
+                                        : rid;
                                 return "#" + n;
                             }
                             font.family: Theme.fontSans

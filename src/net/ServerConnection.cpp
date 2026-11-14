@@ -32,6 +32,7 @@
 #include "voice/VoiceTransportSelector.h"
 #ifdef BSFCHAT_VOICE_ENABLED
 #include "voice/VoiceEngine.h"
+#include "voice/AudioEngine.h"
 #include "voice/NotificationSounds.h"
 #include "voice/video/VideoStreamRegistry.h"
 #endif
@@ -2223,6 +2224,9 @@ void ServerConnection::joinVoiceChannel(const QString& roomId)
     // for its own echo.
     m_voiceSession->setLocalUserId(m_userId);
 
+    // Acknowledge the click now: the server round trip, the TURN fetch and
+    // opening the audio devices can together take a couple of seconds.
+    setVoiceConnecting(roomId);
     // Everything about ordering (leave-before-join on a switch, a join
     // queued behind an in-flight leave) lives in the session.
     m_voiceSession->requestJoin(roomId);
@@ -2233,6 +2237,13 @@ void ServerConnection::joinVoiceChannel(const QString& roomId)
         m_viewingVoiceRoom = true;
         emit viewingVoiceRoomChanged();
     }
+}
+
+void ServerConnection::setVoiceConnecting(const QString& roomId)
+{
+    if (m_voiceConnectingRoomId == roomId) return;
+    m_voiceConnectingRoomId = roomId;
+    emit voiceConnectingChanged();
 }
 
 void ServerConnection::showVoiceRoom()
@@ -2641,6 +2652,15 @@ void ServerConnection::setupVoiceSession()
         }
         // A join that never landed leaves the optimistically-flipped
         // VoiceRoom view pointing at nothing — flip back to text.
+        // The attempt is over without audio starting (refused, failed,
+        // left). With voice compiled out, Active is as far as it goes.
+        // Not when Idle is only the gap in a switch (A left, B's join
+        // still queued): the user is still on their way into B.
+        if (st == State::Idle && m_voiceSession->headingTo().isEmpty())
+            setVoiceConnecting(QString());
+#ifndef BSFCHAT_VOICE_ENABLED
+        if (st == State::Active) setVoiceConnecting(QString());
+#endif
         if (st == State::Idle && m_viewingVoiceRoom) {
             m_viewingVoiceRoom = false;
             emit viewingVoiceRoomChanged();
@@ -2776,11 +2796,14 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
     // after the join went ahead. Leave, which unwinds the server-side
     // membership exactly as a refused start used to.
     connect(m_voiceEngine, &VoiceEngine::audioStarted, this, [this]() {
+        // In the call: audio is flowing. This is the "completed" moment.
+        setVoiceConnecting(QString());
         if (!m_joinChimePending) return;
         m_joinChimePending = false;
         m_sounds->playJoin();
     });
     connect(m_voiceEngine, &VoiceEngine::audioStartFailed, this, [this]() {
+        setVoiceConnecting(QString());
         m_joinChimePending = false;
         if (m_voiceSession) m_voiceSession->requestLeave();
     });
@@ -2889,7 +2912,7 @@ void ServerConnection::teardownVoiceSession()
     // switch / kick / failed-start path funnels through here.
     clearVoiceProtection();
 #ifdef BSFCHAT_VOICE_ENABLED
-    if (!m_activeVoiceRoomId.isEmpty()) m_sounds->playLeave();
+    const bool leavingACall = !m_activeVoiceRoomId.isEmpty();
     if (m_voiceEngine) {
         m_voiceEngine->stop();
         delete m_voiceEngine;
@@ -2904,6 +2927,13 @@ void ServerConnection::teardownVoiceSession()
     // Blank every remote video surface from the session (fires
     // liveVideoChanged → peerScreen/CameraFrameChanged for QML).
     if (m_videoRegistry) m_videoRegistry->clear();
+    // The leave beep waits for the audio devices to finish closing. It used
+    // to play first, and on macOS the VoiceProcessingIO teardown that
+    // follows reconfigures the output hardware underneath it: a glitched
+    // beep on every disconnect. A fraction of a second later, but clean.
+    if (leavingACall) {
+        AudioEngine::afterRetired(this, [this]() { m_sounds->playLeave(); });
+    }
 #endif
     // Announced share/camera flags die with the session too (the
     // server resets them on leave) — otherwise peersCurrentlySharing()

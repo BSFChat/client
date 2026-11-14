@@ -54,6 +54,21 @@ bool AudioEngine::retiringInProgress()
     return !retiringThreads().isEmpty();
 }
 
+void AudioEngine::afterRetired(QObject* context, std::function<void()> fn)
+{
+    // Next event-loop turn at the earliest, either way, so callers see the
+    // same ordering whether or not anything happened to be retiring.
+    QPointer<QObject> guard(context);
+    auto run = [guard, fn = std::move(fn)]() {
+        if (guard) fn();
+    };
+    if (!retiringInProgress()) {
+        QMetaObject::invokeMethod(context, run, Qt::QueuedConnection);
+        return;
+    }
+    retireWaiters().push_back(std::move(run));
+}
+
 bool AudioEngine::waitForRetiredThreads(int timeoutMs)
 {
     QElapsedTimer clock;

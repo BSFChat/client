@@ -162,6 +162,14 @@ class ServerConnection : public QObject {
     Q_PROPERTY(bool voiceMuted READ voiceMuted NOTIFY voiceMutedChanged)
     Q_PROPERTY(bool voiceDeafened READ voiceDeafened NOTIFY voiceDeafenedChanged)
     Q_PROPERTY(bool inVoiceChannel READ inVoiceChannel NOTIFY activeVoiceRoomIdChanged)
+    // The voice channel the user has asked to join and is not yet fully IN:
+    // set the moment they click (before the server has even answered) and
+    // cleared once audio is running, or when the attempt ends. Empty
+    // otherwise. The dock and the channel row show "Connecting…" for it,
+    // so the click is acknowledged at once and completion is visible.
+    Q_PROPERTY(QString voiceConnectingRoomId READ voiceConnectingRoomId
+               NOTIFY voiceConnectingChanged)
+    Q_PROPERTY(bool voiceConnecting READ voiceConnecting NOTIFY voiceConnectingChanged)
     // Last voice-subsystem error (join/leave REST failures, engine
     // init failures). Auto-clears after ~8 s or on the next successful
     // join; QML routes non-empty values into the toast surface.
@@ -303,6 +311,8 @@ public:
     bool voiceMuted() const { return m_voiceMuted; }
     bool voiceDeafened() const { return m_voiceDeafened; }
     bool inVoiceChannel() const { return !m_activeVoiceRoomId.isEmpty(); }
+    QString voiceConnectingRoomId() const { return m_voiceConnectingRoomId; }
+    bool voiceConnecting() const { return !m_voiceConnectingRoomId.isEmpty(); }
 
     // Empty until a transport has actually started, and empty again the
     // moment it stops. Deliberately not "assume mesh until told
@@ -1096,6 +1106,7 @@ signals:
     // bled into the composer.
     void avatarUploadFailed(const QString& error);
     void activeVoiceRoomIdChanged();
+    void voiceConnectingChanged();
     // The server retired our voice row and the V-H2 re-join was
     // accepted: same room and same engine, but a NEW membership whose
     // screen_sharing/camera_on both start false. activeVoiceRoomId does
@@ -1495,6 +1506,8 @@ public:
     // Set when a join is accepted, cleared when the join chime plays once
     // the audio pipeline is running (or the start fails).
     bool m_joinChimePending = false;
+    QString m_voiceConnectingRoomId;
+    void setVoiceConnecting(const QString& roomId);
     // Wire the session to MatrixClient, to the engine, and to the mirrors
     // above. Called once from the constructor.
     void setupVoiceSession();
