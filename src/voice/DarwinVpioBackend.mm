@@ -704,6 +704,24 @@ void DarwinVpioBackend::teardownUnit()
 // IAudioBackend
 // ---------------------------------------------------------------------
 
+void DarwinVpioBackend::prepareDevices(const QAudioDevice& input, const QAudioDevice& output)
+{
+    // Record both devices WITHOUT marking either direction wanted, so the
+    // first open builds the unit against the right pair. resolveDevices()
+    // maps both ids whatever is wanted, and openRender() then finds the
+    // unit already built for its device (no deviceChanged, no rebuild).
+    // A later openCapture/openRender still sets its own id, so a device
+    // that changes between here and the open is honoured as before.
+    if (!input.isNull()) {
+        m_captureDeviceId = QString::fromLatin1(input.id());
+        m_captureDeviceDesc = input.description();
+    }
+    if (!output.isNull()) {
+        m_renderDeviceId = QString::fromLatin1(output.id());
+        m_renderDeviceDesc = output.description();
+    }
+}
+
 bool DarwinVpioBackend::openCapture(const QAudioDevice& device,
                                     const QAudioFormat& format)
 {

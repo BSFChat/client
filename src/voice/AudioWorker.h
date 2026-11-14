@@ -344,6 +344,8 @@ private:
     // Snapshot -> policy input.
     QList<bsfchat::voice::DeviceInfo> deviceInfos(Direction dir) const;
     const QAudioDevice* snapshotDevice(Direction dir, const QString& id) const;
+    // The device evaluateDevice(dir) would open now, without opening it.
+    const QAudioDevice* plannedDevice(Direction dir) const;
     // Open or close exactly ONE direction. These touch no shared
     // pipeline state: no encoder, no jitter buffers, no pump timer.
     void openSource(const QAudioDevice& device);

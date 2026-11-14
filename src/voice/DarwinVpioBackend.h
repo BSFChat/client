@@ -152,6 +152,8 @@ public:
     bool platformVoiceProcessing() const override { return true; }
     bool capturePolled() const override { return true; }
 
+    void prepareDevices(const QAudioDevice& input, const QAudioDevice& output) override;
+
     bool openCapture(const QAudioDevice& device,
                      const QAudioFormat& format) override;
     void closeCapture() override;

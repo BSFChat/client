@@ -154,6 +154,15 @@ bool AudioWorker::startDevices() {
     // system-wide — a quality cliff the user hears in every other app —
     // so "follow the default output" must never drag the input along
     // with it.
+    // Tell the backend both devices before either opens, so a single-unit
+    // backend (VoiceProcessingIO) is built once rather than built for
+    // capture and rebuilt for render. Same decision evaluateDevice() is
+    // about to make; side-effect free.
+    {
+        const QAudioDevice* in = plannedDevice(Direction::Input);
+        const QAudioDevice* out = plannedDevice(Direction::Output);
+        m_backend->prepareDevices(in ? *in : QAudioDevice(), out ? *out : QAudioDevice());
+    }
     evaluateDevice(Direction::Input);
     if (m_inputInUseId.isEmpty()) {
         qWarning("[voice] No audio input device available");
@@ -838,6 +847,16 @@ void AudioWorker::setInUse(Direction dir, const QString& id,
     inUseId = id;
     inUseDesc = description;
     emit deviceInUseChanged(input, description);
+}
+
+const QAudioDevice* AudioWorker::plannedDevice(Direction dir) const {
+    const bool input = (dir == Direction::Input);
+    const auto d = bsfchat::voice::resolveDevice(
+        input ? m_preferredInput : m_preferredOutput,
+        input ? m_inputHintId : m_outputHintId, deviceInfos(dir),
+        input ? m_inputInUseId : m_outputInUseId);
+    if (d.action == bsfchat::voice::DeviceAction::None) return nullptr;
+    return snapshotDevice(dir, d.id);
 }
 
 void AudioWorker::evaluateDevice(Direction dir) {
