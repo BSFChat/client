@@ -1473,3 +1473,14 @@ target_compile_definitions(test_android_runtime PRIVATE
     BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test_android_runtime PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_android_runtime COMMAND test_android_runtime)
+
+# The QImage -> QVideoFrame copy the macOS screen-share and camera paths
+# use. A whole-image memcpy sheared every share whose width was not a
+# multiple of four pixels (QVideoFrame pads lines to 16 bytes).
+if(BSFCHAT_ENABLE_VOICE)
+    qt_add_executable(test_image_to_video_frame test_image_to_video_frame.cpp)
+    target_include_directories(test_image_to_video_frame PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_image_to_video_frame PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test)
+    add_test(NAME test_image_to_video_frame COMMAND test_image_to_video_frame)
+endif()

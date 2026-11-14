@@ -5,6 +5,7 @@
 #include "voice/IVoiceTransport.h"
 #include "voice/VoiceEngine.h"
 #include "voice/video/VideoRateController.h"
+#include "voice/video/ImageToVideoFrame.h"
 #include "voice/video/LatestWinsWorker.h"
 #include "voice/video/VideoSendPipeline.h"
 #include "net/ServerManager.h"
@@ -136,14 +137,11 @@ ScreenShareController::ScreenShareController(QObject* parent)
                     QStringLiteral("video-frame-copy"));
             }
             m_frameWorker->submit([this, img, captureUs]() {
-                QVideoFrameFormat fmt(img.size(),
-                    QVideoFrameFormat::pixelFormatFromImageFormat(img.format()));
-                QVideoFrame vf(fmt);
-                if (!vf.map(QVideoFrame::WriteOnly)) return;
-                // One plane, RGB image.
-                std::memcpy(vf.bits(0), img.bits(),
-                            size_t(img.bytesPerLine()) * size_t(img.height()));
-                vf.unmap();
+                // Row by row: see ImageToVideoFrame.h for why a single
+                // memcpy sheared any share whose width was not a
+                // multiple of four pixels.
+                const QVideoFrame vf = imageToVideoFrame(img);
+                if (!vf.isValid()) return;
                 QMetaObject::invokeMethod(this, [this, vf, captureUs]() {
                     if (!m_active) return;
                     // Feed the internal sink so any VideoOutput
