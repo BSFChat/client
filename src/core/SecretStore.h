@@ -44,6 +44,15 @@ public:
     // Whether write() can succeed at all on this system.
     virtual bool available() const = 0;
 
+    // Fire-and-forget variants, for callers that must not spin a local event
+    // loop: Settings persists credentials from inside arbitrary signal
+    // handlers, and a nested loop there would re-enter them. Jobs still run
+    // one at a time in submission order, so a later read or remove sees the
+    // write. A failure is logged and otherwise lost: the caller already holds
+    // the value in memory. Default: the synchronous call.
+    virtual void writeLater(const QString& key, const QString& value) { write(key, value); }
+    virtual void removeLater(const QString& key) { remove(key); }
+
     // The process-wide store: the OS keychain, namespaced by the active
     // profile's application name so `--profile alice` and the default
     // profile never read each other's secrets.

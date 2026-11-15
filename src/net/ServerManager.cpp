@@ -121,6 +121,15 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
         wireConnection(conn);
     }
 
+    // Saved servers that came back without a token on a system with no
+    // keychain: say why once, after the UI is up to hear it.
+    {
+        bool anyMissing = false;
+        for (const auto& entry : saved) anyMissing |= entry.accessToken.isEmpty();
+        if (anyMissing && !saved.isEmpty())
+            QTimer::singleShot(0, this, [this]() { noteIfNotPersisted(); });
+    }
+
     int savedIndex = m_settings->activeServerIndex();
     if (savedIndex >= 0 && savedIndex < m_roster.count()) {
         setActiveServer(savedIndex);
@@ -448,11 +457,31 @@ void ServerManager::markActiveRoomsRead()
 
 void ServerManager::removeServer(int index)
 {
+    // Leaves nothing behind (C-4): the server is asked to delete the token
+    // (POST /logout — a token merely forgotten here stayed valid on the
+    // server until it expired), the account's LocalCache file goes, and the
+    // keychain entry goes with the settings row (Settings::writeServers).
+    if (ServerConnection* conn = m_roster.at(index)) {
+        revokeOnServer(conn->homeserverUrl(), conn->accessToken());
+        conn->forgetLocalData();
+    }
     // All of the ordering — clear the active pointer before anything can
     // observe it, emit activeServerChanged when the pointer *or* the index
     // moves, retire the connection last — lives in ServerRoster::remove so
     // it can be tested without a network (see tests/test_server_roster.cpp).
     m_roster.remove(index);
+}
+
+void ServerManager::revokeOnServer(const QString& homeserver, const QString& accessToken)
+{
+    if (homeserver.isEmpty() || accessToken.isEmpty()) return;
+    // Its own client, parented here: the connection is retired right after
+    // this and would abort a request of its own on the way out.
+    auto* client = new MatrixClient(this);
+    client->setHomeserver(homeserver);
+    client->setAccessToken(accessToken);
+    connect(client, &MatrixClient::logoutFinished, client, &QObject::deleteLater);
+    client->logout();
 }
 
 void ServerManager::leaveServer(int index)
@@ -746,6 +775,16 @@ void ServerManager::wireConnection(ServerConnection* conn)
     // add-server path to wire.
     connect(conn, &ServerConnection::loginSucceeded, this,
             [this, conn]() { persistCredentials(conn); });
+
+    // Re-authentication through the BSFChat ID session when the server
+    // trusts it: no browser for a token that merely expired. Falls back to
+    // the browser exactly as a join does (consent missing, session ended).
+    {
+        QPointer<ServerConnection> guard(conn);
+        conn->setOidcSignIn([this, guard](const QString& providerUrl) {
+            if (guard) signInWithSessionOrBrowser(guard, providerUrl);
+        });
+    }
     connect(conn, &ServerConnection::registerSucceeded, this,
             [this, conn]() { persistCredentials(conn); });
 
@@ -869,10 +908,21 @@ void ServerManager::onLoginSuccess(ServerConnection* conn)
     }
 }
 
+void ServerManager::noteIfNotPersisted()
+{
+    if (m_warnedNotPersisted || m_settings->credentialsPersist()) return;
+    m_warnedNotPersisted = true;
+    emit credentialsNotPersisted(
+        tr("This system has no secure credential store (keychain), so BSFChat "
+           "does not save your sign-in. You will need to sign in again the next "
+           "time BSFChat starts."));
+}
+
 void ServerManager::persistCredentials(ServerConnection* conn)
 {
     const int index = m_roster.indexOf(conn);
     if (index < 0) return;
+    noteIfNotPersisted();
 
     Settings::ServerEntry entry;
     entry.url = conn->serverUrl();
@@ -1135,6 +1185,7 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
             // once per server.
             if (!refreshToken.isEmpty()) {
                 m_identitySession->adopt(m_identityUrl, refreshToken);
+                if (!m_identitySession->isPersisted()) noteIfNotPersisted();
                 m_settings->setIdentityRecord(
                     {m_identityUrl, m_identityAccount.name, m_identityAccount.subject});
             }

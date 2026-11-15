@@ -578,6 +578,8 @@ ApplicationWindow {
         // The BSFChat ID session on this device ended (expired or revoked).
         // Servers already joined keep working; the next join opens the browser.
         function onIdentitySessionEnded(reason) { toastWarn(reason); }
+        // No OS keychain: sign-ins last until the app quits (ServerSecrets).
+        function onCredentialsNotPersisted(message) { toastWarn(message); }
         function onLoginError(serverUrl, error) {
             // The dialog shows the error inline when it is up; toasting
             // the same string at the same moment is the duplicate surface

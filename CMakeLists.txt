@@ -250,6 +250,7 @@ qt_add_library(bsfchat-lib STATIC
     src/identity/IdentityApiClient.cpp
     src/identity/IdentitySession.cpp
     src/core/SecretStore.cpp
+    src/core/ServerSecrets.cpp
     src/net/MatrixClient.cpp
     src/net/MediaTicketCache.cpp
     src/net/SyncBackoff.cpp

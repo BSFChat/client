@@ -256,6 +256,9 @@ signals:
     void identityAccountChanged();
     // The provider ended this device's BSFChat ID session (expired, revoked).
     void identitySessionEnded(const QString& reason);
+    // Once per run, when a sign-in is held in memory only because the
+    // system has no secure store (see core/ServerSecrets.h).
+    void credentialsNotPersisted(const QString& message);
     // No browser opened for a sign-in — the account-level one or any
     // server's — and `authUrl` is the page the user must open by hand to
     // finish it. One manager-level signal for every sign-in path, because
@@ -331,6 +334,9 @@ private:
     void restoreIdentitySession();
     void fetchIdentityServers(bool interactive);
     void signInWithSessionOrBrowser(ServerConnection* conn, const QString& providerUrl);
+    void revokeOnServer(const QString& homeserver, const QString& accessToken);
+    void noteIfNotPersisted();
+    bool m_warnedNotPersisted = false;
     QString m_identityUrl;
     QString m_identityAccessToken;
     bsfchat::IdTokenAccount m_identityAccount;

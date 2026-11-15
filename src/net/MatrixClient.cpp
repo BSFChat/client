@@ -432,6 +432,25 @@ void MatrixClient::joinRoom(const QString& roomIdOrAlias)
     });
 }
 
+void MatrixClient::logout()
+{
+    if (m_accessToken.isEmpty()) {
+        emit logoutFinished(true);
+        return;
+    }
+    auto* reply = makeRequest("POST", QString::fromUtf8(bsfchat::api_path::kLogout), "{}");
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        // 401: the token was already dead, which is the outcome we wanted.
+        const bool ok = reply->error() == QNetworkReply::NoError || status == 401;
+        if (!ok) {
+            qWarning().noquote() << "[MatrixClient] /logout failed:" << reply->errorString();
+        }
+        emit logoutFinished(ok);
+    });
+}
+
 void MatrixClient::deleteRoom(const QString& roomId)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)

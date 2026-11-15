@@ -144,8 +144,16 @@ QString Settings::logDirectory() const
     return bsfchat::logDirectory();
 }
 
+void Settings::ensureSecretsMigrated() const
+{
+    if (m_secretsMigrated) return;
+    m_secretsMigrated = true;
+    m_secrets.migrate(m_settings);
+}
+
 QList<Settings::ServerEntry> Settings::savedServers() const
 {
+    ensureSecretsMigrated();
     QList<ServerEntry> servers;
     int count = m_settings.beginReadArray("servers");
     for (int i = 0; i < count; ++i) {
@@ -153,35 +161,59 @@ QList<Settings::ServerEntry> Settings::savedServers() const
         ServerEntry entry;
         entry.url = m_settings.value("url").toString();
         entry.userId = m_settings.value("userId").toString();
-        entry.accessToken = m_settings.value("accessToken").toString();
         entry.deviceId = m_settings.value("deviceId").toString();
         entry.displayName = m_settings.value("displayName").toString();
-        entry.identityRefreshToken = m_settings.value("identityRefreshToken").toString();
         entry.identityProviderUrl = m_settings.value("identityProviderUrl").toString();
         servers.append(entry);
     }
     m_settings.endArray();
+    // Outside the array walk: a store read may run a short local event loop.
+    for (auto& entry : servers)
+        entry.accessToken = m_secrets.accessToken(entry.url, entry.userId);
     return servers;
 }
 
 void Settings::writeServers(const QList<ServerEntry>& servers)
 {
+    ensureSecretsMigrated();
+    // The accounts on disk before this write, so a token whose row goes
+    // (server removed, URL or account changed) is deleted from the keychain
+    // too rather than orphaned there.
+    QList<QPair<QString, QString>> before; // (url, userId)
+    {
+        const int n = m_settings.beginReadArray("servers");
+        for (int i = 0; i < n; ++i) {
+            m_settings.setArrayIndex(i);
+            before.append({m_settings.value("url").toString(),
+                           m_settings.value("userId").toString()});
+        }
+        m_settings.endArray();
+    }
+
+    // Secrets first, and never blocking: this runs inside login and expiry
+    // signal handlers, which a nested event loop would re-enter.
+    QSet<QString> after;
+    for (const auto& e : servers) {
+        after.insert(ServerSecrets::accessTokenKey(e.url, e.userId));
+        m_secrets.setAccessToken(e.url, e.userId, e.accessToken);
+    }
+    for (const auto& [url, userId] : std::as_const(before)) {
+        if (!after.contains(ServerSecrets::accessTokenKey(url, userId)))
+            m_secrets.forget(url, userId);
+    }
+
     // remove() first, every time. beginWriteArray(n) rewrites `size` and rows
     // 1..n but leaves any row above n on disk, so a shorter array — removing a
-    // server, dropping a duplicate — left the old last row behind, with its
-    // accessToken and identityRefreshToken, in the plaintext settings file
-    // indefinitely. "The entry goes, credential and all" has to be true of
-    // the file, not only of what savedServers() reads back.
+    // server, dropping a duplicate — left the old last row behind in the
+    // settings file indefinitely.
     m_settings.remove("servers");
     m_settings.beginWriteArray("servers", servers.size());
     for (int i = 0; i < servers.size(); ++i) {
         m_settings.setArrayIndex(i);
         m_settings.setValue("url", servers[i].url);
         m_settings.setValue("userId", servers[i].userId);
-        m_settings.setValue("accessToken", servers[i].accessToken);
         m_settings.setValue("deviceId", servers[i].deviceId);
         m_settings.setValue("displayName", servers[i].displayName);
-        m_settings.setValue("identityRefreshToken", servers[i].identityRefreshToken);
         m_settings.setValue("identityProviderUrl", servers[i].identityProviderUrl);
     }
     m_settings.endArray();

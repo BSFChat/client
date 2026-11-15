@@ -1146,6 +1146,9 @@ ApplicationWindow {
     Connections {
         target: serverManager
         ignoreUnknownSignals: true
+        // The BSFChat ID session on this device ended (expired or revoked).
+        function onIdentitySessionEnded(reason) { toastWarn(reason); }
+        function onCredentialsNotPersisted(message) { toastWarn(message); }
         function onLoginError(serverUrl, error) {
             // The open dialog shows only its own attempt's failures (U-5).
             if (!loginDialogGlobal.opened || !loginDialogGlobal.ownsServerUrl(serverUrl))

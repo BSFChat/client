@@ -1331,6 +1331,21 @@ void ServerConnection::setIdentityProviderUrl(const QString& url)
     m_storedIdentityProviderUrl = url;
 }
 
+QString ServerConnection::homeserverUrl() const
+{
+    return m_client->homeserver();
+}
+
+void ServerConnection::forgetLocalData()
+{
+    m_syncLoop->stop();
+    m_timelines.clear();
+    m_persistedTimelineGen.clear();
+    m_cache->close();
+    m_cacheWired = false;
+    LocalCache::removeFilesFor(m_userId, m_serverUrl);
+}
+
 QString ServerConnection::signInResource() const
 {
     return oidc::resourceForHomeserver(m_client->homeserver());
@@ -1525,7 +1540,8 @@ void ServerConnection::beginReauth()
                 }
             }
             if (!providerUrl.isEmpty()) {
-                loginWithOidc(providerUrl);
+                if (m_oidcSignIn) m_oidcSignIn(providerUrl);
+                else loginWithOidc(providerUrl);
                 return;
             }
             if (passwordFlow) {

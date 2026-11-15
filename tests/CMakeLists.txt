@@ -814,6 +814,9 @@ qt_add_executable(test_identity_provider_url
     ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
     ${CMAKE_SOURCE_DIR}/src/util/ExternalBrowser.cpp
     ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
+    # Settings keeps access tokens out of the settings file through these.
+    ${CMAKE_SOURCE_DIR}/src/core/ServerSecrets.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/SecretStore.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AudioDeviceStatus.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AudioGainSettings.cpp
@@ -874,6 +877,9 @@ qt_add_executable(test_error_surface_guards
     ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
     ${CMAKE_SOURCE_DIR}/src/util/ExternalBrowser.cpp
     ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
+    # Settings keeps access tokens out of the settings file through these.
+    ${CMAKE_SOURCE_DIR}/src/core/ServerSecrets.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/SecretStore.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AudioDeviceStatus.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AudioGainSettings.cpp
@@ -925,6 +931,9 @@ qt_add_executable(test_composer_upload_lock
     ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
     ${CMAKE_SOURCE_DIR}/src/util/ExternalBrowser.cpp
     ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
+    # Settings keeps access tokens out of the settings file through these.
+    ${CMAKE_SOURCE_DIR}/src/core/ServerSecrets.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/SecretStore.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AudioDeviceStatus.cpp
     ${CMAKE_SOURCE_DIR}/src/core/AudioGainSettings.cpp
@@ -1128,6 +1137,19 @@ if(BSFCHAT_ENABLE_KEYCHAIN)
     target_compile_definitions(test_identity_session PRIVATE BSFCHAT_HAVE_KEYCHAIN)
 endif()
 add_test(NAME test_identity_session COMMAND test_identity_session)
+
+# Chat-server access tokens out of the plaintext settings file (audit C-5/C-4):
+# the one-time migration, the per-account keys, and no-secure-store behaviour.
+# Scratch INI file and an in-memory secret store: no OS keychain touched.
+qt_add_executable(test_server_secrets
+    test_server_secrets.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/ServerSecrets.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/SecretStore.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
+)
+target_include_directories(test_server_secrets PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_server_secrets PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_server_secrets COMMAND test_server_secrets)
 
 # The real OS credential store via QtKeychain. Skips where none is reachable.
 if(BSFCHAT_ENABLE_KEYCHAIN)

@@ -52,6 +52,35 @@ public:
         return run(job) || job.error() == QKeychain::EntryNotFound;
     }
 
+    void writeLater(const QString& key, const QString& value) override
+    {
+        auto* job = new QKeychain::WritePasswordJob(service());
+        job->setAutoDelete(true);
+        job->setKey(key);
+        job->setTextData(value);
+        QObject::connect(job, &QKeychain::Job::finished, [](QKeychain::Job* j) {
+            if (j->error() != QKeychain::NoError) {
+                qWarning().noquote() << "[SecretStore] could not store a secret in the OS keychain:"
+                                     << j->errorString();
+            }
+        });
+        job->start();
+    }
+
+    void removeLater(const QString& key) override
+    {
+        auto* job = new QKeychain::DeletePasswordJob(service());
+        job->setAutoDelete(true);
+        job->setKey(key);
+        QObject::connect(job, &QKeychain::Job::finished, [](QKeychain::Job* j) {
+            if (j->error() != QKeychain::NoError && j->error() != QKeychain::EntryNotFound) {
+                qWarning().noquote() << "[SecretStore] could not delete a keychain entry:"
+                                     << j->errorString();
+            }
+        });
+        job->start();
+    }
+
     bool available() const override
     {
         // Probed, not asked: QKeychain::isAvailable() answers true on Linux
@@ -96,6 +125,8 @@ public:
     bool write(const QString&, const QString&) override { return false; }
     std::optional<QString> read(const QString&) override { return std::nullopt; }
     bool remove(const QString&) override { return true; }
+    void writeLater(const QString&, const QString&) override {}
+    void removeLater(const QString&) override {}
     bool available() const override { return false; }
 };
 #endif

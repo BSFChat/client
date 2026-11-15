@@ -299,6 +299,22 @@ bool LocalCache::ensureSchema()
     return true;
 }
 
+bool LocalCache::removeFilesFor(const QString& userId, const QString& homeserver)
+{
+    if (userId.isEmpty() || homeserver.isEmpty()) return true;
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                      + QStringLiteral("/cache");
+    const QString path = dir + QLatin1Char('/') + cacheFileName(userId, homeserver);
+    bool ok = true;
+    for (const QString& f : {path, path + QStringLiteral("-wal"), path + QStringLiteral("-shm")}) {
+        if (QFile::exists(f) && !QFile::remove(f)) {
+            qWarning() << "LocalCache: could not delete" << f;
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 void LocalCache::close()
 {
     m_open = false;
