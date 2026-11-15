@@ -228,6 +228,8 @@ qt_add_library(bsfchat-lib STATIC
     src/core/TintedIconProvider.cpp
     src/core/MediaDownloader.cpp
     src/core/Updater.cpp
+    # Signed-manifest + hash + URL pinning checks for the updater (M-5).
+    src/core/UpdateIntegrity.cpp
     src/core/Haptics.cpp
     # UIKit feedback generators for the iOS half of Haptics. Objective-C++
     # and iOS-only, same shape as IosAuthSession.mm below; UIKit is already
@@ -1376,6 +1378,14 @@ if(MSVC)
     target_link_options(bsfchat-app PRIVATE
         $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>)
 endif()
+
+# OpenSSL is already a hard dependency (bsfchat_protocol / jwt-cpp), but
+# that find_package runs in the protocol's own directory scope and its
+# imported targets are not visible here. The updater verifies the Ed25519
+# release-manifest signature with libcrypto (src/core/UpdateIntegrity.cpp);
+# the platform hints set at the top of this file apply to this call too.
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+target_link_libraries(bsfchat-lib PUBLIC OpenSSL::Crypto)
 
 target_link_libraries(bsfchat-lib PUBLIC
     bsfchat_protocol
