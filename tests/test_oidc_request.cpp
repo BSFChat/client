@@ -226,25 +226,72 @@ private slots:
     {
         // Includes the user declining on the provider's own consent page —
         // the other half of "cancelled", the half that arrives as a redirect
-        // rather than as an ASWebAuthenticationSession cancellation.
-        const auto described = oidc::parseCallbackQuery(
-            QUrlQuery(QStringLiteral("error=access_denied&error_description=You%20said%20no")),
+        // rather than as an ASWebAuthenticationSession cancellation. The
+        // provider echoes `state` on these (OidcHandler redirect_with_error).
+        const auto declined = oidc::parseCallbackQuery(
+            QUrlQuery(QStringLiteral("error=access_denied&state=s1")), "s1");
+        QCOMPARE(declined.status, oidc::CallbackStatus::ProviderError);
+        QVERIFY(declined.code.isEmpty());
+        QVERIFY(!declined.error.isEmpty());
+        QVERIFY2(declined.error.contains(QLatin1String("access_denied")),
+                 qPrintable(declined.error));
+
+        const auto other = oidc::parseCallbackQuery(
+            QUrlQuery(QStringLiteral("error=server_error&state=s1")), "s1");
+        QCOMPARE(other.status, oidc::CallbackStatus::ProviderError);
+        QVERIFY2(other.error.contains(QLatin1String("server_error")),
+                 qPrintable(other.error));
+    }
+
+    // Audit 2026-11, C-9. The callback is an unauthenticated request: any
+    // page can make the browser hit the loopback URL, any app can fire the
+    // bsfchat:// intent. An error without THIS attempt's state is not the
+    // provider's, and must not be able to end the sign-in.
+    void anErrorWithoutTheAttemptsStateIsNotTheProviders()
+    {
+        for (const QString& q : {QStringLiteral("error=access_denied"),
+                                 QStringLiteral("error=access_denied&state="),
+                                 QStringLiteral("error=access_denied&state=s2"),
+                                 QStringLiteral("error=server_error&error_description=x")}) {
+            const auto r = oidc::parseCallbackQuery(QUrlQuery(q), "s1");
+            QVERIFY2(r.status == oidc::CallbackStatus::StateMismatch, qPrintable(q));
+        }
+        // ...and with no attempt in flight there is nothing for it to match.
+        const auto idle = oidc::parseCallbackQuery(
+            QUrlQuery(QStringLiteral("error=server_error&state=")), QString());
+        QCOMPARE(idle.status, oidc::CallbackStatus::StateMismatch);
+    }
+
+    // Even a callback carrying the right state is not shown verbatim: the
+    // words on screen are ours, plus the error code reduced to the RFC 6749
+    // alphabet. error_description never reaches the user.
+    void theProvidersFreeTextIsNeverShown()
+    {
+        const auto r = oidc::parseCallbackQuery(
+            QUrlQuery(QStringLiteral(
+                "error=access_denied&state=s1"
+                "&error_description=Your%20account%20is%20locked.%20Call%20555-0100")),
             "s1");
-        QCOMPARE(described.status, oidc::CallbackStatus::ProviderError);
-        QCOMPARE(described.error, QString("You said no"));
+        QCOMPARE(r.status, oidc::CallbackStatus::ProviderError);
+        QVERIFY2(!r.error.contains(QLatin1String("555")), qPrintable(r.error));
+        QVERIFY2(!r.error.contains(QLatin1String("locked")), qPrintable(r.error));
 
-        const auto bare = oidc::parseCallbackQuery(
-            QUrlQuery(QStringLiteral("error=access_denied")), "s1");
-        QCOMPARE(bare.status, oidc::CallbackStatus::ProviderError);
-        QCOMPARE(bare.error, QString("access_denied"));
-        QVERIFY(bare.code.isEmpty());
+        // A code that tries to be a sentence is cut down to its safe letters
+        // and bounded in length.
+        const auto crafted = oidc::parseCallbackQuery(
+            QUrlQuery(QStringLiteral("error=%3Cb%3EVisit%20evil.example%3C%2Fb%3E&state=s1")),
+            "s1");
+        QCOMPARE(crafted.status, oidc::CallbackStatus::ProviderError);
+        QVERIFY2(!crafted.error.contains(QLatin1Char('<')), qPrintable(crafted.error));
+        QVERIFY2(!crafted.error.contains(QLatin1Char(' ') + QStringLiteral("evil")),
+                 qPrintable(crafted.error));
 
-        // An error redirect need not carry state, and is still reported
-        // rather than being lost behind the CSRF check — a silently dropped
-        // error is a hung sign-in, which is the whole bug.
-        const auto stateless = oidc::parseCallbackQuery(
-            QUrlQuery(QStringLiteral("error=server_error")), QString());
-        QCOMPARE(stateless.status, oidc::CallbackStatus::ProviderError);
+        QCOMPARE(oidc::sanitizedErrorCode(QStringLiteral("invalid_request")),
+                 QStringLiteral("invalid_request"));
+        QCOMPARE(oidc::sanitizedErrorCode(QStringLiteral("a b\"c<d>")),
+                 QStringLiteral("abcd"));
+        QCOMPARE(oidc::sanitizedErrorCode(QString(500, QLatin1Char('x'))).size(), 64);
+        QVERIFY(!oidc::providerErrorMessage(QStringLiteral("<>")).isEmpty());
     }
 
     void aCallbackWithNeitherCodeNorErrorIsRefused()

@@ -414,10 +414,34 @@ void IdentityClient::handleCallback(const QUrl& callbackUrl)
     const oidc::CallbackParse parsed =
         oidc::parseCallbackQuery(QUrlQuery(callbackUrl.query()), m_state);
 
+    if (parsed.status == oidc::CallbackStatus::StateMismatch) {
+        qWarning().noquote()
+            << "[IdentityClient] refused a callback that is not this attempt's";
+#ifndef Q_OS_IOS
+        // Ignored, not fatal (audit C-9). On desktop any web page can make
+        // the browser request the loopback URL, and on Android any app or
+        // page can fire the bsfchat:// intent; letting an unauthenticated
+        // request end the attempt is letting anybody cancel the user's
+        // sign-in. The real redirect, carrying the real state, is still on
+        // its way, and the five-minute timeout bounds the wait if it is not.
+        //
+        // iOS is the exception: ASWebAuthenticationSession completes once,
+        // with whatever its sheet was redirected to, so there is nothing
+        // left to wait for and the attempt has to end here.
+        return;
+#endif
+    }
+
     if (parsed.status != oidc::CallbackStatus::Code) {
-        if (parsed.status == oidc::CallbackStatus::StateMismatch) {
+        if (parsed.status == oidc::CallbackStatus::ProviderError) {
+            // The provider's own words go to the log, bounded, where a bug
+            // report can find them; the UI gets only parsed.error, which is
+            // built from the sanitised code (OidcRequest.h).
             qWarning().noquote()
-                << "[IdentityClient] refused a callback that is not this attempt's";
+                << "[IdentityClient] provider error:"
+                << QUrlQuery(callbackUrl.query()).queryItemValue("error").left(64)
+                << QUrlQuery(callbackUrl.query())
+                       .queryItemValue("error_description").left(200);
         }
         cancel();
         emit loginFailed(parsed.error);
