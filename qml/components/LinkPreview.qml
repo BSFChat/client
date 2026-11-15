@@ -235,6 +235,7 @@ Rectangle {
             Accessible.ignored: true
             Layout.preferredHeight: Math.ceil(
                 Theme.fontSize.md * 1.3 * 2)
+            textFormat: Text.PlainText
             text: preview.ogTitle
             color: Theme.accent
             font.family: Theme.fontSans
@@ -255,6 +256,7 @@ Rectangle {
             Accessible.ignored: true
             Layout.preferredHeight: Math.ceil(
                 Theme.fontSize.xs * 1.3)
+            textFormat: Text.PlainText
             // Always render — `hostName` is derived from the URL
             // synchronously, so the row is populated before the OG
             // fetch resolves. ogSiteName replaces it if/when it
@@ -289,6 +291,7 @@ Rectangle {
             // Site name — quiet, small. Falls back to the URL's host.
             Text {
                 Accessible.ignored: true
+                textFormat: Text.PlainText
                 text: preview.ogSiteName.length > 0
                     ? preview.ogSiteName : preview.hostName
                 visible: text.length > 0
@@ -301,6 +304,7 @@ Rectangle {
             // Title — accent-coloured, clickable like a link.
             Text {
                 Accessible.ignored: true
+                textFormat: Text.PlainText
                 text: preview.ogTitle
                 visible: text.length > 0
                 color: Theme.accent
@@ -321,6 +325,7 @@ Rectangle {
             // Description — dimmer, up to 3 lines.
             Text {
                 Accessible.ignored: true
+                textFormat: Text.PlainText
                 text: preview.ogDescription
                 visible: text.length > 0
                 color: Theme.fg2

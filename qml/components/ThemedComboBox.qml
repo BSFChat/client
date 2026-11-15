@@ -40,6 +40,7 @@ ComboBox {
                                               cb.textRole)
         Accessible.onPressAction: itemDelegate.clicked()
         contentItem: Text {
+            textFormat: Text.PlainText
             // ComboBox.textAt(index) resolves through textRole against
             // most model shapes — QVariantList-as-array,
             // QAbstractListModel with roles, plain JS array — but NOT
@@ -90,6 +91,7 @@ ComboBox {
         // Offset left to leave room for the chevron indicator.
         leftPadding: Theme.sp.s4
         rightPadding: cb.indicator.width + Theme.sp.s5
+        textFormat: Text.PlainText
         // The closed field has the same root cause as the rows above:
         // displayText goes through the same textRole lookup, so it is
         // blank on a QJsonArray model too. Same resolver, same reasons.

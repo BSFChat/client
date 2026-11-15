@@ -140,6 +140,7 @@ Popup {
                     Layout.fillWidth: true
                     spacing: 2
                     Text {
+                        textFormat: Text.PlainText
                         text: forwardDialog.sourceSenderName !== ""
                               ? forwardDialog.sourceSenderName : "unknown"
                         font.family: Theme.fontSans
@@ -148,6 +149,7 @@ Popup {
                         color: Theme.accent
                     }
                     Text {
+                        textFormat: Text.PlainText
                         text: forwardDialog.sourceBody
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm
@@ -199,6 +201,7 @@ Popup {
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
                         anchors.leftMargin: Theme.sp.s1
+                        textFormat: Text.PlainText
                         text: (row.name || "").toUpperCase()
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
@@ -243,6 +246,7 @@ Popup {
                             color: chanHover.containsMouse ? Theme.accent : Theme.fg2
                         }
                         Text {
+                            textFormat: Text.PlainText
                             text: row.name
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.md

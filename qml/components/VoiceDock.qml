@@ -291,6 +291,7 @@ Rectangle {
                         ? (serverManager.activeServer.userId || "") : "")
                     Text {
                         anchors.centerIn: parent
+                        textFormat: Text.PlainText
                         text: {
                             if (!serverManager.activeServer) return "?";
                             var n = serverManager.activeServer.displayName
@@ -319,6 +320,7 @@ Rectangle {
                         // line below it is the part that answers "which call
                         // am I in?" while you are off reading a text channel.
                         visible: !Theme.isMobile
+                        textFormat: Text.PlainText
                         text: serverManager.activeServer
                               ? serverManager.activeServer.displayName : ""
                         font.family: Theme.fontSans
@@ -349,6 +351,7 @@ Rectangle {
                         }
                     }
                     Text {
+                        textFormat: Text.PlainText
                         text: {
                             var s = serverManager.activeServer;
                             if (!s) return "";
@@ -444,6 +447,7 @@ Rectangle {
                             // the detail it only hints at.
                             Accessible.ignored: true
                             visible: !Theme.isMobile
+                            textFormat: Text.PlainText
                             text: serverManager.activeServer
                                 ? serverManager.activeServer.voiceIpPrivacyBadge : ""
                             font.family: Theme.fontSans

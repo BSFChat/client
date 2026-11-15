@@ -421,6 +421,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 spacing: 0
                 Text {
+                    textFormat: Text.PlainText
                     text: {
                         var s = serverManager.activeServer;
                         // In-DM always takes priority — the title
@@ -447,6 +448,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                 }
                 Text {
+                    textFormat: Text.PlainText
                     text: serverManager.activeServer
                         ? serverManager.activeServer.serverName : ""
                     font.family: Theme.fontSans
@@ -535,6 +537,7 @@ ApplicationWindow {
                                 Layout.leftMargin: Theme.sp.s3
                             }
                             Text {
+                                textFormat: Text.PlainText
                                 text: omi.text
                                 Accessible.ignored: true
                                 font.family: Theme.fontSans
@@ -790,6 +793,7 @@ ApplicationWindow {
                             Layout.alignment: Qt.AlignHCenter
                             onClicked: root.openLoginDialog()
                             contentItem: Text {
+                                textFormat: Text.PlainText
                                 text: parent.text
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.md
@@ -816,6 +820,7 @@ ApplicationWindow {
                             Layout.alignment: Qt.AlignHCenter
                             onClicked: root.openJoinByAddress()
                             contentItem: Text {
+                                textFormat: Text.PlainText
                                 text: parent.text
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.md
@@ -860,6 +865,7 @@ ApplicationWindow {
                             Layout.alignment: Qt.AlignHCenter
                             onClicked: leftDrawer.open()
                             contentItem: Text {
+                                textFormat: Text.PlainText
                                 text: parent.text
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.md

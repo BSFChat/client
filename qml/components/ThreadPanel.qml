@@ -283,6 +283,7 @@ Item {
                                 Layout.fillWidth: true
                                 Text {
                                     Accessible.ignored: true
+                                    textFormat: Text.PlainText
                                     text: threadRow.senderDisplayName
                                           || threadRow.sender
                                           || threadRow.eventId

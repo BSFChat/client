@@ -103,6 +103,7 @@ Popup {
 
                 Text {
                     anchors.centerIn: parent
+                    textFormat: Text.PlainText
                     text: {
                         if (!serverManager.activeServer) return "?";
                         var n = serverManager.activeServer.displayName
@@ -276,6 +277,7 @@ Popup {
 
             // mxid reads as code — mono + fg3 matches UserProfileCard.
             Text {
+                textFormat: Text.PlainText
                 text: serverManager.activeServer ? serverManager.activeServer.userId : ""
                 font.family: Theme.fontMono
                 font.pixelSize: Theme.fontSize.sm
@@ -329,6 +331,7 @@ Popup {
                     // is unknown rather than empty.
                     visible: serverManager.activeServer !== null
                         && serverManager.activeServer.blockedUsersModel.loaded
+                    textFormat: Text.PlainText
                     text: serverManager.activeServer
                         ? serverManager.activeServer.blockedUsersModel.count : ""
                     font.family: Theme.fontSans

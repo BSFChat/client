@@ -423,6 +423,7 @@ Rectangle {
                                     color: Theme.senderColor(modelData.userId)
                                     Text {
                                         anchors.centerIn: parent
+                                        textFormat: Text.PlainText
                                         text: {
                                             var n = modelData.displayName
                                                   || modelData.userId;
@@ -441,6 +442,7 @@ Rectangle {
                                     Layout.fillWidth: true
                                     spacing: 0
                                     Text {
+                                        textFormat: Text.PlainText
                                         text: modelData.displayName
                                               || modelData.userId
                                         font.family: Theme.fontSans
@@ -451,6 +453,7 @@ Rectangle {
                                         Accessible.ignored: true
                                     }
                                     Text {
+                                        textFormat: Text.PlainText
                                         text: modelData.userId
                                               + (modelData.serverName
                                                   ? " · " + modelData.serverName
@@ -563,6 +566,7 @@ Rectangle {
                                 color: Theme.senderColor(modelData.peerId)
                                 Text {
                                     anchors.centerIn: parent
+                                    textFormat: Text.PlainText
                                     text: {
                                         var n = modelData.peerDisplayName
                                               || modelData.peerId;
@@ -611,6 +615,7 @@ Rectangle {
                             Layout.fillWidth: true
                             spacing: 0
                             Text {
+                                textFormat: Text.PlainText
                                 text: modelData.peerDisplayName
                                       || modelData.peerId
                                 font.family: Theme.fontSans
@@ -629,6 +634,7 @@ Rectangle {
                             // is useful when the user is in DMs
                             // across multiple servers).
                             Text {
+                                textFormat: Text.PlainText
                                 text: {
                                     if (modelData.peerStatusMessage
                                         && modelData.peerStatusMessage.length > 0) {
@@ -795,6 +801,7 @@ Rectangle {
                 Text {
                     Layout.fillWidth: true
                     verticalAlignment: Text.AlignVCenter
+                    textFormat: Text.PlainText
                     text: serverManager.activeServer ? serverManager.activeServer.serverName : "BSFChat"
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.lg
@@ -1040,6 +1047,7 @@ Rectangle {
                                         color: Theme.senderColor(modelData.peerId)
                                         Text {
                                             anchors.centerIn: parent
+                                            textFormat: Text.PlainText
                                             text: {
                                                 var n = (modelData.peerDisplayName || modelData.peerId || "?");
                                                 var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -1071,6 +1079,7 @@ Rectangle {
                                 }
 
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: modelData.peerDisplayName || modelData.peerId
                                     font.family: Theme.fontSans
                                     font.pixelSize: Theme.fontSize.base
@@ -1306,6 +1315,7 @@ Rectangle {
                                 }
 
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: modelData.categoryName ? modelData.categoryName.toUpperCase() : ""
                                     font.family: Theme.fontSans
                                     font.pixelSize: Theme.fontSize.xs
@@ -1656,6 +1666,7 @@ Rectangle {
                                                 }
 
                                                 Text {
+                                                    textFormat: Text.PlainText
                                                     text: modelData.displayName
                                                     font.family: Theme.fontSans
                                                     font.pixelSize: Theme.fontSize.base
@@ -2181,6 +2192,7 @@ Rectangle {
                         }
                         // Active voice channel name — the "#room" line.
                         Text {
+                            textFormat: Text.PlainText
                             text: {
                                 var s = serverManager.activeServer;
                                 if (!s) return "";
@@ -2204,6 +2216,7 @@ Rectangle {
                         // publish one yet, so we fall back to the server
                         // host. When CallController.latencyMs lands, swap.
                         Text {
+                            textFormat: Text.PlainText
                             text: serverManager.activeServer
                                   ? serverManager.activeServer.serverName : ""
                             font.family: Theme.fontMono
@@ -2413,6 +2426,7 @@ Rectangle {
 
                                 Text {
                                     anchors.centerIn: parent
+                                    textFormat: Text.PlainText
                                     text: {
                                         if (!serverManager.activeServer) return "?";
                                         var name = serverManager.activeServer.displayName
@@ -2467,6 +2481,7 @@ Rectangle {
                             // still lives (the account menu below, and
                             // Settings → Account → USER ID).
                             Text {
+                                textFormat: Text.PlainText
                                 text: serverManager.activeServer
                                     ? UserIdentity.accountTitle(
                                           serverManager.activeServer.userId,
@@ -2483,6 +2498,7 @@ Rectangle {
                             }
 
                             Text {
+                                textFormat: Text.PlainText
                                 text: serverManager.activeServer
                                     ? UserIdentity.accountSubtitle(
                                           serverManager.activeServer.userId)
@@ -2703,6 +2719,7 @@ Rectangle {
                         // 20th character is the ambiguity this whole block was
                         // added to end. A popup menu can afford a second row.
                         Text {
+                            textFormat: Text.PlainText
                             text: serverManager.activeServer
                                   ? serverManager.activeServer.displayName : ""
                             font.family: Theme.fontSans
@@ -2718,6 +2735,7 @@ Rectangle {
                         // grows a row taller is a far cheaper price than an
                         // id that cannot be read.
                         Text {
+                            textFormat: Text.PlainText
                             text: serverManager.activeServer
                                   ? serverManager.activeServer.userId : ""
                             font.family: Theme.fontMono
@@ -3266,6 +3284,7 @@ Rectangle {
                 }
                 Text {
                     Layout.fillWidth: true
+                    textFormat: Text.PlainText
                     text: "Delete #" + deleteChannelConfirm.roomName + "?"
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.xl
@@ -3499,6 +3518,7 @@ Rectangle {
                 Layout.fillWidth: true
                 spacing: Theme.sp.s3
                 Text {
+                    textFormat: Text.PlainText
                     text: createPrompt.promptTitle
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.xl

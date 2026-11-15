@@ -172,6 +172,7 @@ Column {
                         opacity: participantRow.muted || participantRow.deafened ? 0.5 : 1.0
                         Text {
                             anchors.centerIn: parent
+                            textFormat: Text.PlainText
                             text: {
                                 var n = participantRow.label;
                                 var s = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -203,6 +204,7 @@ Column {
                 Text {
                     Layout.fillWidth: true
                     Layout.alignment: Qt.AlignVCenter
+                    textFormat: Text.PlainText
                     text: participantRow.label
                     Accessible.ignored: true
                     font.family: Theme.fontSans

@@ -85,6 +85,7 @@ Popup {
                     Text {
                         anchors.centerIn: parent
                         Accessible.ignored: true
+                        textFormat: Text.PlainText
                         text: {
                             var n = popup.displayName || popup.userId || "?";
                             var s = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -109,6 +110,7 @@ Popup {
                         font.letterSpacing: Theme.trackWidest.xs
                     }
                     Text {
+                        textFormat: Text.PlainText
                         text: popup.displayName
                         Accessible.ignored: true
                         color: Theme.fg0
@@ -120,6 +122,7 @@ Popup {
                         Layout.fillWidth: true
                     }
                     Text {
+                        textFormat: Text.PlainText
                         text: popup.userId
                         Accessible.role: Accessible.StaticText
                         Accessible.name: qsTr("User ID %1").arg(popup.userId)
@@ -224,6 +227,7 @@ Popup {
                             Text {
                                 Layout.alignment: Qt.AlignVCenter
                                 Layout.fillWidth: true
+                                textFormat: Text.PlainText
                                 text: parent.parent.role.name || parent.parent.roleId
                                 Accessible.ignored: true
                                 color: Theme.fg0
@@ -293,6 +297,7 @@ Popup {
 
                 Text {
                     Layout.fillWidth: true
+                    textFormat: Text.PlainText
                     text: {
                         if (!serverManager.activeServer) return "";
                         var current = serverManager.activeServer.memberRoles(popup.userId) || [];

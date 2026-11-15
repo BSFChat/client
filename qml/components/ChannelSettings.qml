@@ -183,6 +183,7 @@ Popup {
             Layout.fillWidth: true
             spacing: 2
             Text {
+                textFormat: Text.PlainText
                 text: title
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.md
@@ -192,6 +193,7 @@ Popup {
             Text {
                 visible: description.length > 0
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: description
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
@@ -273,6 +275,7 @@ Popup {
 
                     Text {
                         anchors.centerIn: parent
+                        textFormat: Text.PlainText
                         text: modelData.label
                         // Part of the segment's own announcement.
                         Accessible.ignored: true
@@ -320,6 +323,7 @@ Popup {
                 anchors.rightMargin: Theme.sp.s7
                 Text {
                     Layout.fillWidth: true
+                    textFormat: Text.PlainText
                     text: channelSettings.liveRoomName
                         ? ("Channel settings — #" + channelSettings.liveRoomName)
                         : "Channel settings"
@@ -791,6 +795,7 @@ Popup {
                                     Layout.fillWidth: true
                                     spacing: 2
                                     Text {
+                                        textFormat: Text.PlainText
                                         text: flagInfo.label
                                         // Carried by the row's own name.
                                         Accessible.ignored: true
@@ -803,6 +808,7 @@ Popup {
                                         Layout.fillWidth: true
                                         // Carried by the row's own description.
                                         Accessible.ignored: true
+                                        textFormat: Text.PlainText
                                         text: flagInfo.hint
                                         color: Theme.fg2
                                         font.family: Theme.fontSans

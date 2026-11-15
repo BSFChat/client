@@ -95,6 +95,7 @@ Popup {
         Layout.fillWidth: true
         spacing: Theme.sp.s3
         Text {
+            textFormat: Text.PlainText
             text: parent.title
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.xxl
@@ -439,6 +440,7 @@ Popup {
                 }
                 Text {
                     Layout.fillWidth: true
+                    textFormat: Text.PlainText
                     text: serverSettingsPopup._toastMessage
                     // Carried by the toast's own name.
                     Accessible.ignored: true
@@ -586,6 +588,7 @@ Popup {
             // list prints for it. Two identical lines say nothing twice.
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: serverManager.activeServer
                       ? serverManager.activeServer.displayName : ""
                 font.family: Theme.fontSans
@@ -612,6 +615,7 @@ Popup {
             }
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: "If you have more than one account on this server, the "
                     + "permissions belong to the account above — not to you as "
                     + "a person. Signing in as the other one is often the whole "
@@ -691,6 +695,7 @@ Popup {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.left: parent.left
                             anchors.leftMargin: Theme.sp.s3
+                            textFormat: Text.PlainText
                             text: modelData
                             // Carried by the row's own name.
                             Accessible.ignored: true
@@ -824,6 +829,7 @@ Popup {
                             Text {
                                 anchors.centerIn: parent
                                 visible: serverIconPreview.status !== Image.Ready
+                                textFormat: Text.PlainText
                                 text: {
                                     var n = serverManager.activeServer
                                         ? serverManager.activeServer.serverName : "?";
@@ -884,6 +890,7 @@ Popup {
                                     Accessible.description: qsTr("Pick an image file to use as this server's icon")
                                     Accessible.onPressAction: uploadIconBtn.clicked()
                                     contentItem: Text {
+                                        textFormat: Text.PlainText
                                         text: uploadIconBtn.text
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.sm
@@ -1019,6 +1026,7 @@ Popup {
 
                     Text {
                         Layout.maximumWidth: 420
+                        textFormat: Text.PlainText
                         text: "Cap the highest quality preset users may pick when "
                             + "sharing their screen in voice channels. Lower caps "
                             + "protect bandwidth on busy servers; Ultra is uncapped."
@@ -1048,6 +1056,7 @@ Popup {
                         spacing: Theme.sp.s3
                         Text {
                             Layout.preferredWidth: 130
+                            textFormat: Text.PlainText
                             text: pr.label
                             color: Theme.fg1
                             font.family: Theme.fontSans
@@ -1319,6 +1328,7 @@ Popup {
                                         Accessible.ignored: true
                                     }
                                     Text {
+                                        textFormat: Text.PlainText
                                         text: roleDelegate.role.name || ""
                                         // Carried by the row's own name.
                                         Accessible.ignored: true
@@ -1663,6 +1673,7 @@ Popup {
                                     Text {
                                         Layout.fillWidth: true
                                         wrapMode: Text.WordWrap
+                                        textFormat: Text.PlainText
                                         text: "It appears in every member\u2019s Your Roles "
                                               + "picker. The server refuses this unless the "
                                               + "role\u2019s permissions are already covered by "
@@ -1718,6 +1729,7 @@ Popup {
                                                 }
                                                 Text {
                                                     id: permLabel
+                                                    textFormat: Text.PlainText
                                                     text: modelData.label
                                                     // Label and tooltip are both
                                                     // on the checkbox already.
@@ -2100,6 +2112,7 @@ Popup {
                                             anchors.centerIn: parent
                                             // Decorative initial; the row is named.
                                             Accessible.ignored: true
+                                            textFormat: Text.PlainText
                                             text: {
                                                 var n = modelData.displayName || modelData.userId || "?";
                                                 var s = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -2122,6 +2135,7 @@ Popup {
                                             Layout.fillWidth: true
                                             spacing: Theme.sp.s2
                                             Text {
+                                                textFormat: Text.PlainText
                                                 text: modelData.displayName || ""
                                                 // Both halves are in the row's
                                                 // own name.
@@ -2133,6 +2147,7 @@ Popup {
                                                 elide: Text.ElideRight
                                             }
                                             Text {
+                                                textFormat: Text.PlainText
                                                 text: modelData.userId || ""
                                                 Accessible.ignored: true
                                                 font.family: Theme.fontMono
@@ -2201,6 +2216,7 @@ Popup {
                                                             Layout.alignment: Qt.AlignVCenter
                                                         }
                                                         Text {
+                                                            textFormat: Text.PlainText
                                                             text: parent.parent.rname
                                                             color: parent.parent.rcolor
                                                             font.family: Theme.fontSans
@@ -2326,6 +2342,7 @@ Popup {
                                                 Text {
                                                     Layout.alignment: Qt.AlignVCenter
                                                     Layout.fillWidth: true
+                                                    textFormat: Text.PlainText
                                                     text: modelData.name || ""
                                                     // Carried by the checkbox.
                                                     Accessible.ignored: true
@@ -2610,6 +2627,7 @@ Popup {
                                     spacing: Theme.sp.s2
 
                                     Text {
+                                        textFormat: Text.PlainText
                                         text: (modelData.categoryName || "").toUpperCase()
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.xs
@@ -2724,6 +2742,7 @@ Popup {
                                         }
 
                                         Text {
+                                            textFormat: Text.PlainText
                                             text: parent.parent.rowRoomName
                                             font.family: Theme.fontSans
                                             font.pixelSize: Theme.fontSize.md
@@ -2733,6 +2752,7 @@ Popup {
                                         }
 
                                         Text {
+                                            textFormat: Text.PlainText
                                             text: (modelData.roomType || (parent.parent.rowIsVoice ? "voice" : "text")).toUpperCase()
                                             font.family: Theme.fontMono
                                             font.pixelSize: Theme.fontSize.xs
@@ -2953,6 +2973,7 @@ Popup {
                                         anchors.centerIn: parent
                                         // Decorative initial; the name is beside it.
                                         Accessible.ignored: true
+                                        textFormat: Text.PlainText
                                         text: {
                                             var n = modelData.displayName || modelData.userId || "?";
                                             var s = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -2970,6 +2991,7 @@ Popup {
                                     spacing: 0
 
                                     Text {
+                                        textFormat: Text.PlainText
                                         text: modelData.displayName || modelData.userId || ""
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.md
@@ -2983,6 +3005,7 @@ Popup {
                                         spacing: Theme.sp.s2
 
                                         Text {
+                                            textFormat: Text.PlainText
                                             text: modelData.userId || ""
                                             font.family: Theme.fontMono
                                             font.pixelSize: Theme.fontSize.xs
@@ -2993,6 +3016,7 @@ Popup {
                                         // Reason, if any — quieter, italic.
                                         Text {
                                             visible: (modelData.reason || "") !== ""
+                                            textFormat: Text.PlainText
                                             text: "· " + (modelData.reason || "")
                                             font.family: Theme.fontSans
                                             font.pixelSize: Theme.fontSize.xs
@@ -3156,6 +3180,7 @@ Popup {
                 }
                 Text {
                     Layout.fillWidth: true
+                    textFormat: Text.PlainText
                     text: _confirmModDialog.titleText
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.xl
@@ -3168,6 +3193,7 @@ Popup {
 
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: _confirmModDialog.descText
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm

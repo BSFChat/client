@@ -54,6 +54,7 @@ Rectangle {
         }
         Text {
             id: bannerText
+            textFormat: Text.PlainText
             text: root.text
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.sm

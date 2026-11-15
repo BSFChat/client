@@ -213,6 +213,7 @@ Popup {
                 }
                 Text {
                     Layout.fillWidth: true
+                    textFormat: Text.PlainText
                     text: reportDialog.kind === "message"
                         ? "Report this message"
                         : "Report " + reportDialog.targetName
@@ -228,6 +229,7 @@ Popup {
             // ── What actually happens ──
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: "This goes to the administrators of this server. They "
                     + "can read the message and decide what to do. Nothing "
                     + "changes right away, and "
@@ -259,6 +261,7 @@ Popup {
                     spacing: 2
                     Text {
                         Layout.fillWidth: true
+                        textFormat: Text.PlainText
                         text: reportDialog.targetName
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
@@ -268,6 +271,7 @@ Popup {
                     }
                     Text {
                         Layout.fillWidth: true
+                        textFormat: Text.PlainText
                         text: reportDialog.preview
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm
@@ -357,6 +361,7 @@ Popup {
             Text {
                 Layout.fillWidth: true
                 visible: reportDialog.alreadyBlocked
+                textFormat: Text.PlainText
                 text: "You are already blocking " + reportDialog.targetName + "."
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.xs
@@ -368,6 +373,7 @@ Popup {
             Text {
                 Layout.fillWidth: true
                 visible: reportDialog.errorMessage.length > 0
+                textFormat: Text.PlainText
                 text: reportDialog.errorMessage
                 // The rate-limit refusal says WHEN to try again, which is no
                 // use to somebody who never hears it (§8).

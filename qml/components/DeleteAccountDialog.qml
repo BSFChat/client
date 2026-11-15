@@ -213,6 +213,7 @@ Popup {
 
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: "This deletes your account on "
                     + (deleteDialog.conn ? deleteDialog.conn.serverUrl : "this server")
                     + ". It cannot be undone, and support cannot bring it back."
@@ -234,6 +235,7 @@ Popup {
             }
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: "• Your sign-in, on this and every other device\n"
                     + "• Your display name, nickname and avatar\n"
                     + "• Your membership of every channel here\n"
@@ -338,6 +340,7 @@ Popup {
                 Layout.fillWidth: true
                 visible: deleteDialog.conn !== null
                     && deleteDialog.conn.accountDeletionError.length > 0
+                textFormat: Text.PlainText
                 text: deleteDialog.conn ? deleteDialog.conn.accountDeletionError : ""
                 Accessible.role: Accessible.AlertMessage
                 Accessible.name: deleteDialog.conn
@@ -406,6 +409,7 @@ Popup {
                                                   deleteConfirmBtn.clicked()
                     implicitHeight: Theme.controlHeight.md
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: {
                             if (!deleteDialog.conn) return "Delete account";
                             if (deleteDialog.conn.accountDeletionBusy) return "Deleting…";

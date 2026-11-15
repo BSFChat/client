@@ -177,6 +177,7 @@ Rectangle {
 
                 Text {
                     anchors.centerIn: parent
+                    textFormat: Text.PlainText
                     text: {
                         var n = tile.dispName;
                         var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -250,6 +251,7 @@ Rectangle {
             Layout.alignment: Qt.AlignHCenter
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
+            textFormat: Text.PlainText
             text: tile.dispName
             Accessible.ignored: true
             font.family: Theme.fontSans
@@ -310,6 +312,7 @@ Rectangle {
             Text {
                 anchors.centerIn: parent
                 horizontalAlignment: Text.AlignHCenter
+                textFormat: Text.PlainText
                 text: tile.connectionPath
                 // Diagnostics, off by default, and a bare word
                 // ("relayed") with no context when read alone.

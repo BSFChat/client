@@ -531,6 +531,7 @@ Dialog {
             Text {
                 visible: dialog.mode === "choose" && dialog.browserSessionNote
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: "Signed out on this device. Your browser is still signed in to "
                     + dialog.identityHost()
                     + " — sign out there first, or the same account will be used again."
@@ -604,6 +605,7 @@ Dialog {
                 visible: (dialog.mode === "signedIn" || dialog.mode === "noServers")
                          && dialog.signedInAs() !== ""
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: dialog.signedInAs()
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.lg
@@ -621,6 +623,7 @@ Dialog {
                          && dialog.signedInDetail() !== ""
                 Layout.fillWidth: true
                 Layout.topMargin: -Theme.sp.s3
+                textFormat: Text.PlainText
                 text: dialog.signedInDetail()
                 font.family: Theme.fontMono
                 font.pixelSize: Theme.fontSize.xs
@@ -632,6 +635,7 @@ Dialog {
             Text {
                 visible: dialog.mode === "signedIn" && dialog.joinedSummary() !== ""
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: dialog.joinedSummary()
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
@@ -646,6 +650,7 @@ Dialog {
             Text {
                 visible: dialog.mode === "noServers"
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: "This account hasn't joined a BSFChat server yet, so there's "
                     + "nothing to restore.\n\nBSFChat servers are run by the people "
                     + "who use them. Ask whoever runs yours for its address — "
@@ -889,6 +894,7 @@ Dialog {
             Text {
                 Layout.fillWidth: true
                 visible: dialog.mode === "address" && dialog.probed && !dialog.checkingFlows
+                textFormat: Text.PlainText
                 text: dialog.probeSummary()
                 // §8. "No BSFChat server found at …" is the answer to
                 // something the user just did, and a probe that fails in
@@ -912,6 +918,7 @@ Dialog {
             Text {
                 Layout.fillWidth: true
                 visible: dialog.mode === "address" && dialog.probeNote !== "" && !dialog.checkingFlows
+                textFormat: Text.PlainText
                 text: dialog.probeNote
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.xs
@@ -1089,6 +1096,7 @@ Dialog {
 
             // Error message
             Text {
+                textFormat: Text.PlainText
                 text: dialog.errorMessage
                 font.pixelSize: Theme.fontSize.sm
                 color: Theme.danger

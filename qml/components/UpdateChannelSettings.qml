@@ -77,6 +77,7 @@ ColumnLayout {
                     Text {
                         id: buildBadge
                         anchors.centerIn: parent
+                        textFormat: Text.PlainText
                         // Version spelling goes through UF.vtag like every
                         // other version in the updater UI; this badge used
                         // to print a bare "0.0.44-rc.2" a few rows under a
@@ -97,6 +98,7 @@ ColumnLayout {
 
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: "Also offer release candidates — builds published "
                     + "ahead of a final release for testing. They arrive "
                     + "through the same update prompt as ordinary "
