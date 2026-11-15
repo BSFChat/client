@@ -297,6 +297,13 @@ void ServerManager::checkLoginFlows(const QString& url)
     });
 }
 
+QString ServerManager::serverUrlKey(const QString& url) const
+{
+    const QString normalised = bsfchat::normaliseServerUrl(url);
+    if (normalised.isEmpty()) return {};
+    return bsfchat::client::serverComparisonKey(normalised);
+}
+
 void ServerManager::addServerWithOidc(const QString& url)
 {
     m_discovery.resolve(url, [this, url](const bsfchat::Resolution& r) {
@@ -355,7 +362,11 @@ void ServerManager::addServerWithOidcResolved(const QString& rawUrl)
         tempClient->deleteLater();
 
         if (providerUrl.isEmpty()) {
-            emit loginError(conn->serverUrl(), "Server does not provide an identity provider URL");
+            // Through onLoginFailed, like every other way this add can fail:
+            // emitting loginError alone left the half-added connection in
+            // the sidebar with no credential and no sign-in running — a
+            // server entry that could only ever say it was not signed in.
+            onLoginFailed(conn, tr("This server does not offer BSFChat ID sign-in."));
             return;
         }
         conn->loginWithOidc(providerUrl);
@@ -456,7 +467,7 @@ void ServerManager::reauthenticateServer(int index)
     if (auto* conn = m_roster.at(index)) conn->beginReauth();
 }
 
-void ServerManager::rebuildConnection(int index, const QString& url)
+void ServerManager::rebuildConnection(int index, const QString& url, bool freshSession)
 {
     auto* old = m_roster.connections()[index];
 
@@ -468,6 +479,7 @@ void ServerManager::rebuildConnection(int index, const QString& url)
     // rebuild works even for a connection whose login predates this
     // process (restored) or whose settings row is missing.
     auto* conn = new ServerConnection(url, this);
+    if (freshSession) conn->requireFullSync();
     conn->setCredentials(old->userId(), old->accessToken(),
                          old->deviceId(), old->displayName());
     // Same source as the credentials, and for the same reason: the live
@@ -714,6 +726,21 @@ void ServerManager::wireConnection(ServerConnection* conn)
     // message wherever the sign-in was started from.
     connect(conn, &ServerConnection::browserOpenFailed, this,
             &ServerManager::browserOpenFailed);
+
+    // A re-auth came back as a different account (C-8). The credentials are
+    // already persisted (loginSucceeded fired first, above); what has to go
+    // is every piece of state the old account left on this object. A fresh
+    // ServerConnection is exactly what a brand-new login gets — empty
+    // timelines, room and member lists, unread state, and a LocalCache
+    // bound to the new account — so build one rather than try to empty this
+    // one field by field. Queued: this fires from inside the old object's
+    // login handler, which should finish before the object is retired.
+    connect(conn, &ServerConnection::accountSwitched, this,
+        [this, conn](const QString&, const QString&) {
+            const int idx = m_roster.indexOf(conn);
+            if (idx < 0) return;
+            rebuildConnection(idx, conn->serverUrl(), /*freshSession=*/true);
+        }, Qt::QueuedConnection);
 
     // Settings plumbed in so the mic gate can read voiceMode / PTT.
     conn->setSettings(m_settings);

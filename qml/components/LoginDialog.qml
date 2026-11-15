@@ -96,6 +96,66 @@ Dialog {
     property string probeNote: ""
     property bool probeRedirected: false
 
+    // --- Whose replies are these (U-5).
+    //
+    // ServerManager's loginError / loginSuccess / serverProbed are broadcast
+    // for EVERY server: a saved server failing to re-authenticate in the
+    // background, or a probe for the address the user typed two edits ago,
+    // arrives on the same signal as the reply this dialog is waiting for.
+    // The handlers used to take any of them as theirs, so somebody else's
+    // failure appeared under the address being typed and cleared the
+    // spinner of an attempt still in flight.
+    //
+    // attemptUrls: the normalised addresses the current sign-in / register
+    //   was sent for — what was typed and what discovery resolved it to,
+    //   because either can come back depending on where it failed.
+    // probeRequest: the exact string handed to checkLoginFlows; serverProbed
+    //   echoes it back as requestedUrl.
+    // _pendingFlows: loginFlowsChecked carries only the resolved URL, so it
+    //   is held until the serverProbed emitted right after it says which
+    //   request it answered.
+    property var attemptUrls: []
+    property string probeRequest: ""
+    property var _pendingFlows: null
+
+    // Compared the way the C++ side compares servers
+    // (ServerManager.serverUrlKey), or as the raw text when it is not an
+    // address at all — "x is not a server address" errors name the raw
+    // text, and must still match.
+    function normUrl(u) {
+        var raw = (u || "").trim();
+        if (raw === "") return "";
+        var n = serverManager.serverUrlKey(raw);
+        return n !== "" ? n : raw;
+    }
+
+    function beginAttempt() {
+        var out = [];
+        var cands = [dialog.targetUrl(), urlField.text, dialog.resolvedUrl];
+        for (var i = 0; i < cands.length; ++i) {
+            var n = dialog.normUrl(cands[i]);
+            if (n !== "" && out.indexOf(n) < 0) out.push(n);
+        }
+        dialog.attemptUrls = out;
+    }
+
+    // True when a reply naming `url` belongs to what this dialog started:
+    // the address attempt, or one of the servers its BSFChat ID sign-in
+    // added. Also read by both shells to decide whether a loginError that
+    // the open dialog will NOT show has to be toasted instead.
+    function ownsServerUrl(url) {
+        var n = dialog.normUrl(url);
+        if (n === "") return false;
+        if (dialog.attemptUrls.indexOf(n) >= 0) return true;
+        for (var i = 0; i < dialog.joinedUrls.length; ++i)
+            if (dialog.normUrl(dialog.joinedUrls[i]) === n) return true;
+        return false;
+    }
+
+    // Is anything this dialog started still waiting on an answer?
+    readonly property bool attemptInFlight: dialog.isConnecting || dialog.oidcInProgress
+                                            || dialog.identitySyncInProgress
+
     // Open straight onto address entry. Both shells expose this as
     // Window.window.openJoinByAddress() so a shared component can offer
     // "join a server by address" as a first-class action without the user
@@ -145,6 +205,8 @@ Dialog {
         dialog.probeOutcome = "";
         dialog.probeNote = "";
         dialog.probeRedirected = false;
+        dialog.probeRequest = url;
+        dialog._pendingFlows = null;
         serverManager.checkLoginFlows(url);
     }
 
@@ -264,16 +326,30 @@ Dialog {
 
     Connections {
         target: serverManager
+        // Held, not applied: it names only the resolved URL, so it cannot say
+        // whether it answers the current probe. serverProbed, emitted from
+        // the same callback straight after it, can.
         function onLoginFlowsChecked(url, oidcAvail, providerUrl, passwordAvail) {
-            dialog.checkingFlows = false;
-            dialog.oidcAvailable = oidcAvail;
-            dialog.oidcProviderUrl = providerUrl;
-            dialog.passwordAvailable = passwordAvail;
+            dialog._pendingFlows = { url: url, oidc: oidcAvail,
+                                     provider: providerUrl, password: passwordAvail };
         }
         // The detail loginFlowsChecked has no room for: which of the six
         // outcomes happened, and where discovery decided the server lives.
         function onServerProbed(requestedUrl, resolvedUrl, outcome, providerUrl, redirected, note) {
+            var flows = dialog._pendingFlows;
+            dialog._pendingFlows = null;
+            // A probe for an address that is no longer the one on screen
+            // (edited since, or the dialog was closed and reopened) must not
+            // decide what this one is offered (U-5).
+            if (!dialog.checkingFlows
+                || dialog.normUrl(requestedUrl) !== dialog.normUrl(dialog.probeRequest))
+                return;
             dialog.checkingFlows = false;
+            if (flows && dialog.normUrl(flows.url) === dialog.normUrl(resolvedUrl)) {
+                dialog.oidcAvailable = flows.oidc;
+                dialog.oidcProviderUrl = flows.provider;
+                dialog.passwordAvailable = flows.password;
+            }
             dialog.probed = true;
             dialog.resolvedUrl = resolvedUrl;
             dialog.probeOutcome = outcome;
@@ -281,6 +357,9 @@ Dialog {
             dialog.probeNote = note;
         }
         function onLoginSuccess(serverUrl) {
+            // Another server's success — a saved one re-authenticating in
+            // the background — is not the answer to anything shown here.
+            if (!dialog.ownsServerUrl(serverUrl)) return;
             dialog.oidcInProgress = false;
             dialog.isConnecting = false;
             dialog.errorMessage = "";
@@ -297,6 +376,10 @@ Dialog {
             dialog.close();
         }
         function onLoginError(serverUrl, error) {
+            // Same rule: a saved server's re-auth failure belongs to the
+            // shell's toast, not under the address being typed here — and
+            // must not end an attempt that is still running (U-5).
+            if (!dialog.ownsServerUrl(serverUrl)) return;
             dialog.oidcInProgress = false;
             dialog.isConnecting = false;
             dialog.awaitingSingleJoin = false;
@@ -334,6 +417,9 @@ Dialog {
         // Neither spinner is cleared: the sign-in really is still in
         // progress, waiting for the browser the user is about to open.
         function onBrowserOpenFailed(authUrl) {
+            // Only for a sign-in this dialog started; a background re-auth
+            // that cannot open a browser is toasted by the shell.
+            if (!dialog.attemptInFlight) return;
             dialog.manualAuthUrl = authUrl;
         }
     }
@@ -352,6 +438,9 @@ Dialog {
         dialog.checkingFlows = false;
         dialog.awaitingSingleJoin = false;
         dialog.joinedUrls = [];
+        dialog.attemptUrls = [];
+        dialog.probeRequest = "";
+        dialog._pendingFlows = null;
         dialog.probed = false;
         dialog.resolvedUrl = "";
         dialog.probeOutcome = "";
@@ -385,6 +474,9 @@ Dialog {
         dialog.browserSessionNote = false;
         dialog.identitySyncInProgress = false;
         dialog.manualAuthUrl = "";
+        dialog.attemptUrls = [];
+        dialog.probeRequest = "";
+        dialog._pendingFlows = null;
         dialog.probed = false;
         dialog.resolvedUrl = "";
         dialog.probeOutcome = "";
@@ -958,6 +1050,7 @@ Dialog {
                     dialog.manualAuthUrl = "";
                     dialog.oidcInProgress = true;
                     dialog.awaitingSingleJoin = true;
+                    dialog.beginAttempt();
                     serverManager.addServerWithOidc(dialog.targetUrl());
                 }
             }
@@ -1263,6 +1356,7 @@ Dialog {
                         }
                         dialog.isConnecting = true;
                         dialog.awaitingSingleJoin = true;
+                        dialog.beginAttempt();
                         serverManager.registerServer(dialog.targetUrl(), usernameField.text.trim(), passwordField.text.trim());
                     }
                 }
@@ -1300,6 +1394,7 @@ Dialog {
                         }
                         dialog.isConnecting = true;
                         dialog.awaitingSingleJoin = true;
+                        dialog.beginAttempt();
                         serverManager.addServer(dialog.targetUrl(), usernameField.text.trim(), passwordField.text.trim());
                     }
                 }

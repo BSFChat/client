@@ -600,8 +600,19 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     });
 
     // Connect room members response
+    // The list's loading / error state (U-4). A failure with rows already
+    // on screen (from the sync cache) is not worth a word — what is shown
+    // is still right — but it is forgotten, so the next open asks again.
+    connect(m_client, &MatrixClient::roomMembersError, this,
+            [this](const QString& roomId, const QString& error) {
+        qWarning().noquote() << "[ServerConnection] /members failed for" << roomId << ":" << error;
+        m_membersFetchedAt.remove(roomId);
+        if (roomId != m_activeRoomId) return;
+        setMembersStatus(m_memberListModel->rowCount() == 0 ? 2 : 0);
+    });
     connect(m_client, &MatrixClient::roomMembersResult, this, [this](const QString& roomId, const QJsonArray& members) {
         if (roomId != m_activeRoomId) return;
+        setMembersStatus(0);
         if (m_membersTimer.isValid()) {
             qCInfo(logTimeline).nospace()
                 << "/members rt=" << m_membersTimer.elapsed() << "ms n=" << members.size()
@@ -849,6 +860,18 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         if (!m_activeRoomId.isEmpty() && !m_userId.isEmpty()) {
             m_client->setTyping(m_activeRoomId, m_userId, false);
         }
+    });
+
+    // A re-auth step that neither succeeds nor fails — every request now
+    // times out, but a step can also simply be abandoned — must not hold
+    // Reauthenticating forever (audit C-6). Same bound SessionAuth applies.
+    m_reauthWatchdog.setSingleShot(true);
+    m_reauthWatchdog.setInterval(int(bsfchat::client::SessionAuth::kReauthStaleMs));
+    connect(&m_reauthWatchdog, &QTimer::timeout, this, [this]() {
+        if (!m_auth.isReauthenticating()) return;
+        qWarning().noquote() << "[ServerConnection] re-authentication for"
+                             << m_serverUrl << "did not finish; giving up on it";
+        failReauth(tr("Signing in didn't finish. Try again."));
     });
 
     // Voice poll timer
@@ -1130,6 +1153,10 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
             if (m_voiceEngine) m_voiceEngine->setLocalUserId(canonicalId);
 #endif
             emit userIdChanged();
+            // Every permission answer is "for m_userId", so they all just
+            // changed with it (U-7).
+            ++m_permissionsGeneration;
+            emit permissionsChanged();
             emit identityCorrected();
             // The block list is stored per user id and the GET above went out
             // with the stale one, which the server answers 403 (account data
@@ -1170,14 +1197,25 @@ void ServerConnection::awaitLoginReply()
 
 void ServerConnection::applyLoginResponse(const bsfchat::LoginResponse& resp)
 {
-    m_userId = QString::fromStdString(resp.user_id);
+    // A re-auth may come back as somebody else: the browser held another
+    // account's session, or a different username went into the password
+    // prompt. Everything this object has cached is the previous account's,
+    // and carrying it over would show one person another's rooms and
+    // messages (audit C-8). Same account: unchanged behaviour below.
+    const QString previousUserId = m_userId;
+    const QString newUserId = QString::fromStdString(resp.user_id);
+    const bool switchedAccount = !previousUserId.isEmpty() && newUserId != previousUserId;
+
+    m_userId = newUserId;
     m_accessToken = QString::fromStdString(resp.access_token);
     m_deviceId = QString::fromStdString(resp.device_id);
     // Only on a first login. Overwriting it on re-auth would replace a real
-    // profile name with the MXID every time a session is renewed.
-    if (m_displayName.isEmpty()) m_displayName = m_userId;
+    // profile name with the MXID every time a session is renewed — but the
+    // old account's name is not this account's, so a switch resets it.
+    if (m_displayName.isEmpty() || switchedAccount) m_displayName = m_userId;
     m_client->setAccessToken(m_accessToken);
 
+    m_reauthWatchdog.stop();
     m_auth.noteAuthenticated();
     m_connected = true;
     m_connectionStatus = 1;
@@ -1198,12 +1236,28 @@ void ServerConnection::applyLoginResponse(const bsfchat::LoginResponse& resp)
     emit syncErrorMessageChanged();
     emit sessionAuthChanged();
     emit loginSucceeded();
+    if (switchedAccount) {
+        qWarning().noquote() << "[ServerConnection] re-authentication on" << m_serverUrl
+                             << "signed in as a different account; starting a new session";
+        // No sync on this object: ServerManager replaces it with a fresh
+        // connection for the new account, which runs the initial sync the
+        // way a brand-new login does. Syncing here first would merge the
+        // new account's rooms into the old account's state.
+        emit accountSwitched(previousUserId, newUserId);
+        return;
+    }
     startSync();
 }
 
 void ServerConnection::onLoginAttemptFailed(const QString& error)
 {
-    if (m_auth.isReauthenticating()) {
+    // needsReauth, not isReauthenticating: an attempt can end in Expired
+    // before its reply lands — the prompt dismissed mid-request, the
+    // watchdog, a late 401 — and a failure arriving then is still a
+    // re-auth's. Routing it to loginFailed would have ServerManager remove a
+    // server the user only meant to sign back in to. A server being ADDED
+    // never leaves Authenticated before its first login, so it is unaffected.
+    if (m_auth.needsReauth()) {
         // Deliberately NOT loginFailed: ServerManager answers that by
         // removing the connection, which is correct for a server being added
         // and destroys a server the user has been on for months.
@@ -1372,9 +1426,22 @@ void ServerConnection::onAccessTokenRejected(const QString& errorBody)
 
 void ServerConnection::failReauth(const QString& error)
 {
+    returnToExpired();
+    emit reauthFailed(error);
+}
+
+void ServerConnection::cancelReauth()
+{
+    if (!m_auth.isReauthenticating()) return;
+    returnToExpired();
+}
+
+void ServerConnection::returnToExpired()
+{
     // Back to Expired, never to a terminal state: the button has to work
     // again. The version this replaced could only be cleared by removing the
     // server from the sidebar and adding it back.
+    m_reauthWatchdog.stop();
     m_auth.noteReauthFailed();
     m_connected = false;
     m_connectionStatus = 3;
@@ -1384,12 +1451,15 @@ void ServerConnection::failReauth(const QString& error)
     emit connectionStatusChanged();
     emit syncErrorMessageChanged();
     emit sessionAuthChanged();
-    emit reauthFailed(error);
 }
 
 void ServerConnection::beginReauth()
 {
-    if (!m_auth.beginReauth()) return;  // one browser flow at a time
+    // One browser flow at a time — unless the one running has gone stale
+    // (SessionAuth::kReauthStaleMs), which is what stops a hung step from
+    // refusing every later click.
+    if (!m_auth.beginReauth(QDateTime::currentMSecsSinceEpoch())) return;
+    m_reauthWatchdog.start();
 
     // Anything still holding the old credential goes quiet first.
     m_syncLoop->stop();
@@ -1436,6 +1506,9 @@ void ServerConnection::beginReauth()
                 return;
             }
             if (passwordFlow) {
+                // The wait from here is the user's, not the network's; the
+                // prompt's Cancel (cancelReauth) is what ends it.
+                m_reauthWatchdog.stop();
                 emit reauthPasswordRequired(m_serverUrl, m_userId);
                 return;
             }
@@ -1458,7 +1531,16 @@ void ServerConnection::reauthWithPassword(const QString& username,
 {
     // Only reachable as the answer to reauthPasswordRequired. Outside that
     // window this would be a silent second login on a healthy connection.
-    if (!m_auth.isReauthenticating()) return;
+    //
+    // An Expired session is not healthy, though: a prompt left open past the
+    // stale bound, or answered after a late 401 knocked the phase back, must
+    // still be able to sign in rather than leave its button spinning forever.
+    if (!m_auth.isReauthenticating()) {
+        if (!m_auth.needsReauth()) return;
+        if (!m_auth.beginReauth(QDateTime::currentMSecsSinceEpoch())) return;
+        emit sessionAuthChanged();
+    }
+    m_reauthWatchdog.start();
     awaitLoginReply();
     m_client->login(username, password);
 }
@@ -1638,11 +1720,30 @@ void ServerConnection::loadMembersForRoom(const QString& roomId)
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     const qint64 last = m_membersFetchedAt.value(roomId, 0);
     const bool haveCached = !m_roomMembers.value(roomId).isEmpty();
+    bool fetching = false;
     if (!haveCached || last == 0 || now - last >= kMembersRefetchMs) {
         m_membersFetchedAt.insert(roomId, now);
         m_membersTimer.restart();
         m_client->getRoomMembers(roomId);
+        fetching = true;
     }
+    // "Loading" only when there is nothing to show meanwhile; a refetch
+    // behind a cached list is invisible, as it always was.
+    setMembersStatus(fetching && m_memberListModel->rowCount() == 0 ? 1 : 0);
+}
+
+void ServerConnection::setMembersStatus(int status)
+{
+    if (m_membersStatus == status) return;
+    m_membersStatus = status;
+    emit membersStatusChanged();
+}
+
+void ServerConnection::retryMembers()
+{
+    if (m_activeRoomId.isEmpty()) return;
+    m_membersFetchedAt.remove(m_activeRoomId);
+    loadMembersForRoom(m_activeRoomId);
 }
 
 void ServerConnection::setActiveRoom(const QString& roomId)
@@ -4934,7 +5035,11 @@ void ServerConnection::applyChannelPermissionsEvent(const QString& roomId, const
     if (originMs > 0) m_channelOverrideTs[key] = originMs;
 
     auto& list = m_channelOverrides[roomId];
-    // Replace any existing entry with the same target key.
+    // Replace any existing entry with the same target key. Falls through to
+    // the notify below rather than returning: editing or clearing an
+    // override used to change permissions without permissionsChanged, so
+    // nothing bound to them updated until the next channel switch (U-7).
+    bool replaced = false;
     for (int i = 0; i < list.size(); ++i) {
         if (list[i].targetKey == stateKey) {
             if (ov.allow == 0 && ov.deny == 0) {
@@ -4942,10 +5047,11 @@ void ServerConnection::applyChannelPermissionsEvent(const QString& roomId, const
             } else {
                 list[i] = ov;
             }
-            return;
+            replaced = true;
+            break;
         }
     }
-    if (ov.allow != 0 || ov.deny != 0) list.append(ov);
+    if (!replaced && (ov.allow != 0 || ov.deny != 0)) list.append(ov);
     emit serverRolesChanged();
     ++m_permissionsGeneration;
     emit permissionsChanged();

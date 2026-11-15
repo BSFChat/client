@@ -4,6 +4,7 @@
 #include "net/IgnoredUsers.h"
 #include "net/ReplyFields.h"
 #include "net/ReportRequest.h"
+#include "net/RequestTimeout.h"
 #include "util/MediaUrl.h"
 
 #include <QDateTime>
@@ -24,6 +25,11 @@ MatrixClient::MatrixClient(QObject* parent)
     : QObject(parent)
     , m_mediaTickets(this)
 {
+    // Every request made through this manager gives up after this long with
+    // no bytes moving (audit C-6; see net/RequestTimeout.h). Requests that set
+    // their own — /sync's long poll, media uploads — keep theirs.
+    m_nam.setTransferTimeout(bsfchat::net::kRequestTimeoutMs);
+
     // The cache decides WHEN a ticket is needed; this class knows HOW to ask.
     // The signal is emitted from the event loop, never from inside the
     // urlFor() that decided — see MediaTicketCache::scheduleMint.
@@ -163,7 +169,7 @@ void MatrixClient::login(const QString& username, const QString& password)
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit loginError(QString::fromUtf8(data));
+            emit loginError(bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -184,7 +190,7 @@ void MatrixClient::getLoginFlows()
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit loginError(QString::fromUtf8(data));
+            emit loginError(bsfchat::net::replyFailureText(reply, data));
             return;
         }
         auto doc = QJsonDocument::fromJson(data);
@@ -210,7 +216,7 @@ void MatrixClient::loginWithToken(const QString& idToken)
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit loginError(QString::fromUtf8(data));
+            emit loginError(bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -240,7 +246,7 @@ void MatrixClient::registerUser(const QString& username, const QString& password
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit registerError(QString::fromUtf8(data));
+            emit registerError(bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -358,7 +364,7 @@ void MatrixClient::createRoom(const QString& requestId, const QString& name,
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit createRoomError(requestId, QString::fromUtf8(data));
+            emit createRoomError(requestId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -389,7 +395,7 @@ void MatrixClient::createDirectMessageRoom(const QString& requestId, const QStri
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit createRoomError(requestId, QString::fromUtf8(data));
+            emit createRoomError(requestId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -413,7 +419,7 @@ void MatrixClient::joinRoom(const QString& roomIdOrAlias)
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit joinRoomError(QString::fromUtf8(data));
+            emit joinRoomError(bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -458,7 +464,10 @@ void MatrixClient::getRoomMembers(const QString& roomId)
     connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         auto data = reply->readAll();
-        if (reply->error() != QNetworkReply::NoError) return;
+        if (reply->error() != QNetworkReply::NoError) {
+            emit roomMembersError(roomId, bsfchat::net::replyFailureText(reply, data));
+            return;
+        }
         // QJsonDocument reports rather than throws, so a bad body is caught
         // here rather than by an exception handler. An absent or non-array
         // "chunk" is not emitted at all: ServerConnection folds the chunk into
@@ -469,16 +478,19 @@ void MatrixClient::getRoomMembers(const QString& roomId)
         if (parseError.error != QJsonParseError::NoError) {
             qWarning().noquote() << "[getRoomMembers] malformed body for" << roomId
                                  << "-" << parseError.errorString();
+            emit roomMembersError(roomId, QStringLiteral("malformed member list"));
             return;
         }
         if (!doc.isObject()) {
             qWarning().noquote() << "[getRoomMembers] body is not an object for"
                                  << roomId;
+            emit roomMembersError(roomId, QStringLiteral("malformed member list"));
             return;
         }
         const QJsonValue chunk = doc.object().value("chunk");
         if (!chunk.isArray()) {
             qWarning().noquote() << "[getRoomMembers] no members array for" << roomId;
+            emit roomMembersError(roomId, QStringLiteral("malformed member list"));
             return;
         }
         emit roomMembersResult(roomId, chunk.toArray());
@@ -540,8 +552,8 @@ QString MatrixClient::sendMessage(const QString& roomId, const QString& body)
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(QString::fromUtf8(data));
-            emit messageSendFailed(txnId, QString::fromUtf8(data));
+            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
+            emit messageSendFailed(txnId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -613,8 +625,8 @@ QString MatrixClient::sendRichMessage(const QString& roomId, const QString& body
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(QString::fromUtf8(data));
-            emit messageSendFailed(txnId, QString::fromUtf8(data));
+            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
+            emit messageSendFailed(txnId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -685,7 +697,7 @@ void MatrixClient::editMessage(const QString& roomId, const QString& targetEvent
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(QString::fromUtf8(data));
+            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -733,7 +745,7 @@ void MatrixClient::replyToMessage(const QString& roomId, const QString& body,
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(QString::fromUtf8(data));
+            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -761,7 +773,7 @@ void MatrixClient::sendEmote(const QString& roomId, const QString& body)
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(QString::fromUtf8(data));
+            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -797,7 +809,7 @@ void MatrixClient::sendThreadReply(const QString& roomId, const QString& body,
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(QString::fromUtf8(data));
+            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -869,7 +881,7 @@ void MatrixClient::forwardMessage(const QString& destRoomId, const QString& body
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(QString::fromUtf8(data));
+            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -895,7 +907,7 @@ void MatrixClient::sendRoomEvent(const QString& roomId, const QString& eventType
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(QString::fromUtf8(data));
+            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -923,7 +935,7 @@ void MatrixClient::sendCallEvent(const QString& roomId, const QString& eventType
         reply->deleteLater();
         const auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit callEventSendResult(token, false, QString::fromUtf8(data));
+            emit callEventSendResult(token, false, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         emit callEventSendResult(token, true, QString());
@@ -944,6 +956,10 @@ void MatrixClient::uploadMedia(const QString& uploadId, const QByteArray& data,
     if (!m_accessToken.isEmpty()) {
         request.setRawHeader("Authorization", ("Bearer " + m_accessToken).toUtf8());
     }
+    // An inactivity allowance, not a deadline: a large file that keeps
+    // moving is never cut off. Longer than the API default for the
+    // server-side work between the last byte and the reply.
+    request.setTransferTimeout(bsfchat::net::kMediaTransferTimeoutMs);
 
     auto* reply = m_nam.post(request, data);
     watchForTokenRejection(reply);
@@ -958,7 +974,7 @@ void MatrixClient::uploadMedia(const QString& uploadId, const QByteArray& data,
         emit mediaUploadProgress(filename, 1.0);
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit mediaUploadError(uploadId, QString::fromUtf8(data));
+            emit mediaUploadError(uploadId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -1606,7 +1622,7 @@ void MatrixClient::getRoomNotifyLevel(const QString& roomId)
         reply->deleteLater();
         const auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit roomNotifyLevelError(roomId, QString::fromUtf8(data));
+            emit roomNotifyLevelError(roomId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -1632,7 +1648,7 @@ void MatrixClient::setRoomNotifyLevel(const QString& roomId, const QString& leve
         reply->deleteLater();
         const auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit roomNotifyLevelError(roomId, QString::fromUtf8(data));
+            emit roomNotifyLevelError(roomId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         // Echo the accepted value back through the same signal the GET uses, so
@@ -1652,8 +1668,8 @@ void MatrixClient::joinVoice(const QString& roomId)
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit voiceError(QString::fromUtf8(data));
-            emit voiceJoinError(roomId, QString::fromUtf8(data));
+            emit voiceError(bsfchat::net::replyFailureText(reply, data));
+            emit voiceJoinError(roomId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -1707,8 +1723,8 @@ void MatrixClient::getVoiceMembers(const QString& roomId)
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit voiceError(QString::fromUtf8(data));
-            emit voiceMembersError(roomId, QString::fromUtf8(data));
+            emit voiceError(bsfchat::net::replyFailureText(reply, data));
+            emit voiceMembersError(roomId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         auto doc = QJsonDocument::fromJson(data);
@@ -1802,7 +1818,7 @@ void MatrixClient::createVoiceChannel(const QString& name)
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit voiceError(QString::fromUtf8(data));
+            emit voiceError(bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -1843,7 +1859,7 @@ void MatrixClient::getRoomMessages(const QString& roomId, const QString& from,
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit messagesError(roomId, from, QString::fromUtf8(data));
+            emit messagesError(roomId, from, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -1881,8 +1897,8 @@ void MatrixClient::getTurnConfig()
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit voiceError(QString::fromUtf8(data));
-            emit turnConfigError(QString::fromUtf8(data));
+            emit voiceError(bsfchat::net::replyFailureText(reply, data));
+            emit turnConfigError(bsfchat::net::replyFailureText(reply, data));
             return;
         }
         auto doc = QJsonDocument::fromJson(data);
@@ -1906,7 +1922,7 @@ void MatrixClient::createCategoryRoom(const QString& name)
         // it needs no token; its failures still ride createRoomError, with an
         // empty token that no awaitTokenedReply handler will claim.
         if (reply->error() != QNetworkReply::NoError) {
-            emit createRoomError(QString(), QString::fromUtf8(data));
+            emit createRoomError(QString(), bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -1941,7 +1957,7 @@ void MatrixClient::createChannelInCategory(const QString& requestId, const QStri
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit createRoomError(requestId, QString::fromUtf8(data));
+            emit createRoomError(requestId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {

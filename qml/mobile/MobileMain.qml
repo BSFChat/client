@@ -621,7 +621,8 @@ ApplicationWindow {
 
                     // Sign out of the active server. Preserves saved
                     // credentials for other servers — we remove just
-                    // the current one.
+                    // the current one. Confirmed first (U-1): one tap in a
+                    // menu used to forget the server outright.
                     OverflowItem {
                         text: "Sign out"
                         iconName: "phone-off"
@@ -629,7 +630,9 @@ ApplicationWindow {
                         onTriggered: {
                             var idx = serverManager.activeServerIndex;
                             if (idx < 0) return;
-                            serverManager.removeServer(idx);
+                            var s = serverManager.activeServer;
+                            signOutConfirm.openFor(
+                                idx, s ? (s.serverName || s.serverUrl) : "", true);
                         }
                     }
                 }
@@ -1077,6 +1080,18 @@ ApplicationWindow {
         id: loginDialogGlobal
         parent: popupSurface
     }
+    RemoveServerDialog {
+        id: signOutConfirm
+        parent: popupSurface
+    }
+    // Sign in again to a password-flow server already in the drawer. This
+    // shell never had one: reauthPasswordRequired went unheard, the banner
+    // sat on "Signing in…" and the session stayed in Reauthenticating, where
+    // every later "Sign in again" is refused. Same component as desktop.
+    ReauthDialog {
+        id: reauthDialogGlobal
+        parent: popupSurface
+    }
     Component.onCompleted: {
         if (!serverManager || !serverManager.servers
             || serverManager.servers.rowCount() === 0) {
@@ -1132,13 +1147,16 @@ ApplicationWindow {
         target: serverManager
         ignoreUnknownSignals: true
         function onLoginError(serverUrl, error) {
-            if (!loginDialogGlobal.opened) root.toastError("Couldn't sign in: " + error);
+            // The open dialog shows only its own attempt's failures (U-5).
+            if (!loginDialogGlobal.opened || !loginDialogGlobal.ownsServerUrl(serverUrl))
+                root.toastError("Couldn't sign in: " + error);
         }
         function onIdentityLoginFailed(error) {
             if (!loginDialogGlobal.opened) root.toastError("BSFChat ID sign-in failed: " + error);
         }
         function onReauthFailed(index, serverUrl, error) {
-            root.toastError("Couldn't sign in: " + error);
+            // ReauthDialog shows the password case inline; one message.
+            if (!reauthDialogGlobal.opened) root.toastError("Couldn't sign in: " + error);
         }
         // Signing in with a BSFChat ID takes TWO browser trips, and the
         // second one is a surprise: the first proves who you are and fetches

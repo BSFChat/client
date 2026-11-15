@@ -392,10 +392,21 @@ Popup {
                 // it is what "log out" has always meant — and it is only
                 // safe now that removeServer clears the active pointer
                 // before anything can dereference it (U-C1).
+                //
+                // Confirmed first (U-1): it signs the user out and forgets
+                // the server, and one stray click used to do that silently.
                 var idx = serverManager.activeServerIndex;
+                if (idx < 0) return;
+                var s = serverManager.activeServer;
                 userSettings.close();
-                if (idx >= 0) serverManager.removeServer(idx);
+                logoutConfirm.openFor(idx, s ? (s.serverName || s.serverUrl) : "", true);
             }
+        }
+
+        // Parented to the overlay, so it outlives the settings popup that
+        // just closed underneath it.
+        RemoveServerDialog {
+            id: logoutConfirm
         }
 
         // Delete account — App Store guideline 5.1.1(v). Quieter than Log out

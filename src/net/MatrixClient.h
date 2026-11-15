@@ -461,6 +461,9 @@ signals:
 
     void joinedRoomsResult(const QString& requestId, const QStringList& roomIds);
     void roomMembersResult(const QString& roomId, const QJsonArray& members);
+    // GET /members failed or answered with something unreadable. The member
+    // list used to get no word at all, and sat empty with nothing on it.
+    void roomMembersError(const QString& roomId, const QString& error);
 
     void messageSent(const QString& eventId);
     void sendMessageError(const QString& error);

@@ -355,8 +355,10 @@ Item {
 
     // True when we can show the "Delete" menu item. Either we sent the
     // message, or we have MANAGE_MESSAGES in the active room.
+    // permissionsGeneration is the NOTIFY the invokable lacks (U-7).
     readonly property bool canDelete: isOwnMessage
         || (serverManager.activeServer
+            && serverManager.activeServer.permissionsGeneration >= 0
             && serverManager.activeServer.canManageMessages(
                    serverManager.activeServer.activeRoomId))
 
@@ -614,6 +616,7 @@ Item {
         readonly property bool isSelfUser: serverManager.activeServer
             && bubble.sender === serverManager.activeServer.userId
         readonly property bool canManageRoles: serverManager.activeServer
+            && serverManager.activeServer.permissionsGeneration >= 0
             && serverManager.activeServer.canManageRoles(
                    serverManager.activeServer.activeRoomId)
 
@@ -1038,6 +1041,13 @@ Item {
                 Text {
                     textFormat: Text.PlainText
                     text: bubble.senderDisplayName
+                    // Names may be 256 bytes; the timestamp and badges
+                    // after it must stay on screen (U-6). parent.parent is
+                    // the content column, the width actually available.
+                    elide: Text.ElideRight
+                    Layout.maximumWidth: Math.max(48, parent.parent.width
+                        - senderTimestamp.implicitWidth
+                        - (bubble.senderIsBot ? 56 : 0) - 2 * Theme.sp.s3)
                     // The name is spoken as part of the message. What is
                     // worth reaching separately is the ACTION on it, so
                     // this element is a button onto the profile rather

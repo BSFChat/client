@@ -185,6 +185,69 @@ private slots:
         QVERIFY(!a.needsReauth());
         QCOMPARE(a.actionForReconnect(), ReconnectAction::RetryWithToken);
     }
+
+    // --- a step that never answers (audit 2026-11, C-6) -----------------
+
+    // A login-flows probe, token exchange or POST /login that hangs, or a
+    // password prompt nobody answers, used to hold Reauthenticating forever:
+    // Reconnect answered Ignore and "Sign in again" was refused, until the
+    // app was restarted.
+    void aHungAttemptStopsBlockingOnceStale()
+    {
+        constexpr long long t0 = 1'000'000;
+        SessionAuth a;
+        a.noteTokenRejected();
+        QVERIFY(a.beginReauth(t0));
+
+        // Inside the window it is a running attempt: a second click must
+        // not open a second browser tab.
+        const long long inside = t0 + SessionAuth::kReauthStaleMs - 1;
+        QCOMPARE(a.actionForReconnect(inside), ReconnectAction::Ignore);
+        QVERIFY(!a.beginReauth(inside));
+        QVERIFY(!a.reauthIsStale(inside));
+
+        // Past it, the attempt no longer counts and can be replaced.
+        const long long after = t0 + SessionAuth::kReauthStaleMs;
+        QVERIFY(a.reauthIsStale(after));
+        QCOMPARE(a.actionForReconnect(after), ReconnectAction::Reauthenticate);
+        QVERIFY(a.beginReauth(after));
+        QCOMPARE(a.phase(), SessionPhase::Reauthenticating);
+
+        // ...and the replacement gets a full window of its own.
+        QCOMPARE(a.actionForReconnect(after + 1), ReconnectAction::Ignore);
+        QVERIFY(!a.beginReauth(after + 1));
+    }
+
+    // The browser window is five minutes; the stale rule must never cut a
+    // user off while that page is still good.
+    void theStaleWindowOutlastsTheBrowserFlow()
+    {
+        QVERIFY(SessionAuth::kReauthStaleMs > 5LL * 60 * 1000);
+    }
+
+    // Callers without a clock keep the original semantics exactly.
+    void withoutAClockNothingIsEverStale()
+    {
+        SessionAuth a;
+        QVERIFY(a.beginReauth());
+        QVERIFY(!a.reauthIsStale(1LL << 50));
+        QCOMPARE(a.actionForReconnect(), ReconnectAction::Ignore);
+        QVERIFY(!a.beginReauth());
+    }
+
+    // Only a running attempt can be stale.
+    void staleOnlyAppliesWhileReauthenticating()
+    {
+        SessionAuth a;
+        QVERIFY(a.beginReauth(0));
+        a.noteReauthFailed();
+        QVERIFY(!a.reauthIsStale(SessionAuth::kReauthStaleMs * 2));
+        QCOMPARE(a.actionForReconnect(SessionAuth::kReauthStaleMs * 2),
+                 ReconnectAction::Reauthenticate);
+        a.noteAuthenticated();
+        QCOMPARE(a.actionForReconnect(SessionAuth::kReauthStaleMs * 2),
+                 ReconnectAction::RetryWithToken);
+    }
 };
 
 QTEST_MAIN(TestSessionAuth)

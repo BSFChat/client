@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QHash>
 #include <QJsonArray>
@@ -92,6 +93,10 @@ class ServerConnection : public QObject {
     Q_PROPERTY(RoomListModel* roomListModel READ roomListModel CONSTANT)
     Q_PROPERTY(MessageModel* messageModel READ messageModel CONSTANT)
     Q_PROPERTY(MemberListModel* memberListModel READ memberListModel CONSTANT)
+    // Where the active room's member list stands, for its loading / error
+    // state (audit U-4): 0 = what is shown is the answer, 1 = fetching with
+    // nothing cached to show meanwhile, 2 = the fetch failed.
+    Q_PROPERTY(int membersStatus READ membersStatus NOTIFY membersStatusChanged)
     // View-model behind the bot management dialog. Always present, even for a
     // user with no MANAGE_BOTS — the dialog binds to it unconditionally and is
     // itself gated on canManageBots(), so a null here would only move the
@@ -302,7 +307,7 @@ public:
     // rather than re-derived at the call site. ServerManager dispatches on it.
     bsfchat::client::ReconnectAction reconnectAction() const
     {
-        return m_auth.actionForReconnect();
+        return m_auth.actionForReconnect(QDateTime::currentMSecsSinceEpoch());
     }
     bool hasUnread() const { return m_hasUnread; }
 
@@ -390,6 +395,9 @@ public:
     QJsonArray serverRoles() const { return m_serverRoles; }
     QVariantList categorizedRooms() const { return m_categorizedRooms; }
     int permissionsGeneration() const { return m_permissionsGeneration; }
+    int membersStatus() const { return m_membersStatus; }
+    // The member list's "Retry" after a failed fetch.
+    Q_INVOKABLE void retryMembers();
     int botFlagsGeneration() const { return m_botFlagsGeneration; }
 
     RoomListModel* roomListModel() const { return m_roomListModel; }
@@ -402,6 +410,10 @@ public:
     MatrixClient* client() const { return m_client; }
 
     // Set credentials (for restoring from settings)
+    // The next startSync() must not resume from a cached `since`. For a
+    // connection built to carry a credential that was just issued (see
+    // accountSwitched); call before setCredentials(), which starts the sync.
+    void requireFullSync() { m_forceFullSync = true; }
     void setCredentials(const QString& userId, const QString& accessToken,
                         const QString& deviceId, const QString& displayName);
 
@@ -594,6 +606,11 @@ public:
     // m.login.password: the UI collects the credentials and hands them back.
     Q_INVOKABLE void reauthWithPassword(const QString& username,
                                         const QString& password);
+    // The user dismissed the password prompt reauthPasswordRequired opened.
+    // Returns the session to Expired, quietly, so "Sign in again" works on
+    // the next click — the dialog used to just close, leaving the phase in
+    // Reauthenticating where every later attempt was refused (audit C-6).
+    Q_INVOKABLE void cancelReauth();
     // Returns the identity-provider base URL (e.g. "https://id.bsfchat.com")
     // for the "Manage Account" link: the live OIDC session's provider if
     // this process ran the flow, otherwise the one this connection was
@@ -1071,6 +1088,13 @@ signals:
     // server's canonical one (stale/corrupt settings). ServerManager
     // listens and rewrites the stored entry.
     void identityCorrected();
+    // A re-authentication signed in as a DIFFERENT account than the one this
+    // connection was holding (audit C-8). Emitted after loginSucceeded, with
+    // the new credential installed and nothing synced: everything this object
+    // holds — timelines, room and member lists, unread state, the LocalCache
+    // binding — belongs to `previousUserId`. ServerManager answers it by
+    // replacing the connection with a fresh one for the new account.
+    void accountSwitched(const QString& previousUserId, const QString& userId);
     void registerSucceeded();
     void registerFailed(const QString& error);
     void mediaSendCompleted();
@@ -1170,6 +1194,7 @@ signals:
     void myPowerLevelChanged();
     void serverRolesChanged();
     void permissionsChanged();
+    void membersStatusChanged();
     // A bot flag was learned or changed. Coalesced to once per event-loop
     // turn — see flushBotFlagRepaint().
     void botFlagsChanged();
@@ -1288,6 +1313,9 @@ private:
     void onLoginAttemptFailed(const QString& error);
     // Return to a clearable expired state and tell the UI why.
     void failReauth(const QString& error);
+    // failReauth() minus the reauthFailed signal: the state half, shared with
+    // cancelReauth(), which has nothing to report.
+    void returnToExpired();
     // `userId`'s latest membership value in every synced room, keyed by room id
     // (empty string where the room has no member event for them). The input to
     // bsfchat::client::moderationRooms(); split out so the three moderation
@@ -1480,6 +1508,8 @@ public:
     // the same key with the same meaning.
     void recordBotFlag(const QString& userId, bool isBot);
     void loadMembersForRoom(const QString& roomId);
+    void setMembersStatus(int status);
+    int m_membersStatus = 0;
     // Start a history fill of `kind` in the active room and send its first
     // request, if the model agrees to start one (see beginHistoryFill).
     void requestHistoryFill(bsfchat::client::HistoryFillKind kind, int firstPageLimit);
@@ -1686,6 +1716,10 @@ private:
     bool m_voiceDeafened = false;
     QJsonArray m_voiceMembers;
     QTimer* m_voicePollTimer = nullptr;
+    // Bounds a re-authentication that never answers (audit C-6). Armed for
+    // the network and browser steps, disarmed while a password prompt is up:
+    // that wait is the user's, and the prompt's Cancel ends it.
+    QTimer m_reauthWatchdog;
     // Fold one m.call.member state event into the per-room voice roster the
     // sidebar renders. Sync is the ONLY writer of that roster: room state is
     // the server's own answer to "who is in this channel", it arrives for

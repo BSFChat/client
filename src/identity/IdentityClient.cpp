@@ -1,4 +1,5 @@
 #include "identity/IdentityClient.h"
+#include "net/RequestTimeout.h"
 #include "identity/OidcRequest.h"
 #include "util/ExternalBrowser.h"
 
@@ -85,6 +86,12 @@ int IdentityClient::waitingForBrowserCount()
 IdentityClient::IdentityClient(QObject* parent)
     : QObject(parent)
 {
+    // The token exchange is the one step of a sign-in with no browser in
+    // front of it and, until now, no bound at all: the 5-minute timer below
+    // is stopped the moment the callback lands, so a /token that never
+    // answered left the dialog on "Waiting…" and a re-auth stuck in
+    // Reauthenticating (audit C-6).
+    m_nam.setTransferTimeout(bsfchat::net::kRequestTimeoutMs);
     m_timeout.setSingleShot(true);
     connect(&m_timeout, &QTimer::timeout, this, [this]() {
         cancel();
@@ -407,10 +414,34 @@ void IdentityClient::handleCallback(const QUrl& callbackUrl)
     const oidc::CallbackParse parsed =
         oidc::parseCallbackQuery(QUrlQuery(callbackUrl.query()), m_state);
 
+    if (parsed.status == oidc::CallbackStatus::StateMismatch) {
+        qWarning().noquote()
+            << "[IdentityClient] refused a callback that is not this attempt's";
+#ifndef Q_OS_IOS
+        // Ignored, not fatal (audit C-9). On desktop any web page can make
+        // the browser request the loopback URL, and on Android any app or
+        // page can fire the bsfchat:// intent; letting an unauthenticated
+        // request end the attempt is letting anybody cancel the user's
+        // sign-in. The real redirect, carrying the real state, is still on
+        // its way, and the five-minute timeout bounds the wait if it is not.
+        //
+        // iOS is the exception: ASWebAuthenticationSession completes once,
+        // with whatever its sheet was redirected to, so there is nothing
+        // left to wait for and the attempt has to end here.
+        return;
+#endif
+    }
+
     if (parsed.status != oidc::CallbackStatus::Code) {
-        if (parsed.status == oidc::CallbackStatus::StateMismatch) {
+        if (parsed.status == oidc::CallbackStatus::ProviderError) {
+            // The provider's own words go to the log, bounded, where a bug
+            // report can find them; the UI gets only parsed.error, which is
+            // built from the sanitised code (OidcRequest.h).
             qWarning().noquote()
-                << "[IdentityClient] refused a callback that is not this attempt's";
+                << "[IdentityClient] provider error:"
+                << QUrlQuery(callbackUrl.query()).queryItemValue("error").left(64)
+                << QUrlQuery(callbackUrl.query())
+                       .queryItemValue("error_description").left(200);
         }
         cancel();
         emit loginFailed(parsed.error);
@@ -575,8 +606,10 @@ void IdentityClient::exchangeCodeForTokens(const QString& code)
         if (reply->error() != QNetworkReply::NoError) {
             const int status = reply->attribute(
                 QNetworkRequest::HttpStatusCodeAttribute).toInt();
-            QString msg = QString("Token exchange failed [%1]: %2")
-                .arg(status).arg(reply->errorString());
+            QString msg = bsfchat::net::replyTimedOut(reply)
+                ? tr("The sign-in provider didn't answer in time. Try again.")
+                : QString("Token exchange failed [%1]: %2")
+                      .arg(status).arg(reply->errorString());
             if (!data.isEmpty()) {
                 msg += " — " + QString::fromUtf8(data).left(200);
             }

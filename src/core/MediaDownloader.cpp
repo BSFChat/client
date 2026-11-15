@@ -1,4 +1,5 @@
 #include "MediaDownloader.h"
+#include "net/RequestTimeout.h"
 
 #include "core/AttachmentPolicy.h"
 #include "util/ExternalBrowser.h"
@@ -167,6 +168,10 @@ void MediaDownloader::request(const QString& remoteUrl)
         && (url.scheme() == QLatin1String("https") || url.scheme() == QLatin1String("http"))) {
         req.setRawHeader("Authorization", ("Bearer " + m_authToken).toUtf8());
     }
+    // A stalled download used to sit in m_entries forever, and every later
+    // request for the same file "just waits" on it (audit C-6). Inactivity,
+    // not a deadline — see net/RequestTimeout.h.
+    req.setTransferTimeout(bsfchat::net::kMediaTransferTimeoutMs);
     QNetworkReply* reply = m_nam.get(req);
 
     Entry e;
