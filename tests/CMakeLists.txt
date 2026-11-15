@@ -558,6 +558,18 @@ if(BSFCHAT_ENABLE_VOICE)
     endif()
 endif()
 
+# libdatachannel's H.264 depacketizer as patched by
+# cmake/patch-libdatachannel.cmake (V-6): a malformed packet drops one
+# frame instead of stalling the track, and the buffer is bounded.
+if(BSFCHAT_ENABLE_VOICE)
+    qt_add_executable(test_rtp_depacketizer
+        test_rtp_depacketizer.cpp
+    )
+    target_link_libraries(test_rtp_depacketizer PRIVATE
+        Qt6::Core Qt6::Test LibDataChannel::LibDataChannel)
+    add_test(NAME test_rtp_depacketizer COMMAND test_rtp_depacketizer)
+endif()
+
 # RTP video RECEPTION between two real PeerConnectionManagers (S-16).
 # test_media_loopback proves the handler chain packetizes and
 # depacketizes; it uses a single m-line, which silently skips
