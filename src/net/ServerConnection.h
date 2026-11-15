@@ -502,6 +502,14 @@ public:
     Q_INVOKABLE void editMessage(const QString& eventId, const QString& newBody,
                                   const QString& formattedBody = QString(),
                                   const QStringList& mentionedUserIds = {});
+    // sed-style correction from the composer (`s/teh/the/`, flags g and i;
+    // see util/SedEdit.h). Applies it to the user's most recent message in
+    // the active room and sends the result through editMessage, so it renders
+    // as an ordinary edit. Returns
+    //   { isSed: false }                    — not a command; send the text
+    //   { isSed: true, ok: true }           — edit sent
+    //   { isSed: true, ok: false, error }   — keep the text; toast `error`
+    Q_INVOKABLE QVariantMap editLastMessageWithSed(const QString& text);
     // Send `body` into the currently-active room as a reply pointing at
     // `targetEventId`. The UI composer calls this when the reply banner is
     // active; no server-side support is needed beyond arbitrary content.

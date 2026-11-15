@@ -24,6 +24,7 @@
 #include "util/MentionBadge.h"
 #include "util/ModerationScope.h"
 #include "util/PermissionMath.h"
+#include "util/SedEdit.h"
 #include "util/TimelineTrace.h"
 #include "identity/IdentityClient.h"
 #include "identity/OidcRequest.h"
@@ -2028,6 +2029,56 @@ void ServerConnection::editMessage(const QString& eventId, const QString& newBod
 
     m_client->editMessage(m_activeRoomId, eventId, newBody, formattedBody,
                           mentions);
+}
+
+QVariantMap ServerConnection::editLastMessageWithSed(const QString& text)
+{
+    namespace sed = bsfchat::client::sed;
+    const sed::ParseResult parsed = sed::parse(text);
+    if (parsed.status == sed::ParseStatus::NotSed) return {{QStringLiteral("isSed"), false}};
+    auto fail = [](const QString& why) {
+        return QVariantMap{{QStringLiteral("isSed"), true},
+                           {QStringLiteral("ok"), false},
+                           {QStringLiteral("error"), why}};
+    };
+    if (parsed.status == sed::ParseStatus::Invalid) return fail(parsed.error);
+    if (m_activeRoomId.isEmpty() || !m_messageModel || m_userId.isEmpty())
+        return fail(QStringLiteral("Open a channel first."));
+
+    // The newest row of ours in the main timeline. Thread replies are skipped:
+    // the composer that typed this is the channel's, not the thread's.
+    int row = -1;
+    for (int i = m_messageModel->rowCount() - 1; i >= 0; --i) {
+        const QModelIndex mi = m_messageModel->index(i);
+        if (!m_messageModel->data(mi, MessageModel::IsOwnMessageRole).toBool()) continue;
+        const QString id = m_messageModel->data(mi, MessageModel::EventIdRole).toString();
+        const QString root = m_messageModel->data(mi, MessageModel::ThreadRootIdRole).toString();
+        if (!root.isEmpty() && root != id) continue;
+        row = i;
+        break;
+    }
+    if (row < 0) return fail(QStringLiteral("You have no recent message here to edit."));
+
+    const QModelIndex mi = m_messageModel->index(row);
+    if (m_messageModel->data(mi, MessageModel::DeliveryStateRole).toInt()
+        != MessageModel::DeliveryConfirmed)
+        return fail(QStringLiteral("Your last message hasn't been sent yet."));
+    const QString msgtype = m_messageModel->data(mi, MessageModel::MsgtypeRole).toString();
+    if (msgtype != QLatin1String("m.text"))
+        return fail(QStringLiteral("Your last message isn't text, so it can't be edited that way."));
+
+    const QString eventId = m_messageModel->data(mi, MessageModel::EventIdRole).toString();
+    const QString body = m_messageModel->data(mi, MessageModel::BodyRole).toString();
+    const auto edited = sed::apply(parsed.command, body);
+    if (!edited) return fail(QStringLiteral("Nothing in your last message matches that."));
+    if (*edited == body) return fail(QStringLiteral("That wouldn't change your last message."));
+    if (edited->trimmed().isEmpty())
+        return fail(QStringLiteral("That would leave your last message empty."));
+
+    // Plain body only: the original's HTML can't be rewritten with a regex
+    // safely, and editMessage carries the mention set forward on its own.
+    editMessage(eventId, *edited);
+    return {{QStringLiteral("isSed"), true}, {QStringLiteral("ok"), true}};
 }
 
 void ServerConnection::replyToMessage(const QString& targetEventId, const QString& body,

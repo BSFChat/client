@@ -1729,6 +1729,31 @@ Rectangle {
         // refuses it identically.
         if (inputRoot.overLimit) return;
 
+        // sed-style correction: `s/teh/the/[gi]` edits your last message in
+        // this channel instead of posting (util/SedEdit.h has the rules). Only
+        // from a plain composer, and only when the RAW text starts with `s/` —
+        // a leading space sends it literally, and so does a leading
+        // backslash, which is dropped.
+        if (inputRoot.editingEventId === "" && inputRoot.replyToEventId === "") {
+            var raw = inputArea.text;
+            if (/^\\s\//.test(raw)) {
+                text = raw.slice(1).trim();
+            } else if (raw.indexOf("s/") === 0
+                       && serverManager.activeServer.editLastMessageWithSed) {
+                var sed = serverManager.activeServer.editLastMessageWithSed(text);
+                if (sed && sed.isSed) {
+                    if (sed.ok) {
+                        inputArea.text = "";
+                        inputRoot._clearMentionState();
+                    } else {
+                        var w = inputArea.Window.window;
+                        if (w && w.toastInfo) w.toastInfo(sed.error);
+                    }
+                    return;
+                }
+            }
+        }
+
         // Slash-command intercept — takes priority over replies/edits
         // since "/me fixed typo" inside a reply context would be a
         // weird thing to commit to.

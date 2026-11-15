@@ -53,6 +53,13 @@ target_link_libraries(test_reply_fields PRIVATE
 )
 add_test(NAME test_reply_fields COMMAND test_reply_fields)
 
+# sed-style composer edits (`s/teh/the/`): which texts count as a command, the
+# escapes and flags, and the regex guards. Header-only, no GUI app.
+qt_add_executable(test_sed_edit test_sed_edit.cpp)
+target_include_directories(test_sed_edit PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_sed_edit PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_sed_edit COMMAND test_sed_edit)
+
 # Startup-cost path: the persisted sync token + room snapshot that lets a
 # launch skip the server's initial /sync, and the retry schedule that keeps a
 # downed server from being dialled every 5s forever. Both are deliberately
