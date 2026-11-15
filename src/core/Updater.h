@@ -45,12 +45,23 @@
 //   stays, and the state becomes AheadOfChannel (not UpToDate) until a
 //   stable release exceeds it.
 //
-// Security model:
-//   * GitHub API + asset URLs over HTTPS only; redirect policy is
-//     `NoLessSafeRedirectPolicy` so we don't downgrade to plaintext.
-//   * No signature verification yet — TLS is the trust anchor. The
-//     long-term move (post-Microsoft-Store enrollment) is to verify
-//     the .dmg / .exe code signature before launching the installer.
+// Security model (audit M-5):
+//   * Every URL is pinned: the asset link must be an https
+//     github.com/BSFChat/client/releases/download/... URL, and every
+//     redirect hop must be https on a GitHub release host. Redirects use
+//     UserVerifiedRedirectPolicy so each hop is checked before it is
+//     followed (core/UpdateIntegrity.h).
+//   * TLS is NOT the trust anchor. Each release carries SHA256SUMS, signed
+//     by the release CI with an Ed25519 key whose public half is compiled
+//     in (core/ReleaseSigningKey.h). The manifest is verified, bound to the
+//     release tag, and the installer is hashed while it streams to disk; it
+//     only reaches its final path if the digest matches.
+//   * A release without SHA256SUMS + .sig is never installed: the state
+//     becomes UpdateUnsigned and the UI offers the release page instead.
+//   * macOS additionally requires `codesign --verify --deep --strict` on the
+//     .app inside the DMG, and the same Team ID as the running build,
+//     before the bundle is swapped. Windows Authenticode is not checked:
+//     installers are not code-signed today (docs/release-signing.md).
 //   * Downloads land in CacheLocation — a per-user dir the OS will
 //     reap on uninstall.
 //
@@ -60,10 +71,16 @@
 // QCoreApplication so the installer can replace our binary.
 #pragma once
 
+#include "UpdateIntegrity.h"
+
 #include <QNetworkAccessManager>
 #include <QObject>
 #include <QString>
 #include <QTimer>
+
+#include <functional>
+
+class QNetworkReply;
 
 class Updater : public QObject {
     Q_OBJECT
@@ -106,7 +123,11 @@ public:
         // offered, but "you're up to date" would be a false statement
         // about a build that is ahead of the channel, and the user who
         // just opted out is owed an explanation rather than silence.
-        AheadOfChannel
+        AheadOfChannel,
+        // A newer release exists but carries no signed SHA256SUMS (an RC
+        // published before the signing secret was configured). It is never
+        // downloaded or run; the UI points at the release page instead.
+        UpdateUnsigned
     };
     Q_ENUM(State)
 
@@ -133,12 +154,13 @@ public:
     // No-op if state != UpdateAvailable.
     Q_INVOKABLE void downloadUpdate();
 
-    // Hand the downloaded artefact to the OS-specific apply path.
+    // Hand the verified artefact to the OS-specific apply path.
     // Spawns the installer / dmg-mount + ditto and exits the app.
     Q_INVOKABLE void applyUpdate();
 
     // Open the release's GitHub page in the browser. Linux uses this
-    // as its only update path.
+    // as its only update path, and it is the only path for an
+    // UpdateUnsigned release.
     Q_INVOKABLE void openReleasePage();
 
     // Hooked from main() — if the user has auto-check enabled, runs
@@ -154,6 +176,8 @@ public:
     // stall detector, not a deadline on a large artefact.
     static constexpr int kCheckTimeoutMs = 30 * 1000;
     static constexpr int kDownloadStallTimeoutMs = 60 * 1000;
+    // GitHub uses one or two hops (github.com -> release-assets...).
+    static constexpr int kMaxRedirects = 5;
 
 signals:
     void stateChanged();
@@ -169,6 +193,17 @@ private:
     void onCheckReply();
     void onDownloadProgress(qint64 received, qint64 total);
 
+    // GET with every redirect hop checked against the release-host pin.
+    QNetworkReply* pinnedGet(const QUrl& url, int timeoutMs);
+    // "" on success, else a user-facing reason (including a refused hop).
+    static QString replyFailure(QNetworkReply* reply);
+    // Small, capped GET for SHA256SUMS / SHA256SUMS.sig.
+    void fetchSmall(const QString& url,
+                    std::function<void(const QByteArray&)> onBody);
+    void onManifestFetched(const QByteArray& signature);
+    void startAssetDownload();
+    void failIntegrity(const QString& why);
+
     void applyMac(const QString& path);
     void applyWindows(const QString& path);
     void applyLinux(const QString& path);
@@ -180,6 +215,12 @@ private:
     QString m_releaseHtmlUrl;
     QString m_releaseNotes;
     QString m_assetUrl;       // direct download URL of the platform asset
+    QString m_assetName;      // its name in the release and in SHA256SUMS
+    QString m_sumsUrl;        // SHA256SUMS
+    QString m_sigUrl;         // SHA256SUMS.sig
+    QByteArray m_manifest;    // SHA256SUMS body, unverified until the sig is
+    QByteArray m_expectedDigest; // hex SHA-256 of the asset, from a verified manifest
+    bsfchat::updates::Sha256FileSink m_sink;
     QString m_assetLocalPath; // where the downloaded asset lives
     qint64  m_downloadedBytes = 0;
     qint64  m_totalBytes = 0;
