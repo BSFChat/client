@@ -1233,16 +1233,6 @@ qt_add_qml_module(bsfchat-lib
         # tests/qml/tst_updateformat.qml. Imports PlaybackMath.js for the
         # byte formatter, so both must stay in this resource set.
         qml/js/UpdateFormat.js
-        # Process-wide OpenGraph unfurl cache. Shared by every LinkPreview
-        # delegate — that is the whole point, see the file header — and
-        # tested in tests/qml/tst_linkpreviewcache.qml.
-        qml/js/LinkPreviewCache.js
-        # Pure HTML→metadata helpers for the same unfurl: OpenGraph parsing
-        # and bot-challenge detection. Split out of LinkPreview.qml so they
-        # cannot depend on a component scope (rc.7 shipped XHR callbacks that
-        # outlived their delegate) and so tests/qml/tst_linkpreviewparse.qml
-        # can import them.
-        qml/js/LinkPreviewParse.js
         # Overlay visibility rules for the message timeline, shared by
         # MessageView.qml and tests/qml/tst_timelineoverlay.qml.
         qml/js/TimelineOverlay.js

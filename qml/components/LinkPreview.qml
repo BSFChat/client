@@ -2,49 +2,42 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import BSFChat
-import "../js/LinkPreviewCache.js" as PreviewCache
-import "../js/LinkPreviewParse.js" as PreviewParse
 
 // Per-link OpenGraph unfurl card. A MessageBubble instantiates one
 // (or two) of these via a Repeater keyed on URLs detected in its body.
 //
-// Fetches the target page with XMLHttpRequest, regex-extracts the
-// standard OpenGraph meta tags (og:title / og:description / og:image /
-// og:site_name), and renders a Discord-style preview. Falls back to
-// the <title> element if og:title is missing; hides the card entirely
-// if the response carries nothing preview-worthy.
-//
-// Fetch is client-side — each user's app hits the target URL. Good
-// enough for v1; if fingerprinting or cache duplication becomes an
-// issue we'll route through a server-side unfurler later. Until then
-// the cache is process-wide (js/LinkPreviewCache.js, a `.pragma library`
-// so it is genuinely shared) keyed by URL, so neither two messages
-// linking the same page nor the same message scrolling back into view
-// refetches it.
+// The preview is fetched by the HOMESERVER (GET /_matrix/media/v3/preview_url
+// via ServerConnection.requestLinkPreview), never by this app: no request
+// from the viewer's machine reaches the linked site, so it cannot learn who
+// read the message, a link into the reader's LAN is not fetched from inside
+// that LAN, and no third-party response is buffered here (audit Q-S4). The
+// cache, de-duplication and rate-limiting are C++ (net/LinkPreviewCache);
+// og:image arrives as an mxc:// URI and loads through the same ticketed media
+// path as every other image. A server without preview_url means no previews —
+// there is deliberately no client-side fallback. The "Show link previews"
+// setting turns the request off entirely.
 Rectangle {
     id: preview
 
     property url url
 
-    // Parsed metadata. Populated by _fetch().
+    // Plain text from the server, already trimmed (LinkPreviewCache::parse).
+    // ogImage is an mxc:// URI, never an http(s) URL.
     property string ogTitle: ""
     property string ogDescription: ""
     property string ogImage: ""
     property string ogSiteName: ""
 
-    // For known video platforms (YouTube for now — Vimeo/Twitch
-    // trivial to extend) we short-circuit the OG fetch path with a
-    // derived thumbnail + a landscape "video embed" layout. Click the
-    // play overlay to open in browser; inline playback via WebEngine
-    // is a follow-up.
+    readonly property var _server: serverManager.activeServer
+    readonly property bool _enabled: appSettings.showLinkPreviews
+        && !!_server && _server.linkPreviewsSupported
+
+    // For known video platforms (YouTube for now) we use a landscape
+    // "video embed" layout with a hero thumbnail; the thumbnail is the
+    // server's og:image like any other card. Click the play overlay to open
+    // in browser.
     readonly property string _videoId: _detectVideoId(String(preview.url))
     readonly property bool isVideoEmbed: _videoId !== ""
-    // 16:9 thumbnail pulled straight from YouTube's CDN — no fetch
-    // needed. `hqdefault` always exists; maxres is spottier on older
-    // videos. Prefer maxres with hqdefault as the Image fallback.
-    readonly property string videoThumbUrl: isVideoEmbed
-        ? "https://img.youtube.com/vi/" + _videoId + "/maxresdefault.jpg"
-        : ""
     // Host extracted from `url` as a fallback site-name display.
     readonly property string hostName: {
         var s = String(preview.url);
@@ -52,36 +45,26 @@ Rectangle {
         return m ? m[1] : "";
     }
 
+    // The og:image's download URL. Empty until a media ticket lands; the
+    // epoch is read AND compared so the binding re-runs when one does (see
+    // ServerConnection.mediaTicketEpoch).
+    readonly property string _imageSource: {
+        if (!_server || ogImage === "") return "";
+        if (_server.mediaTicketEpoch < 0) return "";
+        return _server.resolveMediaUrl(ogImage);
+    }
+
     readonly property bool ready: isVideoEmbed
         ? ogTitle.length > 0   // video cards are ready once the title arrives
         : (ogTitle.length > 0 || ogDescription.length > 0 || ogImage.length > 0)
-    readonly property bool hasImage: ogImage.length > 0
+    readonly property bool hasImage: ogImage.length > 0 && !_imageFailed
     property bool _failed: false
-
-    // The request currently in flight, so it can be cancelled if this
-    // delegate goes away before it lands. A QML XHR callback is a plain JS
-    // closure with no owner: it fires whether or not the object that created
-    // it still exists, and once that object is gone every unqualified name in
-    // the closure resolves against a dead scope. Message delegates are
-    // recycled constantly, so the callbacks below regularly outlived their
-    // card — which is what the v0.0.44-rc.7 field logs were reporting as
-    // `ReferenceError: _looksLikeChallenge is not defined` (a helper read) and
-    // `Invalid write to global property "_failed"` (a property write). Neither
-    // was a missing helper; both were a live callback on a dead delegate.
-    property var _xhr: null
-
-    Component.onDestruction: _cancelFetch()
-
-    // The unfurl cache lives in js/LinkPreviewCache.js. It used to be a
-    // per-instance `property var` right here, and message delegates are
-    // recycled constantly, so every recreation refetched a URL the app had
-    // already resolved. A failed or empty fetch is cached too (as null) so a
-    // dead link is not re-requested on every repaint.
+    property bool _imageFailed: false
 
     // Video embeds are visible immediately — we know the full
     // geometry from the URL pattern alone (16:9 thumbnail + reserved
-    // title rows), so we render the skeleton before the OG fetch
-    // resolves. This is what stops a YouTube card resolving mid-
+    // title rows), so we render the skeleton before the server's
+    // preview resolves. This is what stops a YouTube card resolving mid-
     // settle from shoving the rest of the message list around and
     // parking the user above the bottom on channel open.
     //
@@ -89,9 +72,9 @@ Rectangle {
     // know their geometry until fetch completes, but their height
     // delta is small (~120px) and they're rare enough that the
     // layout shift is tolerable.
-    visible: isVideoEmbed
+    visible: _enabled && (isVideoEmbed
         ? !_failed
-        : (ready && !_failed)
+        : (ready && !_failed))
     implicitHeight: isVideoEmbed
         ? (videoCol.implicitHeight + Theme.sp.s4 * 2)
         : (!ready ? 0
@@ -171,24 +154,13 @@ Rectangle {
                 id: videoThumb
                 anchors.fill: parent
                 Accessible.ignored: true
-                source: preview.videoThumbUrl
+                source: preview._imageSource
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
                 cache: true
                 // The tile is at most 270pt tall at 16:9, i.e. 480pt wide.
                 // Width only, so the decode keeps the thumbnail's aspect.
                 sourceSize.width: 480 * Screen.devicePixelRatio
-                // YouTube returns a small "video thumbnail not found"
-                // grey placeholder as a 200 for missing maxres — we
-                // can't easily detect that without pixel-peeping,
-                // but the difference is subtle enough to live with.
-                // Older / unlisted videos fall back to hqdefault.
-                onStatusChanged: {
-                    if (status === Image.Error && preview._videoId !== "") {
-                        source = "https://img.youtube.com/vi/"
-                            + preview._videoId + "/hqdefault.jpg";
-                    }
-                }
             }
 
             // Dim scrim so the play button reads over any frame.
@@ -359,7 +331,7 @@ Rectangle {
                 id: thumb
                 anchors.fill: parent
                 Accessible.ignored: true
-                source: preview.ogImage
+                source: preview._imageSource
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
                 cache: true
@@ -369,11 +341,12 @@ Rectangle {
                 // tile's live size, so a relayout never re-decodes.
                 sourceSize.width: 96 * Screen.devicePixelRatio
                 sourceSize.height: 96 * Screen.devicePixelRatio
-                // If the thumbnail itself 404s or the origin blocks
-                // hotlinking, hide the tile so the card doesn't look
-                // broken — the text side still stands on its own.
+                // If the thumbnail fails to load, hide the tile so the card
+                // doesn't look broken — the text side still stands on its
+                // own. A flag rather than `parent.visible = false`, which
+                // would break the binding for the next URL.
                 onStatusChanged: {
-                    if (status === Image.Error) parent.visible = false;
+                    if (status === Image.Error) preview._imageFailed = true;
                 }
             }
             MouseArea {
@@ -385,181 +358,53 @@ Rectangle {
     }
 
     onUrlChanged: _fetch()
+    on_EnabledChanged: _fetch()
+    on_ServerChanged: _fetch()
+
+    // The server answered (or gave up on) some URL; ours, maybe.
+    Connections {
+        target: preview._server
+        ignoreUnknownSignals: true
+        function onLinkPreviewResolved(u) {
+            if (u === String(preview.url)) preview._load();
+        }
+    }
 
     function _fetch() {
-        _cancelFetch();
         // Start from a clean slate. `url` is a binding, and a live delegate
         // sees it change whenever the model row updates or the delegate is
         // recycled for a different message. Every property below describes
         // the *previous* URL: a `_failed` left over from a dead link would
-        // keep the card hidden for a perfectly good successor (`visible`
-        // gates on it and nothing else ever set it back), and stale og*
-        // fields would briefly render the old page's card — or, on the
-        // bad-URL and cached-failure paths that return before `_apply()`,
-        // keep it rendered — under the new link.
+        // keep the card hidden for a perfectly good successor, and stale og*
+        // fields would briefly render the old page's card under the new link.
         _failed = false;
+        _imageFailed = false;
         ogTitle = "";
         ogDescription = "";
         ogImage = "";
         ogSiteName = "";
         var u = String(preview.url);
-        if (!u || u.indexOf("http") !== 0) {
+        if (!preview._enabled || !/^https?:\/\//i.test(u)) {
             _failed = true;
             return;
         }
-        // Cache hit. Absent means never fetched; a stored `null` means "known
-        // to have nothing preview-worthy" and must short-circuit to failed
-        // rather than fall through to a refetch, so the two are kept apart.
-        if (PreviewCache.has(u)) {
-            var c = PreviewCache.lookup(u);
-            if (!c) { _failed = true; return; }
-            _apply(c);
+        // false = the answer is already cached (or none will come); read it
+        // now. true = linkPreviewResolved(u) follows.
+        if (!preview._server.requestLinkPreview(u)) _load();
+    }
+
+    function _load() {
+        var s = preview._server;
+        var r = s ? s.linkPreview(String(preview.url)) : null;
+        if (r && r.state === "pending") return;
+        if (!r || r.state !== "ready") {
+            _failed = true;
             return;
         }
-        // Known video platforms get the oEmbed fast-path — returns
-        // tiny JSON with title + author name, no HTML scanning. The
-        // thumbnail for the video card is derived from the video id
-        // directly so we don't need it from oEmbed.
-        if (isVideoEmbed) {
-            _fetchYoutubeOEmbed(u);
-            return;
-        }
-        // Up to 3 redirect hops — covers http→https→www-prefix chains
-        // without risking redirect loops.
-        _fetchOne(u, u, 3);
-    }
-
-    // YouTube oEmbed (https://oembed.com/). No auth required, returns
-    // `{title, author_name, author_url, thumbnail_url, ...}`. Much
-    // more reliable than scraping the rendered HTML — YouTube's own
-    // page puts og tags past byte 600KB so a bounded regex scan
-    // misses them entirely.
-    function _fetchYoutubeOEmbed(origUrl) {
-        var api = "https://www.youtube.com/oembed?format=json&url="
-            + encodeURIComponent(origUrl);
-        var xhr = new XMLHttpRequest();
-        _xhr = xhr;
-        xhr.open("GET", api);
-        xhr.setRequestHeader("Accept", "application/json");
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState !== XMLHttpRequest.DONE) return;
-            _xhr = null;
-            var parsed = null;
-            if (xhr.status >= 200 && xhr.status < 400) {
-                try {
-                    var j = JSON.parse(xhr.responseText);
-                    if (j.title) {
-                        parsed = {
-                            title: j.title,
-                            siteName: j.author_name || "YouTube",
-                            description: "",
-                            image: "",
-                            ready: true
-                        };
-                    }
-                } catch (e) {
-                    parsed = null;
-                }
-            }
-            PreviewCache.store(origUrl, parsed);
-            _finish(parsed);
-        };
-        xhr.send();
-    }
-
-    function _fetchOne(origUrl, currentUrl, redirectsLeft) {
-        var xhr = new XMLHttpRequest();
-        _xhr = xhr;
-        xhr.open("GET", currentUrl);
-        xhr.setRequestHeader("Accept", "text/html,application/xhtml+xml");
-        // Some sites (Reddit, LinkedIn, Twitter) return a completely
-        // different body — or a block — to non-browser User-Agents.
-        // Claim a modern Safari UA so we get the OpenGraph-rich HTML
-        // and not a login wall or raw JSON.
-        xhr.setRequestHeader(
-            "User-Agent",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            + "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-            + "Version/17.0 Safari/605.1.15");
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState !== XMLHttpRequest.DONE) return;
-
-            // Follow 3xx manually. Qt's QML XHR doesn't follow
-            // redirects by default, so reddit.com (→ www.reddit.com)
-            // and every other root-domain short link would otherwise
-            // land us with an empty body.
-            if (xhr.status >= 300 && xhr.status < 400 && redirectsLeft > 0) {
-                var loc = xhr.getResponseHeader("Location")
-                       || xhr.getResponseHeader("location");
-                if (loc) {
-                    var next = PreviewParse.absolutize(loc, currentUrl);
-                    _fetchOne(origUrl, next, redirectsLeft - 1);
-                    return;
-                }
-            }
-            _xhr = null;
-
-            // `parsed` stays null for every unusable outcome — bad status,
-            // non-HTML body, a bot-challenge shim, or HTML with nothing
-            // preview-worthy in it — and null is exactly what the cache
-            // stores for "do not fetch this again".
-            var parsed = null;
-            if (xhr.status >= 200 && xhr.status < 400) {
-                var ct = xhr.getResponseHeader("content-type") || "";
-                if (ct.indexOf("text/html") >= 0 || ct.indexOf("xhtml") >= 0) {
-                    // Limit the regex-scan prefix to avoid running big
-                    // regexes over a whole megabyte of body. 64KB used to
-                    // be enough for most sites' <head>, but modern
-                    // JS-heavy pages (YouTube, Reddit) push og tags past
-                    // 500KB; widen to 512KB so we still catch them.
-                    // YouTube specifically takes the oEmbed fast-path
-                    // above and never lands here.
-                    var html = xhr.responseText.substring(0, 524288);
-                    // Bot-challenge / verification pages. Client-side
-                    // fetches from a desktop app don't pass Cloudflare
-                    // Turnstile, PerimeterX, etc. — the response is a
-                    // short "please wait" shim with a placeholder title
-                    // but no real content. Render nothing rather than a
-                    // misleading card. Fix is a server-side unfurler;
-                    // this is the interim stop.
-                    if (!PreviewParse.looksLikeChallenge(html)) {
-                        var og = PreviewParse.parseOg(html, currentUrl);
-                        if (og.ready) parsed = og;
-                    }
-                }
-            }
-            PreviewCache.store(origUrl, parsed);
-            _finish(parsed);
-        };
-        xhr.send();
-    }
-
-    function _apply(data) {
-        ogTitle = data.title || "";
-        ogDescription = data.description || "";
-        ogImage = data.image || "";
-        ogSiteName = data.siteName || "";
-    }
-
-    // Single exit for both fetch paths. `null` means the URL has no usable
-    // preview — bad status, wrong content type, a challenge shim, or HTML with
-    // no OpenGraph and no <title> — and that is the state the card hides in.
-    function _finish(parsed) {
-        if (parsed) _apply(parsed);
-        else _failed = true;
-    }
-
-    // Drop the in-flight request, if any. Clearing the handler first matters:
-    // abort() dispatches a final readyState change, and running the normal
-    // callback from here would be the very thing this exists to prevent.
-    // Whatever the response would have been is simply lost — the URL stays
-    // absent from the cache and the next card that shows it fetches again.
-    function _cancelFetch() {
-        if (!_xhr) return;
-        var xhr = _xhr;
-        _xhr = null;
-        xhr.onreadystatechange = function() {};
-        xhr.abort();
+        ogTitle = r.title || "";
+        ogDescription = r.description || "";
+        ogImage = r.image || "";
+        ogSiteName = r.siteName || "";
     }
 
     // Known-platform sniff. Returns the platform-native video ID if
