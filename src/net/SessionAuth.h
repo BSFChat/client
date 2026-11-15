@@ -40,6 +40,17 @@
 //      not an auth prompt. Once the session is known dead those are noise
 //      about a cause already on screen: shouldSuppressSubsystemError().
 //
+// A fourth, found in the 2026-11 audit (C-6): Reauthenticating had no way out
+// but an answer. Every step of a sign-in — the login-flows probe, the browser,
+// the token exchange, POST /login — ends it by succeeding or failing, and a
+// step that did neither (a request that never answered, a password prompt
+// that was dismissed) left the phase there for the life of the process, with
+// actionForReconnect() answering Ignore and beginReauth() refusing. Requests
+// now time out, and ServerConnection runs a watchdog, but the rule that makes
+// it unwedgeable lives here: an attempt older than kReauthStaleMs no longer
+// blocks a new one. Callers pass a clock (milliseconds, any epoch, as long as
+// it is the same one throughout); the no-clock forms keep the old behaviour.
+//
 // Deliberately free of Qt beyond nothing at all: no QObject, no signals, no
 // strings. ServerConnection owns one of these and does the I/O.
 
@@ -69,6 +80,12 @@ enum class ReconnectAction {
 
 class SessionAuth {
 public:
+    // How long one sign-in attempt may hold the phase before a new one is
+    // allowed to replace it. Longer than IdentityClient's five-minute browser
+    // window, so a user who is still reading the provider's page is never
+    // pre-empted by their own second click.
+    static constexpr long long kReauthStaleMs = 6LL * 60 * 1000;
+
     SessionPhase phase() const { return m_phase; }
 
     // True whenever the user needs to sign in again — including while the
@@ -92,14 +109,27 @@ public:
         return isNew;
     }
 
-    ReconnectAction actionForReconnect() const
+    // `nowMs` < 0 means "no clock": an in-flight attempt is never stale.
+    ReconnectAction actionForReconnect(long long nowMs = -1) const
     {
         switch (m_phase) {
         case SessionPhase::Authenticated:    return ReconnectAction::RetryWithToken;
         case SessionPhase::Expired:          return ReconnectAction::Reauthenticate;
-        case SessionPhase::Reauthenticating: return ReconnectAction::Ignore;
+        case SessionPhase::Reauthenticating:
+            return reauthIsStale(nowMs) ? ReconnectAction::Reauthenticate
+                                        : ReconnectAction::Ignore;
         }
         return ReconnectAction::RetryWithToken;
+    }
+
+    // An attempt that has run past kReauthStaleMs without an answer. Only
+    // meaningful while Reauthenticating, and only when both the start and
+    // `nowMs` came from a clock.
+    bool reauthIsStale(long long nowMs) const
+    {
+        return m_phase == SessionPhase::Reauthenticating
+            && nowMs >= 0 && m_reauthStartedMs >= 0
+            && nowMs - m_reauthStartedMs >= kReauthStaleMs;
     }
 
     // Take the session into a login attempt. False means "already running" —
@@ -108,10 +138,16 @@ public:
     // Callable from Authenticated on purpose: "sign out and sign in again"
     // is a legitimate thing to offer someone whose session is merely
     // misbehaving, and refusing it here would be a second way to get stuck.
-    bool beginReauth()
+    //
+    // A STALE attempt (see kReauthStaleMs) does not count as running: it is
+    // replaced, which is what keeps a hung step from refusing every later
+    // click.
+    bool beginReauth(long long nowMs = -1)
     {
-        if (m_phase == SessionPhase::Reauthenticating) return false;
+        if (m_phase == SessionPhase::Reauthenticating && !reauthIsStale(nowMs))
+            return false;
         m_phase = SessionPhase::Reauthenticating;
+        m_reauthStartedMs = nowMs;
         return true;
     }
 
@@ -133,6 +169,7 @@ public:
 
 private:
     SessionPhase m_phase = SessionPhase::Authenticated;
+    long long m_reauthStartedMs = -1;
 };
 
 } // namespace bsfchat::client

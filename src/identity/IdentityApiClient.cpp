@@ -1,4 +1,5 @@
 #include "identity/IdentityApiClient.h"
+#include "net/RequestTimeout.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -24,6 +25,9 @@ IdentityApiClient::IdentityApiClient(const QString& baseUrl, const QString& acce
     , m_baseUrl(normalizeBase(baseUrl))
     , m_accessToken(accessToken)
 {
+    // Server list, membership writes: small calls that must not hang a
+    // sign-in forever (audit C-6).
+    m_nam.setTransferTimeout(bsfchat::net::kRequestTimeoutMs);
 }
 
 void IdentityApiClient::fetchServers()

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QHash>
 #include <QJsonArray>
@@ -302,7 +303,7 @@ public:
     // rather than re-derived at the call site. ServerManager dispatches on it.
     bsfchat::client::ReconnectAction reconnectAction() const
     {
-        return m_auth.actionForReconnect();
+        return m_auth.actionForReconnect(QDateTime::currentMSecsSinceEpoch());
     }
     bool hasUnread() const { return m_hasUnread; }
 
@@ -594,6 +595,11 @@ public:
     // m.login.password: the UI collects the credentials and hands them back.
     Q_INVOKABLE void reauthWithPassword(const QString& username,
                                         const QString& password);
+    // The user dismissed the password prompt reauthPasswordRequired opened.
+    // Returns the session to Expired, quietly, so "Sign in again" works on
+    // the next click — the dialog used to just close, leaving the phase in
+    // Reauthenticating where every later attempt was refused (audit C-6).
+    Q_INVOKABLE void cancelReauth();
     // Returns the identity-provider base URL (e.g. "https://id.bsfchat.com")
     // for the "Manage Account" link: the live OIDC session's provider if
     // this process ran the flow, otherwise the one this connection was
@@ -1236,6 +1242,9 @@ private:
     void onLoginAttemptFailed(const QString& error);
     // Return to a clearable expired state and tell the UI why.
     void failReauth(const QString& error);
+    // failReauth() minus the reauthFailed signal: the state half, shared with
+    // cancelReauth(), which has nothing to report.
+    void returnToExpired();
     // `userId`'s latest membership value in every synced room, keyed by room id
     // (empty string where the room has no member event for them). The input to
     // bsfchat::client::moderationRooms(); split out so the three moderation
@@ -1620,6 +1629,10 @@ private:
     bool m_voiceDeafened = false;
     QJsonArray m_voiceMembers;
     QTimer* m_voicePollTimer = nullptr;
+    // Bounds a re-authentication that never answers (audit C-6). Armed for
+    // the network and browser steps, disarmed while a password prompt is up:
+    // that wait is the user's, and the prompt's Cancel ends it.
+    QTimer m_reauthWatchdog;
     // Fold one m.call.member state event into the per-room voice roster the
     // sidebar renders. Sync is the ONLY writer of that roster: room state is
     // the server's own answer to "who is in this channel", it arrives for

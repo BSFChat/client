@@ -1,4 +1,5 @@
 #include "identity/IdentityClient.h"
+#include "net/RequestTimeout.h"
 #include "identity/OidcRequest.h"
 #include "util/ExternalBrowser.h"
 
@@ -85,6 +86,12 @@ int IdentityClient::waitingForBrowserCount()
 IdentityClient::IdentityClient(QObject* parent)
     : QObject(parent)
 {
+    // The token exchange is the one step of a sign-in with no browser in
+    // front of it and, until now, no bound at all: the 5-minute timer below
+    // is stopped the moment the callback lands, so a /token that never
+    // answered left the dialog on "Waiting…" and a re-auth stuck in
+    // Reauthenticating (audit C-6).
+    m_nam.setTransferTimeout(bsfchat::net::kRequestTimeoutMs);
     m_timeout.setSingleShot(true);
     connect(&m_timeout, &QTimer::timeout, this, [this]() {
         cancel();
@@ -575,8 +582,10 @@ void IdentityClient::exchangeCodeForTokens(const QString& code)
         if (reply->error() != QNetworkReply::NoError) {
             const int status = reply->attribute(
                 QNetworkRequest::HttpStatusCodeAttribute).toInt();
-            QString msg = QString("Token exchange failed [%1]: %2")
-                .arg(status).arg(reply->errorString());
+            QString msg = bsfchat::net::replyTimedOut(reply)
+                ? tr("The sign-in provider didn't answer in time. Try again.")
+                : QString("Token exchange failed [%1]: %2")
+                      .arg(status).arg(reply->errorString());
             if (!data.isEmpty()) {
                 msg += " — " + QString::fromUtf8(data).left(200);
             }

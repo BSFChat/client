@@ -1075,6 +1075,14 @@ ApplicationWindow {
         id: signOutConfirm
         parent: popupSurface
     }
+    // Sign in again to a password-flow server already in the drawer. This
+    // shell never had one: reauthPasswordRequired went unheard, the banner
+    // sat on "Signing in…" and the session stayed in Reauthenticating, where
+    // every later "Sign in again" is refused. Same component as desktop.
+    ReauthDialog {
+        id: reauthDialogGlobal
+        parent: popupSurface
+    }
     Component.onCompleted: {
         if (!serverManager || !serverManager.servers
             || serverManager.servers.rowCount() === 0) {
@@ -1138,7 +1146,8 @@ ApplicationWindow {
             if (!loginDialogGlobal.opened) root.toastError("BSFChat ID sign-in failed: " + error);
         }
         function onReauthFailed(index, serverUrl, error) {
-            root.toastError("Couldn't sign in: " + error);
+            // ReauthDialog shows the password case inline; one message.
+            if (!reauthDialogGlobal.opened) root.toastError("Couldn't sign in: " + error);
         }
         // Signing in with a BSFChat ID takes TWO browser trips, and the
         // second one is a surprise: the first proves who you are and fetches

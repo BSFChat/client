@@ -818,6 +818,18 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         }
     });
 
+    // A re-auth step that neither succeeds nor fails — every request now
+    // times out, but a step can also simply be abandoned — must not hold
+    // Reauthenticating forever (audit C-6). Same bound SessionAuth applies.
+    m_reauthWatchdog.setSingleShot(true);
+    m_reauthWatchdog.setInterval(int(bsfchat::client::SessionAuth::kReauthStaleMs));
+    connect(&m_reauthWatchdog, &QTimer::timeout, this, [this]() {
+        if (!m_auth.isReauthenticating()) return;
+        qWarning().noquote() << "[ServerConnection] re-authentication for"
+                             << m_serverUrl << "did not finish; giving up on it";
+        failReauth(tr("Signing in didn't finish. Try again."));
+    });
+
     // Voice poll timer
     m_voicePollTimer = new QTimer(this);
     m_voicePollTimer->setInterval(5000);
@@ -1154,6 +1166,7 @@ void ServerConnection::applyLoginResponse(const bsfchat::LoginResponse& resp)
     if (m_displayName.isEmpty()) m_displayName = m_userId;
     m_client->setAccessToken(m_accessToken);
 
+    m_reauthWatchdog.stop();
     m_auth.noteAuthenticated();
     m_connected = true;
     m_connectionStatus = 1;
@@ -1348,9 +1361,22 @@ void ServerConnection::onAccessTokenRejected(const QString& errorBody)
 
 void ServerConnection::failReauth(const QString& error)
 {
+    returnToExpired();
+    emit reauthFailed(error);
+}
+
+void ServerConnection::cancelReauth()
+{
+    if (!m_auth.isReauthenticating()) return;
+    returnToExpired();
+}
+
+void ServerConnection::returnToExpired()
+{
     // Back to Expired, never to a terminal state: the button has to work
     // again. The version this replaced could only be cleared by removing the
     // server from the sidebar and adding it back.
+    m_reauthWatchdog.stop();
     m_auth.noteReauthFailed();
     m_connected = false;
     m_connectionStatus = 3;
@@ -1360,12 +1386,15 @@ void ServerConnection::failReauth(const QString& error)
     emit connectionStatusChanged();
     emit syncErrorMessageChanged();
     emit sessionAuthChanged();
-    emit reauthFailed(error);
 }
 
 void ServerConnection::beginReauth()
 {
-    if (!m_auth.beginReauth()) return;  // one browser flow at a time
+    // One browser flow at a time — unless the one running has gone stale
+    // (SessionAuth::kReauthStaleMs), which is what stops a hung step from
+    // refusing every later click.
+    if (!m_auth.beginReauth(QDateTime::currentMSecsSinceEpoch())) return;
+    m_reauthWatchdog.start();
 
     // Anything still holding the old credential goes quiet first.
     m_syncLoop->stop();
@@ -1412,6 +1441,9 @@ void ServerConnection::beginReauth()
                 return;
             }
             if (passwordFlow) {
+                // The wait from here is the user's, not the network's; the
+                // prompt's Cancel (cancelReauth) is what ends it.
+                m_reauthWatchdog.stop();
                 emit reauthPasswordRequired(m_serverUrl, m_userId);
                 return;
             }
@@ -1434,7 +1466,16 @@ void ServerConnection::reauthWithPassword(const QString& username,
 {
     // Only reachable as the answer to reauthPasswordRequired. Outside that
     // window this would be a silent second login on a healthy connection.
-    if (!m_auth.isReauthenticating()) return;
+    //
+    // An Expired session is not healthy, though: a prompt left open past the
+    // stale bound, or answered after a late 401 knocked the phase back, must
+    // still be able to sign in rather than leave its button spinning forever.
+    if (!m_auth.isReauthenticating()) {
+        if (!m_auth.needsReauth()) return;
+        if (!m_auth.beginReauth(QDateTime::currentMSecsSinceEpoch())) return;
+        emit sessionAuthChanged();
+    }
+    m_reauthWatchdog.start();
     awaitLoginReply();
     m_client->login(username, password);
 }
