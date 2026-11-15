@@ -1224,6 +1224,50 @@ signals:
 private:
     void startSync();
     void processSyncResponse(const bsfchat::SyncResponse& response);
+
+    // ── "this room is gone for me" (audit R-1) ───────────────────────────
+    // Implemented in net/ServerConnectionRoomRemoval.cpp; the decisions are
+    // the pure functions in net/RoomRemoval.h.
+    //
+    // A LIVE /sync reply, as opposed to the cache-hydration replay that also
+    // runs through processSyncResponse. Processes the reply, then applies the
+    // raw body's rooms.leave section AFTER it (so a leave + re-join in one
+    // batch resolves on the whole batch), then — once per session — asks
+    // /joined_rooms to reconcile for servers that send no leave section.
+    void onLiveSync(const bsfchat::SyncResponse& response);
+    enum class RoomGoneCause {
+        OwnAction, // this device left or deleted it: no toast
+        Server,    // learned from the server (rooms.leave, reconcile, prune)
+    };
+    // The ONE removal path: sidebar row, categorized/DM snapshots, timeline
+    // window (memory and disk), per-room caches, unread state; voice is left
+    // if it was in one of them; and if the active room is among them, the
+    // view moves to the app's usual landing channel (restoreLastTextRoom) and
+    // — for Server — a toast says the room is no longer available.
+    void dropRoomsGoneForMe(const QStringList& roomIds, RoomGoneCause cause);
+    // Blank the main pane: no active room, empty message and member models.
+    void clearActiveRoomView();
+    // GET /joined_rooms and drop every sidebar room the answer leaves out
+    // (see roomsToDropAfterReconcile). Coalesces: one request in flight per
+    // session, a request asked for meanwhile is issued when it lands.
+    void requestJoinedRoomsReconcile();
+    void onJoinedRoomsResult(const QString& requestId, const QStringList& roomIds);
+    // New session (startSync) or teardown: forget the in-flight request so
+    // its answer — another session's, possibly another account's — is
+    // ignored, and re-arm the once-per-session reconcile.
+    void resetRoomReconcile();
+    QStringList sidebarRoomIds() const;
+    // Correlation id of the outstanding /joined_rooms request, empty if none.
+    QString m_joinedRoomsRequestId;
+    // Sidebar ids when it was issued: anything newer is protected from its
+    // answer, which was computed before that room arrived.
+    QSet<QString> m_joinedRoomsAskedWith;
+    QElapsedTimer m_joinedRoomsAskedAt;
+    bool m_joinedRoomsAgain = false;
+    bool m_reconciledThisSession = false;
+    // Pending invites as of the newest live sync (that section is a complete
+    // restatement, see the protocol header). Never dropped by a reconcile.
+    QSet<QString> m_pendingInviteIds;
     // The homeserver rejected our bearer token, from /sync or from any other
     // authenticated request. Idempotent: the ten in-flight requests that all
     // 401 at once raise one banner between them.

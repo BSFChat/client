@@ -254,6 +254,7 @@ qt_add_library(bsfchat-lib STATIC
     src/net/AuthError.cpp
     src/net/SyncLoop.cpp
     src/net/ServerConnection.cpp
+    src/net/ServerConnectionRoomRemoval.cpp
     src/net/VoiceSession.cpp
     src/net/ServerManager.cpp
     src/net/ServerDiscovery.cpp

@@ -7,6 +7,7 @@
 #include "net/SnapshotGate.h"
 #include "net/IgnoredUsers.h"
 #include "net/MemberJson.h"
+#include "net/RoomRemoval.h"
 #include "model/RoomListModel.h"
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
@@ -494,7 +495,11 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     });
 
     // Connect sync signals
-    connect(m_syncLoop, &SyncLoop::syncCompleted, this, &ServerConnection::processSyncResponse);
+    // onLiveSync, not processSyncResponse directly: a live reply also
+    // carries rooms.leave, and earns the session's /joined_rooms reconcile.
+    connect(m_syncLoop, &SyncLoop::syncCompleted, this, &ServerConnection::onLiveSync);
+    connect(m_client, &MatrixClient::joinedRoomsResult, this,
+            &ServerConnection::onJoinedRoomsResult);
 
     // Track sync errors for UI
     connect(m_syncLoop, &SyncLoop::syncError, this, [this](const QString& error) {
@@ -700,6 +705,11 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     connect(m_client, &MatrixClient::messagesError, this,
             [this](const QString& roomId, const QString& from, const QString& error) {
         qWarning() << "[ServerConnection] /messages failed for" << roomId << ":" << error;
+        // 403/404 on history is how a room deleted or revoked elsewhere shows
+        // up on a server that sends no rooms.leave. Ask the server which
+        // rooms we are still in; that answer, not this error, decides.
+        if (bsfchat::client::messagesErrorSuggestsRoomGone(error))
+            requestJoinedRoomsReconcile();
         if (roomId != m_activeRoomId) return;
         if (m_messageModel->failHistoryFill(from, m_userId)) {
             qCInfo(logTimeline).nospace()
@@ -995,16 +1005,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 
     // Handle leave room success
     connect(m_client, &MatrixClient::leaveRoomSuccess, this, [this](const QString& roomId) {
-        if (roomId == m_activeRoomId) {
-            m_activeRoomId.clear();
-            m_activeRoomName.clear();
-            m_activeRoomTopic.clear();
-            m_messageModel->clear();
-            m_memberListModel->clear();
-            emit activeRoomIdChanged();
-            emit activeRoomNameChanged();
-            emit activeRoomTopicChanged();
-        }
+        dropRoomsGoneForMe({roomId}, RoomGoneCause::OwnAction);
     });
 }
 
@@ -1442,6 +1443,7 @@ void ServerConnection::reauthWithPassword(const QString& username,
 void ServerConnection::disconnectFromServer()
 {
     m_syncLoop->stop();
+    resetRoomReconcile();
     // The bot set is a fact about THIS server's users; a reconnect may be as
     // a different account against a server whose bot set has moved. The
     // member list rebuilds itself from fresh member events, so only the
@@ -1472,6 +1474,8 @@ void ServerConnection::disconnectFromServer()
 
 void ServerConnection::startSync()
 {
+    // A new session: no earlier /joined_rooms answer may act on it.
+    resetRoomReconcile();
     // Resume where the last session left off when we can. An initial /sync
     // is the most expensive request the server serves — full state plus a
     // VIEW_CHANNEL check for every joined room — and the client used to pay
@@ -2100,17 +2104,7 @@ void ServerConnection::deleteChannel(const QString& roomId)
     // Without clearing the per-room models the main pane kept rendering the
     // last message list from the deleted room which made the UI look frozen
     // until the long-poll sync came back.
-    if (roomId == m_activeRoomId) {
-        m_activeRoomId.clear();
-        m_activeRoomName.clear();
-        m_activeRoomTopic.clear();
-        m_messageModel->clear();
-        m_memberListModel->clear();
-        emit activeRoomIdChanged();
-        emit activeRoomNameChanged();
-        emit activeRoomTopicChanged();
-    }
-    m_roomListModel->removeRoom(roomId);
+    dropRoomsGoneForMe({roomId}, RoomGoneCause::OwnAction);
     m_client->deleteRoom(roomId);
 }
 
@@ -4667,16 +4661,10 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             for (const auto& [roomIdStr, _unused] : response.rooms.join) {
                 visible.insert(QString::fromStdString(roomIdStr));
             }
-            auto removed = m_roomListModel->pruneRoomsNotIn(visible);
-            if (!removed.isEmpty() && removed.contains(m_activeRoomId)) {
-                // Active room was pruned; clear the view.
-                m_activeRoomId.clear();
-                m_activeRoomName.clear();
-                m_activeRoomTopic.clear();
-                emit activeRoomIdChanged();
-                emit activeRoomNameChanged();
-                emit activeRoomTopicChanged();
-            }
+            QStringList gone;
+            for (const QString& id : sidebarRoomIds())
+                if (!visible.contains(id)) gone.append(id);
+            if (!gone.isEmpty()) dropRoomsGoneForMe(gone, RoomGoneCause::Server);
         }
         m_firstSyncProcessed = true;
         // Tells QML the empty room list is now an ANSWER rather than the

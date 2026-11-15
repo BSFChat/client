@@ -789,6 +789,7 @@ add_test(NAME test_server_roster COMMAND test_server_roster)
 qt_add_executable(test_identity_provider_url
     test_identity_provider_url.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/ServerConnectionRoomRemoval.cpp
     # ServerConnection gained a BotAdminModel* Q_PROPERTY when feat/bots merged,
     # a SelfRoleModel* with the self-role picker, a ChannelInviteModel* with
     # "add a member to a channel", and a BlockedUsersModel* with blocking.
@@ -852,6 +853,7 @@ add_test(NAME test_identity_provider_url COMMAND test_identity_provider_url)
 qt_add_executable(test_error_surface_guards
     test_error_surface_guards.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/ServerConnectionRoomRemoval.cpp
     # ServerConnection gained a MediaTicketCache and a MediaDownloader when
     # security/media-tickets merged. This target did not exist on that branch,
     # so it never picked them up — the same cross-branch shape as BotAdminModel.
@@ -904,6 +906,7 @@ add_test(NAME test_error_surface_guards COMMAND test_error_surface_guards)
 qt_add_executable(test_composer_upload_lock
     test_composer_upload_lock.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/ServerConnectionRoomRemoval.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
@@ -1003,6 +1006,7 @@ qt_add_executable(test_direct_rooms
 target_include_directories(test_direct_rooms PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_direct_rooms PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_direct_rooms COMMAND test_direct_rooms)
+
 
 # Media cache identity. The key used to include the access token, so every
 # re-login re-downloaded every image the user had ever seen.
