@@ -80,9 +80,26 @@ Popup {
                     clip: true
                     onTextChanged: emojiPicker.searchQuery = text
 
+                    // Keyboard (U-3): the search field is where focus lands,
+                    // so it drives the grid the way a combobox drives its
+                    // list. Down moves into the grid, Enter picks the
+                    // highlighted emoji (the first result until you move),
+                    // Escape is the Popup's own CloseOnEscape.
+                    Keys.onPressed: (event) => {
+                        if (event.key === Qt.Key_Down) {
+                            emojiPicker._focusGrid();
+                            event.accepted = true;
+                        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                            emojiPicker._pickCurrent();
+                            event.accepted = true;
+                        }
+                    }
+
                     Accessible.role: Accessible.EditableText
                     Accessible.name: qsTr("Search emoji")
-                    Accessible.description: qsTr("Filters the emoji grid as you type")
+                    Accessible.description: qsTr("Filters the emoji grid as you type. "
+                                                 + "Down arrow moves into the results, "
+                                                 + "Return picks the highlighted emoji.")
 
                     Text {
                         anchors.fill: parent
@@ -164,6 +181,26 @@ Popup {
                                  : "transparent"
                         visible: modelData.id !== "frequent" || emojiPicker.recentEmoji.length > 0
                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                        // Tab reaches the tabs; Space/Return select, Left and
+                        // Right walk along them, Down drops into the grid.
+                        activeFocusOnTab: true
+                        border.width: activeFocus ? 2 : 0
+                        border.color: Theme.accent
+                        Keys.onPressed: (event) => {
+                            if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                                || event.key === Qt.Key_Enter) {
+                                emojiPicker.currentCategory = modelData.id;
+                                event.accepted = true;
+                            } else if (event.key === Qt.Key_Right || event.key === Qt.Key_Left) {
+                                var next = nextItemInFocusChain(event.key === Qt.Key_Right);
+                                if (next && next.parent === parent) next.forceActiveFocus();
+                                event.accepted = true;
+                            } else if (event.key === Qt.Key_Down) {
+                                emojiPicker.currentCategory = modelData.id;
+                                emojiPicker._focusGrid();
+                                event.accepted = true;
+                            }
+                        }
 
                         Accessible.role: Accessible.PageTab
                         Accessible.name: qsTr("%1 emoji").arg(modelData.name)
@@ -241,8 +278,56 @@ Popup {
                 cellHeight: 40
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
+                activeFocusOnTab: true
+
+                Accessible.role: Accessible.List
+                Accessible.name: emojiPicker.searchQuery.length > 0
+                    ? qsTr("Emoji matching %1").arg(emojiPicker.searchQuery)
+                    : qsTr("Emoji")
 
                 ScrollBar.vertical: ThemedScrollBar {}
+
+                // Arrow keys are GridView's own key navigation (currentIndex);
+                // this keeps the highlighted cell in view and says what it is,
+                // because the grid, not the cell, holds focus and a screen
+                // reader has nothing else to read.
+                onCurrentIndexChanged: {
+                    if (currentIndex < 0) return;
+                    positionViewAtIndex(currentIndex, GridView.Contain);
+                    if (emojiGrid.activeFocus && currentItem)
+                        emojiGrid.Accessible.announce(currentItem.Accessible.name,
+                                                      Accessible.AnnouncementPoliteness.Polite);
+                }
+                onCountChanged: currentIndex = count > 0 ? 0 : -1
+                Keys.onPressed: (event) => {
+                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+                        || event.key === Qt.Key_Space) {
+                        emojiPicker._pickCurrent();
+                        event.accepted = true;
+                        return;
+                    }
+                    // Up off the top row goes back to the search field.
+                    if (event.key === Qt.Key_Up && currentIndex >= 0
+                        && currentIndex < Math.max(1, Math.floor(width / cellWidth))) {
+                        searchField.forceActiveFocus();
+                        event.accepted = true;
+                        return;
+                    }
+                    if (event.key === Qt.Key_Backspace) {
+                        searchField.text = searchField.text.slice(0, -1);
+                        searchField.forceActiveFocus();
+                        event.accepted = true;
+                        return;
+                    }
+                    // Typing anywhere in the grid searches.
+                    if (event.text.length > 0 && event.text.trim().length > 0
+                        && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier
+                                                | Qt.MetaModifier))) {
+                        searchField.text += event.text;
+                        searchField.forceActiveFocus();
+                        event.accepted = true;
+                    }
+                }
 
                 model: {
                     if (emojiPicker.searchQuery.length > 0) {
@@ -258,10 +343,16 @@ Popup {
                     width: 38
                     height: 38
                     radius: Theme.r1
-                    color: emojiCellHover.containsMouse ? Theme.bg3 : "transparent"
+                    readonly property bool kbCurrent: GridView.isCurrentItem
+                        && (emojiGrid.activeFocus
+                            || (searchField.activeFocus && emojiPicker.searchQuery.length > 0))
+                    color: emojiCellHover.containsMouse || kbCurrent ? Theme.bg3 : "transparent"
+                    border.width: kbCurrent ? 2 : 0
+                    border.color: Theme.accent
 
                     Accessible.role: Accessible.ListItem
                     Accessible.name: modelData.name
+                    Accessible.selected: GridView.isCurrentItem
                     Accessible.description: qsTr("Insert %1").arg(modelData.name)
                     Accessible.onPressAction: {
                         addToRecent(modelData);
@@ -322,8 +413,26 @@ Popup {
         recentEmoji = filtered;
     }
 
+    function _focusGrid() {
+        if (emojiGrid.count === 0) return;
+        if (emojiGrid.currentIndex < 0) emojiGrid.currentIndex = 0;
+        emojiGrid.forceActiveFocus();
+        if (emojiGrid.currentItem)
+            emojiGrid.Accessible.announce(emojiGrid.currentItem.Accessible.name,
+                                          Accessible.AnnouncementPoliteness.Polite);
+    }
+    function _pickCurrent() {
+        if (emojiGrid.currentIndex < 0 || emojiGrid.currentIndex >= emojiGrid.count) return;
+        var m = emojiGrid.model;
+        var e = m && m[emojiGrid.currentIndex];
+        if (!e || !e.emoji) return;
+        addToRecent(e);
+        emojiPicker.emojiSelected(e.emoji);
+    }
+
     onOpened: {
         searchField.text = "";
+        emojiGrid.currentIndex = emojiGrid.count > 0 ? 0 : -1;
         searchField.forceActiveFocus();
     }
 }

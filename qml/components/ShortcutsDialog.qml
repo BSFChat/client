@@ -88,7 +88,34 @@ Popup {
                 { label: "Send message",            keys: ["Enter"] },
                 { label: "New line in composer",    keys: [shiftKey + " Enter"] },
                 { label: "Cancel reply / edit",     keys: ["Esc"] },
+                { label: "Edit your last message",  keys: ["s/old/new/"] },
                 { label: "Right-click for menu",    keys: ["Right-click"] }
+            ]
+        },
+        {
+            // Keyboard message actions (U-3). Handled in MessageView._kbKey;
+            // keep the two in step.
+            title: "Timeline",
+            entries: [
+                { label: "Into timeline (empty composer)", keys: ["↑"] },
+                { label: "Previous / next message", keys: ["↑ ↓"] },
+                { label: "Oldest / newest loaded",  keys: ["Home End"] },
+                { label: "Message actions menu",    keys: ["Enter " + shiftKey + "+F10"] },
+                { label: "Reply",                   keys: ["R"] },
+                { label: "Edit (your message)",     keys: ["E"] },
+                { label: "Delete",                  keys: ["Del"] },
+                { label: "Add reaction",            keys: ["+"] },
+                { label: "Back to composer",        keys: ["Esc"] }
+            ]
+        },
+        {
+            title: "Emoji Picker",
+            entries: [
+                { label: "Search",                  keys: ["Type"] },
+                { label: "Move through emoji",      keys: ["↑ ↓ ← →"] },
+                { label: "Pick",                    keys: ["Enter"] },
+                { label: "Categories",              keys: ["Tab"] },
+                { label: "Close",                   keys: ["Esc"] }
             ]
         },
         {

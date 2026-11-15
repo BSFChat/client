@@ -233,6 +233,9 @@ Rectangle {
     // Exposed so MessageView.focusComposer() can force focus via
     // Ctrl+L. alias avoids hardcoding the nested id path.
     property alias inputArea: inputArea
+    // Up arrow in an empty composer — MessageView moves focus to the newest
+    // message (keyboard message actions, U-3).
+    signal timelineFocusRequested()
 
     property string editingEventId: ""
     property string editingOriginalBody: ""
@@ -944,6 +947,21 @@ Rectangle {
                             event.accepted = true;
                             return;
                         }
+                    }
+
+                    // Up from an EMPTY composer walks into the timeline
+                    // (U-3): the message list takes focus on the newest
+                    // message. Only when empty, so Up still moves the caret
+                    // through a multi-line draft. Desktop only — a phone's
+                    // hardware-keyboard case is not one we have designed for.
+                    if (event.key === Qt.Key_Up && !Theme.isMobile
+                        && !(event.modifiers & (Qt.ShiftModifier | Qt.ControlModifier
+                                                | Qt.AltModifier | Qt.MetaModifier))
+                        && inputArea.text.length === 0
+                        && (!inputArea.preeditText || inputArea.preeditText.length === 0)) {
+                        inputRoot.timelineFocusRequested();
+                        event.accepted = true;
+                        return;
                     }
                 }
                 Keys.onReturnPressed: (event) => {

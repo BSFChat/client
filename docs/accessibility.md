@@ -67,7 +67,7 @@ Use the narrowest role that is true. The mapping used throughout:
 | A modal dialog's root | `Accessible.Dialog` |
 | A non-modal popup / drawer / sheet root | `Accessible.Dialog` |
 | A grouping container that needs a name (the timeline, the member pane) | `Accessible.Pane` |
-| A whole message in the timeline | `Accessible.StaticText` |
+| A whole message in the timeline | `Accessible.ListItem` (a keyboard focus stop — §12) |
 | A status strip (connection banner, toast) | `Accessible.AlertMessage` |
 | Anything decorative | *no role* — see §6 |
 
@@ -176,8 +176,10 @@ The rule: **the bubble is the accessible node, its text children are not.**
 
 ```qml
 // MessageBubble.qml root
-Accessible.role: Accessible.StaticText
+Accessible.role: Accessible.ListItem        // StaticText before U-3, see §12
 Accessible.name: <sender>, <body>, <time>, assembled in one string
+Accessible.focusable: true
+Accessible.focused: bubble.activeFocus
 Accessible.ignored: false
 ```
 
@@ -287,6 +289,53 @@ A `Window` is a different matter: attached accessibility genuinely does nothing
 there, and `QAccessibleQuickWindow` reads the window's `title` instead. Name
 a window through `title:`, and put roles and names on its content items.
 
+## 12. Keyboard message actions (U-3)
+
+Every message action that used to need a pointer — reply, react, edit,
+delete, the context menu — has a key. The bindings live in
+`MessageView._kbKey`, are listed in `ShortcutsDialog.qml`, and are shown next
+to the matching context-menu items.
+
+| Where | Key | Does |
+| --- | --- | --- |
+| Composer, empty | Up | Focus the newest message |
+| Anywhere | Tab onto the timeline | Focus the last focused (or newest) message |
+| Message | Up / Down | Previous / next message (Up past the top loads older history) |
+| Message | Page Up / Page Down, Home / End | Ten at a time; oldest / newest loaded |
+| Message | Return, Menu, Shift+F10 | Open the message's context menu, at the message |
+| Message | R | Reply (focus moves to the composer) |
+| Message | E | Edit, own messages only (focus moves to the composer) |
+| Message | Delete / Backspace | Delete, if allowed — through the same confirmation, focused on Cancel (§9) |
+| Message | + | Open the shared emoji picker for this message |
+| Message | Escape | Back to the composer |
+
+Choices, and why:
+
+- **Up from an empty composer**, not Alt+Up: Alt+Up/Down already walk the
+  channel list (main.qml). Only an *empty* composer, so Up still moves the
+  caret through a draft.
+- **Focus is on the message, not the list.** The focused `MessageBubble`
+  takes `activeFocus` and is a `ListItem` with `focusable`/`focused`, so a
+  screen reader reads its assembled name (§7) as focus arrives; its
+  `Accessible.description` lists the keys while it is focused. The ListView's
+  `currentIndex` is not used — it drags the view to follow it, and the
+  timeline's scroll bookkeeping assumes nothing else moves `contentY`.
+  Keyboard moves update `followEnd` the same way a reply jump does: moving up
+  releases the bottom, landing on the newest message re-pins it.
+- A visible 2-px accent ring marks the focused message.
+- After a menu, the picker or the delete confirmation closes, focus returns
+  to the message — unless the action put it somewhere else (reply and edit
+  focus the composer).
+
+The emoji picker (`EmojiPicker.qml`) is keyboard-operable on its own: focus
+opens in the search field and typing filters; Down moves into the grid and
+the arrow keys move through it; Return (or Space in the grid) picks; Return
+in the search field picks the highlighted result, the first match until you
+move; Up off the top row returns to the search field, and typing in the grid
+goes on searching. Tab reaches the category tabs (Left/Right between them,
+Return/Space to select). Escape closes. The grid holds focus rather than the
+cell, so each move is spoken with `Accessible.announce`.
+
 ## What the guard enforces
 
 `tests/test_qml_hygiene.cpp :: everyInteractiveControlIsNamedOrDeliberatelyIgnored`
@@ -309,8 +358,9 @@ first 300.
 - **Dynamic type / text scaling** is not addressed by this pass at all. It is
   real work and it is separate work.
 - **Keyboard-only operation on desktop** is partly a function of focus order
-  (§9) and partly of whether every action has a non-pointer route. The second
-  half is not audited here.
+  (§9) and partly of whether every action has a non-pointer route. The
+  timeline and the emoji picker have one (§12); the rest of the app is not
+  audited here.
 - **Reduced motion.** Not addressed.
 
 ## Manual verification is still required

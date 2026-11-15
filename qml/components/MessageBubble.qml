@@ -201,7 +201,19 @@ Item {
     // it is the one fact that decides whether to keep listening, and
     // putting it after a timestamp buries it. Everything else follows
     // docs/accessibility.md §7: body before time, state suffixes last.
-    Accessible.role: Accessible.StaticText
+    // A ListItem of the "Message timeline" List: since U-3 a message is a
+    // keyboard focus stop (MessageView._kbKey), and focusable/focused are
+    // what let a screen reader follow that focus onto it.
+    Accessible.role: Accessible.ListItem
+    Accessible.focusable: true
+    Accessible.focused: bubble.activeFocus
+    Accessible.description: bubble.activeFocus && !Theme.isMobile
+        ? (bubble.isOwnMessage
+           ? qsTr("Return for actions. R to reply, E to edit, Delete to delete, plus to react. Escape returns to the composer.")
+           : (bubble.canDelete
+              ? qsTr("Return for actions. R to reply, Delete to delete, plus to react. Escape returns to the composer.")
+              : qsTr("Return for actions. R to reply, plus to react. Escape returns to the composer.")))
+        : ""
     Accessible.name: {
         var s = [];
         if (bubble.mentionsMe) s.push(qsTr("Mentions you"));
@@ -262,6 +274,19 @@ Item {
         id: bubbleHoverHandler
     }
     readonly property bool bubbleHovered: bubbleHoverHandler.hovered
+
+    // Keyboard focus ring (U-3). Drawn over the row rather than tinting it,
+    // so it reads the same on a highlighted, mentioned or hovered message.
+    Rectangle {
+        anchors.fill: parent
+        z: 100
+        visible: bubble.activeFocus
+        color: "transparent"
+        border.color: Theme.accent
+        border.width: 2
+        radius: Theme.r2
+        Accessible.ignored: true
+    }
 
     // Right-click anywhere on the bubble pops the context menu. Using a
     // TapHandler instead of a MouseArea so it cooperates with the
@@ -387,6 +412,17 @@ Item {
         if (!_contextMenu) _contextMenu = contextMenuComponent.createObject(bubble);
         if (_contextMenu) _contextMenu.popup();
     }
+    // Keyboard (Return / Menu / Shift+F10 on a focused message): at the
+    // message rather than at wherever the mouse pointer happens to be, and
+    // tells MessageView when it closes so focus can come back here.
+    signal keyboardPopupClosed()
+    property bool _kbMenu: false
+    function openContextMenuFromKeyboard() {
+        if (!_contextMenu) _contextMenu = contextMenuComponent.createObject(bubble);
+        if (!_contextMenu) return;
+        _kbMenu = true;
+        _contextMenu.popup(bubble, Theme.sp.s7, Math.min(bubble.height, Theme.sp.s5));
+    }
     function openUserContextMenu() {
         if (!_userContextMenu)
             _userContextMenu = userContextMenuComponent.createObject(bubble);
@@ -461,6 +497,11 @@ Item {
         id: contextMenuComponent
     Menu {
         id: contextMenu
+        onClosed: {
+            if (!bubble._kbMenu) return;
+            bubble._kbMenu = false;
+            bubble.keyboardPopupClosed();
+        }
 
         background: Rectangle {
             color: Theme.bg1
@@ -473,6 +514,7 @@ Item {
         CtxItem {
             text: "Reply"
             iconName: "reply"
+            shortcut: Theme.isMobile ? "" : "R"
             onTriggered: bubble.replyRequested(bubble.eventId, bubble.body,
                                                bubble.senderDisplayName)
         }
@@ -500,6 +542,7 @@ Item {
         CtxItem {
             text: "Edit"
             iconName: "edit"
+            shortcut: Theme.isMobile ? "" : "E"
             visible: bubble.isOwnMessage
             onTriggered: bubble.editRequested(bubble.eventId, bubble.body)
         }
@@ -526,6 +569,7 @@ Item {
         CtxItem {
             text: "Add reaction"
             iconName: "smile-plus"
+            shortcut: Theme.isMobile ? "" : "+"
             onTriggered: bubble.openReactPicker()
         }
         CtxItem {
@@ -597,6 +641,7 @@ Item {
         CtxItem {
             text: "Delete message"
             iconName: "x"
+            shortcut: Theme.isMobile ? "" : "Del"
             labelColor: Theme.danger
             visible: bubble.canDelete
             onTriggered: bubble.deleteRequested(bubble.eventId)
