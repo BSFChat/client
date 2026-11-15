@@ -615,7 +615,8 @@ ApplicationWindow {
 
                     // Sign out of the active server. Preserves saved
                     // credentials for other servers — we remove just
-                    // the current one.
+                    // the current one. Confirmed first (U-1): one tap in a
+                    // menu used to forget the server outright.
                     OverflowItem {
                         text: "Sign out"
                         iconName: "phone-off"
@@ -623,7 +624,9 @@ ApplicationWindow {
                         onTriggered: {
                             var idx = serverManager.activeServerIndex;
                             if (idx < 0) return;
-                            serverManager.removeServer(idx);
+                            var s = serverManager.activeServer;
+                            signOutConfirm.openFor(
+                                idx, s ? (s.serverName || s.serverUrl) : "", true);
                         }
                     }
                 }
@@ -1066,6 +1069,10 @@ ApplicationWindow {
     // time when it could not complete on either platform.
     LoginDialog {
         id: loginDialogGlobal
+        parent: popupSurface
+    }
+    RemoveServerDialog {
+        id: signOutConfirm
         parent: popupSurface
     }
     Component.onCompleted: {

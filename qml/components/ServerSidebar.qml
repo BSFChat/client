@@ -548,8 +548,8 @@ Rectangle {
             labelColor: Theme.danger
             Accessible.name: qsTr("Remove server %1").arg(serverContextMenu.url)
             onTriggered: {
-                removeServerDialog.serverIndex = serverContextMenu.serverIndex;
-                removeServerDialog.open();
+                removeServerDialog.openFor(serverContextMenu.serverIndex,
+                                           serverContextMenu.url, false);
             }
         }
     }
@@ -682,98 +682,9 @@ Rectangle {
         }
     }
 
-    // Remove-server confirm. Destructive: drops the saved login too.
-    Dialog {
+    // Remove-server confirm. Destructive: drops the saved login too. Shared
+    // with the sign-out buttons in settings and the mobile menu (U-1).
+    RemoveServerDialog {
         id: removeServerDialog
-        property int serverIndex: -1
-
-        parent: Overlay.overlay
-        anchors.centerIn: parent
-        width: 360
-        modal: true
-        title: ""
-
-        background: Rectangle {
-            color: Theme.bg1
-            radius: Theme.r2
-            border.color: Theme.line
-            border.width: 1
-        }
-
-        contentItem: ColumnLayout {
-            spacing: Theme.sp.s4
-
-            Text {
-                text: "Remove server?"
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontSize.lg
-                font.weight: Theme.fontWeight.semibold
-                color: Theme.fg0
-            }
-            Text {
-                Layout.fillWidth: true
-                text: "This removes the server and its saved login from this "
-                      + "device. Your account on the server is untouched."
-                wrapMode: Text.WordWrap
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontSize.sm
-                color: Theme.fg2
-            }
-
-            RowLayout {
-                Layout.alignment: Qt.AlignRight
-                spacing: Theme.sp.s3
-
-                Button {
-                    text: "Cancel"
-                    flat: true
-                    Accessible.role: Accessible.Button
-                    Accessible.name: qsTr("Cancel")
-                    Accessible.description: qsTr("Keep the server")
-                    Accessible.onPressAction: removeServerDialog.close()
-                    contentItem: Text {
-                        text: parent.text
-                        font.family: Theme.fontSans
-                        font.pixelSize: Theme.fontSize.md
-                        color: Theme.fg1
-                        horizontalAlignment: Text.AlignHCenter
-                        Accessible.ignored: true
-                    }
-                    background: Rectangle {
-                        color: parent.hovered ? Theme.bg2 : "transparent"
-                        radius: Theme.r2
-                    }
-                    onClicked: removeServerDialog.close()
-                }
-                Button {
-                    text: "Remove"
-                    Accessible.role: Accessible.Button
-                    Accessible.name: qsTr("Remove server")
-                    Accessible.description: qsTr(
-                        "Removes the server and its saved login from this device")
-                    Accessible.onPressAction: {
-                        serverManager.removeServer(removeServerDialog.serverIndex);
-                        removeServerDialog.close();
-                    }
-                    contentItem: Text {
-                        text: parent.text
-                        font.family: Theme.fontSans
-                        font.pixelSize: Theme.fontSize.md
-                        font.weight: Theme.fontWeight.semibold
-                        color: Theme.onAccent
-                        horizontalAlignment: Text.AlignHCenter
-                        Accessible.ignored: true
-                    }
-                    background: Rectangle {
-                        color: parent.hovered ? Qt.lighter(Theme.danger, 1.1) : Theme.danger
-                        radius: Theme.r2
-                    }
-                    onClicked: {
-                        serverManager.removeServer(removeServerDialog.serverIndex);
-                        removeServerDialog.close();
-                    }
-                }
-            }
-        }
     }
 }
