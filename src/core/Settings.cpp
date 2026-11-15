@@ -691,7 +691,11 @@ void Settings::setCollapsedCategories(const QStringList& categories)
 qint64 Settings::lastReadTs(const QString& roomId) const
 {
     if (roomId.isEmpty()) return 0;
-    return m_settings.value(QStringLiteral("unread/") + roomId, 0).toLongLong();
+    if (auto it = m_lastReadCache.constFind(roomId); it != m_lastReadCache.constEnd())
+        return it.value();
+    const qint64 v = m_settings.value(QStringLiteral("unread/") + roomId, 0).toLongLong();
+    m_lastReadCache.insert(roomId, v);
+    return v;
 }
 
 void Settings::setLastReadTs(const QString& roomId, qint64 tsMs)
@@ -704,9 +708,9 @@ void Settings::setLastReadTs(const QString& roomId, qint64 tsMs)
     // every room switch, frequently with the value already stored, and a
     // signal per no-op write would reintroduce exactly the churn the 800 ms
     // poll was replaced to fix.
-    if (!bsfchat::client::readMarkerAdvances(
-            m_settings.value(key, 0).toLongLong(), tsMs)) return;
+    if (!bsfchat::client::readMarkerAdvances(lastReadTs(roomId), tsMs)) return;
     m_settings.setValue(key, tsMs);
+    m_lastReadCache.insert(roomId, tsMs);
     emit lastReadTsChanged(roomId);
 }
 
@@ -728,11 +732,19 @@ bool Settings::isRoomUnread(const QString& roomId, qint64 lastMessageTs) const
     return bsfchat::client::isUnread(lastMessageTs, lastReadTs(roomId));
 }
 
+void Settings::loadMutedRooms() const
+{
+    if (m_mutedRoomsLoaded) return;
+    const QStringList list = m_settings.value(QStringLiteral("mutedRooms")).toStringList();
+    m_mutedRooms = QSet<QString>(list.begin(), list.end());
+    m_mutedRoomsLoaded = true;
+}
+
 bool Settings::isRoomMuted(const QString& roomId) const
 {
     if (roomId.isEmpty()) return false;
-    return m_settings.value(QStringLiteral("mutedRooms"))
-        .toStringList().contains(roomId);
+    loadMutedRooms();
+    return m_mutedRooms.contains(roomId);
 }
 
 void Settings::setRoomMuted(const QString& roomId, bool muted)
@@ -744,6 +756,8 @@ void Settings::setRoomMuted(const QString& roomId, bool muted)
     else if (!muted && has) list.removeAll(roomId);
     else return;
     m_settings.setValue(QStringLiteral("mutedRooms"), list);
+    m_mutedRooms = QSet<QString>(list.begin(), list.end());
+    m_mutedRoomsLoaded = true;
     emit mutedRoomsChanged();
 }
 

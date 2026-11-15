@@ -464,6 +464,40 @@ private slots:
         QCOMPARE(model.data(idx, RoomListModel::LastMessageTimeRole).toLongLong(), 12345);
     }
 
+    void testRoomActivityGenerationCoalescesLiveChanges()
+    {
+        // The sidebar's rows read unread / mention / last-message-time live
+        // through these invokables, gated on activityGeneration, because the
+        // categorized snapshot no longer carries them (it rebuilt every row
+        // on every sync). The generation must move for each of the three, and
+        // once per burst rather than once per room.
+        RoomListModel model;
+        model.ensureRoom("!a:server");
+        model.ensureRoom("!b:server");
+        QCoreApplication::processEvents();
+        QSignalSpy gen(&model, &RoomListModel::activityGenerationChanged);
+
+        model.updateLastMessage("!a:server", "hi", 4242);
+        model.setUnreadCount("!a:server", 3);
+        model.setMentionCount("!b:server", 1);
+        QCOMPARE(gen.count(), 0);   // queued, not emitted inline
+        QTRY_COMPARE(gen.count(), 1);
+        QCOMPARE(model.lastMessageTimeFor("!a:server"), qint64(4242));
+        QCOMPARE(model.unreadCountFor("!a:server"), 3);
+        QCOMPARE(model.mentionCountFor("!b:server"), 1);
+        QCOMPARE(model.lastMessageTimeFor("!nope:server"), qint64(0));
+
+        // A no-op last-message update is silent.
+        model.updateLastMessage("!a:server", "hi", 4242);
+        QCoreApplication::processEvents();
+        QCOMPARE(gen.count(), 1);
+
+        // A role the rows do not read does not bump it.
+        model.updateRoomTopic("!a:server", "topic");
+        QCoreApplication::processEvents();
+        QCOMPARE(gen.count(), 1);
+    }
+
     void testRoomDisplayName()
     {
         RoomListModel model;

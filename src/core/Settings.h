@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QHash>
 #include <QObject>
+#include <QSet>
 #include <QSettings>
 #include <QString>
 #include <QVariantList>
@@ -500,6 +502,16 @@ signals:
 
 private:
     mutable QSettings m_settings;
+    // In-memory mirrors of the two per-room values the sidebar asks about
+    // for EVERY channel row on every unread/mute generation bump. QSettings
+    // reads are a lock plus a lookup (and the muted list was a QStringList
+    // decoded and searched linearly per call). Settings is the only writer
+    // of both keys, so the mirrors are filled on first read and kept in step
+    // by setLastReadTs / setRoomMuted.
+    mutable QHash<QString, qint64> m_lastReadCache;
+    mutable QSet<QString> m_mutedRooms;
+    mutable bool m_mutedRoomsLoaded = false;
+    void loadMutedRooms() const;
     // One instance for the whole process, owned here because Settings is
     // a QML singleton on the GUI thread and QMediaDevices wants a thread
     // with an event loop. Its only job is to keep audioDevicesChanged

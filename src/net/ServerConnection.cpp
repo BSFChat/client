@@ -3663,25 +3663,40 @@ void ServerConnection::rebuildCategorizedRooms()
     // from a delegate is not a reactive dependency: a name that arrives after
     // the row was built would never repaint. Every path that learns a new name
     // rebuilds, so the sidebar renames in step with the member list.
+    //
+    // The same pass takes OUT the three fields that move on almost every
+    // sync: unreadCount, mentionCount and lastMessageTime. This snapshot
+    // drives ChannelList's nested Repeaters, and a Repeater handed a new
+    // array destroys and recreates every row — so while it carried unread
+    // state, one message in any channel rebuilt the whole sidebar, and so
+    // did opening a channel (its count resets, the next sync republishes).
+    // Rows read those values live from RoomListModel (unreadCountFor,
+    // mentionCountFor, lastMessageTimeFor, gated on activityGeneration), so
+    // this list now changes only when the set, order, names or voice
+    // rosters of channels do.
+    static const QString kUnread = QStringLiteral("unreadCount");
+    static const QString kMention = QStringLiteral("mentionCount");
+    static const QString kLastTs = QStringLiteral("lastMessageTime");
     for (auto& g : groups) {
         QVariantMap cat = g.toMap();
         QVariantList channels = cat.value(QStringLiteral("channels")).toList();
-        bool touched = false;
         for (auto& c : channels) {
             QVariantMap ch = c.toMap();
+            ch.remove(kUnread);
+            ch.remove(kMention);
+            ch.remove(kLastTs);
             QVariantList members = ch.value(QStringLiteral("voiceMembers")).toList();
-            if (members.isEmpty()) continue;
-            for (auto& m : members) {
-                QVariantMap row = m.toMap();
-                row[QStringLiteral("displayName")] = displayNameForSender(
-                    row.value(QStringLiteral("user_id")).toString());
-                m = row;
+            if (!members.isEmpty()) {
+                for (auto& m : members) {
+                    QVariantMap row = m.toMap();
+                    row[QStringLiteral("displayName")] = displayNameForSender(
+                        row.value(QStringLiteral("user_id")).toString());
+                    m = row;
+                }
+                ch[QStringLiteral("voiceMembers")] = members;
             }
-            ch[QStringLiteral("voiceMembers")] = members;
             c = ch;
-            touched = true;
         }
-        if (!touched) continue;
         cat[QStringLiteral("channels")] = channels;
         g = cat;
     }
