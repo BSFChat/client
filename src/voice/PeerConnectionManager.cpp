@@ -188,15 +188,21 @@ public:
     // confirmed missing, which is a physical quantity that reads
     // exactly zero on a clean LAN — unlike the delivered/sent byte
     // ratio it replaces, which never could.
+    // The counters live in the PeerConnectionManager; `alive` is its
+    // m_alive, checked before every touch, because a batch already inside
+    // incoming() survives resetAllCallbacks() dropping the chain (V-9).
     RtpGapDetector(std::function<void()> onGap,
                    std::atomic<quint64>* rxPackets,
-                   std::atomic<quint64>* lostPackets)
+                   std::atomic<quint64>* lostPackets,
+                   std::shared_ptr<std::atomic_bool> alive)
         : m_onGap(std::move(onGap))
         , m_rxPackets(rxPackets)
-        , m_lostPackets(lostPackets) {}
+        , m_lostPackets(lostPackets)
+        , m_alive(std::move(alive)) {}
 
     void incoming(rtc::message_vector& messages,
                   const rtc::message_callback&) override {
+        if (!m_alive || !m_alive->load()) return;
         const int64_t now = QDateTime::currentMSecsSinceEpoch();
         for (const auto& msg : messages) {
             if (!msg || msg->size() < sizeof(rtc::RtpHeader)) continue;
@@ -218,6 +224,7 @@ public:
         // A gap at the tail of this batch would otherwise wait for the
         // next one; resolve it on elapsed time here.
         if (m_tracker.poll(now) && m_onGap) m_onGap();
+        if (!m_alive->load()) return;
         // Publish once per batch rather than per packet: the reader is
         // a 500 ms report timer, and these are the only writes.
         if (m_rxPackets)
@@ -230,6 +237,7 @@ private:
     std::function<void()> m_onGap;
     std::atomic<quint64>* m_rxPackets = nullptr;
     std::atomic<quint64>* m_lostPackets = nullptr;
+    std::shared_ptr<std::atomic_bool> m_alive;
     RtpSeqTracker m_tracker;
 };
 
@@ -1307,7 +1315,8 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
     ctx.srReporter = std::make_shared<rtc::RtcpSrReporter>(ctx.rtpConfig);
     packetizer->addToChain(ctx.srReporter);
     packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
-    packetizer->addToChain(std::make_shared<rtc::PliHandler>([this, idx]() {
+    packetizer->addToChain(std::make_shared<rtc::PliHandler>([this, idx, alive = m_alive]() {
+        if (!alive->load()) return;
         QMetaObject::invokeMethod(this, [this, idx]() {
             emit keyframeRequestedByPeer(idx);
         }, Qt::QueuedConnection);
@@ -1332,10 +1341,11 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
     // before the depacketizer assembles — and onFrame delivers — the
     // access unit the gap corrupted.
     packetizer->addToChain(std::make_shared<RtpGapDetector>(
-        [this, idx]() {
+        [this, idx, alive = m_alive]() {
+            if (!alive->load()) return;
             m_video[idx].lossPending.store(true, std::memory_order_relaxed);
         },
-        &m_video[idx].rxPackets, &m_video[idx].lostPackets));
+        &m_video[idx].rxPackets, &m_video[idx].lostPackets, m_alive));
     packetizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
     track->setMediaHandler(packetizer);
 
@@ -1673,6 +1683,12 @@ qint64 PeerConnectionManager::losslessBufferedAmount() const {
 void PeerConnectionManager::addRemoteCandidate(const std::string& candidate, const std::string& mid) {
     if (!m_pc) return;
     if (!m_remoteDescriptionSet) {
+        // Bounded: the peer decides how many it sends (V-9).
+        if (m_pendingCandidates.size() >= kMaxPendingCandidates) {
+            qCWarning(logVoicePc, " [%s] dropping remote candidate — %d already "
+                     "pending", qPrintable(m_peerId), int(m_pendingCandidates.size()));
+            return;
+        }
         m_pendingCandidates.emplace_back(candidate, mid);
         return;
     }

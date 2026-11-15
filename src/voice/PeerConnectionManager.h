@@ -330,6 +330,7 @@ private:
     std::shared_ptr<rtc::PeerConnection> m_pc;
     std::shared_ptr<rtc::DataChannel> m_dc;
     std::vector<std::pair<std::string, std::string>> m_pendingCandidates;
+    static constexpr size_t kMaxPendingCandidates = 128;
     bool m_remoteDescriptionSet = false;
     bool m_isOfferer = false;
     PeerState m_peerState = PeerState::New;
