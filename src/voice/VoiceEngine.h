@@ -82,6 +82,13 @@ public:
     // V-M5, the half that never existed, which is why a crashed peer
     // rendered as "connected" until ICE timed out on its own.
     void dropPeer(const QString& userId);
+    // V-8: who is in the voice channel (users with an active
+    // m.call.member). Fed from every GET /voice/members reply for our room
+    // (wired in the constructor) and seeded by start(); callable directly
+    // too, e.g. from the sync-side m.call.member fold. Only roster members'
+    // invites are answered (see voice/VoiceRosterGate.h), and a held peer
+    // that leaves it is torn down at once.
+    void setVoiceRoster(const QStringList& userIds);
     // Replace the TURN credentials used for peer connections built from
     // here on. The ephemeral username/password pair expires after the
     // server's `ttl`, and this call is mid-session: existing peers keep
@@ -255,6 +262,8 @@ private:
     void dropInboundCandidates(const QString& sender, const QString& callId);
     void pruneInboundCandidates();
     void sendCallEvent(const QString& eventType, const nlohmann::json& content);
+    // Held invites whose grace period ran out are rejected (V-8).
+    void expireHeldInvites();
     // Send everything in the outbox whose next attempt is due. Driven by
     // the 500 ms candidate-batch tick, so there is no second timer.
     void flushOutbox();
@@ -354,6 +363,23 @@ private:
     static constexpr qint64 kInboundCandidateTtlMs = 30000;
     static constexpr int kMaxInboundCandidatesPerCall = 128;
     static constexpr int kMaxInboundCandidateCalls = 32;
+
+    // V-8 roster gate. m_voiceRoster excludes ourselves. Until the first
+    // update it holds start()'s seed, which gates invites but never counts
+    // as a "left the roster" transition.
+    QSet<QString> m_voiceRoster;
+    bool m_rosterFromState = false;
+    // Invites from senders not (yet) on the roster, keyed by sender; the
+    // newest invite wins, the first arrival time is kept.
+    struct HeldInvite {
+        QString callId;
+        std::string sdp;
+        nlohmann::json caps;
+        qint64 firstHeldMs = 0;
+    };
+    QMap<QString, HeldInvite> m_heldInvites;
+    QTimer m_heldInviteTimer;
+    static constexpr int kMaxHeldInvites = 16;
 
     float m_micLevel = 0.0f;
 

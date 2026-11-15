@@ -45,6 +45,9 @@ if(BSFCHAT_ENABLE_VOICE)
         # upstream master. The script is idempotent and fails the configure
         # if its anchor ever stops matching, so moving the pin cannot
         # silently drop the fix. Full incident in the script's header.
+        # The same script also makes VideoRtpDepacketizer drop a frame whose
+        # reassembly throws and caps its buffer (one malformed STAP-A packet
+        # otherwise stalls the track for good). v0.24.6 does not fix that.
         PATCH_COMMAND  ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_LIST_DIR}/patch-libdatachannel.cmake"
     )
     # Media transport ON: rtc::Track + RTP packetizers + DTLS-SRTP for
@@ -108,6 +111,13 @@ if(BSFCHAT_ENABLE_VOICE)
         # `yuv` and collides with the real libyuv above; it's only used
         # by examples/tuning we don't build.
         set(CONFIG_LIBYUV 0 CACHE INTERNAL "" FORCE)
+        # The decoder takes frame dimensions from a peer's bitstream; AV1
+        # allows 65536x65536. Refuse anything past 8192 inside libaom,
+        # before it allocates (decoder-only; the encoder ignores these).
+        # AomLosslessDecoder checks the same limit again.
+        set(CONFIG_SIZE_LIMIT 1 CACHE STRING "" FORCE)
+        set(DECODE_WIDTH_LIMIT 8192 CACHE STRING "" FORCE)
+        set(DECODE_HEIGHT_LIMIT 8192 CACHE STRING "" FORCE)
         FetchContent_MakeAvailable(libaom)
         set(BSFCHAT_HAVE_AOM ON)
     endif()

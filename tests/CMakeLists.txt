@@ -103,6 +103,22 @@ target_link_libraries(test_call_signalling PRIVATE
 )
 add_test(NAME test_call_signalling COMMAND test_call_signalling)
 
+# Lossless-video chunk reassembly byte cap (V-7). Header-only logic.
+qt_add_executable(test_lossless_reassembly
+    test_lossless_reassembly.cpp
+)
+target_include_directories(test_lossless_reassembly PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_lossless_reassembly PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_lossless_reassembly COMMAND test_lossless_reassembly)
+
+# Call-invite roster gate (V-8). Header-only logic.
+qt_add_executable(test_voice_roster_gate
+    test_voice_roster_gate.cpp
+)
+target_include_directories(test_voice_roster_gate PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_voice_roster_gate PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_voice_roster_gate COMMAND test_voice_roster_gate)
+
 # Codec round-trip tests — only meaningful where a software H.264
 # backend exists (openh264: macOS/Linux desktop).
 if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)
@@ -551,6 +567,18 @@ if(BSFCHAT_ENABLE_VOICE)
         add_test(NAME test_voice_teardown COMMAND test_voice_teardown)
         set_tests_properties(test_voice_teardown PROPERTIES TIMEOUT 180)
     endif()
+endif()
+
+# libdatachannel's H.264 depacketizer as patched by
+# cmake/patch-libdatachannel.cmake (V-6): a malformed packet drops one
+# frame instead of stalling the track, and the buffer is bounded.
+if(BSFCHAT_ENABLE_VOICE)
+    qt_add_executable(test_rtp_depacketizer
+        test_rtp_depacketizer.cpp
+    )
+    target_link_libraries(test_rtp_depacketizer PRIVATE
+        Qt6::Core Qt6::Test LibDataChannel::LibDataChannel)
+    add_test(NAME test_rtp_depacketizer COMMAND test_rtp_depacketizer)
 endif()
 
 # RTP video RECEPTION between two real PeerConnectionManagers (S-16).

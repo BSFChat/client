@@ -188,15 +188,21 @@ public:
     // confirmed missing, which is a physical quantity that reads
     // exactly zero on a clean LAN — unlike the delivered/sent byte
     // ratio it replaces, which never could.
+    // The counters live in the PeerConnectionManager; `alive` is its
+    // m_alive, checked before every touch, because a batch already inside
+    // incoming() survives resetAllCallbacks() dropping the chain (V-9).
     RtpGapDetector(std::function<void()> onGap,
                    std::atomic<quint64>* rxPackets,
-                   std::atomic<quint64>* lostPackets)
+                   std::atomic<quint64>* lostPackets,
+                   std::shared_ptr<std::atomic_bool> alive)
         : m_onGap(std::move(onGap))
         , m_rxPackets(rxPackets)
-        , m_lostPackets(lostPackets) {}
+        , m_lostPackets(lostPackets)
+        , m_alive(std::move(alive)) {}
 
     void incoming(rtc::message_vector& messages,
                   const rtc::message_callback&) override {
+        if (!m_alive || !m_alive->load()) return;
         const int64_t now = QDateTime::currentMSecsSinceEpoch();
         for (const auto& msg : messages) {
             if (!msg || msg->size() < sizeof(rtc::RtpHeader)) continue;
@@ -218,6 +224,7 @@ public:
         // A gap at the tail of this batch would otherwise wait for the
         // next one; resolve it on elapsed time here.
         if (m_tracker.poll(now) && m_onGap) m_onGap();
+        if (!m_alive->load()) return;
         // Publish once per batch rather than per packet: the reader is
         // a 500 ms report timer, and these are the only writes.
         if (m_rxPackets)
@@ -230,6 +237,7 @@ private:
     std::function<void()> m_onGap;
     std::atomic<quint64>* m_rxPackets = nullptr;
     std::atomic<quint64>* m_lostPackets = nullptr;
+    std::shared_ptr<std::atomic_bool> m_alive;
     RtpSeqTracker m_tracker;
 };
 
@@ -1307,7 +1315,8 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
     ctx.srReporter = std::make_shared<rtc::RtcpSrReporter>(ctx.rtpConfig);
     packetizer->addToChain(ctx.srReporter);
     packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
-    packetizer->addToChain(std::make_shared<rtc::PliHandler>([this, idx]() {
+    packetizer->addToChain(std::make_shared<rtc::PliHandler>([this, idx, alive = m_alive]() {
+        if (!alive->load()) return;
         QMetaObject::invokeMethod(this, [this, idx]() {
             emit keyframeRequestedByPeer(idx);
         }, Qt::QueuedConnection);
@@ -1332,10 +1341,11 @@ void PeerConnectionManager::attachVideoTrack(VideoStreamId stream,
     // before the depacketizer assembles — and onFrame delivers — the
     // access unit the gap corrupted.
     packetizer->addToChain(std::make_shared<RtpGapDetector>(
-        [this, idx]() {
+        [this, idx, alive = m_alive]() {
+            if (!alive->load()) return;
             m_video[idx].lossPending.store(true, std::memory_order_relaxed);
         },
-        &m_video[idx].rxPackets, &m_video[idx].lostPackets));
+        &m_video[idx].rxPackets, &m_video[idx].lostPackets, m_alive));
     packetizer->addToChain(std::make_shared<rtc::RtcpReceivingSession>());
     track->setMediaHandler(packetizer);
 
@@ -1512,6 +1522,12 @@ void PeerConnectionManager::setupLosslessChannel(std::shared_ptr<rtc::DataChanne
     dc->onMessage([this, alive = m_alive](rtc::message_variant msg) {
         if (!alive->load()) return;
         if (!std::holds_alternative<rtc::binary>(msg)) return;
+        // Only when we advertised "av1-dc": nothing else should be
+        // arriving here, and nothing else gets buffered.
+        if (!m_acceptLossless.load()) {
+            noteLosslessDrop("not advertised", 0);
+            return;
+        }
         auto& data = std::get<rtc::binary>(msg);
         if (data.size() < 10) return;  // [stream][flags][seq][tsMs]
         const int stream = int(std::to_integer<uint8_t>(data[0]));
@@ -1524,10 +1540,26 @@ void PeerConnectionManager::setupLosslessChannel(std::shared_ptr<rtc::DataChanne
         for (int i = 6; i < 10; ++i)
             tsMs = (tsMs << 8) | std::to_integer<uint8_t>(data[i]);
 
+        // Hands a complete frame to the main thread, unless this stream
+        // already has too much undelivered (V-7).
+        auto deliver = [this, stream, keyframe, tsMs](QByteArray tu) {
+            const qint64 bytes = tu.size();
+            if (m_losslessRxQueued[stream].load() + bytes > kMaxLosslessRxQueuedBytes) {
+                noteLosslessDrop("receive queue full", bytes);
+                return;
+            }
+            m_losslessRxQueued[stream].fetch_add(bytes);
+            const qint64 mediaUs = m_losslessRxClock[stream].toUs(tsMs);
+            QMetaObject::invokeMethod(this, [this, stream, tu, keyframe, mediaUs, bytes]() {
+                m_losslessRxQueued[stream].fetch_sub(bytes);
+                emit losslessFrameReceived(stream, tu, keyframe, mediaUs);
+            }, Qt::QueuedConnection);
+        };
+
         // Chunked frame (flags 0x2): header grows by
         // [chunkIdx:u16][chunkTotal:u16]; payload chunks of one frame
         // arrive contiguously on this reliable+ordered channel and are
-        // reassembled here before the normal emit.
+        // reassembled (byte-capped) before the normal emit.
         if (flags & 0x2) {
             if (data.size() < 14) return;
             quint32 seq = 0;
@@ -1537,41 +1569,29 @@ void PeerConnectionManager::setupLosslessChannel(std::shared_ptr<rtc::DataChanne
                                         | std::to_integer<uint8_t>(data[11]));
             const quint16 total = quint16((std::to_integer<uint8_t>(data[12]) << 8)
                                           | std::to_integer<uint8_t>(data[13]));
-            if (total == 0 || idx >= total) return;
-            if (idx == 0) {
-                m_losslessAsm[stream].clear();
-                m_losslessAsmSeq[stream] = seq;
-                m_losslessAsmNext[stream] = 0;
-            } else if (seq != m_losslessAsmSeq[stream]
-                       || idx != m_losslessAsmNext[stream]) {
-                // Gap or interleaving that shouldn't happen — drop the
-                // partial frame; the next chunk 0 restarts cleanly.
-                m_losslessAsm[stream].clear();
-                m_losslessAsmNext[stream] = 0;
-                return;
-            }
-            m_losslessAsm[stream].append(
-                reinterpret_cast<const char*>(data.data() + 14),
-                int(data.size() - 14));
-            m_losslessAsmNext[stream] = quint16(idx + 1);
-            if (idx + 1 < total) return;   // more chunks coming
-
-            QByteArray tu = std::move(m_losslessAsm[stream]);
-            m_losslessAsm[stream] = QByteArray();
-            const qint64 mediaUs = m_losslessRxClock[stream].toUs(tsMs);
-            QMetaObject::invokeMethod(this, [this, stream, tu, keyframe, mediaUs]() {
-                emit losslessFrameReceived(stream, tu, keyframe, mediaUs);
-            }, Qt::QueuedConnection);
+            QByteArray tu;
+            const auto r = m_losslessAsm[stream].add(
+                seq, idx, total, reinterpret_cast<const char*>(data.data() + 14),
+                qsizetype(data.size() - 14), &tu);
+            if (r == LosslessChunkAssembler::Result::Oversize)
+                noteLosslessDrop("frame over byte cap", qint64(total) * qint64(data.size()));
+            if (r == LosslessChunkAssembler::Result::Complete)
+                deliver(std::move(tu));
             return;
         }
 
-        QByteArray tu(reinterpret_cast<const char*>(data.data() + 10),
-                      int(data.size() - 10));
-        const qint64 mediaUs = m_losslessRxClock[stream].toUs(tsMs);
-        QMetaObject::invokeMethod(this, [this, stream, tu, keyframe, mediaUs]() {
-            emit losslessFrameReceived(stream, tu, keyframe, mediaUs);
-        }, Qt::QueuedConnection);
+        deliver(QByteArray(reinterpret_cast<const char*>(data.data() + 10),
+                           int(data.size() - 10)));
     });
+}
+
+void PeerConnectionManager::noteLosslessDrop(const char* why, qint64 bytes) {
+    // Callback thread. Log the first drop and then every 100th, so a
+    // hostile peer cannot flood the log either.
+    const quint32 n = m_losslessRxDrops.fetch_add(1) + 1;
+    if (n == 1 || n % 100 == 0)
+        qCWarning(logVoicePc, " [%s] dropped lossless frame (%s, ~%lld bytes; %u dropped)",
+                 qPrintable(m_peerId), why, static_cast<long long>(bytes), n);
 }
 
 void PeerConnectionManager::sendLosslessFrame(VideoStreamId stream,
@@ -1663,6 +1683,12 @@ qint64 PeerConnectionManager::losslessBufferedAmount() const {
 void PeerConnectionManager::addRemoteCandidate(const std::string& candidate, const std::string& mid) {
     if (!m_pc) return;
     if (!m_remoteDescriptionSet) {
+        // Bounded: the peer decides how many it sends (V-9).
+        if (m_pendingCandidates.size() >= kMaxPendingCandidates) {
+            qCWarning(logVoicePc, " [%s] dropping remote candidate — %d already "
+                     "pending", qPrintable(m_peerId), int(m_pendingCandidates.size()));
+            return;
+        }
         m_pendingCandidates.emplace_back(candidate, mid);
         return;
     }
