@@ -88,7 +88,9 @@ file(READ "${_pc}" _content)
 set(_marker "BSFCHAT: remote description before ICE credentials")
 
 if(_content MATCHES "${_marker}")
-    return()  # already patched
+    set(_pc_done TRUE)  # already patched
+else()
+    set(_pc_done FALSE)
 endif()
 
 set(_before
@@ -107,6 +109,7 @@ set(_after
 
 \ticeTransport->setRemoteDescription(description); // ICE transport might reject the description")
 
+if(NOT _pc_done)
 string(FIND "${_content}" "${_before}" _pos)
 if(_pos EQUAL -1)
     message(FATAL_ERROR
@@ -121,3 +124,110 @@ endif()
 string(REPLACE "${_before}" "${_after}" _content "${_content}")
 file(WRITE "${_pc}" "${_content}")
 message(STATUS "Patched libdatachannel: remote description stored before ICE credentials")
+endif()
+
+# ---------------------------------------------------------------------------
+# VideoRtpDepacketizer::incoming (src/rtpdepacketizer.cpp; unchanged on
+# upstream master as of 2026-11, so no newer pin fixes it).
+#
+# THE BUG. Each batch calls reassemble(mBuffer) and only then
+# mBuffer.clear(). The H.264/H.265 reassemble() throws on a malformed
+# payload (STAP-A length past the payload, NAL type 0, ...); the throw skips
+# the clear, so the bad packet stays buffered and every later frame of the
+# track is reassembled together with it and fails again. The track's video
+# is dead from that packet on and mBuffer grows by every packet received
+# (~65k packets, ~90 MB). Past 32768 entries the int16 sequence comparator
+# stops being a strict weak ordering and std::set is undefined behaviour.
+# One packet from a peer is enough.
+#
+# THE FIX catches the reassembly exception and drops that frame (the
+# decoder recovers on the next keyframe / PLI), and flushes the buffer
+# without emitting whenever a packet would make the buffered sequence span
+# reach 512. That bounds the set to 512 packets and keeps every buffered
+# sequence number within half the int16 range of every other, so the
+# comparator stays a valid ordering.
+
+set(_rd "src/rtpdepacketizer.cpp")
+if(NOT EXISTS "${_rd}")
+    message(FATAL_ERROR
+        "patch-libdatachannel: ${_rd} not found. The libdatachannel layout "
+        "changed; re-check the depacketizer exception/buffer-cap fix.")
+endif()
+file(READ "${_rd}" _content)
+set(_marker "BSFCHAT: depacketizer drops bad frames")
+if(NOT _content MATCHES "${_marker}")
+    set(_before [==[		if (!mBuffer.empty()) {
+			auto first = *mBuffer.begin();
+			auto firstHeader = reinterpret_cast<const RtpHeader *>(first->data());
+			if (firstHeader->timestamp() != header->timestamp()) {
+				if (auto frame = reassemble(mBuffer))
+					result.push_back(frame);
+
+				mBuffer.clear();
+			}
+		}
+
+		mBuffer.insert(std::move(message));
+
+		if (header->marker()) {
+			if (auto frame = reassemble(mBuffer))
+				result.push_back(std::move(frame));
+
+			mBuffer.clear();
+		}
+]==])
+    set(_after [==[		// BSFCHAT: depacketizer drops bad frames.
+		// reassemble() throws on a malformed payload (bad STAP-A size, NAL
+		// type 0, ...). Upstream let that escape before mBuffer.clear(), so
+		// the bad packet stayed buffered, every later frame failed with it
+		// and the set grew without bound; past 32768 entries the int16
+		// sequence comparator is no longer a strict weak order (UB). Drop the
+		// offending frame instead, and flush whenever a packet would widen
+		// the buffered sequence span past kMaxSpan, which also caps its size.
+		// See cmake/patch-libdatachannel.cmake.
+		constexpr int kMaxSpan = 512;
+		auto flush = [&](bool emit) {
+			if (emit) {
+				try {
+					if (auto frame = reassemble(mBuffer))
+						result.push_back(std::move(frame));
+				} catch (const std::exception &e) {
+					PLOG_WARNING << "Dropping malformed RTP video frame (" << mBuffer.size()
+					             << " packets): " << e.what();
+				}
+			}
+			mBuffer.clear();
+		};
+
+		if (!mBuffer.empty()) {
+			auto first = *mBuffer.begin();
+			auto firstHeader = reinterpret_cast<const RtpHeader *>(first->data());
+			auto lastHeader = reinterpret_cast<const RtpHeader *>((*mBuffer.rbegin())->data());
+			int dFirst = int16_t(header->seqNumber() - firstHeader->seqNumber());
+			int dLast = int16_t(header->seqNumber() - lastHeader->seqNumber());
+			if (firstHeader->timestamp() != header->timestamp()) {
+				flush(true);
+			} else if (dFirst >= kMaxSpan || dLast <= -kMaxSpan) {
+				PLOG_WARNING << "Dropping oversized RTP video frame (" << mBuffer.size()
+				             << " packets)";
+				flush(false);
+			}
+		}
+
+		mBuffer.insert(std::move(message));
+
+		if (header->marker())
+			flush(true);
+]==])
+    string(FIND "${_content}" "${_before}" _pos)
+    if(_pos EQUAL -1)
+        message(FATAL_ERROR
+            "patch-libdatachannel: could not find the VideoRtpDepacketizer "
+            "anchor in ${_rd}. The pin moved: check whether upstream now "
+            "clears mBuffer when reassemble() throws and caps the buffer; "
+            "if it does, delete this section.")
+    endif()
+    string(REPLACE "${_before}" "${_after}" _content "${_content}")
+    file(WRITE "${_rd}" "${_content}")
+    message(STATUS "Patched libdatachannel: depacketizer drops malformed frames, buffer capped")
+endif()

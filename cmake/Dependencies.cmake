@@ -45,6 +45,9 @@ if(BSFCHAT_ENABLE_VOICE)
         # upstream master. The script is idempotent and fails the configure
         # if its anchor ever stops matching, so moving the pin cannot
         # silently drop the fix. Full incident in the script's header.
+        # The same script also makes VideoRtpDepacketizer drop a frame whose
+        # reassembly throws and caps its buffer (one malformed STAP-A packet
+        # otherwise stalls the track for good). v0.24.6 does not fix that.
         PATCH_COMMAND  ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_LIST_DIR}/patch-libdatachannel.cmake"
     )
     # Media transport ON: rtc::Track + RTP packetizers + DTLS-SRTP for
