@@ -98,9 +98,20 @@ signals:
     // (for EXTRA_TEXT). `mimeType` is whatever the source app declared.
     // MobileMain wires this into the active room's composer /
     // sendMediaMessage path.
+    //
+    // Files no longer arrive here; see sharedFileReceived. `isFile` is kept
+    // (always false) so existing handlers keep their signature.
     void sharedPayloadReceived(const QString& payloadOrUri,
                                const QString& mimeType,
                                bool isFile);
+    // Android ACTION_SEND with EXTRA_STREAM that passed SharePolicy (another
+    // app's content:// URI, not backed by our own storage). Nothing has been
+    // read yet: MobileMain asks the user before uploading. `sizeBytes` is -1
+    // when the provider did not say.
+    void sharedFileReceived(const QString& uri, const QString& mimeType,
+                            const QString& displayName, qint64 sizeBytes);
+    // A share refused by SharePolicy, with user-facing copy.
+    void shareRejected(const QString& reason);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* ev) override;

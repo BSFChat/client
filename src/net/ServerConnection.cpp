@@ -24,10 +24,12 @@
 #include "util/MentionBadge.h"
 #include "util/ModerationScope.h"
 #include "util/PermissionMath.h"
+#include "util/SedEdit.h"
 #include "util/TimelineTrace.h"
 #include "identity/IdentityClient.h"
 #include "identity/OidcRequest.h"
 #include "core/AttachmentPolicy.h"
+#include "core/SharePolicy.h"
 #include "core/MediaDownloader.h"
 #include "core/Settings.h"
 #include "core/ReadState.h"
@@ -2069,6 +2071,56 @@ void ServerConnection::editMessage(const QString& eventId, const QString& newBod
                           mentions);
 }
 
+QVariantMap ServerConnection::editLastMessageWithSed(const QString& text)
+{
+    namespace sed = bsfchat::client::sed;
+    const sed::ParseResult parsed = sed::parse(text);
+    if (parsed.status == sed::ParseStatus::NotSed) return {{QStringLiteral("isSed"), false}};
+    auto fail = [](const QString& why) {
+        return QVariantMap{{QStringLiteral("isSed"), true},
+                           {QStringLiteral("ok"), false},
+                           {QStringLiteral("error"), why}};
+    };
+    if (parsed.status == sed::ParseStatus::Invalid) return fail(parsed.error);
+    if (m_activeRoomId.isEmpty() || !m_messageModel || m_userId.isEmpty())
+        return fail(QStringLiteral("Open a channel first."));
+
+    // The newest row of ours in the main timeline. Thread replies are skipped:
+    // the composer that typed this is the channel's, not the thread's.
+    int row = -1;
+    for (int i = m_messageModel->rowCount() - 1; i >= 0; --i) {
+        const QModelIndex mi = m_messageModel->index(i);
+        if (!m_messageModel->data(mi, MessageModel::IsOwnMessageRole).toBool()) continue;
+        const QString id = m_messageModel->data(mi, MessageModel::EventIdRole).toString();
+        const QString root = m_messageModel->data(mi, MessageModel::ThreadRootIdRole).toString();
+        if (!root.isEmpty() && root != id) continue;
+        row = i;
+        break;
+    }
+    if (row < 0) return fail(QStringLiteral("You have no recent message here to edit."));
+
+    const QModelIndex mi = m_messageModel->index(row);
+    if (m_messageModel->data(mi, MessageModel::DeliveryStateRole).toInt()
+        != MessageModel::DeliveryConfirmed)
+        return fail(QStringLiteral("Your last message hasn't been sent yet."));
+    const QString msgtype = m_messageModel->data(mi, MessageModel::MsgtypeRole).toString();
+    if (msgtype != QLatin1String("m.text"))
+        return fail(QStringLiteral("Your last message isn't text, so it can't be edited that way."));
+
+    const QString eventId = m_messageModel->data(mi, MessageModel::EventIdRole).toString();
+    const QString body = m_messageModel->data(mi, MessageModel::BodyRole).toString();
+    const auto edited = sed::apply(parsed.command, body);
+    if (!edited) return fail(QStringLiteral("Nothing in your last message matches that."));
+    if (*edited == body) return fail(QStringLiteral("That wouldn't change your last message."));
+    if (edited->trimmed().isEmpty())
+        return fail(QStringLiteral("That would leave your last message empty."));
+
+    // Plain body only: the original's HTML can't be rewritten with a regex
+    // safely, and editMessage carries the mention set forward on its own.
+    editMessage(eventId, *edited);
+    return {{QStringLiteral("isSed"), true}, {QStringLiteral("ok"), true}};
+}
+
 void ServerConnection::replyToMessage(const QString& targetEventId, const QString& body,
                                        const QString& formattedBody,
                                        const QStringList& mentionedUserIds)
@@ -2209,8 +2261,8 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         displayName = QFileInfo(fileUrl).fileName();
     }
 
-    QFile file(openPath);
-    if (!file.open(QIODevice::ReadOnly)) {
+    auto* file = new QFile(openPath);
+    if (!file->open(QIODevice::ReadOnly)) {
         // User-facing toast: strip the raw URI so we don't bleed
         // /data/… or content://com.android.providers… into the UI.
         QString friendly = displayName.isEmpty() ? "file" : displayName;
@@ -2219,25 +2271,61 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         // for emitPreflightMediaFailure's reason.
         emitPreflightMediaFailure(QStringLiteral("Couldn't read the selected ")
                                   + friendly + QStringLiteral(" — ")
-                                  + file.errorString());
+                                  + file->errorString());
+        delete file;
         return;
     }
 
-    QByteArray fileData = file.readAll();
-    file.close();
+    // Size cap before anything is read (M-4). The server does not advertise
+    // its limit, so this is the client's own ceiling; the server still
+    // enforces its configured one and answers 413 above it.
+    const qint64 maxBytes = bsfchat::client::share::kDefaultMaxUploadBytes;
+    const auto tooLarge = [&]() {
+        emitPreflightMediaFailure(QStringLiteral("%1 is too large to upload (the limit is %2 MB).")
+                                      .arg(displayName.isEmpty() ? QStringLiteral("That file")
+                                                                 : displayName)
+                                      .arg(maxBytes / (1024 * 1024)));
+    };
+
+    // Streamed when the device knows its size, which local files and
+    // content:// URIs normally do; otherwise read, but never past the cap.
+    QByteArray fileData;
+    qint64 fileSize = file->isSequential() ? 0 : file->size();
+    const bool stream = fileSize > 0;
+    if (stream) {
+        if (fileSize > maxBytes) {
+            tooLarge();
+            delete file;
+            return;
+        }
+    } else {
+        fileData = file->read(maxBytes + 1);
+        if (fileData.size() > maxBytes) {
+            tooLarge();
+            delete file;
+            return;
+        }
+        fileSize = fileData.size();
+    }
 
     QString fileName = displayName;
-    qint64 fileSize = fileData.size();
 
     // Determine MIME type. For content:// URIs we can't sniff from
-    // the path — fall back to sniffing bytes we just read.
+    // the path — sniff the content (peeked, so a streamed device is not
+    // consumed).
     QMimeDatabase mimeDb;
     QString mimeType;
     if (url.isLocalFile()) {
         mimeType = mimeDb.mimeTypeForFile(openPath).name();
     }
     if (mimeType.isEmpty() || mimeType == "application/octet-stream") {
-        mimeType = mimeDb.mimeTypeForData(fileData).name();
+        mimeType = stream ? mimeDb.mimeTypeForData(file).name()
+                          : mimeDb.mimeTypeForData(fileData).name();
+    }
+    if (!stream) {
+        file->close();
+        delete file;
+        file = nullptr;
     }
 
     // Determine msgtype based on MIME
@@ -2279,7 +2367,24 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
             emitMediaSendFailed(error);
         });
 
-    m_client->uploadMedia(uploadId, fileData, mimeType, fileName);
+    if (file)
+        m_client->uploadMedia(uploadId, file, mimeType, fileName);  // takes ownership
+    else
+        m_client->uploadMedia(uploadId, fileData, mimeType, fileName);
+}
+
+void ServerConnection::sendSharedMediaMessage(const QString& uri)
+{
+    // Belt and braces for M-4: UrlHandler already refused everything but
+    // another app's content:// URI, and the user has confirmed. A share must
+    // never reach the file:// branch of sendMediaMessage, which would read a
+    // path with OUR permissions.
+    if (QUrl(uri).scheme().compare(QLatin1String("content"), Qt::CaseInsensitive) != 0) {
+        qWarning() << "[share] refused a non-content:// shared upload";
+        emitPreflightMediaFailure(QStringLiteral("That shared file can't be uploaded."));
+        return;
+    }
+    sendMediaMessage(uri);
 }
 
 void ServerConnection::createRoom(const QString& name, const QString& topic)

@@ -191,6 +191,10 @@ public:
     // net/TokenedReply.h.
     void uploadMedia(const QString& uploadId, const QByteArray& data,
                      const QString& contentType, const QString& filename);
+    // Same, streamed from an open, readable device. Takes ownership of
+    // `device` (it is reparented to the reply and freed with it).
+    void uploadMedia(const QString& uploadId, QIODevice* device,
+                     const QString& contentType, const QString& filename);
 
     // The URL to hand an Image/MediaPlayer for an mxc URI, or "" when there is
     // not yet a ticket for it.
@@ -723,6 +727,9 @@ private:
     // Authorization header; a 401 from /login is a wrong password, not a
     // revoked session.
     void watchForTokenRejection(QNetworkReply* reply);
+    // Shared body of both uploadMedia overloads: `device` if set, else `data`.
+    void startMediaUpload(const QString& uploadId, QIODevice* device, const QByteArray& bytes,
+                          const QString& contentType, const QString& filename);
     // Writes the MSC3952 `m.mentions` block into `content` (no-op for an empty
     // list). Shared by the plain-send, reply and edit paths — see the
     // definition for why the @room sentinel is handled here and not by callers.

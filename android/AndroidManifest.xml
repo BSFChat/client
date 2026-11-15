@@ -257,8 +257,12 @@
             <!-- Share target: let other apps "Share to BSFChat" a
                  single file or snippet of text. We handle the intent
                  on the Qt side (UrlHandler) by reading the activity
-                 intent at launch and, if it's ACTION_SEND, uploading
-                 the payload to the user's current channel. -->
+                 intent at launch and, if it's ACTION_SEND, offering the
+                 payload for the user's current channel. Exported, so any
+                 app can send here: files are accepted only as another
+                 app's content:// URI (never file://, never our own
+                 storage — core/SharePolicy.h) and nothing is posted until
+                 the user confirms (MobileMain shareSheet). M-4. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />

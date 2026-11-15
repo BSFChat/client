@@ -504,6 +504,14 @@ public:
     Q_INVOKABLE void editMessage(const QString& eventId, const QString& newBody,
                                   const QString& formattedBody = QString(),
                                   const QStringList& mentionedUserIds = {});
+    // sed-style correction from the composer (`s/teh/the/`, flags g and i;
+    // see util/SedEdit.h). Applies it to the user's most recent message in
+    // the active room and sends the result through editMessage, so it renders
+    // as an ordinary edit. Returns
+    //   { isSed: false }                    — not a command; send the text
+    //   { isSed: true, ok: true }           — edit sent
+    //   { isSed: true, ok: false, error }   — keep the text; toast `error`
+    Q_INVOKABLE QVariantMap editLastMessageWithSed(const QString& text);
     // Send `body` into the currently-active room as a reply pointing at
     // `targetEventId`. The UI composer calls this when the reply banner is
     // active; no server-side support is needed beyond arbitrary content.
@@ -585,6 +593,10 @@ public:
     // all segments. Returns "" if no active room.
     Q_INVOKABLE QString messageLink(const QString& eventId) const;
     Q_INVOKABLE void sendMediaMessage(const QString& fileUrl);
+    // The Android share target's upload (M-4): sendMediaMessage, but only
+    // for a content:// URI — never a path read with this app's permissions.
+    // Same mediaSendCompleted/mediaSendFailed contract.
+    Q_INVOKABLE void sendSharedMediaMessage(const QString& uri);
     Q_INVOKABLE void createRoom(const QString& name, const QString& topic);
     Q_INVOKABLE void joinRoom(const QString& roomIdOrAlias);
     Q_INVOKABLE void leaveRoom(const QString& roomId);

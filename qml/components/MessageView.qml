@@ -1138,6 +1138,145 @@ Rectangle {
                     return true;
                 }
 
+                // ── Keyboard navigation (U-3) ─────────────────────────────
+                //
+                // Focus lives on the focused row's MessageBubble itself, not on
+                // this ListView, so a screen reader reads the message the
+                // moment it gains focus (the bubble is the one accessible node
+                // per message, docs/accessibility.md §7). currentIndex and
+                // ListView's own key navigation are deliberately NOT used:
+                // currentIndex drags the view to follow it, and every scroll
+                // statement in this file assumes nothing but its own code and
+                // the user moves contentY.
+                //
+                // Entry: Up from an empty composer (MessageInput's
+                // timelineFocusRequested), or Tab onto the list. Keys on a
+                // focused message are handled in _kbKey; Escape goes back to
+                // the composer. See ShortcutsDialog.qml and
+                // docs/accessibility.md §12.
+                property string kbEventId: ""
+                property int _kbLastIndex: -1
+                activeFocusOnTab: true
+                keyNavigationEnabled: false
+                // Tab landed on the list: hand focus to a message.
+                // Only when the list ITSELF took focus — a click into a
+                // message's selectable text also makes this a focus ancestor,
+                // and must not move the view.
+                onActiveFocusChanged: {
+                    if (activeFocus && Window.activeFocusItem === messageListView)
+                        _kbFocusIndex(_kbIndexOrNewest());
+                }
+
+                function _kbIndexOrNewest() {
+                    var mm = messageModelRef;   // never the view's `model`
+                    if (!mm) return -1;
+                    var idx = kbEventId !== "" ? mm.indexForEventId(kbEventId) : -1;
+                    return idx >= 0 ? idx : count - 1;
+                }
+                // Focus the newest message (the composer's Up arrow).
+                function kbEnterAtNewest() {
+                    if (count === 0) return false;
+                    return _kbFocusIndex(count - 1);
+                }
+                function _kbFocusIndex(idx) {
+                    if (count === 0) return false;
+                    idx = Math.max(0, Math.min(count - 1, idx));
+                    // Same intent bookkeeping as jumpToLoadedEvent: a keyboard
+                    // move away from the newest row is the user leaving the
+                    // bottom, and arriving back on it re-pins.
+                    initialLoad = false;
+                    scrollTimer.stop();
+                    settleTimer.stop();
+                    if (idx === count - 1) {
+                        followEnd = true;
+                        positionViewAtIndex(idx, ListView.End);
+                    } else {
+                        followEnd = false;
+                        atBottom = false;
+                        positionViewAtIndex(idx, ListView.Contain);
+                    }
+                    var row = itemAtIndex(idx);
+                    var b = row ? row["bubble"] : null;   // the delegate's alias
+                    if (!b) return false;
+                    _kbLastIndex = idx;
+                    b.forceActiveFocus(Qt.TabFocusReason);
+                    return true;
+                }
+                function _kbMove(fromIdx, delta) {
+                    var target = fromIdx + delta;
+                    if (target < 0) {
+                        // Off the top of what is loaded: ask for more, stay put.
+                        _maybeLoadOlder();
+                        return;
+                    }
+                    if (target >= count) return;
+                    _kbFocusIndex(target);
+                }
+                // After a popup opened from the keyboard closes, put focus back
+                // on the message — unless the action moved it somewhere real
+                // (reply and edit focus the composer).
+                property bool _kbPopupPending: false
+                function _kbRestoreSoon() {
+                    if (!_kbPopupPending) return;
+                    _kbPopupPending = false;
+                    Qt.callLater(function() {
+                        var w = messageListView.Window.window;
+                        var f = w ? w.activeFocusItem : null;
+                        if (f && f !== w.contentItem && f.visible
+                            && f !== messageListView) return;
+                        var mm = messageListView.messageModelRef;
+                        var idx = mm && kbEventId !== "" ? mm.indexForEventId(kbEventId) : -1;
+                        if (idx < 0) idx = Math.min(_kbLastIndex, count - 1);
+                        if (idx >= 0) _kbFocusIndex(idx);
+                        else messageViewRoot.focusComposer();
+                    });
+                }
+                function _kbKey(event, bubble, idx) {
+                    var shift = (event.modifiers & Qt.ShiftModifier) !== 0;
+                    var mods = event.modifiers & (Qt.ControlModifier | Qt.AltModifier
+                                                  | Qt.MetaModifier);
+                    var k = event.key;
+                    event.accepted = true;
+                    if (mods === 0 && k === Qt.Key_Up) { _kbMove(idx, -1); return; }
+                    if (mods === 0 && k === Qt.Key_Down) { _kbMove(idx, 1); return; }
+                    if (mods === 0 && k === Qt.Key_PageUp) { _kbMove(idx, -10); return; }
+                    if (mods === 0 && k === Qt.Key_PageDown) {
+                        _kbFocusIndex(Math.min(count - 1, idx + 10)); return;
+                    }
+                    if (mods === 0 && k === Qt.Key_Home) { _kbFocusIndex(0); return; }
+                    if (mods === 0 && k === Qt.Key_End) { _kbFocusIndex(count - 1); return; }
+                    if (k === Qt.Key_Escape) { messageViewRoot.focusComposer(); return; }
+                    if (k === Qt.Key_Return || k === Qt.Key_Enter || k === Qt.Key_Menu
+                        || (k === Qt.Key_F10 && shift)) {
+                        _kbPopupPending = true;
+                        bubble.openContextMenuFromKeyboard();
+                        return;
+                    }
+                    if (mods === 0 && k === Qt.Key_R) {
+                        bubble.replyRequested(bubble.eventId, bubble.body,
+                                              bubble.senderDisplayName);
+                        return;
+                    }
+                    if (mods === 0 && k === Qt.Key_E && bubble.isOwnMessage) {
+                        bubble.editRequested(bubble.eventId, bubble.body);
+                        return;
+                    }
+                    if (mods === 0 && (k === Qt.Key_Delete || k === Qt.Key_Backspace)
+                        && bubble.canDelete) {
+                        _kbPopupPending = true;
+                        bubble.deleteRequested(bubble.eventId);
+                        return;
+                    }
+                    // `+` however the layout produces it (Shift+= on US keys,
+                    // a dedicated key elsewhere, the keypad).
+                    if (event.text === "+" || k === Qt.Key_Plus) {
+                        _kbPopupPending = true;
+                        bubble.openReactPicker();
+                        return;
+                    }
+                    event.accepted = false;
+                }
+
                 // Paginate-until-found state for jumpToLoadedEvent. When a
                 // reply-target isn't loaded yet, we kick off back-pagination
                 // and re-try after each batch lands, up to _jumpAttemptsLeft
@@ -1515,6 +1654,8 @@ Rectangle {
                 delegate: Column {
                     width: messageListView.width
                     spacing: 0
+                    // For keyboard navigation (_kbFocusIndex).
+                    readonly property alias bubble: rowBubble
 
                     // "New messages" divider — accent-coloured hairline with
                     // a pill on the right, rendered above the first unread
@@ -1607,9 +1748,14 @@ Rectangle {
                     }
 
                     MessageBubble {
+                        id: rowBubble
                         width: parent.width
                         eventId: model.eventId
                         highlighted: messageListView.highlightedEventId === model.eventId
+                        // Keyboard navigation — see _kbKey.
+                        Keys.onPressed: (event) => messageListView._kbKey(event, rowBubble, index)
+                        onActiveFocusChanged: if (activeFocus) messageListView.kbEventId = model.eventId
+                        onKeyboardPopupClosed: messageListView._kbRestoreSoon()
                         sender: model.sender
                         senderDisplayName: model.senderDisplayName
                         senderIsBot: model.senderIsBot === true
@@ -2029,6 +2175,8 @@ Rectangle {
         // Message input
         MessageInput {
             id: messageInput
+            // Up from an empty composer: into the timeline (U-3).
+            onTimelineFocusRequested: messageListView.kbEnterAtNewest()
             Layout.fillWidth: true
             // The composer used to take a TIGHTER gutter than the timeline
             // above it (s3 = 8 against s7 = 16) on the theory that it
@@ -2392,7 +2540,10 @@ Rectangle {
                     serverManager.activeServer.toggleReaction(target, emoji);
                 sharedReactPicker.close();
             }
-            onClosed: messageViewRoot.reactPickerEventId = ""
+            onClosed: {
+                messageViewRoot.reactPickerEventId = "";
+                messageListView._kbRestoreSoon();
+            }
         }
     }
 
@@ -2410,6 +2561,7 @@ Rectangle {
         // destructive, and an initial focus that deletes a message on a
         // space-bar press is a trap, not an affordance.
         onOpened: cancelDeleteBtn.forceActiveFocus()
+        onClosed: messageListView._kbRestoreSoon()
         parent: Overlay.overlay
         anchors.centerIn: Overlay.overlay
         width: 420

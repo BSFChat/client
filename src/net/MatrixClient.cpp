@@ -974,6 +974,19 @@ void MatrixClient::sendCallEvent(const QString& roomId, const QString& eventType
 void MatrixClient::uploadMedia(const QString& uploadId, const QByteArray& data,
                                const QString& contentType, const QString& filename)
 {
+    startMediaUpload(uploadId, nullptr, data, contentType, filename);
+}
+
+void MatrixClient::uploadMedia(const QString& uploadId, QIODevice* device,
+                               const QString& contentType, const QString& filename)
+{
+    startMediaUpload(uploadId, device, {}, contentType, filename);
+}
+
+void MatrixClient::startMediaUpload(const QString& uploadId, QIODevice* device,
+                                    const QByteArray& bytes, const QString& contentType,
+                                    const QString& filename)
+{
     QString path = QString::fromUtf8(bsfchat::api_path::kMediaUpload);
     QUrl url = buildUrl(path);
     QUrlQuery query;
@@ -990,7 +1003,17 @@ void MatrixClient::uploadMedia(const QString& uploadId, const QByteArray& data,
     // server-side work between the last byte and the reply.
     request.setTransferTimeout(bsfchat::net::kMediaTransferTimeoutMs);
 
-    auto* reply = m_nam.post(request, data);
+    QNetworkReply* reply = nullptr;
+    if (device) {
+        // Streamed from the device rather than buffered whole; the reply
+        // takes ownership so the source stays open exactly as long as needed.
+        if (!device->isSequential())
+            request.setHeader(QNetworkRequest::ContentLengthHeader, device->size());
+        reply = m_nam.post(request, device);
+        device->setParent(reply);
+    } else {
+        reply = m_nam.post(request, bytes);
+    }
     watchForTokenRejection(reply);
     connect(reply, &QNetworkReply::uploadProgress, this,
         [this, filename](qint64 sent, qint64 total) {
