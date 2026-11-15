@@ -519,7 +519,12 @@ ApplicationWindow {
     // "Add a server" lives in ChannelList's empty state and in the
     // ServerSidebar rail, both of which are shared with the mobile shell and
     // so cannot see `loginDialog` by id. Mirrored in MobileMain.qml.
-    function openLoginDialog() { loginDialog.open(); }
+    // Signed in to a BSFChat ID: "+" means "join a server", so open straight
+    // at the address. Not signed in: the sign-in-or-join chooser.
+    function openLoginDialog() {
+        if (serverManager.identitySignedIn) loginDialog.openAtAddress();
+        else loginDialog.open();
+    }
     // Straight onto address entry, skipping the chooser. Mirrored in
     // MobileMain.qml — ChannelList's empty state offers it on both shells,
     // and a helper that exists on one is a TypeError on the other.
@@ -570,6 +575,9 @@ ApplicationWindow {
     // we pick up the right ServerConnection without manual bookkeeping.
     Connections {
         target: serverManager
+        // The BSFChat ID session on this device ended (expired or revoked).
+        // Servers already joined keep working; the next join opens the browser.
+        function onIdentitySessionEnded(reason) { toastWarn(reason); }
         function onLoginError(serverUrl, error) {
             // The dialog shows the error inline when it is up; toasting
             // the same string at the same moment is the duplicate surface

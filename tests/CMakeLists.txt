@@ -1111,6 +1111,37 @@ if(BSFCHAT_ENABLE_VOICE)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
+# Auth first: the app's BSFChat ID session. Single-use refresh tokens must be
+# requested one at a time and saved before use, or two joins at once sign the
+# user out everywhere. Fake transport and an in-memory secret store: no
+# network, no OS keychain.
+qt_add_executable(test_identity_session
+    test_identity_session.cpp
+    ${CMAKE_SOURCE_DIR}/src/identity/IdentitySession.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/SecretStore.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
+)
+target_include_directories(test_identity_session PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_identity_session PRIVATE bsfchat_protocol Qt6::Core Qt6::Network Qt6::Test)
+if(BSFCHAT_ENABLE_KEYCHAIN)
+    target_link_libraries(test_identity_session PRIVATE qt6keychain)
+    target_compile_definitions(test_identity_session PRIVATE BSFCHAT_HAVE_KEYCHAIN)
+endif()
+add_test(NAME test_identity_session COMMAND test_identity_session)
+
+# The real OS credential store via QtKeychain. Skips where none is reachable.
+if(BSFCHAT_ENABLE_KEYCHAIN)
+    qt_add_executable(test_secret_store
+        test_secret_store.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/SecretStore.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/AppProfile.cpp
+    )
+    target_include_directories(test_secret_store PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_secret_store PRIVATE Qt6::Core Qt6::Test qt6keychain)
+    target_compile_definitions(test_secret_store PRIVATE BSFCHAT_HAVE_KEYCHAIN)
+    add_test(NAME test_secret_store COMMAND test_secret_store)
+endif()
+
 # One browser, one sign-in at a time (the 2026-09-24 mobile 403). Compiles the
 # real IdentityClient and drives its process-wide serialisation through a test
 # presenter, so no system browser is launched by the suite. Gui is for

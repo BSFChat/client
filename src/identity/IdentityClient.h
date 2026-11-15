@@ -16,7 +16,8 @@
 //     system browser and listen on a QTcpServer bound to an ephemeral port.
 //     Unchanged by this file's mobile work.
 //
-//   iOS and Android — private-use URI scheme (§7.1), `bsfchat://oauth/callback`.
+//   iOS and Android — claimed https redirect (§7.2) as client bsfchat-mobile,
+//     `https://bsfchat.com/oauth/callback` (identity/OidcCallback.h).
 //     Neither platform can use the loopback redirect, for reasons that look
 //     different and amount to the same thing: the listening socket stops
 //     being serviced the moment the browser takes the foreground.
@@ -121,7 +122,7 @@ public:
     // ordinary deep link the caller should still open as a message.
     //
     // This is the whole delivery path on Android: the provider redirects to
-    // bsfchat://oauth/callback, the OS resolves the intent-filter back to us,
+    // https://bsfchat.com/oauth/callback, the verified App Link resolves to us,
     // and UrlHandler surfaces it as urlReceived.
     //
     // On iOS it is the belt to ASWebAuthenticationSession's braces — the

@@ -344,6 +344,35 @@ private slots:
         QVERIFY(cache.cachedRoomIds().isEmpty());
     }
 
+    // A room that leaves the server's world (deleted, left, VIEW_CHANNEL
+    // lost) never arrives as an incremental delta. Nothing used to remove it
+    // from the cache, so every resumed launch hydrated it back into the
+    // sidebar indefinitely.
+    void testForgottenRoomsDoNotHydrateBack()
+    {
+        const QString user = QStringLiteral("@josh:h");
+        const QString host = QStringLiteral("https://h");
+        {
+            LocalCache cache;
+            QVERIFY(cache.open(user, host));
+            cache.recordSync(initialSync("s42"));
+            cache.recordTimeline(QStringLiteral("!general:server"),
+                                 {messageEvent("!general:server", 1)});
+            QCOMPARE(cache.cachedRoomIds().size(), 2);
+            cache.forgetRoom(QStringLiteral("!general:server"));
+        }
+        LocalCache reopened;
+        QVERIFY(reopened.open(user, host));
+        QVERIFY(!reopened.cachedRoomIds().contains(QStringLiteral("!general:server")));
+        QCOMPARE(reopened.cachedRoomIds().size(), 1);
+        QVERIFY(!reopened.timelines().contains(QStringLiteral("!general:server")));
+        bsfchat::SyncResponse hydrated;
+        QVERIFY(reopened.buildHydrationSync(hydrated));
+        QCOMPARE(hydrated.rooms.join.count("!general:server"), std::size_t(0));
+        // The token is untouched: forgetting a room is not a reason to full-sync.
+        QCOMPARE(reopened.syncToken(), QStringLiteral("s42"));
+    }
+
     void testIncrementalStateReplacesRatherThanDuplicates()
     {
         LocalCache cache;

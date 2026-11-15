@@ -1,4 +1,5 @@
 #include "core/UrlHandler.h"
+#include "identity/OidcCallback.h"
 
 #include "core/AppProfile.h"
 
@@ -286,8 +287,8 @@ void UrlHandler::checkAndroidLaunchIntent()
     if (!actionObj.isValid()) return;
     QString action = actionObj.toString();
 
-    // A `bsfchat://…` deep link — and, since the OIDC redirect uses the same
-    // scheme on Android, the way a sign-in comes back. Android delivers no
+    // A `bsfchat://…` deep link, or the sign-in coming back through its
+    // claimed https redirect. Android delivers no
     // QFileOpenEvent, so the eventFilter that handles this on macOS and iOS
     // never sees it; this is the equivalent.
     if (action == QStringLiteral("android.intent.action.VIEW")) {
@@ -299,7 +300,11 @@ void UrlHandler::checkAndroidLaunchIntent()
         clearAction();
         if (!dataObj.isValid()) return;
         const QString url = dataObj.toString();
-        if (url.startsWith(QStringLiteral("bsfchat://")))
+        // bsfchat:// deep links, and the sign-in's claimed https callback
+        // (the App Link in AndroidManifest.xml). Nothing else: the filter is
+        // path-scoped, but a VIEW can also arrive as an explicit intent.
+        if (url.startsWith(QStringLiteral("bsfchat://"))
+            || oidc::isNativeCallbackUrl(QUrl(url)))
             emit urlReceived(url);
         return;
     }

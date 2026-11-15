@@ -143,7 +143,7 @@ int main(int argc, char *argv[])
     QObject::connect(&urlHandler, &UrlHandler::urlReceived,
                      &app, [&application](const QString& url) {
 #ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
-        // A `bsfchat://oauth/callback?…` is a sign-in reply, not a link to a
+        // An `https://bsfchat.com/oauth/callback?…` is a sign-in reply, not a link to a
         // message, and it must reach the sign-in rather than openMessageLink
         // — which would go looking for a room called "oauth" and leave the
         // login spinner running forever.

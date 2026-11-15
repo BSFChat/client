@@ -164,11 +164,15 @@ QList<Settings::ServerEntry> Settings::savedServers() const
     return servers;
 }
 
-void Settings::addServer(const ServerEntry& entry)
+void Settings::writeServers(const QList<ServerEntry>& servers)
 {
-    auto servers = savedServers();
-    servers.append(entry);
-
+    // remove() first, every time. beginWriteArray(n) rewrites `size` and rows
+    // 1..n but leaves any row above n on disk, so a shorter array — removing a
+    // server, dropping a duplicate — left the old last row behind, with its
+    // accessToken and identityRefreshToken, in the plaintext settings file
+    // indefinitely. "The entry goes, credential and all" has to be true of
+    // the file, not only of what savedServers() reads back.
+    m_settings.remove("servers");
     m_settings.beginWriteArray("servers", servers.size());
     for (int i = 0; i < servers.size(); ++i) {
         m_settings.setArrayIndex(i);
@@ -181,6 +185,15 @@ void Settings::addServer(const ServerEntry& entry)
         m_settings.setValue("identityProviderUrl", servers[i].identityProviderUrl);
     }
     m_settings.endArray();
+    m_settings.sync();
+}
+
+void Settings::addServer(const ServerEntry& entry)
+{
+    auto servers = savedServers();
+    servers.append(entry);
+
+    writeServers(servers);
 }
 
 void Settings::removeServer(int index)
@@ -189,18 +202,7 @@ void Settings::removeServer(int index)
     if (index < 0 || index >= servers.size()) return;
     servers.removeAt(index);
 
-    m_settings.beginWriteArray("servers", servers.size());
-    for (int i = 0; i < servers.size(); ++i) {
-        m_settings.setArrayIndex(i);
-        m_settings.setValue("url", servers[i].url);
-        m_settings.setValue("userId", servers[i].userId);
-        m_settings.setValue("accessToken", servers[i].accessToken);
-        m_settings.setValue("deviceId", servers[i].deviceId);
-        m_settings.setValue("displayName", servers[i].displayName);
-        m_settings.setValue("identityRefreshToken", servers[i].identityRefreshToken);
-        m_settings.setValue("identityProviderUrl", servers[i].identityProviderUrl);
-    }
-    m_settings.endArray();
+    writeServers(servers);
 }
 
 void Settings::updateServer(int index, const ServerEntry& entry)
@@ -209,18 +211,26 @@ void Settings::updateServer(int index, const ServerEntry& entry)
     if (index < 0 || index >= servers.size()) return;
     servers[index] = entry;
 
-    m_settings.beginWriteArray("servers", servers.size());
-    for (int i = 0; i < servers.size(); ++i) {
-        m_settings.setArrayIndex(i);
-        m_settings.setValue("url", servers[i].url);
-        m_settings.setValue("userId", servers[i].userId);
-        m_settings.setValue("accessToken", servers[i].accessToken);
-        m_settings.setValue("deviceId", servers[i].deviceId);
-        m_settings.setValue("displayName", servers[i].displayName);
-        m_settings.setValue("identityRefreshToken", servers[i].identityRefreshToken);
-        m_settings.setValue("identityProviderUrl", servers[i].identityProviderUrl);
-    }
-    m_settings.endArray();
+    writeServers(servers);
+}
+
+Settings::IdentityRecord Settings::identityRecord() const
+{
+    return {m_settings.value("identity/providerUrl").toString(),
+            m_settings.value("identity/accountName").toString(),
+            m_settings.value("identity/accountId").toString()};
+}
+
+void Settings::setIdentityRecord(const IdentityRecord& record)
+{
+    m_settings.setValue("identity/providerUrl", record.providerUrl);
+    m_settings.setValue("identity/accountName", record.accountName);
+    m_settings.setValue("identity/accountId", record.accountId);
+}
+
+void Settings::clearIdentityRecord()
+{
+    m_settings.remove("identity");
 }
 
 int Settings::activeServerIndex() const

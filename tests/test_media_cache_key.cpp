@@ -88,6 +88,19 @@ private slots:
             "https://bsfchat.com/_matrix/media/v3/download/s/clip.mp4?access_token=aa.bbb"));
         QVERIFY(key.endsWith(QStringLiteral(".mp4")));
     }
+
+    // A sender chooses the content.url of an m.file. QNAM drops the fragment, so
+    // `mxc://hs/<id>#.exe` downloads the real object — and the cached copy used
+    // to be saved as <sha1>.exe and handed to ShellExecute by "Open". The
+    // saved extension now comes only from AttachmentPolicy (M-1, covered in
+    // test_untrusted_content); the key must still not carry the fragment.
+    void aFragmentIsNotPartOfTheObject()
+    {
+        const QString base = QStringLiteral(
+            "https://bsfchat.com/_matrix/media/v3/download/bsfchat.com/0123abcd");
+        QCOMPARE(MediaDownloader::cacheKeyForUrl(base + QStringLiteral("#.exe")), base);
+        QCOMPARE(MediaDownloader::cacheKeyForUrl(base + QStringLiteral("#x?y")), base);
+    }
 };
 
 QTEST_MAIN(TestMediaCacheKey)

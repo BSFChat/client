@@ -459,6 +459,11 @@ signals:
     void leaveRoomSuccess(const QString& roomId);
     void leaveRoomError(const QString& error);
 
+    // DELETE /rooms/{id} used to be fire-and-forget, so a refused delete
+    // looked exactly like one that worked.
+    void deleteRoomSuccess(const QString& roomId);
+    void deleteRoomError(const QString& roomId, int status, const QString& error);
+
     void joinedRoomsResult(const QString& requestId, const QStringList& roomIds);
     void roomMembersResult(const QString& roomId, const QJsonArray& members);
     // GET /members failed or answered with something unreadable. The member
