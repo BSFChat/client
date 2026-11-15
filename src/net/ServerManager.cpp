@@ -360,7 +360,11 @@ void ServerManager::addServerWithOidcResolved(const QString& rawUrl)
         tempClient->deleteLater();
 
         if (providerUrl.isEmpty()) {
-            emit loginError(conn->serverUrl(), "Server does not provide an identity provider URL");
+            // Through onLoginFailed, like every other way this add can fail:
+            // emitting loginError alone left the half-added connection in
+            // the sidebar with no credential and no sign-in running — a
+            // server entry that could only ever say it was not signed in.
+            onLoginFailed(conn, tr("This server does not offer BSFChat ID sign-in."));
             return;
         }
         conn->loginWithOidc(providerUrl);
