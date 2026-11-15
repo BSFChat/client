@@ -1349,9 +1349,16 @@ MessageModel::absorbHistoryPage(const QString& requestedFrom,
     // which is the entire fix. Dedupe against the loaded rows and against
     // earlier pages of this fill, exactly as prependEvents will.
     int newRows = 0;
+    // Whether the page reaches rows that were on screen before this fill
+    // began (a cached window, or /sync beating the open) — HistoryFill stops
+    // an open there. A row THIS fill added is in the index too by the time a
+    // later page arrives, which is what the second half excludes.
+    bool overlapsLoaded = false;
     for (const auto& event : chronological) {
         if (!rendersAsRow(event)) continue;
         const QString id = QString::fromStdString(event.event_id);
+        if (m_indexByEventId.contains(id) && !m_historyFillRowIds.contains(id))
+            overlapsLoaded = true;
         if (m_indexByEventId.contains(id) || m_historyFillRowIds.contains(id)) continue;
         m_historyFillRowIds.insert(id);
         ++newRows;
@@ -1381,7 +1388,7 @@ MessageModel::absorbHistoryPage(const QString& requestedFrom,
     setPrevBatchToken(endToken);
 
     const bool wasSpent = m_historyFill.autoBudgetSpent();
-    if (m_historyFill.onPage(newRows, endToken.isEmpty())) {
+    if (m_historyFill.onPage(newRows, endToken.isEmpty(), overlapsLoaded)) {
         m_historyFillFrom = endToken;
         if (wasSpent != m_historyFill.autoBudgetSpent()) emit historyAutoFillSpentChanged();
         result.outcome = HistoryPageOutcome::FetchMore;

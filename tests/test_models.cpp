@@ -2154,6 +2154,8 @@ private slots:
         const auto res = model.absorbHistoryPage(QString(), page, "t1", "@me:server");
 
         // The overlap deduplicated, the older two on top, nothing reordered.
+        // And the open stops there: the page overlapped the cached window.
+        QCOMPARE(res.outcome, hist::Outcome::Done);
         QCOMPARE(model.rowCount(), 6);
         QCOMPARE(model.data(model.index(0), MessageModel::EventIdRole).toString(),
                  QString("$older0"));
@@ -2163,7 +2165,6 @@ private slots:
                  QString("$cached3"));
         // And the cursor is live, so the user can still scroll back.
         QVERIFY(model.hasMoreHistory());
-        Q_UNUSED(res);
     }
 
     void testOpenFillShowsPageOneBeforeTheFillEnds()
@@ -2227,6 +2228,33 @@ private slots:
         QCOMPARE(model.data(model.index(2), MessageModel::BodyRole).toString(),
                  QString("edited"));
         QCOMPARE(model.indexForEventId("$m3"), -1);
+    }
+
+    void testOpenFillOverACachedWindowStopsOnOverlap()
+    {
+        // A cache hit still sends the open fill — for the pagination cursor,
+        // not for rows. A first page that overlaps the cached window has
+        // proved the window is head-current and handed over the cursor, so
+        // there is nothing left for the open to do: no second and third
+        // serial round trip that the viewport/gesture fills would cover
+        // anyway if the user wants older history.
+        MessageModel model;
+        model.ingestCachedWindow(hist::messagePage(6, "$cached", 900000000),
+                                 "@me:server");
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open,
+                                       bsfchat::client::kHistoryFirstPageLimit)
+                    .has_value());
+        QVector<bsfchat::RoomEvent> page = hist::editPage(20, "$board", "$e", 800000000);
+        page += hist::messagePage(6, "$cached", 900000000);
+        const auto r = model.absorbHistoryPage(QString(), page, "t1", "@me:server");
+        QCOMPARE(r.outcome, hist::Outcome::Done);
+        QCOMPARE(model.historyFill().pagesThisFill(), 1);
+        QCOMPARE(model.rowCount(), 6);
+        QVERIFY(!model.loadingHistory());
+        QVERIFY(model.hasMoreHistory());
+        // The automatic budget is not spent: a viewport that is still not
+        // full may top up once, as before.
+        QVERIFY(!model.historyAutoFillSpent());
     }
 
     void testOpenFillAppliesRelationsCarriedByLaterPages()
