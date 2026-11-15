@@ -297,6 +297,11 @@ void ServerManager::checkLoginFlows(const QString& url)
     });
 }
 
+QString ServerManager::normaliseServerUrl(const QString& url) const
+{
+    return bsfchat::normaliseServerUrl(url);
+}
+
 void ServerManager::addServerWithOidc(const QString& url)
 {
     m_discovery.resolve(url, [this, url](const bsfchat::Resolution& r) {

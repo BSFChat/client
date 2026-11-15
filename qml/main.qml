@@ -571,10 +571,15 @@ ApplicationWindow {
             // the same string at the same moment is the duplicate surface
             // D-H5 is about. Toast only when nobody can see the inline one
             // — e.g. a saved server failing to re-authenticate at launch.
-            if (!loginDialog.opened) toastError("Login failed: " + error);
+            // "Can see" means the dialog is up AND the failure is for the
+            // attempt it is showing: it drops every other server's (U-5),
+            // and those still have to be said somewhere.
+            if (!loginDialog.opened || !loginDialog.ownsServerUrl(serverUrl))
+                toastError("Login failed: " + error);
         }
         function onIdentityLoginFailed(error) {
-            toastError("Identity login failed: " + error);
+            // The dialog shows this one inline too; same one-message rule.
+            if (!loginDialog.opened) toastError("Identity login failed: " + error);
         }
         // The link itself is too long for a toast, so the toast says what
         // happened and puts the link where a browser can take it. The
@@ -598,12 +603,10 @@ ApplicationWindow {
     Connections {
         target: serverManager.activeServer
         ignoreUnknownSignals: true
-        function onLoginFailed(error) {
-            toastError("Login failed: " + error);
-        }
-        function onRegisterFailed(error) {
-            toastError("Registration failed: " + error);
-        }
+        // No onLoginFailed / onRegisterFailed here. Both reach the user as
+        // ServerManager::loginError (ServerManager::onLoginFailed forwards
+        // every one), which the block above and the dialog already report;
+        // toasting them here as well made one failed sign-in say so twice.
         function onMediaSendFailed(error) {
             toastError("Upload failed: " + error);
         }

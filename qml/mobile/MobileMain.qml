@@ -1130,7 +1130,9 @@ ApplicationWindow {
         target: serverManager
         ignoreUnknownSignals: true
         function onLoginError(serverUrl, error) {
-            if (!loginDialogGlobal.opened) root.toastError("Couldn't sign in: " + error);
+            // The open dialog shows only its own attempt's failures (U-5).
+            if (!loginDialogGlobal.opened || !loginDialogGlobal.ownsServerUrl(serverUrl))
+                root.toastError("Couldn't sign in: " + error);
         }
         function onIdentityLoginFailed(error) {
             if (!loginDialogGlobal.opened) root.toastError("BSFChat ID sign-in failed: " + error);
