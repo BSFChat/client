@@ -890,9 +890,8 @@ private slots:
     //
     // The rule is therefore: if a component starts a request, it has to be
     // able to stop one. Nothing here can prove the abort is wired to the
-    // right request — that is what tst_linkpreviewparse.qml and the manual
-    // destroy-mid-fetch check are for — but a file that fetches and has no
-    // teardown at all cannot be correct.
+    // right request — that needs a manual destroy-mid-fetch check — but a
+    // file that fetches and has no teardown at all cannot be correct.
     void componentsThatFetchCanCancel()
     {
         const QStringList qmlFiles = filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
@@ -1160,6 +1159,28 @@ private slots:
                          "_fetch() does not clear %1 before its first exit; the previous "
                          "URL's metadata renders under the new one").arg(QLatin1String(field))));
         }
+    }
+
+    // Audit Q-S4: link previews are fetched by the homeserver
+    // (ServerConnection.requestLinkPreview -> preview_url), never by the
+    // viewer's app. A direct request from LinkPreview.qml — an XHR, or an
+    // Image pointed at a literal third-party URL like the old YouTube
+    // thumbnail — would hand every reader's IP to the linked site again, and
+    // "fall back to fetching it ourselves when the server can't" is exactly
+    // the regression this exists to stop.
+    void linkPreviewNeverFetchesFromTheClient()
+    {
+        const QString src = withoutComments(readQml(QStringLiteral("/components/LinkPreview.qml")));
+        QVERIFY2(src.contains(QLatin1String("requestLinkPreview")),
+                 "LinkPreview.qml no longer asks the server — check the test, not the code");
+        QVERIFY2(!src.contains(QLatin1String("XMLHttpRequest")),
+                 "LinkPreview.qml fetches with XMLHttpRequest; previews must come from the server");
+        // No `//` in the pattern: withoutComments() strips from any `//`,
+        // string or not, so "https://host" reaches here as "https:.
+        static const QRegularExpression literalUrl(QStringLiteral(R"(["'`]https?:)"));
+        QVERIFY2(!src.contains(literalUrl),
+                 "LinkPreview.qml has a literal http(s) URL; every image it shows must be "
+                 "the server's mxc:// og:image, loaded through resolveMediaUrl");
     }
 
     // ---- Profile card (2026-09-18) -------------------------------------

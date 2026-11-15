@@ -860,6 +860,7 @@ qt_add_executable(test_identity_provider_url
     ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
     ${CMAKE_SOURCE_DIR}/src/util/TimelineTrace.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/LinkPreviewCache.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
     ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
     ${CMAKE_SOURCE_DIR}/src/net/VoiceSession.cpp
@@ -916,6 +917,7 @@ qt_add_executable(test_error_surface_guards
     # security/media-tickets merged. This target did not exist on that branch,
     # so it never picked them up — the same cross-branch shape as BotAdminModel.
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/LinkPreviewCache.cpp
     ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/SelfRoleModel.cpp
@@ -970,6 +972,7 @@ qt_add_executable(test_composer_upload_lock
     ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerConnectionRoomRemoval.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/LinkPreviewCache.cpp
     ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/SelfRoleModel.cpp
@@ -1053,6 +1056,18 @@ add_test(NAME test_url_handler COMMAND test_url_handler)
 
 # Correlating an async reply with its request. Qt::SingleShotConnection does
 # NOT mean "only one slot runs" — that misreading crossed uploads and DMs over.
+# Server-side link previews (audit Q-S4): the per-URL cache, request
+# de-duplication, concurrency cap, negative TTLs and the "this server has no
+# preview_url" verdict in front of MatrixClient::previewUrl. No network: the
+# test plays the server by calling fetchSucceeded/fetchFailed directly.
+qt_add_executable(test_link_preview_cache
+    test_link_preview_cache.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/LinkPreviewCache.cpp
+)
+target_include_directories(test_link_preview_cache PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_link_preview_cache PRIVATE Qt6::Core Qt6::Test bsfchat_protocol)
+add_test(NAME test_link_preview_cache COMMAND test_link_preview_cache)
+
 qt_add_executable(test_tokened_reply test_tokened_reply.cpp)
 target_include_directories(test_tokened_reply PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_tokened_reply PRIVATE Qt6::Core Qt6::Test)

@@ -459,6 +459,16 @@ void Settings::setShowMemberList(bool v) {
     }
 }
 
+bool Settings::showLinkPreviews() const {
+    return m_settings.value("ui/showLinkPreviews", true).toBool();
+}
+void Settings::setShowLinkPreviews(bool v) {
+    if (showLinkPreviews() != v) {
+        m_settings.setValue("ui/showLinkPreviews", v);
+        emit showLinkPreviewsChanged();
+    }
+}
+
 QVariantMap Settings::popoutGeometry(const QString& kind) const {
     // Anything that is not the screen kind is a camera: the caller is
     // qml/js/VideoWindows.js geometryKey(), but a settings file edited by

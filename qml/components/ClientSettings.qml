@@ -554,6 +554,25 @@ Popup {
                         }
                     }
 
+                    // Previews come from the server (preview_url), never from
+                    // this device, so the description says so; off means no
+                    // preview request is made at all. Audit Q-S4.
+                    SettingRow {
+                        title: "Show link previews"
+                        description: "Show a title, description and image under messages that contain links. Your server fetches the page, not your device, so the linked site does not see your address. Turn off to stop asking the server for previews."
+                        ThemedSwitch {
+                            Accessible.name: qsTr("Show link previews")
+                            checked: appSettings.showLinkPreviews
+                            // Re-bind after the user's write (D-C1).
+                            onToggled: {
+                                appSettings.showLinkPreviews = checked;
+                                checked = Qt.binding(function() {
+                                    return appSettings.showLinkPreviews;
+                                });
+                            }
+                        }
+                    }
+
                     InfoBanner {
                         icon: "bolt"
                         text: "Theme changes apply instantly across the entire app — no restart required."
