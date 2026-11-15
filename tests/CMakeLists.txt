@@ -3,6 +3,7 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 qt_add_executable(test_models
     test_models.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
@@ -820,6 +821,7 @@ qt_add_executable(test_identity_provider_url
     ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
     # The mesh-vs-SFU choice is made on every join regardless of whether
@@ -875,6 +877,7 @@ qt_add_executable(test_error_surface_guards
     ${CMAKE_SOURCE_DIR}/src/core/AudioGainSettings.cpp
     ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/voice/VoiceTransportSelector.cpp
@@ -924,6 +927,7 @@ qt_add_executable(test_composer_upload_lock
     ${CMAKE_SOURCE_DIR}/src/core/AudioGainSettings.cpp
     ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/voice/VoiceTransportSelector.cpp
@@ -1210,6 +1214,7 @@ qt_add_executable(test_bots
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/util/MarkdownParser.cpp
@@ -1235,6 +1240,7 @@ add_test(NAME test_bots COMMAND test_bots)
 qt_add_executable(test_message_render
     test_message_render.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/util/MarkdownParser.cpp
@@ -1484,3 +1490,13 @@ if(BSFCHAT_ENABLE_VOICE)
         Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test)
     add_test(NAME test_image_to_video_frame COMMAND test_image_to_video_frame)
 endif()
+
+# Q-S2: the formatted_body sanitiser, against the bypasses a hand-rolled
+# filter usually misses. Pure string code, no GUI.
+qt_add_executable(test_html_sanitizer
+    test_html_sanitizer.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
+)
+target_include_directories(test_html_sanitizer PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_html_sanitizer PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_html_sanitizer COMMAND test_html_sanitizer)

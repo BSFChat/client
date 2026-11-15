@@ -270,6 +270,7 @@ qt_add_library(bsfchat-lib STATIC
     src/store/LocalCache.cpp
     src/util/ExternalBrowser.cpp
     src/util/FileLogger.cpp
+    src/util/HtmlSanitizer.cpp
     src/util/MarkdownParser.cpp
     src/util/MentionRenderer.cpp
     src/util/PermissionMath.cpp
