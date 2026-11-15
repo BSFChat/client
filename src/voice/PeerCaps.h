@@ -3,6 +3,8 @@
 #include <QStringList>
 #include <nlohmann/json.hpp>
 
+#include "util/JsonSafe.h"
+
 // Media capabilities a peer advertises in the `bsfchat_caps` field of
 // its m.call.invite / m.call.answer content (and refreshes mid-call
 // via the 0x04 control channel).
@@ -39,15 +41,18 @@ struct PeerCaps {
         return videoCodecs.contains(codec, Qt::CaseInsensitive);
     }
 
+    // Never throws: this is another user's JSON, read inside a sync handler
+    // or a datachannel callback (V-2). A wrong type reads as "not advertised".
     static PeerCaps fromJson(const nlohmann::json& j) {
+        namespace js = bsfchat::jsonsafe;
         PeerCaps c;
         if (!j.is_object()) return c;
-        c.videoRtp = j.value("video_rtp", 0) != 0;
-        c.controlDc = j.value("control_dc", 0) != 0;
+        c.videoRtp = js::boolean(j, "video_rtp");
+        c.controlDc = js::boolean(j, "control_dc");
         auto strList = [&j](const char* key) {
             QStringList out;
-            for (const auto& v : j.value(key, nlohmann::json::array()))
-                if (v.is_string())
+            for (const auto& v : js::array(j, key))
+                if (v.is_string() && out.size() < 32)
                     out << QString::fromStdString(v.get<std::string>());
             return out;
         };
