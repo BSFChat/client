@@ -199,6 +199,13 @@ public:
     // because this could always return "" before login. See util/MediaUrl.h.
     QString mediaDownloadUrl(const QString& mxcUri) const;
 
+    // GET /_matrix/media/v3/preview_url?url=… — the homeserver fetches the
+    // page and answers its OpenGraph fields, with og:image re-hosted as an
+    // mxc:// URI. Answers linkPreviewResult or linkPreviewFailed, both keyed
+    // by `url` exactly as passed. Policy (cache, dedupe, unsupported servers)
+    // is net/LinkPreviewCache's; this is only the request.
+    void previewUrl(const QString& url);
+
     // The mint-and-cache layer behind mediaDownloadUrl(). Exposed so the pieces
     // that resolve media without going through this class — MessageModel, which
     // bakes a URL into each row — share one cache and one set of tickets rather
@@ -700,6 +707,11 @@ signals:
     // saw was a raw {"errcode":"M_UNKNOWN_TOKEN",...} toast from the voice
     // join path, not a prompt to sign in.
     void accessTokenRejected(const QString& errorBody);
+
+    // Answers to previewUrl. `body` is the server's object verbatim;
+    // LinkPreviewCache::parse validates and trims it.
+    void linkPreviewResult(const QString& url, const QJsonObject& body);
+    void linkPreviewFailed(const QString& url, const bsfchat::net::MatrixFailure& failure);
 
 private:
     QNetworkReply* makeRequest(const QString& method, const QString& path,

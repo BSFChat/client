@@ -2210,3 +2210,37 @@ void MatrixClient::unbanUser(const QString& roomId, const QString& userId)
     auto* reply = makeRequest("POST", path, payload);
     connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
 }
+
+void MatrixClient::previewUrl(const QString& url)
+{
+    // Standard Matrix media endpoint. Authenticated: the server rate-limits
+    // and logs per user, and an anonymous preview fetcher is an open proxy.
+    const QString path = QStringLiteral("/_matrix/media/v3/preview_url?url=")
+                         + QString::fromLatin1(QUrl::toPercentEncoding(url));
+    auto* reply = makeRequest("GET", path);
+    if (!reply) {
+        emit linkPreviewFailed(url, bsfchat::net::parseMatrixFailure(
+                                        0, {}, {}, QStringLiteral("request not sent")));
+        return;
+    }
+    connect(reply, &QNetworkReply::finished, this, [this, reply, url]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit linkPreviewFailed(url, decodeMatrixFailure(reply));
+            return;
+        }
+        // A handful of short strings. Anything much bigger is not a preview,
+        // whatever the server thinks it is.
+        constexpr qint64 kMaxBodyBytes = 64 * 1024;
+        const QByteArray data = reply->read(kMaxBodyBytes + 1);
+        const auto doc = data.size() > kMaxBodyBytes ? QJsonDocument()
+                                                     : QJsonDocument::fromJson(data);
+        if (!doc.isObject()) {
+            emit linkPreviewFailed(url, bsfchat::net::parseMatrixFailure(
+                                            200, {}, {},
+                                            QStringLiteral("malformed preview response")));
+            return;
+        }
+        emit linkPreviewResult(url, doc.object());
+    });
+}

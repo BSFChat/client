@@ -37,6 +37,7 @@
 
 class MatrixClient;
 class MediaDownloader;
+namespace bsfchat::client { class LinkPreviewCache; }
 class SyncLoop;
 class LocalCache;
 class RoomListModel;
@@ -76,6 +77,10 @@ class ServerConnection : public QObject {
     // is dead-code-eliminated on QML's AOT-compiled path (same trap as
     // UserProfileCard's _permGen).
     Q_PROPERTY(int mediaTicketEpoch READ mediaTicketEpoch NOTIFY mediaTicketEpochChanged)
+    // False once this server has answered preview_url with "no such
+    // endpoint". Previews are then off for the rest of the session — there is
+    // no client-side fallback, by design (audit Q-S4).
+    Q_PROPERTY(bool linkPreviewsSupported READ linkPreviewsSupported NOTIFY linkPreviewsSupportedChanged)
     Q_PROPERTY(QString userId READ userId NOTIFY userIdChanged)
     // The composer's character... BYTE budget. See messageByteLength() below
     // for why the composer has to count in bytes, and Constants.h for why the
@@ -1026,7 +1031,25 @@ public:
     // prompt calls back with `confirmed` set.
     Q_INVOKABLE void openMediaExternally(const QString& mxcUri, bool confirmed = false);
 
+    // Server-side link previews (GET /_matrix/media/v3/preview_url). The
+    // homeserver fetches the page; this app never contacts the linked site.
+    // Cached per URL, de-duplicated and rate-capped in net/LinkPreviewCache.
+    //
+    // requestLinkPreview() returns true when linkPreviewResolved(url) will
+    // follow, false when linkPreview(url) already has the answer (or none will
+    // ever come: previews switched off, unsupported server, not http(s)).
+    //
+    // linkPreview() returns {state} where state is "pending", "ready", "none"
+    // or "unknown"; a "ready" map also carries title, description, siteName
+    // (plain text, already trimmed), image (an mxc:// URI or ""), imageWidth
+    // and imageHeight.
+    Q_INVOKABLE bool requestLinkPreview(const QString& url);
+    Q_INVOKABLE QVariantMap linkPreview(const QString& url) const;
+    bool linkPreviewsSupported() const;
+
 signals:
+    void linkPreviewResolved(QString url);
+    void linkPreviewsSupportedChanged();
     void displayNameChanged();
     void serverNameChanged();
     void serverAvatarUrlChanged();
@@ -1367,6 +1390,8 @@ private:
     QString m_serverAvatarUrl;  // resolved http URL for QML
     // Incremented on every ticketReady. See the mediaTicketEpoch property.
     int m_mediaTicketEpoch = 0;
+    // Owned (QObject child). See requestLinkPreview().
+    bsfchat::client::LinkPreviewCache* m_linkPreviews = nullptr;
     // Downloads a media object with an Authorization header and hands the
     // resulting LOCAL FILE to the desktop. Created on first use — most sessions
     // never open a file externally. See openMediaExternally().

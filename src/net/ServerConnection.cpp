@@ -8,6 +8,7 @@
 #include "net/TokenedReply.h"
 #include "net/SnapshotGate.h"
 #include "net/IgnoredUsers.h"
+#include "net/LinkPreviewCache.h"
 #include "net/MemberJson.h"
 #include "net/RoomRemoval.h"
 #include "model/RoomListModel.h"
@@ -237,6 +238,20 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
                     emit serverAvatarUrlChanged();
                 }
             });
+
+    // Server-side link previews (audit Q-S4). The cache owns the policy and
+    // asks for fetches; MatrixClient owns the HTTP.
+    m_linkPreviews = new bsfchat::client::LinkPreviewCache(this);
+    connect(m_linkPreviews, &bsfchat::client::LinkPreviewCache::fetchRequested,
+            m_client, &MatrixClient::previewUrl);
+    connect(m_client, &MatrixClient::linkPreviewResult,
+            m_linkPreviews, &bsfchat::client::LinkPreviewCache::fetchSucceeded);
+    connect(m_client, &MatrixClient::linkPreviewFailed,
+            m_linkPreviews, &bsfchat::client::LinkPreviewCache::fetchFailed);
+    connect(m_linkPreviews, &bsfchat::client::LinkPreviewCache::resolved,
+            this, &ServerConnection::linkPreviewResolved);
+    connect(m_linkPreviews, &bsfchat::client::LinkPreviewCache::supportedChanged,
+            this, &ServerConnection::linkPreviewsSupportedChanged);
 
     m_botAdminModel = new BotAdminModel(this);
     m_botAdminModel->hooks.listBots = [this]() { m_client->listBots(); };
@@ -3598,6 +3613,12 @@ void ServerConnection::setSettings(Settings* settings)
 {
     m_settings = settings;
     if (settings) {
+        // "Show link previews" off means no preview_url request at all, not
+        // merely no card.
+        m_linkPreviews->setEnabled(settings->showLinkPreviews());
+        connect(settings, &Settings::showLinkPreviewsChanged, this, [this]() {
+            if (m_settings) m_linkPreviews->setEnabled(m_settings->showLinkPreviews());
+        });
         // Refresh the mic gate whenever voice mode flips so a user
         // switching Open-mic → PTT immediately goes silent (and vv).
         connect(settings, &Settings::voiceModeChanged,
@@ -4062,6 +4083,39 @@ void ServerConnection::fetchProfile(const QString& userId)
 QString ServerConnection::resolveMediaUrl(const QString& mxcUri) const
 {
     return m_client->mediaDownloadUrl(mxcUri);
+}
+
+bool ServerConnection::requestLinkPreview(const QString& url)
+{
+    return m_linkPreviews->request(url);
+}
+
+QVariantMap ServerConnection::linkPreview(const QString& url) const
+{
+    using Cache = bsfchat::client::LinkPreviewCache;
+    QVariantMap out;
+    switch (m_linkPreviews->state(url)) {
+    case Cache::State::Pending: out[QStringLiteral("state")] = QStringLiteral("pending"); break;
+    case Cache::State::Empty:   out[QStringLiteral("state")] = QStringLiteral("none"); break;
+    case Cache::State::Unknown: out[QStringLiteral("state")] = QStringLiteral("unknown"); break;
+    case Cache::State::Ready: {
+        const Cache::Preview p = m_linkPreviews->preview(url);
+        out[QStringLiteral("state")] = QStringLiteral("ready");
+        out[QStringLiteral("title")] = p.title;
+        out[QStringLiteral("description")] = p.description;
+        out[QStringLiteral("siteName")] = p.siteName;
+        out[QStringLiteral("image")] = p.imageMxc;
+        out[QStringLiteral("imageWidth")] = p.imageWidth;
+        out[QStringLiteral("imageHeight")] = p.imageHeight;
+        break;
+    }
+    }
+    return out;
+}
+
+bool ServerConnection::linkPreviewsSupported() const
+{
+    return m_linkPreviews->supported();
 }
 
 void ServerConnection::openMediaExternally(const QString& mxcUri, bool confirmed)

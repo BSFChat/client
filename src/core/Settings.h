@@ -74,6 +74,10 @@ class Settings : public QObject {
     // Whether the right-hand member list is expanded. Also toggleable via
     // the chat-header users button and the Ctrl+M shortcut.
     Q_PROPERTY(bool showMemberList READ showMemberList WRITE setShowMemberList NOTIFY showMemberListChanged)
+    // "Show link previews". Previews are fetched by the homeserver
+    // (preview_url), never by this app; off means no preview request is made
+    // at all — see net/LinkPreviewCache.h.
+    Q_PROPERTY(bool showLinkPreviews READ showLinkPreviews WRITE setShowLinkPreviews NOTIFY showLinkPreviewsChanged)
     // Persisted window geometry. Negative values == "use default" (first
     // run, or the saved position was off-screen / on a detached monitor).
     // We save each field independently so a partial restore still works if
@@ -228,6 +232,9 @@ public:
 
     bool showMemberList() const;
     void setShowMemberList(bool v);
+
+    bool showLinkPreviews() const;
+    void setShowLinkPreviews(bool v);
 
     int windowX() const;
     void setWindowX(int v);
@@ -494,6 +501,7 @@ signals:
     void notificationsEnabledChanged();
     void notificationSoundChanged();
     void showMemberListChanged();
+    void showLinkPreviewsChanged();
     void windowXChanged();
     void windowYChanged();
     void windowWidthChanged();
