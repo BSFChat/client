@@ -1500,3 +1500,23 @@ qt_add_executable(test_html_sanitizer
 target_include_directories(test_html_sanitizer PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_html_sanitizer PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_html_sanitizer COMMAND test_html_sanitizer)
+
+# Other users' input never crashes the client or reaches the OS unchecked:
+# wrong-typed event content (C-1), call capabilities (V-2), strict mxc URIs and
+# the attachment allowlist (M-1), and the link scheme / spoofed-text policy
+# (Q-S1). No server, no GUI.
+qt_add_executable(test_untrusted_content
+    test_untrusted_content.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MarkdownParser.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MentionRenderer.cpp
+)
+target_include_directories(test_untrusted_content PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_untrusted_content PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Test
+)
+add_test(NAME test_untrusted_content COMMAND test_untrusted_content)
