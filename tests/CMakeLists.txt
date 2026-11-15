@@ -489,6 +489,17 @@ target_include_directories(test_update_channel PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_update_channel PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_update_channel COMMAND test_update_channel)
 
+# Updater integrity (audit M-5): URL pinning, SHA256SUMS parsing, Ed25519
+# signatures (keypairs generated in the test) and the streaming hash sink.
+# OpenSSL::Crypto comes from the top-level find_package next to bsfchat-lib.
+qt_add_executable(test_update_integrity
+    test_update_integrity.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/UpdateIntegrity.cpp
+)
+target_include_directories(test_update_integrity PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_update_integrity PRIVATE Qt6::Core Qt6::Test OpenSSL::Crypto)
+add_test(NAME test_update_integrity COMMAND test_update_integrity)
+
 # Media-path loopback: proves H.264 AUs survive packetize → DTLS-SRTP →
 # depacketize between two in-process peer connections using the exact
 # handler chain production builds. No Qt, no codecs, no network.
