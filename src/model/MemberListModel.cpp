@@ -6,7 +6,12 @@
 
 #include <bsfchat/Constants.h>
 
+#include "util/JsonSafe.h"
+
 namespace {
+
+namespace jsonsafe = bsfchat::jsonsafe;
+
 // How often the release edge is checked. A quarter of kSpeakingHoldMs, so a
 // member stops being "speaking" within 100 ms of when they are due to — under
 // the ~200 ms a listener notices — without waking the event loop at the
@@ -182,18 +187,18 @@ void MemberListModel::processEvent(const bsfchat::RoomEvent& event)
         ? QString::fromStdString(*event.state_key)
         : QString::fromStdString(event.sender);
 
-    QString membership = QString::fromStdString(event.content.data.value("membership", ""));
-    QString displayName = QString::fromStdString(event.content.data.value("displayname", ""));
-    QString avatarUrl = QString::fromStdString(event.content.data.value("avatar_url", ""));
+    // Type-checked reads: member content is the member's own to write.
+    QString membership = jsonsafe::qstr(event.content.data, "membership");
+    QString displayName = jsonsafe::qstr(event.content.data, "displayname");
+    QString avatarUrl = jsonsafe::qstr(event.content.data, "avatar_url");
     // The server writes the EFFECTIVE name into `displayname` and the nickname
     // separately, so `displayName` above is already the string to render and this
     // is only for telling the two apart in admin UI.
-    QString nickname = QString::fromStdString(
-        event.content.data.value(std::string("bsfchat.nickname"), std::string()));
+    QString nickname = jsonsafe::qstr(event.content.data, "bsfchat.nickname");
     // Absent is the server's encoding for "human" — it never writes `false` —
     // so a default of false is the whole of the rule, and there is no third
     // "not known yet" state to represent.
-    bool isBotAccount = event.content.data.value(std::string("bsfchat.bot"), false);
+    bool isBotAccount = jsonsafe::boolean(event.content.data, "bsfchat.bot");
 
     int idx = findMember(userId);
 

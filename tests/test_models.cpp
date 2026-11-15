@@ -745,15 +745,17 @@ private slots:
         QVERIFY2(!modelSrc.isEmpty() && !rebuildSrc.isEmpty(),
                  "sources not readable — check BSFCHAT_SRC_DIR");
 
-        // Matches both spellings the model uses:
+        // Matches the spellings the model uses:
         //   content.data.value("displayname", "")
         //   content.data.value(std::string("bsfchat.nickname"), std::string())
+        //   jsonsafe::qstr(event.content.data, "displayname")
         //
         // Spelled with escapes rather than R"(...)": moc's lexer does not
         // survive a raw string containing a quote — it loses track of the rest
         // of the file, finds no Q_OBJECT, and the test links with no vtable.
         static const QRegularExpression reader(
-            QStringLiteral("content\\.data\\.value\\(\\s*(?:std::string\\(\\s*)?\"([^\"]+)\""));
+            QStringLiteral("(?:content\\.data\\.value\\(\\s*(?:std::string\\(\\s*)?"
+                           "|jsonsafe::\\w+\\(\\s*event\\.content\\.data,\\s*)\"([^\"]+)\""));
 
         QStringList keys;
         auto it = reader.globalMatch(modelSrc);

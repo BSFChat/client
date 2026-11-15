@@ -374,6 +374,10 @@ public:
     Q_INVOKABLE void discardLocalEcho(const QString& localId);
     // Body of a pending/failed echo, for a retry that re-sends the text.
     Q_INVOKABLE QString localEchoBody(const QString& localId) const;
+    // The sender's file name and info.mimetype for a loaded media row, so
+    // "open externally" can judge the file without trusting QML to pass them.
+    // False when no loaded row shows `mxc`.
+    bool mediaInfoForMxc(const QString& mxc, QString* fileName, QString* mimeType) const;
 
     void appendEvent(const bsfchat::RoomEvent& event, const QString& ownUserId);
     void appendEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);
@@ -505,6 +509,7 @@ private:
         QString mediaMxc;       // The mxc:// URI mediaUrl was resolved from
         QString mediaFileName;  // Filename from content
         qint64 mediaFileSize = 0; // Size in bytes
+        QString mediaMimeType;  // info.mimetype, as the sender claimed it
         int    mediaWidth  = 0;   // intrinsic px from info.w (0 = unknown)
         int    mediaHeight = 0;   // intrinsic px from info.h (0 = unknown)
         bool edited = false;    // True if ≥1 m.replace has been applied

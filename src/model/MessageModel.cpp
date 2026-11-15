@@ -4,12 +4,17 @@
 #include <QDateTime>
 #include <QSet>
 #include <bsfchat/Constants.h>
+#include "util/EventGuard.h"
+#include "util/HtmlSanitizer.h"
+#include "util/JsonSafe.h"
 #include "util/MarkdownParser.h"
 #include "util/MediaUrl.h"
 #include "util/MentionRenderer.h"
 #include "util/ScrollAnchor.h"
 
 namespace {
+
+namespace jsonsafe = bsfchat::jsonsafe;
 
 // Media rows render a filename card, not prose — no body HTML is built for
 // them, and MessageBubble never shows their TextEdit.
@@ -466,7 +471,7 @@ int MessageModel::indexOfEchoMatching(const bsfchat::RoomEvent& event) const
     // costs one integer test per inbound event rather than a walk.
     if (m_unreconciledEchoes <= 0) return -1;
     const QString sender = QString::fromStdString(event.sender);
-    const QString body = QString::fromStdString(event.content.data.value("body", ""));
+    const QString body = jsonsafe::qstr(event.content.data, "body");
     // Newest first: if the user sent the same text twice in a row, the
     // server's copies arrive in send order, so the OLDEST unmatched echo is
     // the right target... except that scanning oldest-first would match an
@@ -603,6 +608,19 @@ QString MessageModel::localEchoBody(const QString& localId) const
     return row < 0 ? QString() : m_messages[row].body;
 }
 
+bool MessageModel::mediaInfoForMxc(const QString& mxc, QString* fileName,
+                                   QString* mimeType) const
+{
+    if (mxc.isEmpty()) return false;
+    for (const auto& m : m_messages) {
+        if (m.mediaMxc != mxc) continue;
+        if (fileName) *fileName = m.mediaFileName;
+        if (mimeType) *mimeType = m.mediaMimeType;
+        return true;
+    }
+    return false;
+}
+
 MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& event, const QString& ownUserId) const
 {
     MessageEntry entry;
@@ -614,9 +632,10 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
     entry.serverTimestamp = static_cast<qint64>(event.origin_server_ts);
     entry.isOwnMessage = (entry.sender == ownUserId);
 
-    entry.msgtype = QString::fromStdString(event.content.data.value("msgtype", ""));
-    entry.body = QString::fromStdString(event.content.data.value("body", ""));
-    entry.formattedBody = QString::fromStdString(event.content.data.value("formatted_body", ""));
+    entry.msgtype = jsonsafe::qstr(event.content.data, "msgtype");
+    entry.body = jsonsafe::qstr(event.content.data, "body");
+    entry.formattedBody = bsfchat::client::sanitizeHtml(
+        jsonsafe::qstr(event.content.data, "formatted_body"));
 
     // Parse m.in_reply_to — pointer to the message this one replies to.
     // We don't mind m.replace (that's handled above); only genuine replies
@@ -625,13 +644,13 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
         && event.content.data["m.relates_to"].is_object()) {
         const auto& rel = event.content.data["m.relates_to"];
         if (rel.contains("m.in_reply_to") && rel["m.in_reply_to"].is_object()) {
-            entry.replyToEventId = QString::fromStdString(
-                rel["m.in_reply_to"].value("event_id", ""));
+            entry.replyToEventId = jsonsafe::qstr(
+                rel["m.in_reply_to"], "event_id");
         }
         // Thread relation — rel_type = "m.thread", event_id points at
         // the thread root. Spec'd under Matrix threading (MSC3440).
-        if (rel.value("rel_type", "") == "m.thread") {
-            entry.threadRootId = QString::fromStdString(rel.value("event_id", ""));
+        if (jsonsafe::str(rel, "rel_type") == "m.thread") {
+            entry.threadRootId = jsonsafe::qstr(rel, "event_id");
         }
     }
 
@@ -649,7 +668,7 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
     // Extract media fields for image/file messages
     if (entry.msgtype == "m.image" || entry.msgtype == "m.file" ||
         entry.msgtype == "m.audio" || entry.msgtype == "m.video") {
-        QString mxcUrl = QString::fromStdString(event.content.data.value("url", ""));
+        QString mxcUrl = jsonsafe::qstr(event.content.data, "url");
         // Kept alongside the resolved URL: a ticket is short-lived, so the row
         // has to know which object it is showing in order to be re-resolved when
         // one arrives (or is refreshed). Also what the external-open path uses,
@@ -660,15 +679,16 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
 
         if (event.content.data.contains("info") && event.content.data["info"].is_object()) {
             const auto& info = event.content.data["info"];
-            entry.mediaFileSize = info.value("size", 0);
+            entry.mediaFileSize = jsonsafe::integer(info, "size", 0, 0);
+            entry.mediaMimeType = jsonsafe::qstr(info, "mimetype");
             // Pull intrinsic dimensions from the upload metadata so
             // MessageBubble can reserve the right box before the
             // image / video data finishes downloading. Without this
             // the row's height reflows once Image::sourceSize
             // resolves, which forces the scroll-pin logic to
             // chase a moving bottom while async media loads in.
-            entry.mediaWidth  = info.value("w", 0);
-            entry.mediaHeight = info.value("h", 0);
+            entry.mediaWidth  = jsonsafe::int32(info, "w");
+            entry.mediaHeight = jsonsafe::int32(info, "h");
         }
     }
 
@@ -739,8 +759,7 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
             if (relations.contains("m.replace")
                 && relations["m.replace"].is_object()) {
                 const auto& replace = relations["m.replace"];
-                replaceEventId = QString::fromStdString(
-                    replace.value("event_id", ""));
+                replaceEventId = jsonsafe::qstr(replace, "event_id");
                 if (replace.contains("origin_server_ts")
                     && replace["origin_server_ts"].is_number()) {
                     replaceTs = replace["origin_server_ts"].get<qint64>();
@@ -758,8 +777,7 @@ MessageModel::MessageEntry MessageModel::eventToEntry(const bsfchat::RoomEvent& 
             if (unsignedData.contains("bsfchat.original_content")
                 && unsignedData["bsfchat.original_content"].is_object()) {
                 const auto& original = unsignedData["bsfchat.original_content"];
-                const QString originalBody = QString::fromStdString(
-                    original.value("body", ""));
+                const QString originalBody = jsonsafe::qstr(original, "body");
                 if (!originalBody.isEmpty())
                     entry.history.append({originalBody, entry.timestamp});
             }
@@ -819,7 +837,7 @@ bool MessageModel::isReplacementEvent(const bsfchat::RoomEvent& event)
     const auto& data = event.content.data;
     if (!data.contains("m.relates_to") || !data["m.relates_to"].is_object())
         return false;
-    return data["m.relates_to"].value("rel_type", "") == "m.replace";
+    return jsonsafe::str(data["m.relates_to"], "rel_type") == "m.replace";
 }
 
 bool MessageModel::rendersAsRow(const bsfchat::RoomEvent& event)
@@ -837,10 +855,10 @@ MessageModel::PendingEdit MessageModel::editPayload(const bsfchat::RoomEvent& ev
     const auto& data = event.content.data;
     if (data.contains("m.new_content") && data["m.new_content"].is_object()) {
         const auto& nc = data["m.new_content"];
-        edit.body = QString::fromStdString(nc.value("body", ""));
-        edit.formattedBody = QString::fromStdString(nc.value("formatted_body", ""));
+        edit.body = jsonsafe::qstr(nc, "body");
+        edit.formattedBody = bsfchat::client::sanitizeHtml(jsonsafe::qstr(nc, "formatted_body"));
     } else {
-        QString raw = QString::fromStdString(data.value("body", ""));
+        QString raw = jsonsafe::qstr(data, "body");
         if (raw.startsWith("* ")) raw = raw.mid(2);
         edit.body = raw;
     }
@@ -995,9 +1013,9 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
         if (!data.contains("m.relates_to") || !data["m.relates_to"].is_object())
             return;
         const auto& rel = data["m.relates_to"];
-        if (rel.value("rel_type", "") != "m.annotation") return;
-        QString targetId = QString::fromStdString(rel.value("event_id", ""));
-        QString key = QString::fromStdString(rel.value("key", ""));
+        if (jsonsafe::str(rel, "rel_type") != "m.annotation") return;
+        QString targetId = jsonsafe::qstr(rel, "event_id");
+        QString key = jsonsafe::qstr(rel, "key");
         if (targetId.isEmpty() || key.isEmpty()) return;
         QString reactionEventId = QString::fromStdString(event.event_id);
         QString sender = QString::fromStdString(event.sender);
@@ -1023,7 +1041,7 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
     // re-entered (U-H5).
     if (event.type == std::string(bsfchat::event_type::kRoomRedaction)) {
         const auto& data = event.content.data;
-        QString target = QString::fromStdString(data.value("redacts", ""));
+        QString target = jsonsafe::qstr(data, "redacts");
         if (target.isEmpty()) return;
         auto it = m_reactionIndex.find(target);
         if (it == m_reactionIndex.end()) {
@@ -1064,9 +1082,9 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
     QString targetId;
     if (data.contains("m.relates_to") && data["m.relates_to"].is_object()) {
         const auto& rel = data["m.relates_to"];
-        if (rel.value("rel_type", "") == "m.replace") {
+        if (jsonsafe::str(rel, "rel_type") == "m.replace") {
             isEdit = true;
-            targetId = QString::fromStdString(rel.value("event_id", ""));
+            targetId = jsonsafe::qstr(rel, "event_id");
         }
     }
 
@@ -1170,7 +1188,8 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
 void MessageModel::appendEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId)
 {
     for (const auto& event : events) {
-        appendEvent(event, ownUserId);
+        bsfchat::client::guardEvent(event, "appendEvents",
+                                    [&] { appendEvent(event, ownUserId); });
     }
 }
 
@@ -1194,7 +1213,9 @@ void MessageModel::prependEvents(const QVector<bsfchat::RoomEvent>& events, cons
         // old m_messages-only scan let through.
         if (m_indexByEventId.contains(eventId) || queued.contains(eventId)) continue;
         queued.insert(eventId);
-        MessageEntry entry = eventToEntry(event, ownUserId);
+        MessageEntry entry;
+        if (!bsfchat::client::guardEvent(event, "prependEvents",
+                [&] { entry = eventToEntry(event, ownUserId); })) continue;
         // An edit that arrived over /sync while this page was in flight — the
         // server reconciled the original as of ITS answer, not ours.
         drainPendingEdit(entry);
@@ -1405,7 +1426,9 @@ void MessageModel::ingestCachedWindow(const QVector<bsfchat::RoomEvent>& chronol
         const QString eventId = QString::fromStdString(event.event_id);
         if (m_indexByEventId.contains(eventId) || queued.contains(eventId)) continue;
         queued.insert(eventId);
-        MessageEntry entry = eventToEntry(event, ownUserId);
+        MessageEntry entry;
+        if (!bsfchat::client::guardEvent(event, "ingestCachedWindow",
+                [&] { entry = eventToEntry(event, ownUserId); })) continue;
         drainPendingEdit(entry);
         rows.append(std::move(entry));
     }
@@ -1424,7 +1447,8 @@ void MessageModel::ingestCachedWindow(const QVector<bsfchat::RoomEvent>& chronol
     // to be folded into one.
     for (const auto& event : chronological) {
         if (rendersAsRow(event)) continue;
-        appendEvent(event, ownUserId);
+        bsfchat::client::guardEvent(event, "relations",
+                                    [&] { appendEvent(event, ownUserId); });
     }
 }
 
@@ -1436,7 +1460,9 @@ void MessageModel::ingestHistoryEvents(const QVector<bsfchat::RoomEvent>& chrono
     if (m_messages.isEmpty()) {
         // Nothing loaded: replay the lot in order, so reactions, redactions
         // and in-window edits all take the live path.
-        for (const auto& event : chronological) appendEvent(event, ownUserId);
+        for (const auto& event : chronological)
+            bsfchat::client::guardEvent(event, "ingestHistoryEvents",
+                                        [&] { appendEvent(event, ownUserId); });
         return;
     }
 
@@ -1467,7 +1493,8 @@ void MessageModel::ingestHistoryEvents(const QVector<bsfchat::RoomEvent>& chrono
     // prependEvents above.
     for (const auto& event : chronological) {
         if (rendersAsRow(event)) continue;
-        appendEvent(event, ownUserId);
+        bsfchat::client::guardEvent(event, "relations",
+                                    [&] { appendEvent(event, ownUserId); });
     }
 }
 

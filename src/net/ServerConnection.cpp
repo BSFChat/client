@@ -14,6 +14,8 @@
 #include "model/BotAdminModel.h"
 #include "model/ChannelInviteModel.h"
 #include "model/SelfRoleModel.h"
+#include "util/EventGuard.h"
+#include "util/JsonSafe.h"
 #include "util/MediaUrl.h"
 #include "util/MemberCache.h"
 #include "util/MentionBadge.h"
@@ -51,6 +53,10 @@
 
 #include <bsfchat/Constants.h>
 #include <nlohmann/json.hpp>
+
+// Every read of event content goes through these (util/JsonSafe.h): the
+// content is the sender's, and a throwing nlohmann read is a remote crash.
+namespace js = bsfchat::jsonsafe;
 
 // V-H4's other half: on macOS/iOS (and Android) the FIRST QAudioSource
 // open is what triggers the OS microphone prompt, and until the user
@@ -2457,12 +2463,12 @@ void ServerConnection::applyCallMemberEvent(const QString& roomId,
 
     bsfchat::client::VoiceParticipant p;
     p.userId = QString::fromStdString(*event.state_key);
-    p.muted = event.content.data.value("muted", false);
-    p.deafened = event.content.data.value("deafened", false);
-    p.cameraOn = event.content.data.value("camera_on", false);
-    p.screenSharing = event.content.data.value("screen_sharing", false);
-    p.joinedAt = static_cast<qint64>(event.content.data.value("joined_at", int64_t(0)));
-    const bool active = event.content.data.value("active", false);
+    p.muted = js::boolean(event.content.data, "muted", false);
+    p.deafened = js::boolean(event.content.data, "deafened", false);
+    p.cameraOn = js::boolean(event.content.data, "camera_on", false);
+    p.screenSharing = js::boolean(event.content.data, "screen_sharing", false);
+    p.joinedAt = static_cast<qint64>(js::integer(event.content.data, "joined_at"));
+    const bool active = js::boolean(event.content.data, "active", false);
 
     // A room only carries m.call.member if it is a voice channel, and the
     // m.room.voice marker may sit later in the same state batch — mark it now
@@ -2481,7 +2487,7 @@ void ServerConnection::applyCallMemberEvent(const QString& roomId,
         // join over an active row (which emits active=false for the OLD
         // membership, then active=true) cannot be mistaken for our
         // current one being reaped.
-        const std::string sid = event.content.data.value("session_id", "");
+        const std::string sid = js::str(event.content.data, "session_id");
         m_voiceSession->onSelfMembership(roomId, active,
                                          QString::fromStdString(sid));
     }
@@ -3951,16 +3957,17 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
     if (response.presence) {
         bool anyChanged = false;
         for (const auto& ev : response.presence->events) {
+            // One malformed event is skipped and logged, not the rest of the
+            // batch (util/EventGuard.h). Body deliberately not re-indented.
+            try {
             QString uid = QString::fromStdString(ev.sender);
             if (uid.isEmpty()) continue;
             QString state, msg;
             if (ev.content.data.contains("presence")) {
-                state = QString::fromStdString(
-                    ev.content.data.value("presence", ""));
+                state = js::qstr(ev.content.data, "presence");
             }
             if (ev.content.data.contains("status_msg")) {
-                msg = QString::fromStdString(
-                    ev.content.data.value("status_msg", ""));
+                msg = js::qstr(ev.content.data, "status_msg");
             }
             QString prevState = m_userPresenceFromSync.value(uid);
             QString prevMsg = m_userStatusMessage.value(uid);
@@ -3979,6 +3986,11 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             if (uid == m_userId) {
                 if (!state.isEmpty()) m_selfPresence = state;
                 m_selfStatusMessage = msg;
+            }
+            } catch (const std::exception& e) {
+                bsfchat::client::logSkippedEvent(ev, "sync presence", e.what());
+            } catch (...) {
+                bsfchat::client::logSkippedEvent(ev, "sync presence");
             }
         }
         if (anyChanged) presenceDirty = true;
@@ -4046,15 +4058,18 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
 
         // Process state events (room name, topic, members)
         for (const auto& event : joinedRoom.state.events) {
+            // One malformed event is skipped and logged, not the rest of the
+            // batch (util/EventGuard.h). Body deliberately not re-indented.
+            try {
             QString type = QString::fromStdString(event.type);
             if (type == QString::fromUtf8(bsfchat::event_type::kRoomName)) {
-                QString name = QString::fromStdString(event.content.data.value("name", ""));
+                QString name = js::qstr(event.content.data, "name");
                 m_roomListModel->updateRoomName(roomId, name);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomTopic)) {
-                QString topic = QString::fromStdString(event.content.data.value("topic", ""));
+                QString topic = js::qstr(event.content.data, "topic");
                 m_roomListModel->updateRoomTopic(roomId, topic);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerScreenShare)) {
-                int q = event.content.data.value("max_quality", 3);
+                int q = js::int32(event.content.data, "max_quality", 3);
                 q = std::clamp(q, 0, 3);
                 if (q != m_maxScreenShareQuality) {
                     m_maxScreenShareQuality = q;
@@ -4063,11 +4078,11 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 // New explicit policy fields. Sentinel values
                 // (-1) mean "no cap"; the client applies them as
                 // INT_MAX-equivalents during clamping.
-                int maxFps = event.content.data.value("max_fps", -1);
-                int maxWidth = event.content.data.value("max_width", -1);
-                int maxJpeg = event.content.data.value("max_jpeg_quality", -1);
-                int maxKbps = event.content.data.value("max_bitrate_kbps", -1);
-                bool allowLossless = event.content.data.value("allow_lossless", true);
+                int maxFps = js::int32(event.content.data, "max_fps", -1);
+                int maxWidth = js::int32(event.content.data, "max_width", -1);
+                int maxJpeg = js::int32(event.content.data, "max_jpeg_quality", -1);
+                int maxKbps = js::int32(event.content.data, "max_bitrate_kbps", -1);
+                bool allowLossless = js::boolean(event.content.data, "allow_lossless", true);
                 if (maxFps != m_maxScreenShareFps
                     || maxWidth != m_maxScreenShareWidth
                     || maxJpeg != m_maxScreenShareJpeg
@@ -4099,13 +4114,13 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 noteDirectMembership(roomId, event);
                 if (event.state_key.has_value()) {
                     QString uid = QString::fromStdString(*event.state_key);
-                    QString dn = QString::fromStdString(event.content.data.value("displayname", ""));
+                    QString dn = js::qstr(event.content.data, "displayname");
                     // The bot flag rides on the member event itself, so this
                     // is the same fold as the display name beside it — every
                     // path that can teach us a name can teach us this too,
                     // including a LEAVE, which is what keeps a departed bot's
                     // messages badged.
-                    recordBotFlag(uid, event.content.data.value("bsfchat.bot", false));
+                    recordBotFlag(uid, js::boolean(event.content.data, "bsfchat.bot", false));
                     // Our OWN name is learned here, like everybody else's.
                     //
                     // It used to be learned only from a /profile reply, and
@@ -4148,23 +4163,23 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             } else if (type == QString::fromUtf8(bsfchat::event_type::kCallMember)) {
                 applyCallMemberEvent(roomId, event);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomType)) {
-                QString rtype = QString::fromStdString(event.content.data.value("type", ""));
+                QString rtype = js::qstr(event.content.data, "type");
                 m_roomListModel->updateRoomType(roomId, rtype);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomCategory)) {
-                QString parentId = QString::fromStdString(event.content.data.value("parent_id", ""));
+                QString parentId = js::qstr(event.content.data, "parent_id");
                 m_roomListModel->updateParentId(roomId, parentId);
                 int order = 0;
                 if (event.content.data.contains("order")) {
-                    order = event.content.data["order"].get<int>();
+                    order = js::int32(event.content.data, "order");
                 }
                 m_roomListModel->updateSortOrder(roomId, order);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerInfo)) {
-                QString name = QString::fromStdString(event.content.data.value("name", ""));
+                QString name = js::qstr(event.content.data, "name");
                 if (name != m_serverName) {
                     m_serverName = name;
                     emit serverNameChanged();
                 }
-                QString mxc = QString::fromStdString(event.content.data.value("avatar", ""));
+                QString mxc = js::qstr(event.content.data, "avatar");
                 if (mxc != m_serverAvatarMxc) {
                     m_serverAvatarMxc = mxc;
                     m_serverAvatarUrl = mxc.isEmpty() ? QString()
@@ -4196,6 +4211,11 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             } else if (type == QStringLiteral("m.room.power_levels")) {
                 // Legacy: ignored for enforcement but kept for UI compat.
             }
+            } catch (const std::exception& e) {
+                bsfchat::client::logSkippedEvent(event, "sync state", e.what());
+            } catch (...) {
+                bsfchat::client::logSkippedEvent(event, "sync state");
+            }
         }
 
         // Ensure room exists in the list
@@ -4220,11 +4240,14 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
 
         // Process timeline events
         for (const auto& event : joinedRoom.timeline.events) {
+            // One malformed event is skipped and logged, not the rest of the
+            // batch (util/EventGuard.h). Body deliberately not re-indented.
+            try {
             QString type = QString::fromStdString(event.type);
 
             // State events in timeline
             if (type == QString::fromUtf8(bsfchat::event_type::kRoomName)) {
-                QString name = QString::fromStdString(event.content.data.value("name", ""));
+                QString name = js::qstr(event.content.data, "name");
                 m_roomListModel->updateRoomName(roomId, name);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomMember)) {
                 bsfchat::client::upsertMemberEvent(m_roomMembers[roomId], event);
@@ -4238,23 +4261,23 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             } else if (type == QString::fromUtf8(bsfchat::event_type::kCallMember)) {
                 applyCallMemberEvent(roomId, event);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomType)) {
-                QString rtype = QString::fromStdString(event.content.data.value("type", ""));
+                QString rtype = js::qstr(event.content.data, "type");
                 m_roomListModel->updateRoomType(roomId, rtype);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomCategory)) {
-                QString parentId = QString::fromStdString(event.content.data.value("parent_id", ""));
+                QString parentId = js::qstr(event.content.data, "parent_id");
                 m_roomListModel->updateParentId(roomId, parentId);
                 int order = 0;
                 if (event.content.data.contains("order")) {
-                    order = event.content.data["order"].get<int>();
+                    order = js::int32(event.content.data, "order");
                 }
                 m_roomListModel->updateSortOrder(roomId, order);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerInfo)) {
-                QString name = QString::fromStdString(event.content.data.value("name", ""));
+                QString name = js::qstr(event.content.data, "name");
                 if (name != m_serverName) {
                     m_serverName = name;
                     emit serverNameChanged();
                 }
-                QString mxc = QString::fromStdString(event.content.data.value("avatar", ""));
+                QString mxc = js::qstr(event.content.data, "avatar");
                 if (mxc != m_serverAvatarMxc) {
                     m_serverAvatarMxc = mxc;
                     m_serverAvatarUrl = mxc.isEmpty() ? QString()
@@ -4289,7 +4312,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
 
             // Update last message for room list
             if (type == QString::fromUtf8(bsfchat::event_type::kRoomMessage)) {
-                QString body = QString::fromStdString(event.content.data.value("body", ""));
+                QString body = js::qstr(event.content.data, "body");
                 m_roomListModel->updateLastMessage(roomId, body, event.origin_server_ts);
                 batchNewestMsgTs = std::max(batchNewestMsgTs,
                                             static_cast<qint64>(event.origin_server_ts));
@@ -4323,7 +4346,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 if (event.content.data.contains("m.relates_to")
                     && event.content.data["m.relates_to"].is_object()) {
                     const auto& rel = event.content.data["m.relates_to"];
-                    if (rel.value("rel_type", "") == "m.replace") {
+                    if (js::str(rel, "rel_type") == "m.replace") {
                         isEdit = true;
                     }
                 }
@@ -4483,6 +4506,11 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             if (roomId == m_activeRoomId) {
                 m_messageModel->appendEvent(event, m_userId);
             }
+            } catch (const std::exception& e) {
+                bsfchat::client::logSkippedEvent(event, "sync timeline", e.what());
+            } catch (...) {
+                bsfchat::client::logSkippedEvent(event, "sync timeline");
+            }
         }
 
         // First sight of this room: give it a read marker, or the channel
@@ -4562,13 +4590,13 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
         // is rebuilt below from m_roomTyping[m_activeRoomId].
         if (joinedRoom.ephemeral.has_value()) {
             for (const auto& event : joinedRoom.ephemeral->events) {
+                try {
                 if (event.type != std::string(bsfchat::event_type::kTyping)) continue;
                 QStringList users;
-                if (event.content.data.contains("user_ids")) {
-                    for (const auto& uid : event.content.data["user_ids"]) {
-                        QString usrId = QString::fromStdString(uid.get<std::string>());
-                        if (usrId != m_userId) users.append(usrId);
-                    }
+                for (const auto& uid : js::array(event.content.data, "user_ids")) {
+                    if (!uid.is_string()) continue;
+                    QString usrId = QString::fromStdString(uid.get<std::string>());
+                    if (usrId != m_userId) users.append(usrId);
                 }
                 auto existing = m_roomTyping.value(roomId);
                 if (existing != users) {
@@ -4576,6 +4604,11 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     else m_roomTyping[roomId] = users;
                     ++m_typingGeneration;
                     emit roomTypingChanged();
+                }
+                } catch (const std::exception& e) {
+                    bsfchat::client::logSkippedEvent(event, "sync ephemeral", e.what());
+                } catch (...) {
+                    bsfchat::client::logSkippedEvent(event, "sync ephemeral");
                 }
             }
         }
@@ -5263,7 +5296,7 @@ void ServerConnection::noteDirectMembership(const QString& roomId,
     // profile, cleared settings, a sync that errored at the wrong moment) has
     // nothing else to go on and files the DM under channels. Room state comes
     // down on every initial sync, so this one cannot go stale.
-    const bool isDirect = event.content.data.value("is_direct", false);
+    const bool isDirect = js::boolean(event.content.data, "is_direct", false);
     if (!isDirect) return;
     recordDirectRoom(
         roomId,
@@ -5527,8 +5560,7 @@ QMap<QString, QString> ServerConnection::membershipByRoom(const QString& userId)
         for (const auto& ev : it.value()) {
             if (ev.state_key.has_value()
                 && QString::fromStdString(*ev.state_key) == userId) {
-                latest = QString::fromStdString(
-                    ev.content.data.value("membership", ""));
+                latest = js::qstr(ev.content.data, "membership");
             }
         }
         out.insert(it.key(), latest);
@@ -5547,7 +5579,7 @@ QString ServerConnection::membershipInRoom(const QString& roomId,
     for (const auto& ev : it.value()) {
         if (ev.state_key.has_value()
             && QString::fromStdString(*ev.state_key) == userId) {
-            latest = QString::fromStdString(ev.content.data.value("membership", ""));
+            latest = js::qstr(ev.content.data, "membership");
         }
     }
     return latest;
@@ -5724,8 +5756,7 @@ QVariantList ServerConnection::buildServerMembers() const {
         }
         for (auto uit = latestByUser.constBegin(); uit != latestByUser.constEnd(); ++uit) {
             const bsfchat::RoomEvent& ev = uit.value();
-            QString membership = QString::fromStdString(
-                ev.content.data.value("membership", ""));
+            QString membership = js::qstr(ev.content.data, "membership");
             if (membership != QStringLiteral("join")) continue;
 
             const QString& uid = uit.key();
@@ -5733,13 +5764,11 @@ QVariantList ServerConnection::buildServerMembers() const {
             a.rooms.append(roomId);
             QString dn = m_userDisplayNames.value(uid);
             if (dn.isEmpty()) {
-                dn = QString::fromStdString(
-                    ev.content.data.value("displayname", ""));
+                dn = js::qstr(ev.content.data, "displayname");
             }
             if (!dn.isEmpty()) a.displayName = dn;
             if (a.avatarUrl.isEmpty()) {
-                a.avatarUrl = QString::fromStdString(
-                    ev.content.data.value("avatar_url", ""));
+                a.avatarUrl = js::qstr(ev.content.data, "avatar_url");
             }
         }
     }
@@ -5792,8 +5821,7 @@ QVariantList ServerConnection::buildBannedMembers() const {
         }
         for (auto uit = latestByUser.constBegin(); uit != latestByUser.constEnd(); ++uit) {
             const bsfchat::RoomEvent& ev = uit.value();
-            QString membership = QString::fromStdString(
-                ev.content.data.value("membership", ""));
+            QString membership = js::qstr(ev.content.data, "membership");
             if (membership != QStringLiteral("ban")) continue;
 
             const QString& uid = uit.key();
@@ -5803,13 +5831,11 @@ QVariantList ServerConnection::buildBannedMembers() const {
             // the ban event, which is often blank.
             QString dn = m_userDisplayNames.value(uid);
             if (dn.isEmpty()) {
-                dn = QString::fromStdString(
-                    ev.content.data.value("displayname", ""));
+                dn = js::qstr(ev.content.data, "displayname");
             }
             if (!dn.isEmpty()) a.displayName = dn;
             if (a.reason.isEmpty()) {
-                a.reason = QString::fromStdString(
-                    ev.content.data.value("reason", ""));
+                a.reason = js::qstr(ev.content.data, "reason");
             }
         }
     }
