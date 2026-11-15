@@ -974,6 +974,13 @@ Item {
 
                 Text {
                     text: bubble.senderDisplayName
+                    // Names may be 256 bytes; the timestamp and badges
+                    // after it must stay on screen (U-6). parent.parent is
+                    // the content column, the width actually available.
+                    elide: Text.ElideRight
+                    Layout.maximumWidth: Math.max(48, parent.parent.width
+                        - senderTimestamp.implicitWidth
+                        - (bubble.senderIsBot ? 56 : 0) - 2 * Theme.sp.s3)
                     // The name is spoken as part of the message. What is
                     // worth reaching separately is the ACTION on it, so
                     // this element is a button onto the profile rather
