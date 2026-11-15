@@ -2195,6 +2195,40 @@ private slots:
                  QString("$a7"));
     }
 
+    void testColdOpenPageArrivesAsOneInsertion()
+    {
+        // A cold open (nothing cached) used to replay its first page through
+        // appendEvent, one insertion and one countChanged per row — and
+        // MessageView answers every countChanged with a divider scan and a
+        // read-marker update. The page must land as one insertion, with its
+        // relations still applied in order, and with a reaction that /sync
+        // delivered before its target folded in.
+        MessageModel model;
+        model.appendEvent(hist::reaction("$early", "$m4"), "@me:server");
+        QCOMPARE(model.rowCount(), 0);
+
+        QSignalSpy inserted(&model, &QAbstractItemModel::rowsInserted);
+        QSignalSpy counted(&model, &MessageModel::countChanged);
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open,
+                                       bsfchat::client::kHistoryFirstPageLimit)
+                    .has_value());
+        QVector<bsfchat::RoomEvent> page = hist::messagePage(40, "$m", 700000000);
+        page.append(hist::reaction("$react", "$m1"));
+        page.append(hist::edit("$ed", "$m2", 700100000, "edited"));
+        page.append(makeRedactionEvent("$red", "@alice:server", "$m3"));
+        model.absorbHistoryPage(QString(), page, "t1", "@me:server");
+
+        QCOMPARE(inserted.count(), 1);
+        // One for the insertion, one for the redaction taking $m3 out.
+        QCOMPARE(counted.count(), 2);
+        QCOMPARE(model.rowCount(), 39);
+        QCOMPARE(model.ownReactionEventId("$m1", "+1", "@bob:server"), "$react");
+        QCOMPARE(model.ownReactionEventId("$m4", "+1", "@bob:server"), "$early");
+        QCOMPARE(model.data(model.index(2), MessageModel::BodyRole).toString(),
+                 QString("edited"));
+        QCOMPARE(model.indexForEventId("$m3"), -1);
+    }
+
     void testOpenFillAppliesRelationsCarriedByLaterPages()
     {
         // The regression this guards: flushing page by page sends every page

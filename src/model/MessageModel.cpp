@@ -1432,11 +1432,44 @@ void MessageModel::ingestCachedWindow(const QVector<bsfchat::RoomEvent>& chronol
 
     if (!rows.isEmpty()) {
         const int first = static_cast<int>(m_messages.size());
+        QSet<QString> threadRoots;
+        for (const auto& row : rows)
+            if (!row.threadRootId.isEmpty()) threadRoots.insert(row.threadRootId);
         beginInsertRows(QModelIndex(), first, first + static_cast<int>(rows.size()) - 1);
         for (auto& row : rows) m_messages.append(std::move(row));
         rebuildIndices();
         endInsertRows();
         emit countChanged();
+
+        // What appendEvent does per row, once for the batch. A thread root
+        // that was already on screen gets its reply badge refreshed, and a
+        // reaction that arrived (over /sync) before its target row did is
+        // folded in now rather than waiting for a target that has already
+        // gone past.
+        for (const QString& root : std::as_const(threadRoots)) {
+            const int rootRow = rowForEventId(root);
+            if (rootRow >= 0 && rootRow < first) {
+                auto rootIdx = index(rootRow);
+                emit dataChanged(rootIdx, rootIdx, {ThreadReplyCountRole});
+            }
+        }
+        if (!m_pendingReactions.isEmpty()) {
+            for (int row = first; row < m_messages.size(); ++row) {
+                const QString eventId = m_messages[row].eventId;
+                auto pIt = m_pendingReactions.find(eventId);
+                if (pIt == m_pendingReactions.end()) continue;
+                for (const auto& pr : pIt.value()) {
+                    if (m_reactionIndex.contains(pr.reactionEventId)) continue;
+                    auto& bucket = m_messages[row].reactionsByEmoji[pr.emoji];
+                    bucket.append(qMakePair(pr.userId, pr.reactionEventId));
+                    m_reactionIndex.insert(pr.reactionEventId,
+                                           ReactionRef{eventId, pr.emoji, pr.userId});
+                }
+                m_pendingReactions.erase(pIt);
+                auto idx = index(row);
+                emit dataChanged(idx, idx, {ReactionsRole});
+            }
+        }
     }
 
     // The window's relations, for ingestHistoryEvents' reason: a reaction, a
@@ -1454,9 +1487,19 @@ void MessageModel::ingestHistoryEvents(const QVector<bsfchat::RoomEvent>& chrono
     if (chronological.isEmpty()) return;
 
     if (m_messages.isEmpty()) {
-        // Nothing loaded: replay the lot in order, so reactions, redactions
-        // and in-window edits all take the live path.
-        for (const auto& event : chronological) appendEvent(event, ownUserId);
+        // Nothing loaded: the cold open of a channel with no cached window.
+        // This used to replay the page through appendEvent one event at a
+        // time, which is one beginInsertRows/endInsertRows/countChanged PER
+        // ROW — and MessageView answers each countChanged with a divider
+        // scan and a read-marker update (a QSettings write, a sidebar
+        // re-evaluation and, with a newer timestamp every row, a POST). Fifty
+        // of each on every cold open.
+        //
+        // ingestCachedWindow is exactly the batched form of that replay: the
+        // rows go in as ONE insertion, then the page's reactions, redactions
+        // and edits are applied in order through appendEvent's relation
+        // branches, the same as before. The result is the same timeline.
+        ingestCachedWindow(chronological, ownUserId);
         return;
     }
 

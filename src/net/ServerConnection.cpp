@@ -1,4 +1,6 @@
 #include "net/ServerConnection.h"
+
+#include <utility>
 #include "net/MatrixClient.h"
 #include "net/SyncLoop.h"
 #include "net/SyncBackoff.h"
@@ -62,6 +64,12 @@
 #include <QCoreApplication>
 #include <QPermissions>
 #endif
+
+// How long read-marker advances are gathered before the one POST that carries
+// them (ServerConnection::m_pendingReadMarkers). Long enough to cover the
+// burst a room entry produces, short enough that another device sees the
+// channel read effectively at once.
+static constexpr int kReadMarkerCoalesceMs = 750;
 
 // HistoryFillStop as a word, for the channel-switch trace. Not a QMetaEnum:
 // util/HistoryFill.h is header-only and Qt-Core-free on purpose, so that its
@@ -808,6 +816,14 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     m_typingTimer->setSingleShot(true);
     m_typingTimer->setInterval(4000);
 
+    // Read-marker coalescing — see m_pendingReadMarkers. Not restarted by
+    // later calls, so a marker is never held back for longer than this.
+    m_readMarkerTimer = new QTimer(this);
+    m_readMarkerTimer->setSingleShot(true);
+    m_readMarkerTimer->setInterval(kReadMarkerCoalesceMs);
+    connect(m_readMarkerTimer, &QTimer::timeout, this,
+            &ServerConnection::flushReadMarkers);
+
     // Stop timer: sends typing=false after 5 seconds of no typing activity
     m_typingStopTimer = new QTimer(this);
     m_typingStopTimer->setSingleShot(true);
@@ -1463,6 +1479,14 @@ void ServerConnection::disconnectFromServer()
     // channel. The member fetch times go with them for the same reason.
     m_timelines.clear();
     m_membersFetchedAt.clear();
+    // Queued read markers belong to the session being torn down; sending
+    // them after it would go out with whatever token comes next, or none.
+    // Forget that they were "sent" too, so the next advance after a
+    // reconnect is not deduplicated against a POST that never happened.
+    m_readMarkerTimer->stop();
+    for (const QString& roomId : std::as_const(m_pendingReadMarkers))
+        m_sentReadMarkerTs.remove(roomId);
+    m_pendingReadMarkers.clear();
 
     m_connected = false;
     m_connectionStatus = 0;
@@ -1759,10 +1783,13 @@ void ServerConnection::markRoomRead(const QString& roomId, qint64 tsMs)
 
     // One POST per advance, not one per inbound message: this is called
     // from the view on every count change while the user sits at the
-    // bottom of a busy channel.
+    // bottom of a busy channel. And not one per advance either while those
+    // advances come in a burst — entering a room moves the marker several
+    // times in the first second — so the POST itself is coalesced.
     if (tsMs > 0 && m_sentReadMarkerTs.value(roomId, 0) >= tsMs) return;
     if (tsMs > 0) m_sentReadMarkerTs.insert(roomId, tsMs);
-    m_client->sendReadMarker(roomId);
+    m_pendingReadMarkers.insert(roomId);
+    if (!m_readMarkerTimer->isActive()) m_readMarkerTimer->start();
 
     const bool hadUnread = m_hasUnread;
     m_hasUnread = m_roomListModel && m_roomListModel->totalUnreadCount() > 0;
@@ -1771,12 +1798,23 @@ void ServerConnection::markRoomRead(const QString& roomId, qint64 tsMs)
 
 void ServerConnection::markActiveRoomRead()
 {
-    if (m_activeRoomId.isEmpty()) return;
-    if (!m_timelineAtBottom) return;
-    if (!m_messageModel) return;
+    // Whatever happens below, anything already queued goes now: this is the
+    // app leaving the foreground, and a suspended process runs no timers.
+    if (m_activeRoomId.isEmpty() || !m_timelineAtBottom || !m_messageModel) {
+        flushReadMarkers();
+        return;
+    }
     const qint64 ts = m_messageModel->newestServerTimestampMs();
-    if (ts <= 0) return;
-    markRoomRead(m_activeRoomId, ts);
+    if (ts > 0) markRoomRead(m_activeRoomId, ts);
+    flushReadMarkers();
+}
+
+void ServerConnection::flushReadMarkers()
+{
+    m_readMarkerTimer->stop();
+    if (m_pendingReadMarkers.isEmpty()) return;
+    const QSet<QString> rooms = std::exchange(m_pendingReadMarkers, {});
+    for (const QString& roomId : rooms) m_client->sendReadMarker(roomId);
 }
 
 void ServerConnection::resyncNow()

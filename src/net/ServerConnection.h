@@ -1330,6 +1330,16 @@ public:
     // the bottom of a busy channel; without this it would be one HTTP
     // request per inbound message.
     QHash<QString, qint64> m_sentReadMarkerTs;
+    // Rooms whose read marker has advanced but not been POSTed yet. A room
+    // entry produces a burst of markRoomRead calls (the batched first page,
+    // then each further page or /sync row while the view settles at the
+    // bottom); they are coalesced into ONE request per room per
+    // kReadMarkerCoalesceMs. markActiveRoomRead — the app leaving the
+    // foreground — flushes at once, because a suspended phone will not run
+    // the timer.
+    QSet<QString> m_pendingReadMarkers;
+    QTimer* m_readMarkerTimer = nullptr;
+    void flushReadMarkers();
     QMap<QString, qint64> m_userLastActivityMs; // for activity-based presence
     QString m_selfPresence = QStringLiteral("online");
     QString m_selfStatusMessage;
