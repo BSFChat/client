@@ -327,6 +327,13 @@ void MatrixClient::sync(const QString& since, int timeout)
             auto j = json::parse(data.toStdString());
             bsfchat::SyncResponse resp;
             bsfchat::from_json(j, resp);
+            // Stashed for exactly the emission below (parseSyncLeaves never
+            // throws, and a stale list is cleared even if a handler does).
+            m_currentSyncLeaves = bsfchat::client::parseSyncLeaves(j);
+            struct ClearLeaves {
+                QVector<bsfchat::client::SyncLeave>& v;
+                ~ClearLeaves() { v.clear(); }
+            } clearLeaves{m_currentSyncLeaves};
             emit syncSuccess(resp);
         } catch (const std::exception& e) {
             emit syncError(QString::fromStdString(e.what()));
@@ -478,10 +485,10 @@ void MatrixClient::getRoomMembers(const QString& roomId)
     });
 }
 
-void MatrixClient::getJoinedRooms()
+void MatrixClient::getJoinedRooms(const QString& requestId)
 {
     auto* reply = makeRequest("GET", QString::fromUtf8(bsfchat::api_path::kJoinedRooms));
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, requestId]() {
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
@@ -495,6 +502,12 @@ void MatrixClient::getJoinedRooms()
         QStringList rooms;
         try {
             auto j = json::parse(data.toStdString());
+            // An array or nothing. Iterating a scalar yields the scalar
+            // itself, which would turn a garbled body into a one-room list.
+            if (!j.at("joined_rooms").is_array()) {
+                qWarning().noquote() << "[getJoinedRooms] joined_rooms is not an array";
+                return;
+            }
             for (const auto& rid : j.at("joined_rooms")) {
                 rooms.append(QString::fromStdString(rid.get<std::string>()));
             }
@@ -502,7 +515,7 @@ void MatrixClient::getJoinedRooms()
             qWarning().noquote() << "[getJoinedRooms] unusable body -" << e.what();
             return;
         }
-        emit joinedRoomsResult(rooms);
+        emit joinedRoomsResult(requestId, rooms);
     });
 }
 
