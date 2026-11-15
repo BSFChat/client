@@ -77,6 +77,9 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
     // Highest index first, so each removal leaves the earlier ones' indices
     // — and activeServerIndex, which points into this same list — intact.
     auto saved = m_settings->savedServers();
+    // Probe the secure store now, at startup, rather than from inside the
+    // first login handler that asks (the probe runs a short local loop).
+    (void)m_settings->credentialsPersist();
     {
         QList<bsfchat::client::ServerIdentity> ids;
         ids.reserve(saved.size());
