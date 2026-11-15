@@ -24,6 +24,7 @@
 #include "util/TimelineTrace.h"
 #include "identity/IdentityClient.h"
 #include "identity/OidcRequest.h"
+#include "core/AttachmentPolicy.h"
 #include "core/MediaDownloader.h"
 #include "core/Settings.h"
 #include "core/ReadState.h"
@@ -3899,8 +3900,9 @@ QString ServerConnection::resolveMediaUrl(const QString& mxcUri) const
     return m_client->mediaDownloadUrl(mxcUri);
 }
 
-void ServerConnection::openMediaExternally(const QString& mxcUri)
+void ServerConnection::openMediaExternally(const QString& mxcUri, bool confirmed)
 {
+    namespace attachment = bsfchat::client::attachment;
     // The bare object URL: no ticket, no token, no query string at all. The
     // credential goes in a header below, which is the whole difference between
     // this path and the Qt.openUrlExternally it replaced.
@@ -3908,6 +3910,27 @@ void ServerConnection::openMediaExternally(const QString& mxcUri)
     if (remote.isEmpty()) {
         emit mediaOpenFailed(QStringLiteral("Not a media link"));
         return;
+    }
+    // What the sender says the file is. Looked up here rather than passed in
+    // from QML so every call site gets the same judgement (M-1).
+    QString fileName, mimeType;
+    if (m_messageModel) m_messageModel->mediaInfoForMxc(mxcUri, &fileName, &mimeType);
+    switch (attachment::classify(fileName, mimeType)) {
+    case attachment::Kind::Blocked:
+        qWarning() << "[media] refused to open a program/script attachment" << fileName
+                   << mimeType;
+        emit mediaOpenFailed(QStringLiteral("\u201c%1\u201d is a program or script. "
+                                            "BSFChat never opens those for you.")
+                                 .arg(fileName.isEmpty() ? QStringLiteral("This file") : fileName));
+        return;
+    case attachment::Kind::Document:
+        if (!confirmed) {
+            emit mediaOpenConfirmationRequested(mxcUri, fileName);
+            return;
+        }
+        break;
+    case attachment::Kind::Media:
+        break;
     }
     if (!m_mediaOpener) {
         m_mediaOpener = new MediaDownloader(this);
@@ -3921,7 +3944,7 @@ void ServerConnection::openMediaExternally(const QString& mxcUri)
                 });
     }
     m_mediaOpener->setAuthToken(m_accessToken);
-    m_mediaOpener->openDownloaded(remote);
+    m_mediaOpener->openDownloaded(remote, attachment::cacheExtension(fileName, mimeType));
 }
 
 void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response)

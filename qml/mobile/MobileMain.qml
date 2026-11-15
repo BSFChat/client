@@ -351,6 +351,9 @@ ApplicationWindow {
 
     // Toast host for every subsystem — reachable via Window.window.toast().
     ToastHost { id: toastHostGlobal; parent: popupSurface }
+    // Link / attachment confirmations; this shell has no mediaOpenFailed
+    // toast of its own, so the prompts host carries it.
+    ExternalOpenPrompts { popupParent: popupSurface; toastMediaFailures: true }
     // ToastHost's API is toast()/info()/success()/warn()/error(). This
     // called a `show()` that has never existed, so EVERY toast on mobile
     // threw a TypeError and nothing was ever shown (U-C2). Kept

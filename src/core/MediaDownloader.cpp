@@ -1,5 +1,6 @@
 #include "MediaDownloader.h"
 
+#include "core/AttachmentPolicy.h"
 #include "util/ExternalBrowser.h"
 
 #include <QCryptographicHash>
@@ -12,6 +13,52 @@
 #include <QTimer>
 #include <QUrl>
 #include <algorithm>
+
+#if defined(Q_OS_WIN)
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#elif defined(Q_OS_MACOS)
+#  include <sys/xattr.h>
+#endif
+
+namespace {
+
+// Mark a file we are about to hand to the OS as downloaded from the internet,
+// so the platform's own protection applies to it: Windows SmartScreen /
+// Office Protected View read the Zone.Identifier stream (Mark of the Web), and
+// Gatekeeper reads com.apple.quarantine. Best effort — a filesystem without
+// streams or xattrs just doesn't get the mark.
+void markAsDownloaded(const QString& localPath)
+{
+#if defined(Q_OS_WIN)
+    const std::wstring stream =
+        QDir::toNativeSeparators(localPath).toStdWString() + L":Zone.Identifier";
+    HANDLE h = CreateFileW(stream.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        qWarning() << "[MediaDownloader] could not write Zone.Identifier for" << localPath;
+        return;
+    }
+    static const char kZone[] = "[ZoneTransfer]\r\nZoneId=3\r\n";
+    DWORD written = 0;
+    WriteFile(h, kZone, DWORD(sizeof(kZone) - 1), &written, nullptr);
+    CloseHandle(h);
+#elif defined(Q_OS_MACOS)
+    const QByteArray value = QStringLiteral("0081;%1;BSFChat;")
+        .arg(QDateTime::currentSecsSinceEpoch(), 8, 16, QLatin1Char('0')).toLatin1();
+    const QByteArray path = QFile::encodeName(localPath);
+    if (setxattr(path.constData(), "com.apple.quarantine", value.constData(),
+                 size_t(value.size()), 0, 0) != 0) {
+        qWarning() << "[MediaDownloader] could not set com.apple.quarantine on" << localPath;
+    }
+#else
+    Q_UNUSED(localPath);
+#endif
+}
+
+} // namespace
 
 MediaDownloader::MediaDownloader(QObject* parent) : QObject(parent)
 {
@@ -50,20 +97,22 @@ QString MediaDownloader::cacheKeyForUrl(const QString& url)
 QString MediaDownloader::cachePathFor(const QString& url) const
 {
     // Hash the identity (not the credential) so filenames are bounded +
-    // collision-safe. Preserve the extension (if any) so platform decoders
-    // can sniff — taken from the path for the same reason: with the query
-    // string included, "the last dot" was a dot inside the base64 access
-    // token, so every authenticated download landed under a meaningless
-    // extension and the sniffing this exists for never happened.
+    // collision-safe.
+    //
+    // The extension is NEVER taken from the URL. It used to be — "so platform
+    // decoders can sniff" — but the path is the sender's to choose
+    // (`mxc://s/id/x.bat`, `#.bat`), and the extension is what the OS uses to
+    // pick a program when the file is opened (M-1). It comes from the hint
+    // openDownloaded() was given, which AttachmentPolicy only ever builds from
+    // its own allowlist; with no hint the file gets no extension at all.
     const QString key = cacheKeyForUrl(url);
     QByteArray h = QCryptographicHash::hash(key.toUtf8(),
                                             QCryptographicHash::Sha1)
                        .toHex();
-    QString ext;
-    int dot = key.lastIndexOf('.');
-    int slash = key.lastIndexOf('/');
-    if (dot > slash && (key.size() - dot) <= 6)
-        ext = key.mid(dot);
+    QString ext = m_extensionHints.value(key);
+    if (!ext.isEmpty()
+        && !bsfchat::client::attachment::safeTypeForExtension(ext.mid(1)))
+        ext.clear();
     return cacheDirPath() + "/" + QString::fromLatin1(h) + ext;
 }
 
@@ -177,7 +226,7 @@ void MediaDownloader::request(const QString& remoteUrl)
             });
 }
 
-void MediaDownloader::openDownloaded(const QString& remoteUrl)
+void MediaDownloader::openDownloaded(const QString& remoteUrl, const QString& safeExtension)
 {
     if (remoteUrl.isEmpty()) {
         emit openFailed(remoteUrl, QStringLiteral("empty URL"));
@@ -192,6 +241,8 @@ void MediaDownloader::openDownloaded(const QString& remoteUrl)
         }
         return;
     }
+    if (!safeExtension.isEmpty())
+        m_extensionHints.insert(cacheKeyForUrl(remoteUrl), safeExtension);
     m_pendingOpens.insert(remoteUrl);
     request(remoteUrl);
 }
@@ -204,6 +255,7 @@ void MediaDownloader::handOffToDesktop(const QString& remoteUrl, const QString& 
     // OS is handed is constructed from a path this process wrote into its own
     // cache directory, so there is no way for a remote URL to reach the
     // browser through here.
+    markAsDownloaded(localPath);
     if (!bsfchat::openExternalUrl(QUrl::fromLocalFile(localPath))) {
         emit openFailed(remoteUrl, QStringLiteral("the system could not open this file"));
     }

@@ -1209,6 +1209,7 @@ qt_add_qml_module(bsfchat-lib
         qml/components/ToastHost.qml
         qml/components/VideoPlayerCard.qml
         qml/components/LinkPreview.qml
+        qml/components/ExternalOpenPrompts.qml
         qml/components/ScreenPickerDialog.qml
         qml/components/BotBadge.qml
         qml/components/BotManagerPane.qml
