@@ -2302,12 +2302,78 @@ jobs:
             exit 1
           fi
 
+      # Only the public-key header, to check the secret against what the
+      # clients actually trust (see the signing step).
+      - uses: actions/checkout@v4
+        with:
+          path: src-key
+          sparse-checkout: src/core/ReleaseSigningKey.h
+          sparse-checkout-cone-mode: false
+
+      # Integrity for the in-app updater (audit M-5; docs/release-signing.md).
+      # SHA256SUMS lists every desktop asset under a `# release: <tag>` line
+      # (so an old signed manifest can't be replayed onto a new tag) and is
+      # signed with the Ed25519 key in RELEASE_SIGNING_KEY. The client
+      # refuses to install a release without a valid SHA256SUMS.sig.
+      #
+      # Missing secret: a STABLE tag fails here. An RC warns and publishes
+      # without the .sig, and clients then show "This update isn't signed"
+      # with a link to the release page instead of installing it.
+      - name: Checksum and sign release assets
+        shell: bash
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          PRERELEASE: ${{ steps.channel.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          cp artifacts/BSFChat-macOS/BSFChat-macOS.dmg \
+             artifacts/BSFChat-Windows/BSFChat-Setup.exe \
+             artifacts/BSFChat-Linux/BSFChat-linux-x86_64.tar.gz dist/
+          cd dist
+          {
+            echo "# release: ${GITHUB_REF_NAME}"
+            sha256sum BSFChat-macOS.dmg BSFChat-Setup.exe BSFChat-linux-x86_64.tar.gz
+          } > SHA256SUMS
+          cat SHA256SUMS
+
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            if [ "$PRERELEASE" = "true" ]; then
+              echo "::warning::RELEASE_SIGNING_KEY is not set: ${GITHUB_REF_NAME} is published UNSIGNED and the in-app updater will not install it (users are sent to the release page). Add the secret — see docs/release-signing.md."
+              exit 0
+            fi
+            echo "::error::RELEASE_SIGNING_KEY is not set. Stable releases must be signed or the in-app updater refuses them. See docs/release-signing.md."
+            exit 1
+          fi
+
+          KEY="$RUNNER_TEMP/release-signing.pem"
+          ( umask 077; printf '%s\n' "$RELEASE_SIGNING_KEY" > "$KEY" )
+          trap 'rm -f "$KEY"' EXIT
+          openssl pkeyutl -sign -rawin -inkey "$KEY" -in SHA256SUMS -out SHA256SUMS.sig
+          openssl pkey -in "$KEY" -pubout -out "$RUNNER_TEMP/release-signing.pub.pem"
+          openssl pkeyutl -verify -rawin -pubin -inkey "$RUNNER_TEMP/release-signing.pub.pem" \
+            -in SHA256SUMS -sigfile SHA256SUMS.sig
+          [ "$(stat -c %s SHA256SUMS.sig)" = 64 ] || { echo "::error::SHA256SUMS.sig is not a raw 64-byte Ed25519 signature"; exit 1; }
+
+          # A secret the shipped clients don't trust would publish a release
+          # every client rejects. Fail instead.
+          PUBHEX=$(openssl pkey -in "$KEY" -pubout -outform DER | tail -c 32 | od -An -tx1 -v | tr -d ' \n')
+          if ! grep -q "\"$PUBHEX\"" "$GITHUB_WORKSPACE/src-key/src/core/ReleaseSigningKey.h"; then
+            echo "::error::RELEASE_SIGNING_KEY's public key ($PUBHEX) is not in src/core/ReleaseSigningKey.h."
+            exit 1
+          fi
+          echo "SHA256SUMS signed with $PUBHEX"
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          # SHA256SUMS.sig is absent for an RC built without the secret;
+          # an unmatched pattern is a warning, not a failure, for this action.
           files: |
-            artifacts/BSFChat-macOS/BSFChat-macOS.dmg
-            artifacts/BSFChat-Windows/BSFChat-Setup.exe
-            artifacts/BSFChat-Linux/BSFChat-linux-x86_64.tar.gz
+            dist/BSFChat-macOS.dmg
+            dist/BSFChat-Setup.exe
+            dist/BSFChat-linux-x86_64.tar.gz
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sig
           generate_release_notes: true
           prerelease: ${{ steps.channel.outputs.prerelease }}
