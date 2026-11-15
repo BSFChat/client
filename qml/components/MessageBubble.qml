@@ -1284,6 +1284,18 @@ Item {
                                 fillMode: Image.PreserveAspectFit
                                 asynchronous: true
                                 cache: true
+                                // Decode at the size it is shown at. The box
+                                // is fixed at row creation (boxW/boxH above),
+                                // so this never changes under a relayout and
+                                // never re-decodes; a phone photo is 12 MP and
+                                // was being decoded in full for a 400x300
+                                // box, per row, on every channel open. Both
+                                // dimensions set + PreserveAspectFit scales
+                                // to fit inside, keeping the aspect ratio.
+                                // The in-app viewer loads its own full-size
+                                // copy.
+                                sourceSize.width: Math.ceil(parent.boxW * Screen.devicePixelRatio)
+                                sourceSize.height: Math.ceil(parent.boxH * Screen.devicePixelRatio)
                             }
 
                             // Loading placeholder — subtle bg2 on the
