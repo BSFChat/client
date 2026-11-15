@@ -111,6 +111,14 @@ target_include_directories(test_lossless_reassembly PRIVATE ${CMAKE_SOURCE_DIR}/
 target_link_libraries(test_lossless_reassembly PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_lossless_reassembly COMMAND test_lossless_reassembly)
 
+# Call-invite roster gate (V-8). Header-only logic.
+qt_add_executable(test_voice_roster_gate
+    test_voice_roster_gate.cpp
+)
+target_include_directories(test_voice_roster_gate PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_voice_roster_gate PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_voice_roster_gate COMMAND test_voice_roster_gate)
+
 # Codec round-trip tests — only meaningful where a software H.264
 # backend exists (openh264: macOS/Linux desktop).
 if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)

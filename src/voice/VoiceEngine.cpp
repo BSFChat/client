@@ -4,6 +4,7 @@
 #include "util/JsonSafe.h"
 #include "voice/VoiceStartPolicy.h"
 #include "voice/VoiceRosterReconcile.h"
+#include "voice/VoiceRosterGate.h"
 #include "voice/PeerCaps.h"
 #include "voice/video/VideoCodecSelect.h"
 #include "voice/PeerConnectionManager.h"
@@ -28,6 +29,9 @@ VoiceEngine::VoiceEngine(MatrixClient* client, QObject* parent)
     m_candidateBatchTimer.setSingleShot(false);
     connect(&m_candidateBatchTimer, &QTimer::timeout, this, &VoiceEngine::flushCandidateBatch);
 
+    m_heldInviteTimer.setSingleShot(true);
+    connect(&m_heldInviteTimer, &QTimer::timeout, this, &VoiceEngine::expireHeldInvites);
+
     m_rrTimer.setInterval(500);
     connect(&m_rrTimer, &QTimer::timeout, this, &VoiceEngine::sendReceiverReports);
 
@@ -35,6 +39,23 @@ VoiceEngine::VoiceEngine(MatrixClient* client, QObject* parent)
     // batch is retried rather than costing a 30 s watchdog cycle.
     connect(m_client, &MatrixClient::callEventSendResult,
             this, &VoiceEngine::onCallEventSendResult);
+
+    // V-8 roster gate source: GET /voice/members for our room. Server
+    // side this is the m.call.member roster, and ServerConnection
+    // re-polls it whenever an m.call.member event lands for the room we
+    // are in, so a join or leave reaches the gate within one round trip
+    // (not only on the 5 s tick).
+    connect(m_client, &MatrixClient::voiceMembersResult, this,
+            [this](const QString& roomId, const QJsonArray& members) {
+                if (!m_running || roomId != m_roomId) return;
+                QStringList ids;
+                for (const auto& v : members) {
+                    const QJsonObject row = v.toObject();
+                    if (!row.value(QStringLiteral("active")).toBool(true)) continue;
+                    ids.append(row.value(QStringLiteral("user_id")).toString());
+                }
+                setVoiceRoster(ids);
+            });
 }
 
 VoiceEngine::~VoiceEngine() {
@@ -60,6 +81,17 @@ bool VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
 
     m_roomId = roomId;
     m_turnConfig = turnConfig;
+    // V-8 seed: the member list the join was started with; the next
+    // /voice/members reply replaces it.
+    m_voiceRoster.clear();
+    m_rosterFromState = false;
+    for (const auto& v : members) {
+        const QJsonObject row = v.toObject();
+        const QString uid = row.value(QStringLiteral("user_id")).toString();
+        if (uid.isEmpty() || uid == m_localUserId) continue;
+        if (!row.value(QStringLiteral("active")).toBool(true)) continue;
+        m_voiceRoster.insert(uid);
+    }
     m_allowP2P = turnConfig.value("allow_p2p").toBool(false);
 
     // Relay-only with no relay to use is a guaranteed, silent, total
@@ -211,6 +243,10 @@ void VoiceEngine::stop() {
     m_pendingCandidates.clear();
     m_inboundCandidates.clear();
     m_gaveUpPeers.clear();
+    m_heldInvites.clear();
+    m_heldInviteTimer.stop();
+    m_voiceRoster.clear();
+    m_rosterFromState = false;
     // Nothing queued is worth sending into a call that no longer exists —
     // except the hangups just enqueued above, which went out immediately.
     m_outbox.clear();
@@ -274,6 +310,55 @@ void VoiceEngine::dropPeer(const QString& userId) {
     qCInfo(logVoice, "reconcile: %s left the roster — dropping peer",
           qPrintable(userId));
     removePeer(userId);
+}
+
+void VoiceEngine::setVoiceRoster(const QStringList& userIds) {
+    QSet<QString> next;
+    for (const QString& uid : userIds)
+        if (!uid.isEmpty() && uid != m_localUserId) next.insert(uid);
+    // The start() seed is not a roster transition; only updates are.
+    const QSet<QString> previous = m_rosterFromState ? m_voiceRoster : QSet<QString>{};
+    const auto plan = voice::applyRosterUpdate(previous, next, m_peers.keys(),
+                                               m_heldInvites.keys());
+    m_voiceRoster = next;
+    m_rosterFromState = true;
+    if (!m_running) return;
+
+    for (const QString& uid : plan.toDrop) {
+        qCInfo(logVoice, "roster: %s left the voice channel — dropping peer",
+              qPrintable(uid));
+        dropPeer(uid);
+    }
+    for (const QString& uid : plan.toAdmit) {
+        auto it = m_heldInvites.find(uid);
+        if (it == m_heldInvites.end()) continue;
+        const HeldInvite inv = it.value();
+        m_heldInvites.erase(it);
+        qCInfo(logVoice, "roster: %s joined — answering held invite",
+              qPrintable(uid));
+        handleCallInvite(uid, inv.callId, inv.sdp, inv.caps);
+    }
+}
+
+void VoiceEngine::expireHeldInvites() {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    qint64 nextDue = -1;
+    for (auto it = m_heldInvites.begin(); it != m_heldInvites.end();) {
+        const auto gate = voice::gateInvite(m_voiceRoster, it.key(),
+                                            it->firstHeldMs, now);
+        if (gate == voice::InviteGate::Reject) {
+            qCWarning(logVoice, "rejecting call invite from %s — not in the "
+                     "voice channel", qPrintable(it.key()));
+            it = m_heldInvites.erase(it);
+            continue;
+        }
+        const qint64 due = it->firstHeldMs + voice::kInviteRosterGraceMs;
+        if (nextDue < 0 || due < nextDue) nextDue = due;
+        ++it;
+    }
+    if (nextDue >= 0)
+        m_heldInviteTimer.start(int(qBound<qint64>(1, nextDue - now,
+                                                   voice::kInviteRosterGraceMs)));
 }
 
 void VoiceEngine::updateTurnConfig(const QJsonObject& turnConfig) {
@@ -991,6 +1076,39 @@ void VoiceEngine::handleCallInvite(const QString& sender, const QString& callId,
     }
     qCInfo(logVoice, "recv invite from %s callId=%s sdp_bytes=%zu",
           qPrintable(sender), qPrintable(callId), sdp.size());
+
+    // V-8: answering wires our mic to the sender, so only voice-channel
+    // members get an answer. Not on the roster yet (their m.call.member
+    // may still be in flight): hold the invite for the grace period.
+    {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        auto held = m_heldInvites.find(sender);
+        const qint64 first = held != m_heldInvites.end() ? held->firstHeldMs : now;
+        switch (voice::gateInvite(m_voiceRoster, sender, first, now)) {
+        case voice::InviteGate::Accept:
+            m_heldInvites.remove(sender);
+            break;
+        case voice::InviteGate::Hold:
+            if (held == m_heldInvites.end()
+                && m_heldInvites.size() >= kMaxHeldInvites) {
+                qCWarning(logVoice, "rejecting call invite from %s — not in the "
+                         "voice channel (%d invites already held)",
+                         qPrintable(sender), int(m_heldInvites.size()));
+                return;
+            }
+            m_heldInvites[sender] = HeldInvite{callId, sdp, caps, first};
+            if (!m_heldInviteTimer.isActive())
+                m_heldInviteTimer.start(int(voice::kInviteRosterGraceMs - (now - first)));
+            qCInfo(logVoice, "holding invite from %s until they join the voice "
+                  "channel", qPrintable(sender));
+            return;
+        case voice::InviteGate::Reject:
+            m_heldInvites.remove(sender);
+            qCWarning(logVoice, "rejecting call invite from %s — not in the "
+                     "voice channel", qPrintable(sender));
+            return;
+        }
+    }
 
     if (auto* existing = m_peers.value(sender)) {
         const auto state = existing->peerState();
