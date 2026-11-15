@@ -29,6 +29,9 @@ var ReadyToApply    = 5;
 var Applying        = 6;
 var Failed          = 7;
 var AheadOfChannel  = 8;
+// A newer release with no signed SHA256SUMS: never installed in-app, the
+// user is sent to the release page instead (audit M-5).
+var UpdateUnsigned  = 9;
 
 // ── Predicates ──────────────────────────────────────────────────────
 //
@@ -46,7 +49,7 @@ function isBusy(state) {
 // states worth interrupting someone for.
 function awaitsUser(state) {
     return state === UpdateAvailable || state === ReadyToApply
-        || state === Failed;
+        || state === Failed || state === UpdateUnsigned;
 }
 
 // Settled: the updater has finished and there is nothing to do. Distinct
@@ -67,7 +70,8 @@ function canCheck(state) {
 // starts, the progress group is the thing worth reading, and after apply
 // the notes describe a build you are already installing.
 function showsNotes(state) {
-    return state === UpdateAvailable || state === ReadyToApply;
+    return state === UpdateAvailable || state === ReadyToApply
+        || state === UpdateUnsigned;
 }
 
 // The bar. Indeterminate during Applying (the installer reports nothing
@@ -93,6 +97,7 @@ function kind(state) {
     case Downloading:     return "accent";
     case Applying:        return "accent";
     case AheadOfChannel:  return "warn";
+    case UpdateUnsigned:  return "warn";
     case Failed:          return "danger";
     default:              return "neutral";   // Idle, Checking
     }
@@ -148,6 +153,8 @@ function title(state, availableVersion) {
     case Applying:        return "Installing update…";
     case Failed:          return "Update failed";
     case AheadOfChannel:  return "Ahead of your update channel";
+    case UpdateUnsigned:  return v ? "BSFChat " + v + " can't be installed here"
+                                   : "This update can't be installed here";
     default:              return "Updates";
     }
 }
@@ -186,6 +193,8 @@ function detail(state, ctx) {
         head += stable ? "the latest " + chan + " release (" + stable + ")."
                        : "anything on the " + chan + " channel.";
         return head + " Nothing to install.";
+    case UpdateUnsigned:
+        return "This update isn't signed — download it from the website.";
     default:
         // Idle. Also reached after a check that learned nothing — an
         // empty release list, or a release with no asset for this

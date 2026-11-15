@@ -11,7 +11,7 @@ import "../js/UpdateFormat.js" as UF
 //   ClientSettings.qml         inline in the Updates pane, where the user
 //     (embedded: true)         went looking on purpose.
 //
-// Both surfaces show the same eight states, so they share one component
+// Both surfaces show the same states, so they share one component
 // rather than two copies of a state → wording table that drift apart —
 // which is what had happened: the pane said "v0.0.44-rc.3 is available."
 // while the dialog said "BSFChat 0.0.44-rc.3 is available" over the top
@@ -77,13 +77,15 @@ Rectangle {
         if (_state === UF.UpdateAvailable) return "Download";
         if (_state === UF.ReadyToApply)    return UF.applyLabel(_osName);
         if (_state === UF.Failed)          return "Try again";
+        if (_state === UF.UpdateUnsigned)  return "Open download page";
         return "";
     }
 
     // Modal only. Always present so a modal is always escapable by
     // pointer as well as by Esc.
     readonly property string _dismissLabel: {
-        if (_state === UF.UpdateAvailable) return "Skip this version";
+        if (_state === UF.UpdateAvailable
+            || _state === UF.UpdateUnsigned) return "Skip this version";
         if (_state === UF.ReadyToApply)    return "Later";
         if (UF.isBusy(_state))             return "Hide";
         return "Close";
@@ -98,7 +100,7 @@ Rectangle {
     border.color: embedded ? Theme.line : "transparent"
     border.width: embedded ? 1 : 0
 
-    // The panel is the thing that reports WHICH of the eight updater
+    // The panel is the thing that reports WHICH of the updater
     // states you are in, so it carries that headline as its own name —
     // the same expression the title Text below draws, which is then
     // ignored so the sentence is not read twice. UpdateDialog overrides
@@ -449,7 +451,10 @@ Rectangle {
             // come from the same release entry, so "there are notes" is
             // the closest available proxy for "there is a page".
             ActionButton {
+                // Not for UpdateUnsigned: the primary button already opens
+                // the same page.
                 visible: UF.showsNotes(panel._state) && panel._notes.length > 0
+                         && panel._state !== UF.UpdateUnsigned
                 text: "Full notes on GitHub"
                 onClicked: if (panel._u) panel._u.openReleasePage()
             }
@@ -474,13 +479,16 @@ Rectangle {
                     ? qsTr("Downloads the update in the background")
                     : panel._state === UF.Failed
                         ? qsTr("Checks for updates again")
-                        : ""
+                        : panel._state === UF.UpdateUnsigned
+                            ? qsTr("Opens the release page in your browser")
+                            : ""
                 enabled: panel._u !== null
                 onClicked: {
                     if (!panel._u) return;
                     if (panel._state === UF.UpdateAvailable) panel._u.downloadUpdate();
                     else if (panel._state === UF.ReadyToApply) panel._u.applyUpdate();
                     else if (panel._state === UF.Failed) panel._u.checkNow();
+                    else if (panel._state === UF.UpdateUnsigned) panel._u.openReleasePage();
                 }
             }
         }

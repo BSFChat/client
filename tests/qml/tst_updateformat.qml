@@ -21,7 +21,7 @@ TestCase {
     readonly property var allStates: [
         UF.Idle, UF.Checking, UF.UpToDate, UF.UpdateAvailable,
         UF.Downloading, UF.ReadyToApply, UF.Applying, UF.Failed,
-        UF.AheadOfChannel
+        UF.AheadOfChannel, UF.UpdateUnsigned
     ]
 
     function test_stateEnumIsContiguousFromZero() {
@@ -61,6 +61,16 @@ TestCase {
         verify(d.indexOf("up to date") === -1);
         verify(d.indexOf("v0.0.44-rc.2") >= 0);
         verify(d.indexOf("(v0.0.44)") >= 0);
+    }
+
+    function test_unsignedPointsAtTheWebsiteAndNeverAtAnInstall() {
+        verify(UF.awaitsUser(UF.UpdateUnsigned));
+        verify(UF.kind(UF.UpdateUnsigned) !== UF.kind(UF.UpdateAvailable));
+        verify(UF.title(UF.UpdateUnsigned, "v1.1.0").indexOf("v1.1.0") >= 0);
+        var d = UF.detail(UF.UpdateUnsigned, { currentVersion: "1.0.0" });
+        verify(d.indexOf("isn't signed") >= 0, d);
+        verify(d.indexOf("website") >= 0, d);
+        verify(!UF.showsProgress(UF.UpdateUnsigned));
     }
 
     function test_notesOnlyWhereThereIsAPendingRelease() {

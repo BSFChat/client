@@ -85,7 +85,9 @@ Popup {
             if (typeof updater === "undefined" || !updater) return;
             if (updateDialog.suppressed || updateDialog.opened) return;
             var s = updater.state;
-            if (s === UF.UpdateAvailable) {
+            // UpdateUnsigned is an offer too (of the release page), with
+            // the same skip-this-version memory.
+            if (s === UF.UpdateAvailable || s === UF.UpdateUnsigned) {
                 if (updateDialog._dismissedFor === updater.availableVersion)
                     return;
                 updateDialog.open();
@@ -106,7 +108,8 @@ Popup {
     // suppress the next prompt for that version.
     onClosed: {
         if (typeof updater !== "undefined" && updater
-            && updater.state === UF.UpdateAvailable) {
+            && (updater.state === UF.UpdateAvailable
+                || updater.state === UF.UpdateUnsigned)) {
             updateDialog._dismissedFor = updater.availableVersion;
         }
     }
