@@ -312,6 +312,10 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
     // handleCallInvite), so this is where "we gave up on them" stops
     // being true: there is a live connection attempt again.
     m_gaveUpPeers.remove(userId);
+    // V-7: take lossless frames only from peers we advertised "av1-dc" to
+    // (localCapsJson() gates the advertisement on the same probe).
+    peer->setAcceptLossless(
+        VideoEncoder::queryCaps(VideoCodecKind::Av1Lossless).losslessSupported);
 
     // Signaling
     connect(peer, &PeerConnectionManager::localDescriptionReady,

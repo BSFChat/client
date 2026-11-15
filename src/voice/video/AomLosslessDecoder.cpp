@@ -8,6 +8,11 @@
 
 Q_LOGGING_CATEGORY(logAomDec, "bsfchat.video.aom", QtWarningMsg)
 
+namespace {
+// Matches DECODE_{WIDTH,HEIGHT}_LIMIT in cmake/Dependencies.cmake.
+constexpr unsigned kMaxDecodeDimension = 8192;
+}
+
 struct AomDecoderState {
     aom_codec_ctx_t ctx{};
     bool initialized = false;
@@ -56,6 +61,15 @@ VideoDecoder::Result AomLosslessDecoder::decode(const QByteArray& tu,
         return Result::Error;
     }
 
+    // The dimensions come from the peer's bitstream. libaom is built with
+    // DECODE_{WIDTH,HEIGHT}_LIMIT (cmake/Dependencies.cmake) so it should
+    // never get here, but the BGRA frame below is ours to bound (V-7).
+    if (img->d_w == 0 || img->d_h == 0
+        || img->d_w > kMaxDecodeDimension || img->d_h > kMaxDecodeDimension) {
+        qCWarning(logAomDec, "refusing %ux%u aom frame (max %u)",
+                 img->d_w, img->d_h, kMaxDecodeDimension);
+        return Result::Error;
+    }
     const int w = int(img->d_w);
     const int h = int(img->d_h);
     // Identity mapping back to RGB: Y-plane carries G, U carries B,

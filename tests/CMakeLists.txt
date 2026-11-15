@@ -103,6 +103,14 @@ target_link_libraries(test_call_signalling PRIVATE
 )
 add_test(NAME test_call_signalling COMMAND test_call_signalling)
 
+# Lossless-video chunk reassembly byte cap (V-7). Header-only logic.
+qt_add_executable(test_lossless_reassembly
+    test_lossless_reassembly.cpp
+)
+target_include_directories(test_lossless_reassembly PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_lossless_reassembly PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_lossless_reassembly COMMAND test_lossless_reassembly)
+
 # Codec round-trip tests — only meaningful where a software H.264
 # backend exists (openh264: macOS/Linux desktop).
 if(BSFCHAT_ENABLE_VOICE AND BSFCHAT_HAVE_OPENH264)

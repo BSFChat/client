@@ -4,6 +4,7 @@
 #include <QString>
 #include <QByteArray>
 
+#include "voice/LosslessChunkAssembler.h"
 #include "voice/PeerCaps.h"
 #include "voice/video/VideoCodec.h"
 #include "voice/video/MediaClockUnwrapper.h"
@@ -152,6 +153,9 @@ public:
     // The sender drops capture frames (never delays them) while this
     // exceeds its budget.
     qint64 losslessBufferedAmount() const;
+    // Receive gate: only frames from a peer we told we decode "av1-dc"
+    // are reassembled (V-7). Off by default.
+    void setAcceptLossless(bool accept) { m_acceptLossless.store(accept); }
     void sendAudioFrame(const QByteArray& frame);
     // Send a JPEG-encoded screen-share frame to this peer over the
     // same SCTP data channel. Wire format: [tag][payload] where
@@ -269,6 +273,7 @@ private:
     void attachVideoTrack(VideoStreamId stream, std::shared_ptr<rtc::Track> track,
                           bool adopted);
     void setupLosslessChannel(std::shared_ptr<rtc::DataChannel> dc);
+    void noteLosslessDrop(const char* why, qint64 bytes);
     // Size-checked, exception-safe DataChannel send. Returns false if
     // the frame was dropped (oversized or transport error). Callers
     // must have verified m_dc is present and open.
@@ -426,12 +431,18 @@ private:
     std::shared_ptr<rtc::DataChannel> m_losslessDc;
     quint32 m_losslessSeq[kVideoStreamCount] = {};
     // Receive-side reassembly for chunked lossless frames (flags bit
-    // 0x2). The channel is reliable+ordered, so chunks of one frame
-    // arrive contiguously; state is touched only on the channel's
+    // 0x2), byte-capped per frame (V-7). Touched only on the channel's
     // callback thread.
-    QByteArray m_losslessAsm[kVideoStreamCount];
-    quint32 m_losslessAsmSeq[kVideoStreamCount] = {};
-    quint16 m_losslessAsmNext[kVideoStreamCount] = {};
+    LosslessChunkAssembler m_losslessAsm[kVideoStreamCount];
+    // Bytes of received lossless frames queued to the main thread but not
+    // yet delivered, per stream. A peer that out-sends our decoder would
+    // otherwise pile frames up in the event queue without bound.
+    std::atomic<qint64> m_losslessRxQueued[kVideoStreamCount] = {};
+    static constexpr qint64 kMaxLosslessRxQueuedBytes = 64 * 1024 * 1024;
+    std::atomic<quint32> m_losslessRxDrops{0};
+    // Whether we advertised "av1-dc" (set by VoiceEngine). Without it the
+    // peer has no business sending us lossless frames; they are dropped.
+    std::atomic<bool> m_acceptLossless{false};
     // Throttle for losslessSendStalled (ms epoch of last emission).
     qint64 m_losslessStallEmitMs = 0;
 };

@@ -111,6 +111,13 @@ if(BSFCHAT_ENABLE_VOICE)
         # `yuv` and collides with the real libyuv above; it's only used
         # by examples/tuning we don't build.
         set(CONFIG_LIBYUV 0 CACHE INTERNAL "" FORCE)
+        # The decoder takes frame dimensions from a peer's bitstream; AV1
+        # allows 65536x65536. Refuse anything past 8192 inside libaom,
+        # before it allocates (decoder-only; the encoder ignores these).
+        # AomLosslessDecoder checks the same limit again.
+        set(CONFIG_SIZE_LIMIT 1 CACHE STRING "" FORCE)
+        set(DECODE_WIDTH_LIMIT 8192 CACHE STRING "" FORCE)
+        set(DECODE_HEIGHT_LIMIT 8192 CACHE STRING "" FORCE)
         FetchContent_MakeAvailable(libaom)
         set(BSFCHAT_HAVE_AOM ON)
     endif()
