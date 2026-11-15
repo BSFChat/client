@@ -332,7 +332,7 @@ void ServerManager::addServerWithOidc(const QString& url)
     });
 }
 
-void ServerManager::addServerWithOidcResolved(const QString& rawUrl)
+void ServerManager::addServerWithOidcResolved(const QString& rawUrl, bool allowBrowser)
 {
     const QString url = bsfchat::normaliseServerUrl(rawUrl);
     if (url.isEmpty()) {
@@ -357,6 +357,18 @@ void ServerManager::addServerWithOidcResolved(const QString& rawUrl)
     connect(conn, &ServerConnection::loginFailed, this, [this, conn](const QString& error) {
         onLoginFailed(conn, error);
     });
+    // The launch-time restore (allowBrowser = false) must stay invisible: a
+    // server it cannot join silently is dropped from this device again with
+    // a log line, not a toast — the user did nothing to be told about.
+    auto fail = [this, conn, allowBrowser](const QString& error) {
+        if (allowBrowser) {
+            onLoginFailed(conn, error);
+            return;
+        }
+        qInfo().noquote() << "[identity] not restoring" << conn->serverUrl() << ":" << error;
+        const int i = m_roster.indexOf(conn);
+        if (i >= 0) removeServer(i);
+    };
 
     // Query login flows to get the identity_provider URL, then start OIDC
     auto* tempClient = new MatrixClient(this);
@@ -367,7 +379,8 @@ void ServerManager::addServerWithOidcResolved(const QString& rawUrl)
     // MatrixClient, or the reply arriving after deleteLater() was queued but
     // before it ran — would call loginWithOidc a second time and open a
     // second browser page for one server.
-    connect(tempClient, &MatrixClient::loginFlowsResult, this, [this, conn, tempClient](const QJsonArray& flows) {
+    connect(tempClient, &MatrixClient::loginFlowsResult, this,
+            [this, conn, tempClient, allowBrowser, fail](const QJsonArray& flows) {
         QString providerUrl;
         for (const auto& flowVal : flows) {
             QJsonObject flow = flowVal.toObject();
@@ -383,15 +396,33 @@ void ServerManager::addServerWithOidcResolved(const QString& rawUrl)
             // emitting loginError alone left the half-added connection in
             // the sidebar with no credential and no sign-in running — a
             // server entry that could only ever say it was not signed in.
-            onLoginFailed(conn, tr("This server does not offer BSFChat ID sign-in."));
+            fail(tr("This server does not offer BSFChat ID sign-in."));
             return;
         }
-        signInWithSessionOrBrowser(conn, providerUrl);
+        if (allowBrowser) {
+            signInWithSessionOrBrowser(conn, providerUrl);
+            return;
+        }
+        // Silent or not at all. After the provider started asking for
+        // consent per server (invalid_target), a restore that fell back to
+        // the browser would open one page per server on the account's list
+        // at every launch.
+        if (!m_identitySession->servesProvider(providerUrl)) {
+            fail(tr("this server uses another identity provider"));
+            return;
+        }
+        QPointer<ServerConnection> guard(conn);
+        m_identitySession->requestServerToken(conn->signInResource(),
+            [guard, fail](const QString& idToken, const QString& error) {
+                if (!guard) return;
+                if (!idToken.isEmpty()) guard->loginWithIdToken(idToken);
+                else fail(error);
+            });
     }, Qt::SingleShotConnection);
 
-    connect(tempClient, &MatrixClient::loginError, this, [this, conn, tempClient](const QString& error) {
+    connect(tempClient, &MatrixClient::loginError, this, [tempClient, fail](const QString& error) {
         tempClient->deleteLater();
-        onLoginFailed(conn, "Failed to query login flows: " + error);
+        fail("Failed to query login flows: " + error);
     }, Qt::SingleShotConnection);
 
     emit serverAdded(index);
@@ -872,7 +903,6 @@ void ServerManager::persistCredentials(ServerConnection* conn)
     if (index < saved.size()) {
         // In place. Appending would leave the live token in a duplicate row
         // while the restore path kept reading the dead one from this row.
-        entry.identityRefreshToken = saved[index].identityRefreshToken;
         m_settings->updateServer(index, entry);
     } else {
         m_settings->addServer(entry);
@@ -1025,7 +1055,7 @@ void ServerManager::fetchIdentityServers(bool interactive)
                 // identity service — normalise it, but don't spend
                 // a .well-known round trip per server re-deriving
                 // what it just told us.
-                addServerWithOidcResolved(serverUrl);
+                addServerWithOidcResolved(serverUrl, /*allowBrowser=*/interactive);
             }
 
             // D-M8: an identity account that belongs to NO server used

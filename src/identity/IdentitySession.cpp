@@ -2,6 +2,7 @@
 
 #include "core/SecretStore.h"
 #include "identity/OidcRequest.h"
+#include "net/RequestTimeout.h"
 
 #include <QDebug>
 #include <QJsonDocument>
@@ -18,6 +19,9 @@ IdentitySession::IdentitySession(QObject* parent)
         if (!m_nam) m_nam = new QNetworkAccessManager(this);
         QNetworkRequest req(url);
         req.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+        // Without one a dead connection leaves m_busy set forever, and every
+        // later join and the launch-time restore queue behind it (C-6).
+        req.setTransferTimeout(bsfchat::net::kRequestTimeoutMs);
         auto* reply = m_nam->post(req, form.toString(QUrl::FullyEncoded).toUtf8());
         connect(reply, &QNetworkReply::finished, this, [reply, done = std::move(done)]() {
             reply->deleteLater();
@@ -82,6 +86,11 @@ void IdentitySession::persist()
         // Deliberately no file fallback: see SecretStore.h.
         qWarning() << "[IdentitySession] no secure store available; BSFChat ID sign-in is "
                       "kept for this run only";
+        // Whatever an earlier write left there is now SPENT (the provider
+        // has just rotated it). Restoring it next launch would present a
+        // used refresh token, which the provider treats as theft and answers
+        // by revoking the whole grant on every device. Gone is far better.
+        store.remove(storeKey(m_providerUrl));
     }
 }
 
@@ -189,6 +198,14 @@ void IdentitySession::pump()
         // Anything else (network failure, a refused resource, a server error)
         // leaves the token untouched: the provider validates before it
         // rotates, so a refused request did not spend it.
+        //
+        // invalid_target is the common one: the provider mints a server token
+        // only for a server the account has consented to once on the
+        // /authorize page. Not a sign-in failure — the session is fine, and
+        // the caller (ServerManager::signInWithSessionOrBrowser) opens the
+        // browser for that one server; every later join to it is silent.
+        if (code == QLatin1String("invalid_target"))
+            message = tr("This server needs your OK once in the browser.");
         m_busy = false;
         if (status == 0) message = tr("Could not reach BSFChat ID. Check your connection.");
         else if (message.isEmpty()) message = tr("BSFChat ID refused the request (HTTP %1)").arg(status);

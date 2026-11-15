@@ -282,7 +282,8 @@ private:
     // normalise, which costs nothing and is pure.
     void addServerResolved(const QString& url, const QString& username, const QString& password);
     void registerServerResolved(const QString& url, const QString& username, const QString& password);
-    void addServerWithOidcResolved(const QString& url);
+    // allowBrowser = false: join only if it needs no browser (launch restore).
+    void addServerWithOidcResolved(const QString& url, bool allowBrowser = true);
 
     void onLoginSuccess(ServerConnection* conn);
     // Write this connection's live credentials into its settings row,

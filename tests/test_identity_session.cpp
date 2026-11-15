@@ -98,6 +98,27 @@ private slots:
         QVERIFY(!next.restore("https://id.example"));
     }
 
+    // The keychain goes away mid-run (locked, daemon gone) and a rotation
+    // cannot be saved. The copy it still holds is now spent; restoring it
+    // next launch would be a replay, and a replay revokes the whole grant.
+    void aRotationThatCannotBeSavedLeavesNoSpentTokenBehind()
+    {
+        session->adopt("https://id.example", "rt1");
+        QVERIFY(session->isPersisted());
+        store->setAvailable(false);
+        QString err;
+        session->requestAccessToken([&](const QString&, const QString& e) { err = e; });
+        QCOMPARE(calls.size(), 1);
+        succeed(0, "rt2");
+        QVERIFY2(err.isEmpty(), qPrintable(err));
+        QVERIFY(session->isSignedIn());
+        QVERIFY(!session->isPersisted());
+        QCOMPARE(store->size(), 0);
+        IdentitySession next;
+        next.setStore(store);
+        QVERIFY(!next.restore("https://id.example"));
+    }
+
     void aServerTokenIsForThatServerAndTheRotationIsSavedFirst()
     {
         session->adopt("https://id.example", "rt1");
@@ -174,6 +195,41 @@ private slots:
         QCOMPARE(store->size(), 0);
         QCOMPARE(errors.size(), 2);
         QCOMPARE(calls.size(), 1); // the queued one never presented a dead token
+    }
+
+    // A server the account never consented to on the /authorize page: the
+    // provider refuses the resource WITHOUT rotating. The session must stay,
+    // the same token must be presented next (rotating locally would be a
+    // replay), and what was queued behind it must still run.
+    void aServerWithoutConsentFallsBackAndKeepsTheSameToken()
+    {
+        session->adopt("https://id.example", "rt1");
+        QSignalSpy out(session, &IdentitySession::signedOut);
+        QString firstErr, secondTok, secondErr;
+        session->requestServerToken("https://new.example",
+                                    [&](const QString& t, const QString& e) {
+            QVERIFY(t.isEmpty());
+            firstErr = e;
+        });
+        session->requestServerToken("https://known.example",
+                                    [&](const QString& t, const QString& e) {
+            secondTok = t;
+            secondErr = e;
+        });
+        QCOMPARE(calls.size(), 1);
+        reply(0, 400, {{"error", "invalid_target"},
+                       {"error_description", "consent required for this server"}});
+        QVERIFY(!firstErr.isEmpty());
+        QCOMPARE(out.count(), 0);
+        QVERIFY(session->isSignedIn());
+        QCOMPARE(store->read(IdentitySession::storeKey("https://id.example")).value_or(""),
+                 QString("rt1"));
+        // The queue moved on, presenting the unspent token.
+        QCOMPARE(calls.size(), 2);
+        QCOMPARE(calls[1].form.queryItemValue("refresh_token"), QString("rt1"));
+        succeed(1, "rt2");
+        QVERIFY2(secondErr.isEmpty(), qPrintable(secondErr));
+        QVERIFY(!secondTok.isEmpty());
     }
 
     void aNetworkFailureKeepsTheToken()
