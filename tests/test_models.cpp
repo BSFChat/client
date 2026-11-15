@@ -574,6 +574,37 @@ private slots:
     // `displayname`, so no client code has to choose. NicknameRole exists only so
     // admin UI can distinguish "this IS a nickname" from "this is their real name",
     // which is what makes a "Remove nickname" affordance possible.
+    void testMemberListResetFromEventsIsOneResetAndIndexesRows()
+    {
+        // A room switch rebuilds the roster from cached member events. It
+        // used to be one insertion per member through processEvent, with a
+        // linear findMember per event — O(n^2) for the rebuild alone.
+        MemberListModel model;
+        QSignalSpy resets(&model, &QAbstractItemModel::modelReset);
+        QSignalSpy inserts(&model, &QAbstractItemModel::rowsInserted);
+        model.resetFromEvents({makeMemberEvent("@a:server", "A", "join"),
+                               makeMemberEvent("@b:server", "B", "join"),
+                               makeMemberEvent("@c:server", "C", "join"),
+                               makeMemberEvent("@gone:server", "G", "leave")});
+        QCOMPARE(resets.count(), 1);
+        QCOMPARE(inserts.count(), 0);
+        QCOMPARE(model.rowCount(), 3);
+        QCOMPARE(model.displayNameForUser("@c:server"), QString("C"));
+
+        // The index survives a removal in the middle: rows after it moved.
+        model.processEvent(makeMemberEvent("@a:server", "A", "leave"));
+        QCOMPARE(model.rowCount(), 2);
+        QCOMPARE(model.displayNameForUser("@a:server"), QString());
+        QCOMPARE(model.displayNameForUser("@c:server"), QString("C"));
+        model.processEvent(makeMemberEvent("@c:server", "C2", "join"));
+        QCOMPARE(model.rowCount(), 2);
+        QCOMPARE(model.data(model.index(1), MemberListModel::DisplayNameRole).toString(),
+                 QString("C2"));
+
+        model.clear();
+        QCOMPARE(model.displayNameForUser("@b:server"), QString());
+    }
+
     void testMemberListNicknamePreferredOverGlobalName()
     {
         MemberListModel model;

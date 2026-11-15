@@ -61,6 +61,11 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     void processEvent(const bsfchat::RoomEvent& event);
+    // The whole roster at once, from each member's latest m.room.member
+    // event, as ONE model reset — what a room switch does. Replaying through
+    // processEvent cost one row insertion (and one round of QML layout) per
+    // member.
+    void resetFromEvents(const QVector<bsfchat::RoomEvent>& events);
     void clear();
 
     // Invokable because QML calls it (MessageBubble's reaction tooltip did, and
@@ -139,6 +144,10 @@ public:
 
 private:
     int findMember(const QString& userId) const;
+    // The body of processEvent; `notify` false skips every model signal, for
+    // use inside a reset.
+    void applyEvent(const bsfchat::RoomEvent& event, bool notify);
+    void rebuildIndex();
 
     struct MemberEntry {
         QString userId;
@@ -150,6 +159,10 @@ private:
     };
 
     QVector<MemberEntry> m_members;
+    // userId -> row in m_members. findMember is called for every member event
+    // and every speaking-level edge; a linear scan made a roster rebuild
+    // O(n^2).
+    QHash<QString, int> m_indexByUser;
     const QMap<QString, QString>* m_dnCache = nullptr;
 
     // Speaking, keyed by user id and NOT stored on MemberEntry: a level can

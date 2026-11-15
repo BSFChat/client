@@ -167,13 +167,32 @@ void MemberListModel::emitSpeakingChanged(const QString& userId)
 
 int MemberListModel::findMember(const QString& userId) const
 {
-    for (int i = 0; i < m_members.size(); ++i) {
-        if (m_members[i].userId == userId) return i;
-    }
-    return -1;
+    return m_indexByUser.value(userId, -1);
+}
+
+void MemberListModel::rebuildIndex()
+{
+    m_indexByUser.clear();
+    m_indexByUser.reserve(m_members.size());
+    for (int i = 0; i < m_members.size(); ++i) m_indexByUser.insert(m_members[i].userId, i);
 }
 
 void MemberListModel::processEvent(const bsfchat::RoomEvent& event)
+{
+    applyEvent(event, true);
+}
+
+void MemberListModel::resetFromEvents(const QVector<bsfchat::RoomEvent>& events)
+{
+    beginResetModel();
+    m_members.clear();
+    m_indexByUser.clear();
+    m_members.reserve(events.size());
+    for (const auto& ev : events) applyEvent(ev, false);
+    endResetModel();
+}
+
+void MemberListModel::applyEvent(const bsfchat::RoomEvent& event, bool notify)
 {
     if (event.type != std::string(bsfchat::event_type::kRoomMember))
         return;
@@ -208,21 +227,27 @@ void MemberListModel::processEvent(const bsfchat::RoomEvent& event)
             // U-M15: an empty role vector means "every role changed", which
             // makes every delegate binding on this row re-evaluate. Name the
             // five fields this branch can actually move.
-            emit dataChanged(index(idx), index(idx),
-                             {DisplayNameRole, AvatarUrlRole,
-                              MembershipRole, NicknameRole, IsBotRole});
+            if (notify)
+                emit dataChanged(index(idx), index(idx),
+                                 {DisplayNameRole, AvatarUrlRole,
+                                  MembershipRole, NicknameRole, IsBotRole});
         } else {
             // Add new member
-            beginInsertRows(QModelIndex(), m_members.size(), m_members.size());
+            const int row = static_cast<int>(m_members.size());
+            if (notify) beginInsertRows(QModelIndex(), row, row);
             m_members.append({userId, displayName, avatarUrl, membership,
                               nickname, isBotAccount});
-            endInsertRows();
+            m_indexByUser.insert(userId, row);
+            if (notify) endInsertRows();
         }
     } else if (membership == "leave" || membership == "ban") {
         if (idx >= 0) {
-            beginRemoveRows(QModelIndex(), idx, idx);
+            if (notify) beginRemoveRows(QModelIndex(), idx, idx);
             m_members.removeAt(idx);
-            endRemoveRows();
+            // Every later row moved up one. Leaves are rare next to the
+            // lookups, so a rebuild here is the cheap side of the trade.
+            rebuildIndex();
+            if (notify) endRemoveRows();
         }
     }
 }
@@ -247,5 +272,6 @@ void MemberListModel::clear()
 {
     beginResetModel();
     m_members.clear();
+    m_indexByUser.clear();
     endResetModel();
 }

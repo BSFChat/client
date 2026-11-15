@@ -1591,23 +1591,25 @@ void ServerConnection::noteTimelineVisible(int rows)
 
 void ServerConnection::loadMembersForRoom(const QString& roomId)
 {
-    m_memberListModel->clear();
-
     // First, load from our cache (events we've seen in sync)
-    if (m_roomMembers.contains(roomId)) {
-        // Replay cached member events to build current state
-        // We need to build the final state, not just replay — a user might have
-        // joined then left. Process all events in order, keeping latest per-user.
+    //
+    // Replay cached member events to build current state
+    // We need to build the final state, not just replay — a user might have
+    // joined then left. Process all events in order, keeping latest per-user.
+    // Then hand the model the result as one reset rather than one insertion
+    // per member.
+    QVector<bsfchat::RoomEvent> latest;
+    if (const auto it = m_roomMembers.constFind(roomId); it != m_roomMembers.constEnd()) {
         QMap<QString, bsfchat::RoomEvent> latestByUser;
-        for (const auto& ev : m_roomMembers[roomId]) {
+        for (const auto& ev : it.value()) {
             if (ev.state_key.has_value()) {
                 latestByUser[QString::fromStdString(*ev.state_key)] = ev;
             }
         }
-        for (const auto& ev : latestByUser) {
-            m_memberListModel->processEvent(ev);
-        }
+        latest.reserve(latestByUser.size());
+        for (const auto& ev : std::as_const(latestByUser)) latest.append(ev);
     }
+    m_memberListModel->resetFromEvents(latest);
 
     // Then fetch from the server — but not on every single switch.
     //
