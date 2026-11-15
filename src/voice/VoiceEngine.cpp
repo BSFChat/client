@@ -1,6 +1,7 @@
 #include "voice/VoiceEngine.h"
 #include "voice/AudioEngine.h"
 #include "voice/CallSignalCodec.h"
+#include "util/JsonSafe.h"
 #include "voice/VoiceStartPolicy.h"
 #include "voice/VoiceRosterReconcile.h"
 #include "voice/PeerCaps.h"
@@ -653,7 +654,11 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
                  qPrintable(userId), int(json.size()));
         return;
     }
-    const std::string t = doc.value("t", "");
+    // Every read below is type-checked: the peer's build, not ours, wrote this
+    // message, and a throwing value<>() here escapes a libdatachannel
+    // callback and takes the app down (V-3).
+    namespace js = bsfchat::jsonsafe;
+    const std::string t = js::str(doc, "t");
     if (t == "caps") {
         // Mid-call capability refresh — including the RETRACTION a peer
         // sends when a codec it advertised turns out to be undecodable
@@ -680,13 +685,13 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
         // capture tick and so waits for the next pixel to change —
         // the same pre-existing property as the H.264 profile flip.)
         if (auto* peer = m_peers.value(userId)) {
-            peer->setRemoteCaps(PeerCaps::fromJson(doc.value("caps", nlohmann::json::object())));
+            peer->setRemoteCaps(PeerCaps::fromJson(js::object(doc, "caps")));
             maybeSetupVideoFor(userId);
         }
     } else if (t == "kf") {
         // App-level keyframe request — the guaranteed cross-version
         // recovery path (RTCP PLI also feeds videoKeyframeRequested).
-        const int stream = doc.value("stream", 0);
+        const int stream = js::int32(doc, "stream");
         if (stream >= 0 && stream < kVideoStreamCount)
             emit videoKeyframeRequested(stream);
     } else if (t == "stream") {
@@ -695,17 +700,11 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
         // liveness timeout, and then on "Starting share…" until the
         // roster poll cleared the announced flag — up to ~9 s of lying
         // UI after the sender stopped.
-        const int stream = doc.value("stream", 0);
+        const int stream = js::int32(doc, "stream");
         if (stream < 0 || stream >= kVideoStreamCount) return;
         // "on" may arrive as a bool or a 0/1 number depending on the
-        // sender's json library; nlohmann's value<int>() would throw on
-        // the bool form, and this runs inside a slot.
-        bool on = true;
-        if (doc.contains("on")) {
-            const auto& v = doc.at("on");
-            if (v.is_boolean()) on = v.get<bool>();
-            else if (v.is_number()) on = v.get<double>() != 0.0;
-        }
+        // sender's json library; anything else reads as the default.
+        const bool on = js::boolean(doc, "on", true);
         if (!on) {
             // Drop the decode worker too: whatever restarts the stream
             // starts at a keyframe, so nothing about the old session is
@@ -722,16 +721,18 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
         // cumulative received bytes plus (S-17) cumulative expected /
         // lost RTP packets. Packets are what the rate controller is
         // graded on; bytes survive only as a goodput cross-check.
-        const int stream = doc.value("stream", 0);
+        const int stream = js::int32(doc, "stream");
         if (stream < 0 || stream >= kVideoStreamCount) return;
         if (!m_peers.contains(userId)) return;
-        const quint64 rxBytes = doc.value("b", quint64(0));
+        const quint64 rxBytes = js::count(doc, "b");
         // A peer on a build that predates the packet counters sends
         // neither field. That must read as "no opinion" — not as total
         // loss, which would collapse the share for everyone else.
-        const bool hasLoss = doc.contains("e") && doc.contains("l");
-        const quint64 expected = hasLoss ? doc.value("e", quint64(0)) : 0;
-        const quint64 lost = hasLoss ? doc.value("l", quint64(0)) : 0;
+        const auto* e = js::member(doc, "e");
+        const auto* l = js::member(doc, "l");
+        const bool hasLoss = e && l && e->is_number() && l->is_number();
+        const quint64 expected = hasLoss ? js::count(doc, "e") : 0;
+        const quint64 lost = hasLoss ? js::count(doc, "l") : 0;
         const VideoDeliveryReport report =
             m_rrSnapshots[{userId, stream}].update(
                 rxBytes, expected, lost, hasLoss,

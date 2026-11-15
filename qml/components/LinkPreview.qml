@@ -123,7 +123,7 @@ Rectangle {
     Accessible.description: preview.ogDescription.length > 0
         ? preview.ogDescription
         : qsTr("Opens the link in your browser")
-    Accessible.onPressAction: Qt.openUrlExternally(preview.url)
+    Accessible.onPressAction: linkOpener.open(preview.url)
 
     // Left accent stripe — mirrors the reply-preamble chrome so
     // "quoted content" reads consistently whether it's another
@@ -221,7 +221,7 @@ Rectangle {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: Qt.openUrlExternally(preview.url)
+                onClicked: linkOpener.open(preview.url)
             }
         }
 
@@ -235,6 +235,7 @@ Rectangle {
             Accessible.ignored: true
             Layout.preferredHeight: Math.ceil(
                 Theme.fontSize.md * 1.3 * 2)
+            textFormat: Text.PlainText
             text: preview.ogTitle
             color: Theme.accent
             font.family: Theme.fontSans
@@ -247,7 +248,7 @@ Rectangle {
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: Qt.openUrlExternally(preview.url)
+                onClicked: linkOpener.open(preview.url)
             }
         }
         Text {
@@ -255,6 +256,7 @@ Rectangle {
             Accessible.ignored: true
             Layout.preferredHeight: Math.ceil(
                 Theme.fontSize.xs * 1.3)
+            textFormat: Text.PlainText
             // Always render — `hostName` is derived from the URL
             // synchronously, so the row is populated before the OG
             // fetch resolves. ogSiteName replaces it if/when it
@@ -289,6 +291,7 @@ Rectangle {
             // Site name — quiet, small. Falls back to the URL's host.
             Text {
                 Accessible.ignored: true
+                textFormat: Text.PlainText
                 text: preview.ogSiteName.length > 0
                     ? preview.ogSiteName : preview.hostName
                 visible: text.length > 0
@@ -301,6 +304,7 @@ Rectangle {
             // Title — accent-coloured, clickable like a link.
             Text {
                 Accessible.ignored: true
+                textFormat: Text.PlainText
                 text: preview.ogTitle
                 visible: text.length > 0
                 color: Theme.accent
@@ -315,12 +319,13 @@ Rectangle {
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: Qt.openUrlExternally(preview.url)
+                    onClicked: linkOpener.open(preview.url)
                 }
             }
             // Description — dimmer, up to 3 lines.
             Text {
                 Accessible.ignored: true
+                textFormat: Text.PlainText
                 text: preview.ogDescription
                 visible: text.length > 0
                 color: Theme.fg2
@@ -365,7 +370,7 @@ Rectangle {
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: Qt.openUrlExternally(preview.url)
+                onClicked: linkOpener.open(preview.url)
             }
         }
     }

@@ -19,6 +19,7 @@
 #include "net/ServerConnection.h"
 #include "core/TintedIconProvider.h"
 #include "core/MediaDownloader.h"
+#include "util/LinkOpener.h"
 #include "core/Haptics.h"
 #include "core/MobileKeyboard.h"
 #include "core/Updater.h"
@@ -177,6 +178,12 @@ int main(int argc, char *argv[])
     QQmlEngine::setObjectOwnership(&mediaDownloader, QQmlEngine::CppOwnership);
     engine.rootContext()->setContextProperty("mediaDownloader",
                                              &mediaDownloader);
+
+    // The only way QML opens a link outside the app — scheme allowlist,
+    // link-text spoof check, and the bundled-Linux browser workaround.
+    LinkOpener linkOpener;
+    QQmlEngine::setObjectOwnership(&linkOpener, QQmlEngine::CppOwnership);
+    engine.rootContext()->setContextProperty("linkOpener", &linkOpener);
 
     // Haptics — short platform buzz on long-press + swipe commit.
     // Safe to expose on all platforms; methods no-op on desktop.

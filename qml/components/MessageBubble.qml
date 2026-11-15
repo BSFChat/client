@@ -973,6 +973,7 @@ Item {
                 spacing: Theme.sp.s3
 
                 Text {
+                    textFormat: Text.PlainText
                     text: bubble.senderDisplayName
                     // The name is spoken as part of the message. What is
                     // worth reaching separately is the ACTION on it, so
@@ -1099,6 +1100,7 @@ Item {
                     }
 
                     Text {
+                        textFormat: Text.PlainText
                         text: bubble.replyToSender !== ""
                               ? bubble.replyToSender : "unknown"
                         Accessible.ignored: true
@@ -1109,6 +1111,7 @@ Item {
                     }
 
                     Text {
+                        textFormat: Text.PlainText
                         text: bubble.replyPreview !== ""
                               ? bubble.replyPreview
                               : "(message unavailable)"
@@ -1363,6 +1366,7 @@ Item {
                             visible: bubble.mediaFileName !== ""
 
                             Text {
+                                textFormat: Text.PlainText
                                 text: bubble.mediaFileName
                                 Accessible.ignored: true
                                 font.pixelSize: Theme.fontSize.sm
@@ -1459,6 +1463,7 @@ Item {
                                 Layout.fillWidth: true
                                 spacing: 2
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: bubble.mediaFileName
                                     Accessible.ignored: true
                                     font.family: Theme.fontSans
@@ -1576,8 +1581,8 @@ Item {
                 selectionColor: Theme.accent
                 persistentSelection: false
                 onLinkActivated: (link) => {
-                    // Intercept internal scheme; let anything else open in
-                    // the system browser as before.
+                    // Intercept internal scheme; everything else goes through
+                    // LinkOpener (scheme allowlist + spoofed-text check).
                     if (link.indexOf("bsfchat://channel/") === 0) {
                         bubble.channelLinkClicked(
                             link.substring("bsfchat://channel/".length));
@@ -1592,7 +1597,7 @@ Item {
                             link.substring("bsfchat://user/".length));
                         bubble.userLinkClicked(uid, uid);
                     } else {
-                        Qt.openUrlExternally(link);
+                        linkOpener.open(link, bubble.formattedBody);
                     }
                 }
                 MouseArea {
@@ -1678,6 +1683,7 @@ Item {
                             anchors.centerIn: parent
                             spacing: 5
                             Text {
+                                textFormat: Text.PlainText
                                 text: entry ? entry.emoji : ""
                                 Accessible.ignored: true
                                 font.family: Theme.fontSans

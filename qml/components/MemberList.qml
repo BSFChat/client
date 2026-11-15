@@ -330,6 +330,7 @@ Rectangle {
 
                                 Text {
                                     anchors.centerIn: parent
+                                    textFormat: Text.PlainText
                                     text: {
                                         var n = model.displayName || "?";
                                         var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -424,6 +425,7 @@ Rectangle {
                                 spacing: Theme.sp.s2
 
                                 Text {
+                                    textFormat: Text.PlainText
                                     // Bold on hover, tinted by highest role
                                     // normally. Falls back to fg1 for roleless
                                     // members (e.g. @everyone-only).
@@ -460,6 +462,7 @@ Rectangle {
                             // when set. Italic distinguishes user-
                             // authored copy from the role label.
                             Text {
+                                textFormat: Text.PlainText
                                 text: {
                                     // statusMessageFor is a Q_INVOKABLE: calling
                                     // it subscribes to nothing, so a status set
@@ -487,6 +490,7 @@ Rectangle {
                             // don't get a blank subtext line. Hidden
                             // when a custom status is shown above.
                             Text {
+                                textFormat: Text.PlainText
                                 text: memberDelegate._role && memberDelegate._role.hoist
                                     ? (memberDelegate._role.name || "") : ""
                                 // Hide when a custom status is being
@@ -642,6 +646,7 @@ Rectangle {
                     Layout.leftMargin: Theme.sp.s3
                 }
                 Text {
+                    textFormat: Text.PlainText
                     text: mi.text
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.md

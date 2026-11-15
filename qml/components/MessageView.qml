@@ -207,6 +207,7 @@ Rectangle {
             }
             Text {
                 Layout.alignment: Qt.AlignHCenter
+                textFormat: Text.PlainText
                 text: "Files dropped here are sent to #"
                     + (serverManager.activeServer
                         ? serverManager.activeServer.activeRoomName : "")
@@ -306,6 +307,7 @@ Rectangle {
                 }
 
                 Text {
+                    textFormat: Text.PlainText
                     text: serverManager.activeServer ? serverManager.activeServer.activeRoomName : ""
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.lg
@@ -324,6 +326,7 @@ Rectangle {
 
                 Text {
                     id: topicText
+                    textFormat: Text.PlainText
                     text: serverManager.activeServer ? serverManager.activeServer.activeRoomTopic : ""
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.sm
@@ -1993,6 +1996,7 @@ Rectangle {
                 }
 
                 Text {
+                    textFormat: Text.PlainText
                     text: serverManager.activeServer
                           ? serverManager.activeServer.typingDisplay : ""
                     font.family: Theme.fontSans
@@ -2214,6 +2218,7 @@ Rectangle {
                             spacing: Theme.sp.s2
 
                             Text {
+                                textFormat: Text.PlainText
                                 text: preview ? preview.sender : "Not loaded yet"
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.sm
@@ -2273,6 +2278,7 @@ Rectangle {
                             }
                         }
                         Text {
+                            textFormat: Text.PlainText
                             text: preview && preview.body && preview.body.length > 0
                                 ? preview.body
                                 : "(scroll up — this pinned message hasn't loaded yet)"
@@ -2424,6 +2430,7 @@ Rectangle {
                     spacing: 2
                     Text {
                         visible: deleteConfirm.senderName.length > 0
+                        textFormat: Text.PlainText
                         text: deleteConfirm.senderName
                         color: Theme.accent
                         font.family: Theme.fontSans
@@ -2432,6 +2439,7 @@ Rectangle {
                     }
                     Text {
                         Layout.fillWidth: true
+                        textFormat: Text.PlainText
                         text: deleteConfirm.preview
                         color: Theme.fg1
                         font.family: Theme.fontSans
@@ -2612,6 +2620,7 @@ Rectangle {
                             }
                         }
                         Text {
+                            textFormat: Text.PlainText
                             text: modelData.body
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.base

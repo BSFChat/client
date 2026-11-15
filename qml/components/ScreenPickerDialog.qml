@@ -163,6 +163,7 @@ Dialog {
 
                             Text {
                                 Layout.fillWidth: true
+                                textFormat: Text.PlainText
                                 text: row.modelData.name
                                 elide: Text.ElideRight
                                 font.family: Theme.fontSans
@@ -290,6 +291,7 @@ Dialog {
 
                     Text {
                         Layout.fillWidth: true
+                        textFormat: Text.PlainText
                         text: winRow.modelData.name
                         elide: Text.ElideRight
                         font.family: Theme.fontSans
@@ -381,6 +383,7 @@ Dialog {
                 Accessible.name: qsTr("Cancel")
                 Accessible.onPressAction: dialog.close()
                 contentItem: Text {
+                    textFormat: Text.PlainText
                     text: parent.text
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.md

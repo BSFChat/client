@@ -122,6 +122,7 @@ Popup {
 
         Text {
             Layout.fillWidth: true
+            textFormat: Text.PlainText
             text: "You do not see messages, mentions or notifications from "
                 + "these accounts. They are not told that you blocked them, "
                 + "and they can still see the channels you share."
@@ -136,6 +137,7 @@ Popup {
             Layout.fillWidth: true
             visible: blockedDialog.blockModel !== null
                 && blockedDialog.blockModel.errorText.length > 0
+            textFormat: Text.PlainText
             text: blockedDialog.blockModel ? blockedDialog.blockModel.errorText : ""
             Accessible.role: Accessible.AlertMessage
             Accessible.name: blockedDialog.blockModel
@@ -227,6 +229,7 @@ Popup {
                             // id is the honest answer, not a fallback.
                             Text {
                                 Layout.fillWidth: true
+                                textFormat: Text.PlainText
                                 text: blockedRow.modelData.displayName.length > 0
                                     ? blockedRow.modelData.displayName
                                     : blockedRow.modelData.userId
@@ -238,6 +241,7 @@ Popup {
                             Text {
                                 Layout.fillWidth: true
                                 visible: blockedRow.modelData.displayName.length > 0
+                                textFormat: Text.PlainText
                                 text: blockedRow.modelData.userId
                                 font.family: Theme.fontMono
                                 font.pixelSize: Theme.fontSize.xs
@@ -295,6 +299,7 @@ Popup {
             spacing: Theme.sp.s3
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: {
                     if (!blockedDialog.blockModel) return "";
                     if (blockedDialog.blockModel.busy) return "Checking the server…";

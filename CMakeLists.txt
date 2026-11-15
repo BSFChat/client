@@ -271,6 +271,8 @@ qt_add_library(bsfchat-lib STATIC
     src/store/LocalCache.cpp
     src/util/ExternalBrowser.cpp
     src/util/FileLogger.cpp
+    src/util/HtmlSanitizer.cpp
+    src/util/LinkOpener.cpp
     src/util/MarkdownParser.cpp
     src/util/MentionRenderer.cpp
     src/util/PermissionMath.cpp
@@ -1209,6 +1211,7 @@ qt_add_qml_module(bsfchat-lib
         qml/components/ToastHost.qml
         qml/components/VideoPlayerCard.qml
         qml/components/LinkPreview.qml
+        qml/components/ExternalOpenPrompts.qml
         qml/components/ScreenPickerDialog.qml
         qml/components/BotBadge.qml
         qml/components/BotManagerPane.qml

@@ -277,6 +277,7 @@ ColumnLayout {
                 }
                 Text {
                     Layout.alignment: Qt.AlignHCenter
+                    textFormat: Text.PlainText
                     text: "Buffering video… "
                         + Math.round(root.downloadProgress * 100) + "%"
                     // Said by the overlay above; not said twice.
@@ -337,6 +338,7 @@ ColumnLayout {
                     Layout.alignment: Qt.AlignHCenter
                     Layout.maximumWidth: root.maxWidth - Theme.sp.s5 * 2
                     horizontalAlignment: Text.AlignHCenter
+                    textFormat: Text.PlainText
                     text: mediaPlayer.errorString || ""
                     visible: text.length > 0
                     Accessible.ignored: true
@@ -444,6 +446,7 @@ ColumnLayout {
 
                 // Time elapsed.
                 Text {
+                    textFormat: Text.PlainText
                     text: formatTime(mediaPlayer.position)
                     color: "white"
                     font.family: Theme.fontMono
@@ -525,6 +528,7 @@ ColumnLayout {
 
                 // Duration.
                 Text {
+                    textFormat: Text.PlainText
                     text: formatTime(mediaPlayer.duration)
                     color: "white"
                     font.family: Theme.fontMono
@@ -761,6 +765,7 @@ ColumnLayout {
             root.fileName !== "", Theme.fontSize.sm)
         Layout.maximumHeight: Layout.preferredHeight
         Text {
+            textFormat: Text.PlainText
             text: root.fileName
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.sm
@@ -1112,6 +1117,7 @@ ColumnLayout {
                         }
                     }
                     Text {
+                        textFormat: Text.PlainText
                         text: formatTime(mediaPlayer.position)
                         color: "white"
                         font.family: Theme.fontMono
@@ -1176,6 +1182,7 @@ ColumnLayout {
                         }
                     }
                     Text {
+                        textFormat: Text.PlainText
                         text: formatTime(mediaPlayer.duration)
                         color: "white"
                         font.family: Theme.fontMono

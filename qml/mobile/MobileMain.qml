@@ -351,6 +351,9 @@ ApplicationWindow {
 
     // Toast host for every subsystem — reachable via Window.window.toast().
     ToastHost { id: toastHostGlobal; parent: popupSurface }
+    // Link / attachment confirmations; this shell has no mediaOpenFailed
+    // toast of its own, so the prompts host carries it.
+    ExternalOpenPrompts { popupParent: popupSurface; toastMediaFailures: true }
     // ToastHost's API is toast()/info()/success()/warn()/error(). This
     // called a `show()` that has never existed, so EVERY toast on mobile
     // threw a TypeError and nothing was ever shown (U-C2). Kept
@@ -418,6 +421,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 spacing: 0
                 Text {
+                    textFormat: Text.PlainText
                     text: {
                         var s = serverManager.activeServer;
                         // In-DM always takes priority — the title
@@ -444,6 +448,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                 }
                 Text {
+                    textFormat: Text.PlainText
                     text: serverManager.activeServer
                         ? serverManager.activeServer.serverName : ""
                     font.family: Theme.fontSans
@@ -532,6 +537,7 @@ ApplicationWindow {
                                 Layout.leftMargin: Theme.sp.s3
                             }
                             Text {
+                                textFormat: Text.PlainText
                                 text: omi.text
                                 Accessible.ignored: true
                                 font.family: Theme.fontSans
@@ -787,6 +793,7 @@ ApplicationWindow {
                             Layout.alignment: Qt.AlignHCenter
                             onClicked: root.openLoginDialog()
                             contentItem: Text {
+                                textFormat: Text.PlainText
                                 text: parent.text
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.md
@@ -813,6 +820,7 @@ ApplicationWindow {
                             Layout.alignment: Qt.AlignHCenter
                             onClicked: root.openJoinByAddress()
                             contentItem: Text {
+                                textFormat: Text.PlainText
                                 text: parent.text
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.md
@@ -857,6 +865,7 @@ ApplicationWindow {
                             Layout.alignment: Qt.AlignHCenter
                             onClicked: leftDrawer.open()
                             contentItem: Text {
+                                textFormat: Text.PlainText
                                 text: parent.text
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.md

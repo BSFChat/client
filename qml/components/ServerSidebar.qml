@@ -203,6 +203,7 @@ Rectangle {
                         anchors.centerIn: parent
                         visible: serverIcon.status !== Image.Ready
                               || !model.iconUrl
+                        textFormat: Text.PlainText
                         text: {
                             var name = (model.displayName || "?");
                             var stripped = name.replace(/^[^a-zA-Z0-9]+/, "");
@@ -390,6 +391,7 @@ Rectangle {
                 spacing: 2
                 leftPadding: Theme.sp.s3
                 Text {
+                    textFormat: Text.PlainText
                     text: serverContextMenu.url
                     font.family: Theme.fontMono
                     font.pixelSize: Theme.fontSize.sm
@@ -419,6 +421,7 @@ Rectangle {
                         Accessible.ignored: true
                     }
                     Text {
+                        textFormat: Text.PlainText
                         text: {
                             var c = serverContextMenu.conn;
                             if (!c) return "Unknown";
@@ -473,6 +476,7 @@ Rectangle {
                     Layout.leftMargin: Theme.sp.s3
                 }
                 Text {
+                    textFormat: Text.PlainText
                     text: mi.text
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.md
@@ -632,6 +636,7 @@ Rectangle {
                     Accessible.description: qsTr("Leave the address unchanged")
                     Accessible.onPressAction: editServerDialog.close()
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: parent.text
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md
@@ -654,6 +659,7 @@ Rectangle {
                     Accessible.name: qsTr("Save server address")
                     Accessible.onPressAction: editServerDialog.saveAndClose()
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: parent.text
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md
@@ -732,6 +738,7 @@ Rectangle {
                     Accessible.description: qsTr("Keep the server")
                     Accessible.onPressAction: removeServerDialog.close()
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: parent.text
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md
@@ -756,6 +763,7 @@ Rectangle {
                         removeServerDialog.close();
                     }
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: parent.text
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md

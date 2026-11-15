@@ -44,6 +44,7 @@ Rectangle {
     Text {
         id: badgeText
         anchors.centerIn: parent
+        textFormat: Text.PlainText
         text: badge.label
         font.family: Theme.fontSans
         font.pixelSize: 9

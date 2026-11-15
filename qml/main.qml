@@ -495,6 +495,10 @@ ApplicationWindow {
         parent: Overlay.overlay
     }
 
+    // Confirmations for spoofed links and non-media attachments, and the
+    // toast for a refused link (LinkOpener, ServerConnection).
+    ExternalOpenPrompts {}
+
     // Auto-update dialog — opens itself when the C++ Updater
     // reports an actionable state. Disabled on builds where the
     // `updater` context property is absent (mobile).

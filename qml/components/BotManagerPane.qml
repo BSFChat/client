@@ -176,6 +176,7 @@ Item {
                            Layout.alignment: Qt.AlignVCenter }
                     Text {
                         Layout.fillWidth: true
+                        textFormat: Text.PlainText
                         text: botPane._model && botPane._model.issuedTokenIsRotation
                             ? "New token for " + (botPane._model
                                   ? botPane._model.displayNameFor(botPane._model.issuedTokenUserId)
@@ -192,6 +193,7 @@ Item {
 
                 Text {
                     Layout.fillWidth: true
+                    textFormat: Text.PlainText
                     // The two cases genuinely differ and an operator acts on
                     // the difference: after a rotation something is already
                     // broken and needs the new value, whereas after a create
@@ -495,6 +497,7 @@ Item {
             Text {
                 Layout.fillWidth: true
                 visible: localpartField.problem.length > 0
+                textFormat: Text.PlainText
                 text: localpartField.problem
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.xs
@@ -504,6 +507,7 @@ Item {
             Text {
                 Layout.fillWidth: true
                 visible: localpartField.problem.length === 0
+                textFormat: Text.PlainText
                 // Says the rule out loud even when nothing is wrong. The
                 // prefill shows the prefix; this says why it is there and what
                 // else the server will insist on, so the grammar is readable
@@ -596,6 +600,7 @@ Item {
                             Layout.fillWidth: true
                             spacing: Theme.sp.s2
                             Text {
+                                textFormat: Text.PlainText
                                 text: modelData.displayName || modelData.userId
                                 Accessible.ignored: true
                                 font.family: Theme.fontSans
@@ -619,6 +624,7 @@ Item {
                         }
                         Text {
                             Layout.fillWidth: true
+                            textFormat: Text.PlainText
                             text: modelData.description && modelData.description.length > 0
                                 ? modelData.description : modelData.userId
                             Accessible.ignored: true
@@ -771,6 +777,7 @@ Item {
                 }
                 Text {
                     Layout.fillWidth: true
+                    textFormat: Text.PlainText
                     text: "Deactivate "
                           + (botPane._model
                              ? botPane._model.displayNameFor(botPane.pendingDeactivateId)

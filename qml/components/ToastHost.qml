@@ -221,6 +221,7 @@ Item {
                         Text {
                             id: messageText
                             Layout.fillWidth: true
+                            textFormat: Text.PlainText
                             text: card.toastText
                             color: Theme.fg0
                             font.family: Theme.fontSans
@@ -260,6 +261,7 @@ Item {
                         Text {
                             Layout.fillWidth: true
                             visible: messageText.truncated || card.expanded
+                            textFormat: Text.PlainText
                             text: card.expanded
                                 ? "Show less"
                                 : "Show the rest of this message"

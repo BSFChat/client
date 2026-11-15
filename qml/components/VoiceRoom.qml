@@ -399,6 +399,7 @@ Rectangle {
             }
 
             Text {
+                textFormat: Text.PlainText
                 text: {
                     var s = serverManager.activeServer;
                     if (!s || !s.activeVoiceRoomId) return "";
@@ -572,6 +573,7 @@ Rectangle {
                     id: cryptoText
                     Accessible.ignored: true
                     anchors.centerIn: parent
+                    textFormat: Text.PlainText
                     text: serverManager.activeServer
                         ? serverManager.activeServer.voiceProtectionBadge : ""
                     font.family: Theme.fontMono
@@ -800,6 +802,7 @@ Rectangle {
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
                     text: transmitBanner.message
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.xs
@@ -920,6 +923,7 @@ Rectangle {
                         Text {
                             width: parent.width
                             horizontalAlignment: Text.AlignHCenter
+                            textFormat: Text.PlainText
                             text: VideoStage.feedLabel(
                                 room._displayNameFor(stageMarker.modelData.userId),
                                 stageMarker.modelData.kind,

@@ -123,6 +123,7 @@ Rectangle {
         Accessible.name: btn.text
         Accessible.onPressAction: btn.clicked()
         contentItem: Text {
+            textFormat: Text.PlainText
             text: btn.text
             // Covered by the button's own name.
             Accessible.ignored: true
@@ -196,6 +197,7 @@ Rectangle {
 
                 Text {
                     Layout.fillWidth: true
+                    textFormat: Text.PlainText
                     text: panel._u
                         ? UF.title(panel._state, panel._u.availableVersion)
                         : "Updates"
@@ -212,6 +214,7 @@ Rectangle {
                     id: detailText
                     Layout.fillWidth: true
                     visible: text.length > 0
+                    textFormat: Text.PlainText
                     // No `updater` context property at all — mobile, where
                     // the OS store owns updates. Say so rather than
                     // offering a Check now button that can't do anything.
@@ -251,6 +254,7 @@ Rectangle {
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.leftMargin: Theme.sp.s4
                 anchors.rightMargin: Theme.sp.s4
+                textFormat: Text.PlainText
                 text: panel._u ? panel._u.lastError : ""
                 color: Theme.fg1
                 wrapMode: Text.WordWrap
@@ -400,6 +404,7 @@ Rectangle {
                 visible: UF.showsByteCount(panel._state)
 
                 Text {
+                    textFormat: Text.PlainText
                     text: panel._u ? UF.byteProgress(panel._u.downloadedBytes,
                                                      panel._u.totalBytes) : ""
                     font.family: Theme.fontMono
@@ -408,6 +413,7 @@ Rectangle {
                 }
                 Item { Layout.fillWidth: true }
                 Text {
+                    textFormat: Text.PlainText
                     text: panel._u ? UF.percentText(panel._u.downloadedBytes,
                                                     panel._u.totalBytes) : ""
                     visible: text.length > 0

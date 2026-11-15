@@ -1002,7 +1002,12 @@ public:
     //
     // The fetch carries an Authorization header, because a C++ downloader can:
     // it does not need a ticket and does not use one.
-    Q_INVOKABLE void openMediaExternally(const QString& mxcUri);
+    //
+    // What may be opened is decided here (core/AttachmentPolicy.h): programs
+    // and scripts are refused with mediaOpenFailed; anything but plain
+    // image/video/audio first emits mediaOpenConfirmationRequested, and the
+    // prompt calls back with `confirmed` set.
+    Q_INVOKABLE void openMediaExternally(const QString& mxcUri, bool confirmed = false);
 
 signals:
     void displayNameChanged();
@@ -1012,6 +1017,9 @@ signals:
     // The external-open path could not produce a local file. QML surfaces it
     // the same way a failed media send is surfaced.
     void mediaOpenFailed(QString error);
+    // openMediaExternally wants the user's go-ahead first. `fileName` is the
+    // sender's name for the file (may be empty), for the prompt to show.
+    void mediaOpenConfirmationRequested(QString mxcUri, QString fileName);
     // Bumped whenever presence-relevant state changes (activity
     // observed, self-status set). Views use it as a cheap reactive
     // hook since presenceFor() is a lookup on a regular QMap.

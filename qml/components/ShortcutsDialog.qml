@@ -167,6 +167,7 @@ Popup {
                                 id: sectionLabel
                                 anchors.left: parent.left
                                 anchors.verticalCenter: parent.verticalCenter
+                                textFormat: Text.PlainText
                                 text: modelData.title.toUpperCase()
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.xs
@@ -191,6 +192,7 @@ Popup {
                                 Layout.fillWidth: true
                                 spacing: Theme.sp.s4
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: modelData.label
                                     color: Theme.fg1
                                     font.family: Theme.fontSans
@@ -218,6 +220,7 @@ Popup {
                                             Text {
                                                 id: kbdText
                                                 anchors.centerIn: parent
+                                                textFormat: Text.PlainText
                                                 text: parent.token
                                                 font.family: Theme.fontMono
                                                 font.pixelSize: Theme.fontSize.xs

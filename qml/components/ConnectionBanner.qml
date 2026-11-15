@@ -167,6 +167,7 @@ Rectangle {
         Text {
             Layout.alignment: Qt.AlignVCenter
             Layout.fillWidth: true
+            textFormat: Text.PlainText
             text: Banner.message(root.connView)
             elide: Text.ElideRight
             horizontalAlignment: Text.AlignHCenter
@@ -212,6 +213,7 @@ Rectangle {
             // width is what there is to give.
             implicitHeight: Math.max(implicitContentHeight, 28)
             contentItem: Text {
+                textFormat: Text.PlainText
                 text: reauthButton.text
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm

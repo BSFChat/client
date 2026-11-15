@@ -109,6 +109,7 @@ Dialog {
 
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: dialog.conn
                       ? "Your session on " + dialog.conn.serverUrl
                         + " has ended. Sign in again to reconnect."
@@ -145,6 +146,7 @@ Dialog {
             Text {
                 Layout.fillWidth: true
                 visible: dialog.errorMessage.length > 0
+                textFormat: Text.PlainText
                 text: dialog.errorMessage
                 // §8: a refusal a sighted user sees appear has to be said out
                 // loud, not left to be stumbled on.
