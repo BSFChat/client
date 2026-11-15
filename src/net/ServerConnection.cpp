@@ -1227,7 +1227,13 @@ void ServerConnection::applyLoginResponse(const bsfchat::LoginResponse& resp)
 
 void ServerConnection::onLoginAttemptFailed(const QString& error)
 {
-    if (m_auth.isReauthenticating()) {
+    // needsReauth, not isReauthenticating: an attempt can end in Expired
+    // before its reply lands — the prompt dismissed mid-request, the
+    // watchdog, a late 401 — and a failure arriving then is still a
+    // re-auth's. Routing it to loginFailed would have ServerManager remove a
+    // server the user only meant to sign back in to. A server being ADDED
+    // never leaves Authenticated before its first login, so it is unaffected.
+    if (m_auth.needsReauth()) {
         // Deliberately NOT loginFailed: ServerManager answers that by
         // removing the connection, which is correct for a server being added
         // and destroys a server the user has been on for months.
