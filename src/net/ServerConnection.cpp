@@ -1129,6 +1129,10 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
             if (m_voiceEngine) m_voiceEngine->setLocalUserId(canonicalId);
 #endif
             emit userIdChanged();
+            // Every permission answer is "for m_userId", so they all just
+            // changed with it (U-7).
+            ++m_permissionsGeneration;
+            emit permissionsChanged();
             emit identityCorrected();
             // The block list is stored per user id and the GET above went out
             // with the stale one, which the server answers 403 (account data
@@ -4912,7 +4916,11 @@ void ServerConnection::applyChannelPermissionsEvent(const QString& roomId, const
     if (originMs > 0) m_channelOverrideTs[key] = originMs;
 
     auto& list = m_channelOverrides[roomId];
-    // Replace any existing entry with the same target key.
+    // Replace any existing entry with the same target key. Falls through to
+    // the notify below rather than returning: editing or clearing an
+    // override used to change permissions without permissionsChanged, so
+    // nothing bound to them updated until the next channel switch (U-7).
+    bool replaced = false;
     for (int i = 0; i < list.size(); ++i) {
         if (list[i].targetKey == stateKey) {
             if (ov.allow == 0 && ov.deny == 0) {
@@ -4920,10 +4928,11 @@ void ServerConnection::applyChannelPermissionsEvent(const QString& roomId, const
             } else {
                 list[i] = ov;
             }
-            return;
+            replaced = true;
+            break;
         }
     }
-    if (ov.allow != 0 || ov.deny != 0) list.append(ov);
+    if (!replaced && (ov.allow != 0 || ov.deny != 0)) list.append(ov);
     emit serverRolesChanged();
     ++m_permissionsGeneration;
     emit permissionsChanged();

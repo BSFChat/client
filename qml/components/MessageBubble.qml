@@ -351,8 +351,10 @@ Item {
 
     // True when we can show the "Delete" menu item. Either we sent the
     // message, or we have MANAGE_MESSAGES in the active room.
+    // permissionsGeneration is the NOTIFY the invokable lacks (U-7).
     readonly property bool canDelete: isOwnMessage
         || (serverManager.activeServer
+            && serverManager.activeServer.permissionsGeneration >= 0
             && serverManager.activeServer.canManageMessages(
                    serverManager.activeServer.activeRoomId))
 
@@ -569,6 +571,7 @@ Item {
         readonly property bool isSelfUser: serverManager.activeServer
             && bubble.sender === serverManager.activeServer.userId
         readonly property bool canManageRoles: serverManager.activeServer
+            && serverManager.activeServer.permissionsGeneration >= 0
             && serverManager.activeServer.canManageRoles(
                    serverManager.activeServer.activeRoomId)
 
