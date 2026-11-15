@@ -74,9 +74,13 @@ inline bool isValidMxcUri(const QString& mxcUri)
     for (const QChar c : id) {
         const char16_t u = c.unicode();
         const bool ok = (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z')
-            || (u >= '0' && u <= '9') || u == '_' || u == '-';
+            || (u >= '0' && u <= '9') || u == '_' || u == '-' || u == '.';
         if (!ok) return false;
     }
+    // '.' is allowed because the server accepts it in legacy media ids, and
+    // nothing derives a file extension from the URL any more. A dot-only id
+    // could still name a path segment, so refuse those.
+    if (id.startsWith(QLatin1Char('.'))) return false;
     return true;
 }
 

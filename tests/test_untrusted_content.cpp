@@ -155,8 +155,9 @@ private slots:
         QVERIFY(isValidMxcUri("mxc://bsfchat.example/AbC_d-9"));
         QVERIFY(isValidMxcUri("mxc://host:8448/abc"));
         QVERIFY(isValidMxcUri("mxc://[::1]:8448/abc"));
+        QVERIFY(isValidMxcUri("mxc://s/legacy.id")); // the server accepts dotted legacy ids
         for (const char* bad : {"mxc://s/id/evil.bat", "mxc://s/id#.bat", "mxc://s/id?x=1",
-                                "mxc://s/id.exe", "mxc://s/", "mxc:///id", "mxc://s",
+                                "mxc://s/.hidden", "mxc://s/", "mxc:///id", "mxc://s",
                                 "mxc://s/i%2Fd", "mxc://s/../x", "mxc://s/id ", "http://s/id",
                                 "mxc://us@er/id", "mxc://s/\u00e9"}) {
             QVERIFY2(!isValidMxcUri(QString::fromUtf8(bad)), bad);
