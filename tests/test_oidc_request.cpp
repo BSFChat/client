@@ -139,46 +139,61 @@ private slots:
     // what a callback is allowed to mean — hence one shared parser, pinned
     // here.
 
-    void theCallbackUriIsTheSchemeTheAppAlreadyClaims()
+    void theMobileCallbackIsTheClaimedHttpsUrl()
     {
-        // Pinned against the OS-level registration: CFBundleURLTypes on iOS,
-        // and the same `bsfchat` scheme the desktop deep-link handlers claim.
-        // Changing either side alone breaks sign-in on the device only.
-        QCOMPARE(QString::fromLatin1(oidc::kNativeCallbackScheme), QString("bsfchat"));
+        // Pinned against three other places that must agree byte for byte:
+        // the identity provider's [apps] mobile_redirect_uri, the Android
+        // App Link filter (host + path), and the iOS associated domain.
         QCOMPARE(QString::fromLatin1(oidc::kNativeRedirectUri),
-                 QString("bsfchat://oauth/callback"));
-        // ASWebAuthenticationSession matches on the bare scheme; a value with
-        // "://" in it silently never matches and the sheet hangs open.
-        QVERIFY(!QString::fromLatin1(oidc::kNativeCallbackScheme).contains("://"));
-        QVERIFY(QUrl(QString::fromLatin1(oidc::kNativeRedirectUri)).isValid());
-        QVERIFY(oidc::isNativeCallbackUrl(
-            QUrl(QString::fromLatin1(oidc::kNativeRedirectUri))));
+                 QString("https://bsfchat.com/oauth/callback"));
+        QCOMPARE(QString::fromLatin1(oidc::kNativeCallbackHost), QString("bsfchat.com"));
+        QCOMPARE(QString::fromLatin1(oidc::kNativeCallbackPath), QString("/oauth/callback"));
+        const QUrl u(QString::fromLatin1(oidc::kNativeRedirectUri));
+        QVERIFY(u.isValid());
+        QCOMPARE(u.host(), QString::fromLatin1(oidc::kNativeCallbackHost));
+        QCOMPARE(u.path(), QString::fromLatin1(oidc::kNativeCallbackPath));
+        QVERIFY(oidc::isNativeCallbackUrl(u));
+    }
+
+    void eachPlatformSignsInAsItsOwnClient()
+    {
+        // Mobile is its own client so the provider can stop registering the
+        // custom scheme for desktop's. These run on a desktop build.
+        QCOMPARE(QString::fromLatin1(oidc::kDesktopClientId), QString("bsfchat-desktop"));
+        QCOMPARE(QString::fromLatin1(oidc::kMobileClientId), QString("bsfchat-mobile"));
+#if defined(Q_OS_IOS) || defined(Q_OS_ANDROID)
+        QCOMPARE(QString::fromLatin1(oidc::kClientId), QString("bsfchat-mobile"));
+#else
+        QCOMPARE(QString::fromLatin1(oidc::kClientId), QString("bsfchat-desktop"));
+#endif
     }
 
     void aCallbackIsRecognisedHoweverTheOsSpellsIt()
     {
-        for (const QString& u : {QStringLiteral("bsfchat://oauth/callback"),
-                                 QStringLiteral("bsfchat://oauth/callback/"),
-                                 QStringLiteral("bsfchat://oauth/callback?code=c&state=s"),
-                                 QStringLiteral("BSFChat://OAuth/callback?code=c"),
-                                 QStringLiteral("bsfchat://OAUTH/CALLBACK")}) {
+        for (const QString& u : {QStringLiteral("https://bsfchat.com/oauth/callback"),
+                                 QStringLiteral("https://bsfchat.com/oauth/callback/"),
+                                 QStringLiteral("https://bsfchat.com/oauth/callback?code=c&state=s"),
+                                 QStringLiteral("HTTPS://BSFChat.com/oauth/callback?code=c"),
+                                 QStringLiteral("https://bsfchat.com:443/oauth/callback")}) {
             QVERIFY2(oidc::isNativeCallbackUrl(QUrl(u)), qPrintable(u));
         }
     }
 
-    void aDeepLinkIsNotACallback()
+    void nothingElseIsACallback()
     {
-        // `bsfchat://` carries message deep links too. Confusing the two
-        // costs both ways: a deep link redeemed as a sign-in, or a sign-in
-        // reply handed to openMessageLink while the login spinner runs on.
-        for (const QString& u : {QStringLiteral("bsfchat://room/!abc:example/$evt"),
-                                 QStringLiteral("bsfchat://oauth"),
-                                 QStringLiteral("bsfchat://oauth/callback/extra"),
-                                 QStringLiteral("bsfchat://oauthcallback"),
-                                 QStringLiteral("bsfchat://evil/oauth/callback"),
-                                 QStringLiteral("https://oauth/callback"),
+        // Not the custom scheme (any app can claim it), not any other page
+        // on the site, not a lookalike host, and never a room deep link.
+        for (const QString& u : {QStringLiteral("bsfchat://oauth/callback"),
+                                 QStringLiteral("bsfchat://room/!abc:example/$evt"),
+                                 QStringLiteral("http://bsfchat.com/oauth/callback"),
+                                 QStringLiteral("https://bsfchat.com/oauth"),
+                                 QStringLiteral("https://bsfchat.com/oauth/callback/extra"),
+                                 QStringLiteral("https://bsfchat.com/privacy"),
+                                 QStringLiteral("https://bsfchat.com.evil/oauth/callback"),
+                                 QStringLiteral("https://evil.bsfchat.com/oauth/callback"),
+                                 QStringLiteral("https://bsfchat.com:8443/oauth/callback"),
+                                 QStringLiteral("https://user@bsfchat.com/oauth/callback"),
                                  QStringLiteral("http://localhost:1234/oauth/callback"),
-                                 QStringLiteral("bsfchatx://oauth/callback"),
                                  QStringLiteral("")}) {
             QVERIFY2(!oidc::isNativeCallbackUrl(QUrl(u)), qPrintable(u));
         }
@@ -328,7 +343,7 @@ private slots:
         // are hex (random_hex), and an extra parameter it may add alongside
         // them must not disturb either.
         const QUrl delivered(QStringLiteral(
-            "bsfchat://oauth/callback"
+            "https://bsfchat.com/oauth/callback"
             "?code=9f2c1ab77de40031&state=4a1f0c9e88b27d35&iss=https%3A%2F%2Fid.example"));
         QVERIFY(oidc::isNativeCallbackUrl(delivered));
         const auto r = oidc::parseCallbackQuery(QUrlQuery(delivered.query()),
@@ -348,8 +363,8 @@ private slots:
         const QUrlQuery q(url.query());
         QCOMPARE(q.queryItemValue("redirect_uri", QUrl::FullyDecoded),
                  QString::fromLatin1(oidc::kNativeRedirectUri));
-        // PKCE is the ONLY thing binding the code to this app on a
-        // private-use scheme any other app may also claim. S256, always.
+        // PKCE binds the code to this app's verifier even if the claimed
+        // redirect ever leaks it (the fallback web page). S256, always.
         QCOMPARE(q.queryItemValue("code_challenge_method"), QString("S256"));
         QCOMPARE(q.queryItemValue("code_challenge"), QString("chal"));
         // And the audience binding is untouched by the transport change.

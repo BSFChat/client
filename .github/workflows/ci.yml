@@ -178,10 +178,13 @@ jobs:
         run: |
           sudo apt-get update
           # nasm: libaom (AV1 lossless tier) needs it on x86 builders.
+          # libsecret-1-dev: QtKeychain's Secret Service (GNOME Keyring)
+          # backend, where the BSFChat ID sign-in is stored. Without the
+          # headers it silently builds KWallet-only.
           sudo apt-get install -y libssl-dev libgl1-mesa-dev libxkbcommon-dev \
             libxcb-xkb-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-shape0-dev \
             libxcb-randr0-dev libxcb-icccm4-dev libxcb-image0-dev libegl1-mesa-dev \
-            libpulse-dev libasound2-dev nasm
+            libpulse-dev libasound2-dev nasm libsecret-1-dev
           pip3 install --break-system-packages cmake==3.30.5
 
       - name: Install macOS dependencies

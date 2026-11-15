@@ -17,6 +17,36 @@ set(GAMECHAT_PROTOCOL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(bsfchat_protocol)
 
+# OS secure storage (macOS/iOS Keychain, Windows Credential Manager, Linux
+# Secret Service via libsecret, Android Keystore) for the BSFChat ID refresh
+# token, which can mint sign-ins to any server and so must never sit in the
+# plain settings file. See src/core/SecretStore.h. OFF builds keep the token
+# in memory only: signed in until the app quits, never on disk.
+option(BSFCHAT_ENABLE_KEYCHAIN "Store sign-in secrets in the OS keychain" ON)
+if(BSFCHAT_ENABLE_KEYCHAIN)
+    FetchContent_Declare(
+        qtkeychain
+        GIT_REPOSITORY https://github.com/frankosterfeld/qtkeychain.git
+        GIT_TAG        0.15.0
+        GIT_SHALLOW    TRUE
+    )
+    set(BUILD_WITH_QT6 ON CACHE BOOL "" FORCE)
+    # Static by default here (BUILD_SHARED_LIBS is OFF); QtKeychain's own
+    # QTKEYCHAIN_STATIC switch is deprecated in favour of that.
+    set(BUILD_TEST_APPLICATION OFF CACHE BOOL "" FORCE)
+    set(BUILD_TRANSLATIONS OFF CACHE BOOL "" FORCE)
+    # Its own autotests need a live keyring and are not ours to run. Its
+    # include(CTest) declares option(BUILD_TESTING ON); a plain OFF here
+    # (respected under CMP0077 NEW) keeps them out. Left set afterwards on
+    # purpose: before QtKeychain nothing defined BUILD_TESTING, so the other
+    # dependencies (opus, libaom) saw it false and registered no tests of
+    # their own. Our tests/ do not depend on it.
+    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+    set(BUILD_TESTING OFF)
+    FetchContent_MakeAvailable(qtkeychain)
+    unset(CMAKE_POLICY_DEFAULT_CMP0077)
+endif()
+
 # Voice chat dependencies (libdatachannel + opus)
 if(BSFCHAT_ENABLE_VOICE)
     # Codec/media deps link static. Something in the dependency graph

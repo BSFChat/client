@@ -67,7 +67,8 @@ void release_session()
 
 } // namespace
 
-bool start(const QUrl& authUrl, const QString& callbackScheme, Handler handler)
+bool start(const QUrl& authUrl, const QString& callbackHost, const QString& callbackPath,
+           Handler handler)
 {
     // A second start() replaces the first. Drop the old one without firing
     // its handler; the caller (IdentityClient::startLogin) has already
@@ -89,10 +90,10 @@ bool start(const QUrl& authUrl, const QString& callbackScheme, Handler handler)
     // nested dispatch_async block below gets a working copy too.
     Handler done = std::move(handler);
 
-    g_session = [[ASWebAuthenticationSession alloc]
-              initWithURL:url
-        callbackURLScheme:callbackScheme.toNSString()
-        completionHandler:^(NSURL* _Nullable callbackURL, NSError* _Nullable error) {
+    // The completion, built first so the session itself can be created
+    // inside the availability check below.
+    void (^completion)(NSURL* _Nullable, NSError* _Nullable) =
+        ^(NSURL* _Nullable callbackURL, NSError* _Nullable error) {
             // Always back to the Qt main thread before touching anything of
             // ours. AppKit/UIKit calls this on the main queue today, but the
             // signal chain this ends in (IdentityClient -> ServerConnection ->
@@ -131,7 +132,26 @@ bool start(const QUrl& authUrl, const QString& callbackScheme, Handler handler)
                      QUrl(QString::fromNSString(callbackURL.absoluteString)),
                      QString());
             });
-        }];
+        };
+
+    if (@available(iOS 17.4, *)) {
+        ASWebAuthenticationSessionCallback* callback =
+            [ASWebAuthenticationSessionCallback callbackWithHTTPSHost:callbackHost.toNSString()
+                                                                 path:callbackPath.toNSString()];
+        g_session = [[ASWebAuthenticationSession alloc] initWithURL:url
+                                                           callback:callback
+                                                  completionHandler:completion];
+    } else {
+        // No custom-scheme fallback: see the header. Reported through the
+        // handler on the next turn of the loop so the caller's state is
+        // settled first, like every other ending.
+        release_session();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            done(Outcome::Failed, QUrl(),
+                 QStringLiteral("Signing in needs iOS 17.4 or later. Update iOS and try again."));
+        });
+        return true;
+    }
 
     g_session.presentationContextProvider = g_anchor;
     // NO, explicitly: the point of ASWebAuthenticationSession over an

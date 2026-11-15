@@ -71,6 +71,13 @@ Dialog {
     // that answers it lands on the confirmation screen while the dozen
     // that arrive during an identity sync do not each re-enter it.
     property bool awaitingSingleJoin: false
+    // Set by "Join" when this device is signed in to a BSFChat ID: once the
+    // address is checked, a server that uses the same ID is joined straight
+    // away, no browser and no second click. Anything else falls back to the
+    // ordinary choices below.
+    property bool joinRequested: false
+    // The page the privacy line links to.
+    readonly property string howServersWorkUrl: "https://bsfchat.com/servers/"
     // Shown on the chooser after "not you?": the local session is gone but
     // the browser's is not, and the next attempt will sail straight back in
     // as the same person unless they know that.
@@ -164,6 +171,18 @@ Dialog {
         dialog.open();
         dialog.mode = "address";
         urlField.forceActiveFocus();
+    }
+
+    // The one way a BSFChat ID join starts, from the button or from "Join".
+    // With a signed-in session ServerManager gets the token without the
+    // browser; otherwise this opens the browser sign-in as before.
+    function startOidcJoin() {
+        dialog.errorMessage = "";
+        dialog.manualAuthUrl = "";
+        dialog.oidcInProgress = true;
+        dialog.awaitingSingleJoin = true;
+        dialog.beginAttempt();
+        serverManager.addServerWithOidc(dialog.targetUrl());
     }
 
     function probeFailed() {
@@ -355,6 +374,13 @@ Dialog {
             dialog.probeOutcome = outcome;
             dialog.probeRedirected = redirected;
             dialog.probeNote = note;
+            // "Join" while signed in: a server that uses this BSFChat ID is
+            // joined as soon as its address checks out, no second click.
+            var join = dialog.joinRequested;
+            dialog.joinRequested = false;
+            if (join && dialog.mode === "address" && dialog.oidcAvailable
+                    && serverManager.usesSignedInIdentity(dialog.oidcProviderUrl))
+                dialog.startOidcJoin();
         }
         function onLoginSuccess(serverUrl) {
             // Another server's success — a saved one re-authenticating in
@@ -470,6 +496,7 @@ Dialog {
         dialog.showPasswordFallback = false;
         dialog.mode = "choose";
         dialog.awaitingSingleJoin = false;
+        dialog.joinRequested = false;
         dialog.joinedUrls = [];
         dialog.browserSessionNote = false;
         dialog.identitySyncInProgress = false;
@@ -937,12 +964,12 @@ Dialog {
                         id: checkButton
                         enabled: urlField.text.trim() !== "" && !dialog.isConnecting && !dialog.oidcInProgress && !dialog.checkingFlows
                         Accessible.role: Accessible.Button
-                        Accessible.name: qsTr("Check")
+                        Accessible.name: serverManager.identitySignedIn ? qsTr("Join") : qsTr("Check")
                         Accessible.description: qsTr("Look up which sign-in methods this address offers")
                         Accessible.onPressAction: if (checkButton.enabled)
                                                       checkButton.clicked()
                         contentItem: Text {
-                            text: "Check"
+                            text: serverManager.identitySignedIn ? "Join" : "Check"
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.sm
                             font.weight: Theme.fontWeight.medium
@@ -964,10 +991,37 @@ Dialog {
                         }
                         onClicked: {
                             dialog.errorMessage = "";
+                            // Signed in: check AND join in one press when the
+                            // server uses this BSFChat ID (onLoginFlowsChecked).
+                            dialog.joinRequested = serverManager.identitySignedIn;
                             dialog.beginCheck(urlField.text.trim());
                         }
                     }
                 }
+            }
+
+            // What joining a server means for privacy, in one line, with a
+            // link to the longer explanation. Every server is run by someone
+            // else; the user should know what they see before pressing Join.
+            Text {
+                id: privacyNote
+                Layout.fillWidth: true
+                visible: dialog.mode === "address"
+                text: "Each server is run by its own operators. Joining shares your name "
+                    + "and profile with them, and they can read what you post there. "
+                    + "<a href=\"" + dialog.howServersWorkUrl + "\">How servers work</a>"
+                textFormat: Text.StyledText
+                linkColor: Theme.accent
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                color: Theme.fg3
+                wrapMode: Text.Wrap
+                onLinkActivated: (link) => linkOpener.open(link)
+                Accessible.role: Accessible.StaticText
+                Accessible.name: qsTr("Each server is run by its own operators. Joining shares "
+                                      + "your name and profile with them, and they can read what "
+                                      + "you post there.")
+                HoverHandler { cursorShape: privacyNote.hoveredLink ? Qt.PointingHandCursor : Qt.ArrowCursor }
             }
 
             // Checking indicator
@@ -1030,7 +1084,11 @@ Dialog {
                 Accessible.onPressAction: if (oidcButton.enabled)
                                               oidcButton.clicked()
                 contentItem: Text {
-                    text: "Sign in with BSFChat ID"
+                    text: serverManager.usesSignedInIdentity(dialog.oidcProviderUrl)
+                          ? (serverManager.identityAccountName !== ""
+                             ? "Join as " + serverManager.identityAccountName
+                             : "Join with your BSFChat ID")
+                          : "Sign in with BSFChat ID"
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.md
                     font.weight: Theme.fontWeight.semibold
@@ -1045,14 +1103,7 @@ Dialog {
                     implicitHeight: Theme.touchTarget
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                 }
-                onClicked: {
-                    dialog.errorMessage = "";
-                    dialog.manualAuthUrl = "";
-                    dialog.oidcInProgress = true;
-                    dialog.awaitingSingleJoin = true;
-                    dialog.beginAttempt();
-                    serverManager.addServerWithOidc(dialog.targetUrl());
-                }
+                onClicked: dialog.startOidcJoin()
             }
 
             // Identity-only servers (the official one) have no register form to

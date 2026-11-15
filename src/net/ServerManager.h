@@ -14,6 +14,7 @@ class Settings;
 class MatrixClient;
 class IdentityClient;
 class IdentityApiClient;
+class IdentitySession;
 
 class ServerManager : public QObject {
     Q_OBJECT
@@ -42,6 +43,11 @@ class ServerManager : public QObject {
                NOTIFY identityAccountChanged)
     Q_PROPERTY(QString identityAccountId READ identityAccountId
                NOTIFY identityAccountChanged)
+    // Auth first: whether this device holds a BSFChat ID session (so joining
+    // a server that uses that ID needs no browser), and whether it survives
+    // a restart (false = no OS keychain; kept for this run only).
+    Q_PROPERTY(bool identitySignedIn READ identitySignedIn NOTIFY identityAccountChanged)
+    Q_PROPERTY(bool identityRemembered READ identityRemembered NOTIFY identityAccountChanged)
 
 public:
     explicit ServerManager(Settings* settings, QObject* parent = nullptr);
@@ -97,6 +103,13 @@ public:
                                                const QString& serverUrl,
                                                const QString& serverName);
     Q_INVOKABLE void removeServer(int index);
+    // The user removing or signing out of a server: removeServer, plus taking
+    // it off the account's server list when signed in to BSFChat ID, so the
+    // launch-time restore (and the user's other devices) do not quietly join
+    // it again. removeServer alone is for internal clean-up — a failed join,
+    // or "not you?" dropping someone else's servers — and must not edit the
+    // account's list.
+    Q_INVOKABLE void leaveServer(int index);
     Q_INVOKABLE void setActiveServer(int index);
     // Repoint an already-added server at a new base URL (e.g. the
     // machine's IP changed, or http vs https was wrong). Persists the
@@ -135,6 +148,12 @@ public:
     // the authorize request, which lives in the OIDC flow. Until that
     // lands the UI says so in words rather than pretending.
     Q_INVOKABLE void forgetIdentitySession();
+
+    // Does a server whose login flows name `providerUrl` use the BSFChat ID
+    // this device is signed in to? If so, joining it needs no browser.
+    Q_INVOKABLE bool usesSignedInIdentity(const QString& providerUrl) const;
+    bool identitySignedIn() const;
+    bool identityRemembered() const;
 
     // Aggregate every connection's `directRooms()` into a single
     // flat list with the server's URL + human name stamped on each
@@ -235,6 +254,11 @@ signals:
     // dead-end wearing different words.
     void identityHasNoServers();
     void identityAccountChanged();
+    // The provider ended this device's BSFChat ID session (expired, revoked).
+    void identitySessionEnded(const QString& reason);
+    // Once per run, when a sign-in is held in memory only because the
+    // system has no secure store (see core/ServerSecrets.h).
+    void credentialsNotPersisted(const QString& message);
     // No browser opened for a sign-in — the account-level one or any
     // server's — and `authUrl` is the page the user must open by hand to
     // finish it. One manager-level signal for every sign-in path, because
@@ -261,7 +285,8 @@ private:
     // normalise, which costs nothing and is pure.
     void addServerResolved(const QString& url, const QString& username, const QString& password);
     void registerServerResolved(const QString& url, const QString& username, const QString& password);
-    void addServerWithOidcResolved(const QString& url);
+    // allowBrowser = false: join only if it needs no browser (launch restore).
+    void addServerWithOidcResolved(const QString& url, bool allowBrowser = true);
 
     void onLoginSuccess(ServerConnection* conn);
     // Write this connection's live credentials into its settings row,
@@ -305,6 +330,13 @@ private:
     // /api/servers endpoints with the resulting access token.
     IdentityClient* m_identityClient = nullptr;
     IdentityApiClient* m_identityApi = nullptr;
+    IdentitySession* m_identitySession = nullptr;
+    void restoreIdentitySession();
+    void fetchIdentityServers(bool interactive);
+    void signInWithSessionOrBrowser(ServerConnection* conn, const QString& providerUrl);
+    void revokeOnServer(const QString& homeserver, const QString& accessToken);
+    void noteIfNotPersisted();
+    bool m_warnedNotPersisted = false;
     QString m_identityUrl;
     QString m_identityAccessToken;
     bsfchat::IdTokenAccount m_identityAccount;

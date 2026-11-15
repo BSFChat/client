@@ -11,6 +11,8 @@
 #include <QString>
 #include <QTimer>
 
+#include <functional>
+
 #include "store/RoomTimelineCache.h"
 #include "util/HistoryFill.h"
 #include "util/MentionRenderer.h"
@@ -592,6 +594,26 @@ public:
     Q_INVOKABLE void resetUnreadForRoom(const QString& roomId);
 
     Q_INVOKABLE void loginWithOidc(const QString& providerUrl);
+
+    // Sign in with an id_token obtained without a browser (IdentitySession's
+    // refresh grant). The token must already be checked for this server's
+    // audience — signInResource() is the value it was requested for.
+    void loginWithIdToken(const QString& idToken);
+    // The RFC 8707 resource a BSFChat ID token for this server must name:
+    // derived from the homeserver it will be POSTED to, never from anything
+    // the server advertised. Empty when the address cannot be an audience.
+    QString signInResource() const;
+    // Where requests actually go (after .well-known), as opposed to the
+    // address the server was saved under.
+    QString homeserverUrl() const;
+    // How a BSFChat ID re-authentication signs in. ServerManager installs
+    // its IdentitySession here, so re-auth on a server that trusts the
+    // signed-in ID needs no browser; unset = the browser (loginWithOidc).
+    using OidcSignIn = std::function<void(const QString& providerUrl)>;
+    void setOidcSignIn(OidcSignIn signIn) { m_oidcSignIn = std::move(signIn); }
+    // The account is being signed out of / removed from this device: close
+    // and delete its LocalCache file (plaintext messages and room state).
+    void forgetLocalData();
     // Discard whatever credential we are holding and run the server's
     // current login flow from scratch. The only thing that recovers a
     // session the homeserver has purged.
@@ -1340,6 +1362,7 @@ private:
     // startSync() resume incrementally instead of asking the server for a
     // full initial sync on every launch.
     LocalCache* m_cache;
+    OidcSignIn m_oidcSignIn;
     // True only while a cached snapshot is being replayed through
     // processSyncResponse(). Suppresses the two things in there that must
     // react to *server* syncs and not to a local replay: the first-sync

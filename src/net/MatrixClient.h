@@ -85,6 +85,9 @@ public:
     void joinRoom(const QString& roomIdOrAlias);
     void leaveRoom(const QString& roomId);
     void deleteRoom(const QString& roomId);
+    // POST /logout: the server deletes this access token (C-4). The result
+    // is only for logging — the caller forgets the token either way.
+    void logout();
     // GET /joined_rooms. `requestId` comes back on joinedRoomsResult so the
     // caller can tell its current request apart from one issued by an earlier
     // session (a re-login): that answer describes another account's rooms and
@@ -456,8 +459,14 @@ signals:
     void joinRoomSuccess(const QString& roomId);
     void joinRoomError(const QString& error);
 
+    void logoutFinished(bool ok);
     void leaveRoomSuccess(const QString& roomId);
     void leaveRoomError(const QString& error);
+
+    // DELETE /rooms/{id} used to be fire-and-forget, so a refused delete
+    // looked exactly like one that worked.
+    void deleteRoomSuccess(const QString& roomId);
+    void deleteRoomError(const QString& roomId, int status, const QString& error);
 
     void joinedRoomsResult(const QString& requestId, const QStringList& roomIds);
     void roomMembersResult(const QString& roomId, const QJsonArray& members);

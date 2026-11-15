@@ -1049,6 +1049,18 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         emitFeedback(text, QStringLiteral("error"));
     });
 
+    // deleteChannel already dropped the room (and its cache rows) through
+    // dropRoomsGoneForMe; a refusal must still reach the user.
+    connect(m_client, &MatrixClient::deleteRoomError, this,
+            [this](const QString& roomId, int status, const QString& error) {
+        Q_UNUSED(roomId);
+        // The sidebar removed the room optimistically; the next full sync puts
+        // a room that still exists back. What must not happen is silence.
+        QString text = error.isEmpty() ? tr("Could not delete the channel.") : error;
+        if (status == 403) text = tr("Not allowed: %1").arg(text);
+        emitFeedback(text, QStringLiteral("error"));
+    });
+
     // Handle leave room success
     connect(m_client, &MatrixClient::leaveRoomSuccess, this, [this](const QString& roomId) {
         dropRoomsGoneForMe({roomId}, RoomGoneCause::OwnAction);
@@ -1319,6 +1331,32 @@ void ServerConnection::setIdentityProviderUrl(const QString& url)
     m_storedIdentityProviderUrl = url;
 }
 
+QString ServerConnection::homeserverUrl() const
+{
+    return m_client->homeserver();
+}
+
+void ServerConnection::forgetLocalData()
+{
+    m_syncLoop->stop();
+    m_timelines.clear();
+    m_persistedTimelineGen.clear();
+    m_cache->close();
+    m_cacheWired = false;
+    LocalCache::removeFilesFor(m_userId, m_serverUrl);
+}
+
+QString ServerConnection::signInResource() const
+{
+    return oidc::resourceForHomeserver(m_client->homeserver());
+}
+
+void ServerConnection::loginWithIdToken(const QString& idToken)
+{
+    awaitLoginReply();
+    m_client->loginWithToken(idToken);
+}
+
 void ServerConnection::loginWithOidc(const QString& providerUrl)
 {
     // "Fail loudly" — startLogin("") opens no browser, makes no request and
@@ -1502,7 +1540,8 @@ void ServerConnection::beginReauth()
                 }
             }
             if (!providerUrl.isEmpty()) {
-                loginWithOidc(providerUrl);
+                if (m_oidcSignIn) m_oidcSignIn(providerUrl);
+                else loginWithOidc(providerUrl);
                 return;
             }
             if (passwordFlow) {

@@ -124,6 +124,12 @@ public:
     // to be unusable or belongs to somebody else.
     void clearAll();
 
+    // Delete the database file (and its WAL/SHM) of one (user, homeserver)
+    // pair — the account's messages and room state in plaintext on disk —
+    // when that account is signed out of or removed from this device (C-4).
+    // Close any LocalCache open on it first. True when nothing is left.
+    static bool removeFilesFor(const QString& userId, const QString& homeserver);
+
     // Drop everything held for ONE room — its state snapshot, unread row and
     // timeline window — leaving the token and every other room alone. For a
     // room that is gone for this account (deleted, left, kicked, banned, or

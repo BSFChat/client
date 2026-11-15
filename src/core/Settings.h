@@ -8,6 +8,8 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include "core/ServerSecrets.h"
+
 class QMediaDevices;
 
 class Settings : public QObject {
@@ -151,12 +153,17 @@ public:
         QString accessToken;
         QString deviceId;
         QString displayName;
-        QString identityRefreshToken;
         QString identityProviderUrl;
     };
 
-    // Server persistence
+    // Server persistence. accessToken is NOT in the settings file: it is
+    // kept in the OS keychain per (url, userId) through ServerSecrets, or in
+    // memory only where there is no keychain. The first call moves any
+    // plaintext token a previous build left in the file (C-5).
     QList<ServerEntry> savedServers() const;
+    // Whether saved sign-ins survive a restart on this system (false = no
+    // secure store: every server needs signing in again next launch).
+    bool credentialsPersist() const { return m_secrets.persistent(); }
     void addServer(const ServerEntry& entry);
     void removeServer(int index);
     void updateServer(int index, const ServerEntry& entry);
@@ -164,6 +171,18 @@ public:
     // Active server
     int activeServerIndex() const;
     void setActiveServerIndex(int index);
+
+    // The BSFChat ID this device is signed in to: which provider, and who.
+    // Not secret, so it lives here; the refresh token that proves it lives
+    // only in SecretStore (the OS keychain). Empty provider = signed out.
+    struct IdentityRecord {
+        QString providerUrl;
+        QString accountName;
+        QString accountId;
+    };
+    IdentityRecord identityRecord() const;
+    void setIdentityRecord(const IdentityRecord& record);
+    void clearIdentityRecord();
 
     // UI preferences
     int fontSize() const;
@@ -501,7 +520,11 @@ signals:
     void windowVisibilityChanged();
 
 private:
+    void writeServers(const QList<ServerEntry>& servers);
+    void ensureSecretsMigrated() const;
     mutable QSettings m_settings;
+    mutable ServerSecrets m_secrets;
+    mutable bool m_secretsMigrated = false;
     // In-memory mirrors of the two per-room values the sidebar asks about
     // for EVERY channel row on every unread/mute generation bump. QSettings
     // reads are a lock plus a lookup (and the muted list was a QStringList

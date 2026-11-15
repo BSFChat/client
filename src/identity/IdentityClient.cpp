@@ -288,7 +288,8 @@ void IdentityClient::openAuthorizationPage()
     // Present in-process. QDesktopServices::openUrl here would hand off to
     // Safari and suspend us, which is the bug this branch exists to fix.
     const bool presented = ios_auth_session::start(
-        authUrl, QString::fromLatin1(oidc::kNativeCallbackScheme),
+        authUrl, QString::fromLatin1(oidc::kNativeCallbackHost),
+        QString::fromLatin1(oidc::kNativeCallbackPath),
         [this](ios_auth_session::Outcome outcome, const QUrl& callbackUrl,
                const QString& error) {
             switch (outcome) {
@@ -591,7 +592,9 @@ void IdentityClient::exchangeCodeForTokens(const QString& code)
     body.addQueryItem("grant_type", "authorization_code");
     body.addQueryItem("code", code);
     body.addQueryItem("redirect_uri", redirectUri);
-    body.addQueryItem("client_id", "bsfchat-desktop");
+    // The same client the authorization was started as (oidc::kClientId):
+    // /token refuses a code redeemed by a different client.
+    body.addQueryItem("client_id", QString::fromLatin1(oidc::kClientId));
     body.addQueryItem("code_verifier", m_codeVerifier);
     // RFC 8707 2.2: repeated at the token endpoint; the provider refuses it
     // unless it matches the grant, so a mixed-up code cannot be redeemed for

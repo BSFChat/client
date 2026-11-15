@@ -91,8 +91,17 @@ QString MediaDownloader::cacheKeyForUrl(const QString& url)
     // (util/MediaUrl.h) — and the rule matters more than it did, not less. A
     // ticket is replaced every few minutes, so a key that included it would
     // miss on essentially every fetch and the cache would never hit at all.
-    const int q = url.indexOf(QLatin1Char('?'));
-    return q < 0 ? url : url.left(q);
+    //
+    // The fragment is not part of it either, and that one is a security rule:
+    // QNetworkAccessManager never sends a fragment, so `mxc://hs/<id>#.exe`
+    // fetches exactly the object `mxc://hs/<id>` does — but a key that kept
+    // "#.exe" gave cachePathFor a sender-chosen extension to save it under.
+    qsizetype cut = url.size();
+    for (const QChar c : {QLatin1Char('?'), QLatin1Char('#')}) {
+        const qsizetype i = url.indexOf(c);
+        if (i >= 0 && i < cut) cut = i;
+    }
+    return url.left(cut);
 }
 
 QString MediaDownloader::cachePathFor(const QString& url) const

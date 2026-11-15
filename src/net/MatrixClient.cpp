@@ -432,12 +432,41 @@ void MatrixClient::joinRoom(const QString& roomIdOrAlias)
     });
 }
 
+void MatrixClient::logout()
+{
+    if (m_accessToken.isEmpty()) {
+        emit logoutFinished(true);
+        return;
+    }
+    auto* reply = makeRequest("POST", QString::fromUtf8(bsfchat::api_path::kLogout), "{}");
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        // 401: the token was already dead, which is the outcome we wanted.
+        const bool ok = reply->error() == QNetworkReply::NoError || status == 401;
+        if (!ok) {
+            qWarning().noquote() << "[MatrixClient] /logout failed:" << reply->errorString();
+        }
+        emit logoutFinished(ok);
+    });
+}
+
 void MatrixClient::deleteRoom(const QString& roomId)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                    + QUrl::toPercentEncoding(roomId);
     auto* reply = makeRequest("DELETE", path);
-    connect(reply, &QNetworkReply::finished, this, [reply]() { reply->deleteLater(); });
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const auto doc = QJsonDocument::fromJson(reply->readAll());
+            const QString error = doc.isObject() ? doc.object().value("error").toString() : QString();
+            emit deleteRoomError(roomId, status, error);
+            return;
+        }
+        emit deleteRoomSuccess(roomId);
+    });
 }
 
 void MatrixClient::leaveRoom(const QString& roomId)

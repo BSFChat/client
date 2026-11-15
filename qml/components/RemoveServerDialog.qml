@@ -6,7 +6,7 @@ import BSFChat
 // Confirm before a server leaves this device. One component for every place
 // that can do it — the server rail's "Remove server…", desktop settings' "Log
 // out" and the mobile overflow's "Sign out" — because all three call the same
-// serverManager.removeServer() and drop the saved login with it (U-1). The two
+// serverManager.leaveServer() and drop the saved login with it (U-1). The two
 // sign-out entry points used to do that on the first tap, with no way back
 // short of finding the server's address and signing in again.
 //
@@ -47,7 +47,7 @@ Dialog {
         }
         if (removeServerDialog._url === "") idx = removeServerDialog.serverIndex;
         removeServerDialog.close();
-        if (idx >= 0) serverManager.removeServer(idx);
+        if (idx >= 0) serverManager.leaveServer(idx);
     }
 
     readonly property string _name: serverLabel.length > 0 ? serverLabel : "this server"
