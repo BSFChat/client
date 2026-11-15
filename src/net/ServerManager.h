@@ -78,11 +78,14 @@ public:
     // desktop never did.
     void markActiveRoomsRead();
     Q_INVOKABLE void checkLoginFlows(const QString& url);
-    // bsfchat::normaliseServerUrl, for QML. LoginDialog compares the URL a
-    // loginError / serverProbed reply names against the one it is attempting,
-    // and has to spell both the way this side does or a trailing slash, an
-    // upper-case host or a missing scheme makes its own reply look foreign.
-    Q_INVOKABLE QString normaliseServerUrl(const QString& url) const;
+    // "Same server?" key for QML: bsfchat::normaliseServerUrl, then the
+    // roster's own comparison (net/ServerDedup.h serverComparisonKey).
+    // LoginDialog compares the URL a loginError / loginSuccess /
+    // serverProbed reply names against the one it is attempting, and has to
+    // spell both the way this side does — or a trailing slash, an upper-case
+    // host, a missing scheme or an explicit :443 makes its own reply look
+    // foreign. Empty for text that is not an address at all.
+    Q_INVOKABLE QString serverUrlKey(const QString& url) const;
     Q_INVOKABLE void registerServer(const QString& url, const QString& username, const QString& password);
 
     // Identity-first login: authenticate to the identity provider directly,

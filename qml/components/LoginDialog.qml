@@ -118,13 +118,14 @@ Dialog {
     property string probeRequest: ""
     property var _pendingFlows: null
 
-    // Spelled the way the C++ side spells it (bsfchat::normaliseServerUrl),
-    // or the raw text when it is not an address at all — "x is not a
-    // server address" errors name the raw text, and must still match.
+    // Compared the way the C++ side compares servers
+    // (ServerManager.serverUrlKey), or as the raw text when it is not an
+    // address at all — "x is not a server address" errors name the raw
+    // text, and must still match.
     function normUrl(u) {
         var raw = (u || "").trim();
         if (raw === "") return "";
-        var n = serverManager.normaliseServerUrl(raw);
+        var n = serverManager.serverUrlKey(raw);
         return n !== "" ? n : raw;
     }
 
