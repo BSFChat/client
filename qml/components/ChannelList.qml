@@ -2815,10 +2815,30 @@ Rectangle {
     // empty-state vocabulary we use elsewhere: accent-tinted icon tile,
     // headline, subtext, then a primary action pulling the LoginDialog.
     ColumnLayout {
+        id: welcomeState
         anchors.centerIn: parent
         visible: serverManager.activeServer === null
         width: Math.min(parent.width - Theme.sp.s7 * 2, 280)
         spacing: Theme.sp.s4
+
+        // rowCount() is a function, not a property: a binding that calls it
+        // is evaluated once and never again. So the welcome copy and both
+        // CTAs kept whatever the count was when this view was created — on a
+        // launch with one saved server, signing out of it (or a failed add
+        // removing it) left "Pick a server from the sidebar" over an empty
+        // sidebar, with the "Add a server" button hidden. Re-read on every
+        // insert/remove instead.
+        property int serverCount: serverManager.servers ? serverManager.servers.rowCount() : 0
+        function _recount() {
+            welcomeState.serverCount = serverManager.servers ? serverManager.servers.rowCount() : 0;
+        }
+        Connections {
+            target: serverManager.servers
+            ignoreUnknownSignals: true
+            function onRowsInserted() { welcomeState._recount(); }
+            function onRowsRemoved() { welcomeState._recount(); }
+            function onModelReset() { welcomeState._recount(); }
+        }
 
         Rectangle {
             Layout.alignment: Qt.AlignHCenter
@@ -2837,10 +2857,7 @@ Rectangle {
         }
         Text {
             Layout.alignment: Qt.AlignHCenter
-            text: {
-                var count = serverManager.servers ? serverManager.servers.rowCount() : 0;
-                return count === 0 ? "Welcome to BSFChat" : "No server selected";
-            }
+            text: welcomeState.serverCount === 0 ? "Welcome to BSFChat" : "No server selected"
             color: Theme.fg0
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.lg
@@ -2852,8 +2869,7 @@ Rectangle {
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
             text: {
-                var count = serverManager.servers ? serverManager.servers.rowCount() : 0;
-                return count === 0
+                return welcomeState.serverCount === 0
                     ? "Add a server to start chatting. Sign in with a BSFChat ID to pull in all the servers you've joined."
                     : "Pick a server from the sidebar to see its channels.";
             }
@@ -2871,7 +2887,7 @@ Rectangle {
             id: addServerCta
             Layout.alignment: Qt.AlignHCenter
             Layout.topMargin: Theme.sp.s2
-            visible: serverManager.servers && serverManager.servers.rowCount() === 0
+            visible: welcomeState.serverCount === 0
             Accessible.role: Accessible.Button
             Accessible.name: qsTr("Add a server")
             Accessible.onPressAction: Window.window.openLoginDialog()
@@ -2912,7 +2928,7 @@ Rectangle {
         Button {
             id: joinByAddressCta
             Layout.alignment: Qt.AlignHCenter
-            visible: serverManager.servers && serverManager.servers.rowCount() === 0
+            visible: welcomeState.serverCount === 0
             Accessible.role: Accessible.Button
             Accessible.name: qsTr("Join a server by address")
             Accessible.description: qsTr(
