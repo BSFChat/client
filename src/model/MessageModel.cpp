@@ -41,6 +41,22 @@ QString renderBodyHtml(const QString& body, const QString& msgtype)
                                               : MarkdownParser::plainToHtml(body);
 }
 
+// Whether a prose row's display markup says anything plain text would not.
+// `formatted` is what the bubble would otherwise hand a RichText TextEdit;
+// when it is exactly the escape-only promotion of the body (or empty), the
+// rendered result is the body verbatim, line breaks included, and the row can
+// take the PlainText path. Comparing against plainToHtml rather than sniffing
+// the body for markdown characters keeps the rule exact: whatever markdown,
+// link, channel or mention rendering produced, if it changed a single byte the
+// row stays rich.
+bool rendersAsPlainText(const QString& body, const QString& formatted,
+                        const QString& msgtype)
+{
+    if (isMediaMsgtype(msgtype)) return false;
+    if (formatted.isEmpty()) return true;
+    return formatted == MarkdownParser::plainToHtml(body);
+}
+
 } // namespace
 
 MessageModel::MessageModel(QObject* parent)
@@ -66,6 +82,7 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
     case SenderDisplayNameRole: return msg.senderDisplayName;
     case SenderIsBotRole: return msg.senderIsBot;
     case DeliveryStateRole: return static_cast<int>(msg.delivery);
+    case PlainBodyRole: return rendersAsPlainText(msg.body, msg.formattedBody, msg.msgtype);
     case BodyRole: return msg.body;
     case FormattedBodyRole: return msg.formattedBody;
     case TimestampRole: return msg.timestamp;
@@ -134,7 +151,8 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {MentionsMeRole, "mentionsMe"},
         {MentionsRoomRole, "mentionsRoom"},
         {SenderIsBotRole, "senderIsBot"},
-        {DeliveryStateRole, "deliveryState"}
+        {DeliveryStateRole, "deliveryState"},
+        {PlainBodyRole, "plainBody"}
     };
 }
 
@@ -519,7 +537,8 @@ void MessageModel::adoptEventId(int row, const QString& eventId, qint64 serverTs
 
     auto idx = index(row);
     emit dataChanged(idx, idx, {EventIdRole, DeliveryStateRole, BodyRole,
-                                FormattedBodyRole, EditedRole, ReactionsRole});
+                                FormattedBodyRole, EditedRole, ReactionsRole,
+                                PlainBodyRole});
 }
 
 void MessageModel::appendLocalEcho(const QString& localId, const QString& body,
@@ -1091,7 +1110,8 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
         }
         if (applyEditToEntry(m_messages[i], edit)) {
             auto idx = index(i);
-            emit dataChanged(idx, idx, {BodyRole, FormattedBodyRole, EditedRole});
+            emit dataChanged(idx, idx, {BodyRole, FormattedBodyRole, EditedRole,
+                                         PlainBodyRole});
         }
         return;
     }

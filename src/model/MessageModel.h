@@ -79,7 +79,15 @@ public:
         // Delivery state of a message this client sent, for the tick/retry
         // affordance on the bubble. Always DeliveryConfirmed for anything
         // that arrived over /sync — see DeliveryState.
-        DeliveryStateRole
+        DeliveryStateRole,
+        // True when the body would render the same as plain text: its display
+        // markup is nothing but the escaped body with <br> line breaks — no
+        // markdown, no links, no #channel or mention anchors, no sender
+        // formatting. MessageBubble shows such a body as TextEdit.PlainText
+        // instead of RichText, which skips the HTML import for the common
+        // case of an ordinary one-line message. Media rows are never plain
+        // (they show no body text at all).
+        PlainBodyRole
     };
 
     // Where a row is between "the user pressed Enter" and "the server has

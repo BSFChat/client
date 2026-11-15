@@ -26,6 +26,10 @@ Item {
     property bool senderIsBot: false
     property string body
     property string formattedBody
+    // The model's plainBody role: formattedBody is nothing but the escaped
+    // body (no markdown, links, mentions or sender formatting), so the body
+    // can be shown as plain text without changing a pixel of meaning.
+    property bool plainBody: false
     property real timestamp
     property string msgtype: "m.text"
     property string mediaUrl: ""
@@ -1594,7 +1598,16 @@ Item {
                 // the badge — re-rendered it as one line. Building body HTML
                 // in here is untestable without a GUI; test_message_render
                 // fails if it comes back.
+                // The cheap path. Most messages are a line of ordinary prose,
+                // and for those the markup the model built is only the
+                // escaped body: handing it to a RichText TextEdit pays for an
+                // HTML import to show what PlainText shows directly — same
+                // characters, same line breaks, still selectable. Edited and
+                // /me rows keep RichText for the badge and the prefix.
+                readonly property bool _plain: bubble.plainBody && !bubble.edited
+                                               && bubble.msgtype !== "m.emote"
                 text: {
+                    if (_plain) return bubble.body;
                     var base = bubble.formattedBody !== "" ? bubble.formattedBody : bubble.body;
                     var suffix = '<span style="color:#8e9297;font-size:small"> (edited)</span>';
                     // m.emote ("/me foo") renders as "<sender> foo" in italics
@@ -1621,9 +1634,10 @@ Item {
                     // every prose body it holds.
                     return base + suffix;
                 }
-                textFormat: (bubble.msgtype === "m.emote"
-                             || bubble.formattedBody !== ""
-                             || bubble.edited)
+                textFormat: !_plain
+                            && (bubble.msgtype === "m.emote"
+                                || bubble.formattedBody !== ""
+                                || bubble.edited)
                             ? TextEdit.RichText : TextEdit.PlainText
                 wrapMode: TextEdit.Wrap
                 font.family: Theme.fontSans

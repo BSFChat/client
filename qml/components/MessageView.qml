@@ -1612,6 +1612,7 @@ Rectangle {
                         senderIsBot: model.senderIsBot === true
                         body: model.body
                         formattedBody: model.formattedBody
+                        plainBody: model.plainBody === true
                         timestamp: model.timestamp
                         msgtype: model.msgtype
                         mediaUrl: model.mediaUrl || ""

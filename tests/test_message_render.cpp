@@ -102,9 +102,16 @@ private:
     // makes this reachable from a C++ probe at all. The bubble escaping a body
     // itself is the bug, and testBubbleQmlDoesNotEscapeBodiesItself() below
     // fails if it starts doing that again.
-    static QString bubbleText(const QString& msgtype, const QString& body,
-                              const QString& formattedBody, bool edited)
+    static bool bubbleIsPlain(const QString& msgtype, bool plainBody, bool edited)
     {
+        return plainBody && !edited && msgtype != QLatin1String("m.emote");
+    }
+
+    static QString bubbleText(const QString& msgtype, const QString& body,
+                              const QString& formattedBody, bool edited,
+                              bool plainBody = false)
+    {
+        if (bubbleIsPlain(msgtype, plainBody, edited)) return body;
         const QString badge =
             QStringLiteral("<span style=\"color:#8e9297;font-size:small\">"
                            " (edited)</span>");
@@ -120,8 +127,9 @@ private:
     }
 
     static bool bubbleIsRich(const QString& msgtype, const QString& formattedBody,
-                             bool edited)
+                             bool edited, bool plainBody = false)
     {
+        if (bubbleIsPlain(msgtype, plainBody, edited)) return false;
         return msgtype == QLatin1String("m.emote") || !formattedBody.isEmpty()
             || edited;
     }
@@ -137,9 +145,11 @@ private:
             model.data(model.index(row), MessageModel::FormattedBodyRole).toString();
         const bool edited =
             model.data(model.index(row), MessageModel::EditedRole).toBool();
-        const QString text = bubbleText(msgtype, body, formatted, edited);
-        return bubbleIsRich(msgtype, formatted, edited) ? renderedLines(text)
-                                                        : plainLines(text);
+        const bool plain =
+            model.data(model.index(row), MessageModel::PlainBodyRole).toBool();
+        const QString text = bubbleText(msgtype, body, formatted, edited, plain);
+        return bubbleIsRich(msgtype, formatted, edited, plain) ? renderedLines(text)
+                                                               : plainLines(text);
     }
 
 private slots:
@@ -236,6 +246,58 @@ private slots:
         QTextDocument doc;
         doc.setHtml(out);
         QCOMPARE(doc.toPlainText(), QStringLiteral("<b>bold</b> & *stars*\nnext"));
+    }
+
+    // The plain-text fast path (PlainBodyRole). A row may skip RichText only
+    // when its markup says nothing the body does not: the escape-only
+    // promotion of the body, exactly. Anything markdown, a link, a #channel
+    // or a mention changed keeps the row rich, so link detection is the
+    // same as it was.
+    void testPlainBodyRoleOnlyForBodiesWithNoMarkup_data()
+    {
+        QTest::addColumn<QString>("msgtype");
+        QTest::addColumn<QString>("body");
+        QTest::addColumn<bool>("plain");
+        QTest::newRow("one line") << "m.text" << "just some words" << true;
+        QTest::newRow("multi line") << "m.text" << "one\ntwo\nthree" << true;
+        QTest::newRow("literal markup") << "m.text" << "<b>x</b> & \"q\"" << true;
+        QTest::newRow("bare url") << "m.text" << "see https://example.com/x" << true;
+        QTest::newRow("bold") << "m.text" << "this is **bold**" << false;
+        QTest::newRow("italic") << "m.text" << "an *aside*" << false;
+        QTest::newRow("code") << "m.text" << "run `ls`" << false;
+        QTest::newRow("md link") << "m.text" << "[here](https://x.y)" << false;
+        QTest::newRow("channel") << "m.text" << "go to #general" << false;
+        QTest::newRow("quote") << "m.text" << "> quoted" << false;
+        // m.notice is escape-only: its asterisks are literal, so it is plain.
+        QTest::newRow("notice stars") << "m.notice" << "**not bold**" << true;
+        QTest::newRow("image") << "m.image" << "cat.png" << false;
+    }
+
+    void testPlainBodyRoleOnlyForBodiesWithNoMarkup()
+    {
+        QFETCH(QString, msgtype);
+        QFETCH(QString, body);
+        QFETCH(bool, plain);
+        MessageModel model;
+        model.appendEvent(makeMessage("$a", body.toStdString(), msgtype.toStdString()),
+                          "@bob:server");
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.data(model.index(0), MessageModel::PlainBodyRole).toBool(), plain);
+        if (plain) {
+            // What the plain path shows is what the rich path would have.
+            QTextDocument doc;
+            doc.setHtml(model.data(model.index(0),
+                                   MessageModel::FormattedBodyRole).toString());
+            QCOMPARE(doc.toPlainText(), body);
+        }
+    }
+
+    void testMentionKeepsTheRowRich()
+    {
+        MessageModel model;
+        model.appendEvent(withMention(makeMessage("$a", "hi @bob"), "@bob:server"),
+                          "@bob:server");
+        QVERIFY(!model.data(model.index(0), MessageModel::PlainBodyRole).toBool());
     }
 
     // Markdown's own path was already correct; pin it so the two promotions
