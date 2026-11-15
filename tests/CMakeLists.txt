@@ -1007,6 +1007,19 @@ target_include_directories(test_direct_rooms PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_direct_rooms PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_direct_rooms COMMAND test_direct_rooms)
 
+# "This room is gone for me" (audit R-1): the rooms.leave parser and the
+# join-vs-leave rule, the /joined_rooms reconcile decision, and
+# LocalCache::forgetRoom. RoomRemoval.h is header-only; LocalCache needs Sql.
+qt_add_executable(test_room_removal
+    test_room_removal.cpp
+    ${CMAKE_SOURCE_DIR}/src/store/LocalCache.cpp
+)
+target_include_directories(test_room_removal PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_room_removal PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Sql Qt6::Test
+)
+add_test(NAME test_room_removal COMMAND test_room_removal)
 
 # Media cache identity. The key used to include the access token, so every
 # re-login re-downloaded every image the user had ever seen.
