@@ -273,7 +273,10 @@ private:
     // serverRemoved+serverAdded for the index so NotificationManager
     // and the screen/camera controllers rewire their per-connection
     // signal subscriptions.
-    void rebuildConnection(int index, const QString& url);
+    // `freshSession`: the credential was just issued (an account switch,
+    // C-8), so the replacement runs a full initial sync instead of resuming
+    // from that account's cached stream position.
+    void rebuildConnection(int index, const QString& url, bool freshSession = false);
     // Hooks up a ServerConnection so per-server UI state (unread dot, etc.)
     // in the sidebar tracks the connection's state.
     // "Are we already on this server?" — see net/ServerDedup.h for why

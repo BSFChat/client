@@ -1158,12 +1158,22 @@ void ServerConnection::awaitLoginReply()
 
 void ServerConnection::applyLoginResponse(const bsfchat::LoginResponse& resp)
 {
-    m_userId = QString::fromStdString(resp.user_id);
+    // A re-auth may come back as somebody else: the browser held another
+    // account's session, or a different username went into the password
+    // prompt. Everything this object has cached is the previous account's,
+    // and carrying it over would show one person another's rooms and
+    // messages (audit C-8). Same account: unchanged behaviour below.
+    const QString previousUserId = m_userId;
+    const QString newUserId = QString::fromStdString(resp.user_id);
+    const bool switchedAccount = !previousUserId.isEmpty() && newUserId != previousUserId;
+
+    m_userId = newUserId;
     m_accessToken = QString::fromStdString(resp.access_token);
     m_deviceId = QString::fromStdString(resp.device_id);
     // Only on a first login. Overwriting it on re-auth would replace a real
-    // profile name with the MXID every time a session is renewed.
-    if (m_displayName.isEmpty()) m_displayName = m_userId;
+    // profile name with the MXID every time a session is renewed — but the
+    // old account's name is not this account's, so a switch resets it.
+    if (m_displayName.isEmpty() || switchedAccount) m_displayName = m_userId;
     m_client->setAccessToken(m_accessToken);
 
     m_reauthWatchdog.stop();
@@ -1187,6 +1197,16 @@ void ServerConnection::applyLoginResponse(const bsfchat::LoginResponse& resp)
     emit syncErrorMessageChanged();
     emit sessionAuthChanged();
     emit loginSucceeded();
+    if (switchedAccount) {
+        qWarning().noquote() << "[ServerConnection] re-authentication on" << m_serverUrl
+                             << "signed in as a different account; starting a new session";
+        // No sync on this object: ServerManager replaces it with a fresh
+        // connection for the new account, which runs the initial sync the
+        // way a brand-new login does. Syncing here first would merge the
+        // new account's rooms into the old account's state.
+        emit accountSwitched(previousUserId, newUserId);
+        return;
+    }
     startSync();
 }
 

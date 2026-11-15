@@ -461,7 +461,7 @@ void ServerManager::reauthenticateServer(int index)
     if (auto* conn = m_roster.at(index)) conn->beginReauth();
 }
 
-void ServerManager::rebuildConnection(int index, const QString& url)
+void ServerManager::rebuildConnection(int index, const QString& url, bool freshSession)
 {
     auto* old = m_roster.connections()[index];
 
@@ -473,6 +473,7 @@ void ServerManager::rebuildConnection(int index, const QString& url)
     // rebuild works even for a connection whose login predates this
     // process (restored) or whose settings row is missing.
     auto* conn = new ServerConnection(url, this);
+    if (freshSession) conn->requireFullSync();
     conn->setCredentials(old->userId(), old->accessToken(),
                          old->deviceId(), old->displayName());
     // Same source as the credentials, and for the same reason: the live
@@ -719,6 +720,21 @@ void ServerManager::wireConnection(ServerConnection* conn)
     // message wherever the sign-in was started from.
     connect(conn, &ServerConnection::browserOpenFailed, this,
             &ServerManager::browserOpenFailed);
+
+    // A re-auth came back as a different account (C-8). The credentials are
+    // already persisted (loginSucceeded fired first, above); what has to go
+    // is every piece of state the old account left on this object. A fresh
+    // ServerConnection is exactly what a brand-new login gets — empty
+    // timelines, room and member lists, unread state, and a LocalCache
+    // bound to the new account — so build one rather than try to empty this
+    // one field by field. Queued: this fires from inside the old object's
+    // login handler, which should finish before the object is retired.
+    connect(conn, &ServerConnection::accountSwitched, this,
+        [this, conn](const QString&, const QString&) {
+            const int idx = m_roster.indexOf(conn);
+            if (idx < 0) return;
+            rebuildConnection(idx, conn->serverUrl(), /*freshSession=*/true);
+        }, Qt::QueuedConnection);
 
     // Settings plumbed in so the mic gate can read voiceMode / PTT.
     conn->setSettings(m_settings);

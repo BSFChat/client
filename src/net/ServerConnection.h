@@ -403,6 +403,10 @@ public:
     MatrixClient* client() const { return m_client; }
 
     // Set credentials (for restoring from settings)
+    // The next startSync() must not resume from a cached `since`. For a
+    // connection built to carry a credential that was just issued (see
+    // accountSwitched); call before setCredentials(), which starts the sync.
+    void requireFullSync() { m_forceFullSync = true; }
     void setCredentials(const QString& userId, const QString& accessToken,
                         const QString& deviceId, const QString& displayName);
 
@@ -1069,6 +1073,13 @@ signals:
     // server's canonical one (stale/corrupt settings). ServerManager
     // listens and rewrites the stored entry.
     void identityCorrected();
+    // A re-authentication signed in as a DIFFERENT account than the one this
+    // connection was holding (audit C-8). Emitted after loginSucceeded, with
+    // the new credential installed and nothing synced: everything this object
+    // holds — timelines, room and member lists, unread state, the LocalCache
+    // binding — belongs to `previousUserId`. ServerManager answers it by
+    // replacing the connection with a fresh one for the new account.
+    void accountSwitched(const QString& previousUserId, const QString& userId);
     void registerSucceeded();
     void registerFailed(const QString& error);
     void mediaSendCompleted();
