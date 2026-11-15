@@ -123,7 +123,7 @@ Rectangle {
     Accessible.description: preview.ogDescription.length > 0
         ? preview.ogDescription
         : qsTr("Opens the link in your browser")
-    Accessible.onPressAction: Qt.openUrlExternally(preview.url)
+    Accessible.onPressAction: linkOpener.open(preview.url)
 
     // Left accent stripe — mirrors the reply-preamble chrome so
     // "quoted content" reads consistently whether it's another
@@ -221,7 +221,7 @@ Rectangle {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: Qt.openUrlExternally(preview.url)
+                onClicked: linkOpener.open(preview.url)
             }
         }
 
@@ -247,7 +247,7 @@ Rectangle {
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: Qt.openUrlExternally(preview.url)
+                onClicked: linkOpener.open(preview.url)
             }
         }
         Text {
@@ -315,7 +315,7 @@ Rectangle {
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: Qt.openUrlExternally(preview.url)
+                    onClicked: linkOpener.open(preview.url)
                 }
             }
             // Description — dimmer, up to 3 lines.
@@ -365,7 +365,7 @@ Rectangle {
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: Qt.openUrlExternally(preview.url)
+                onClicked: linkOpener.open(preview.url)
             }
         }
     }

@@ -1600,11 +1600,13 @@ Popup {
                             Accessible.name: qsTr("Open log folder")
                             Accessible.description: qsTr("Opens the client log directory in your file manager")
                             Accessible.onPressAction: logFolderBtn.clicked()
-                            onClicked: Qt.openUrlExternally(
-                                appSettings.logDirectory().startsWith("/")
-                                    ? "file://" + appSettings.logDirectory()
-                                    : "file:///" + appSettings.logDirectory())
+                            // A local folder, which LinkOpener.open() would
+                            // rightly refuse; openLocalDirectory opens only
+                            // an existing directory.
+                            onClicked: linkOpener.openLocalDirectory(
+                                appSettings.logDirectory())
                             contentItem: Text {
+                                textFormat: Text.PlainText
                                 text: parent.text
                                 // Covered by the button's own name.
                                 Accessible.ignored: true

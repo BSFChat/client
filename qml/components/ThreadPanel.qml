@@ -337,7 +337,7 @@ Item {
                                     } else if (link.indexOf("bsfchat://message/") === 0) {
                                         serverManager.openMessageLink(link);
                                     } else {
-                                        Qt.openUrlExternally(link);
+                                        linkOpener.open(link, threadRow.formattedBody);
                                     }
                                 }
                                 MouseArea {

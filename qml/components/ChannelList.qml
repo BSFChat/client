@@ -2769,7 +2769,9 @@ Rectangle {
                             ? serverManager.activeServer.identityProviderUrl()
                             : "";
                         if (!base) base = "https://id.bsfchat.com";
-                        Qt.openUrlExternally(base + "/profile.html");
+                        // The base is server-supplied, so it takes the
+                        // same scheme check as any other link.
+                        linkOpener.open(base + "/profile.html");
                     }
                 }
                 ThemedUserItem {

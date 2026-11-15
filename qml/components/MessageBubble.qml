@@ -1576,8 +1576,8 @@ Item {
                 selectionColor: Theme.accent
                 persistentSelection: false
                 onLinkActivated: (link) => {
-                    // Intercept internal scheme; let anything else open in
-                    // the system browser as before.
+                    // Intercept internal scheme; everything else goes through
+                    // LinkOpener (scheme allowlist + spoofed-text check).
                     if (link.indexOf("bsfchat://channel/") === 0) {
                         bubble.channelLinkClicked(
                             link.substring("bsfchat://channel/".length));
@@ -1592,7 +1592,7 @@ Item {
                             link.substring("bsfchat://user/".length));
                         bubble.userLinkClicked(uid, uid);
                     } else {
-                        Qt.openUrlExternally(link);
+                        linkOpener.open(link, bubble.formattedBody);
                     }
                 }
                 MouseArea {
