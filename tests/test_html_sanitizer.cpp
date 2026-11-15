@@ -46,7 +46,12 @@ QStringList attributes(const QString& html)
 
 void verifyNoActiveContent(const QString& out)
 {
-    const QString lower = out.toLower();
+    // Only markup can be active. Text the sanitiser escaped ("&lt;img src=x&gt;")
+    // is inert and may legitimately contain these words, so check the tags alone.
+    QString markup;
+    static const QRegularExpression tagRe(QStringLiteral("<[^>]*>?"));
+    for (auto it = tagRe.globalMatch(out); it.hasNext();) markup += it.next().captured(0);
+    const QString lower = markup.toLower();
     for (const char* bad : {"<img", "<script", "<style", "<iframe", "<object", "<embed",
                             "<svg", "<math", "<link", "<meta", "<base", "<form", "<input",
                             "<video", "<audio", "<font", "<div", "onerror", "onload",
