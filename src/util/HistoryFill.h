@@ -166,8 +166,20 @@ public:
     // One page came back. `newRows` is how many NEW renderable rows it holds —
     // edits, reactions, redactions, state and duplicates already excluded by
     // the caller. `reachedStart` is "the server returned no token to go on
-    // from". Returns true when another page should be requested.
-    bool onPage(int newRows, bool reachedStart)
+    // from". `overlapsLoaded` is "this page contains a row that was already
+    // in the timeline before the fill started". Returns true when another
+    // page should be requested.
+    //
+    // An OPEN fill whose page overlaps what was already loaded stops there.
+    // That is the cache-hit case: the channel painted from its cached window,
+    // and the open request is only still sent for the pagination cursor —
+    // which this page has just delivered, along with proof that the window is
+    // contiguous with the server's head. Fetching two more pages to reach the
+    // row target cost a sparse channel two further serial round trips that,
+    // on a page of edits, added nothing; a viewport that is genuinely not
+    // full still gets its top-up through a Viewport fill, and the user can
+    // always scroll back.
+    bool onPage(int newRows, bool reachedStart, bool overlapsLoaded = false)
     {
         if (!m_active) return false;
         ++m_pages;
@@ -175,6 +187,8 @@ public:
         m_rows += newRows > 0 ? newRows : 0;
         if (reachedStart) return finish(HistoryFillStop::StartOfRoom);
         if (m_rows >= m_target) return finish(HistoryFillStop::Filled);
+        if (overlapsLoaded && m_kind == HistoryFillKind::Open)
+            return finish(HistoryFillStop::Filled);
         if (m_pages >= pageCap()) return finish(HistoryFillStop::PageCap);
         if (m_kind != HistoryFillKind::Gesture && autoBudgetSpent())
             return finish(HistoryFillStop::PageCap);

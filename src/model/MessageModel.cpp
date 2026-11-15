@@ -46,6 +46,22 @@ QString renderBodyHtml(const QString& body, const QString& msgtype)
                                               : MarkdownParser::plainToHtml(body);
 }
 
+// Whether a prose row's display markup says anything plain text would not.
+// `formatted` is what the bubble would otherwise hand a RichText TextEdit;
+// when it is exactly the escape-only promotion of the body (or empty), the
+// rendered result is the body verbatim, line breaks included, and the row can
+// take the PlainText path. Comparing against plainToHtml rather than sniffing
+// the body for markdown characters keeps the rule exact: whatever markdown,
+// link, channel or mention rendering produced, if it changed a single byte the
+// row stays rich.
+bool rendersAsPlainText(const QString& body, const QString& formatted,
+                        const QString& msgtype)
+{
+    if (isMediaMsgtype(msgtype)) return false;
+    if (formatted.isEmpty()) return true;
+    return formatted == MarkdownParser::plainToHtml(body);
+}
+
 } // namespace
 
 MessageModel::MessageModel(QObject* parent)
@@ -71,6 +87,7 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
     case SenderDisplayNameRole: return msg.senderDisplayName;
     case SenderIsBotRole: return msg.senderIsBot;
     case DeliveryStateRole: return static_cast<int>(msg.delivery);
+    case PlainBodyRole: return rendersAsPlainText(msg.body, msg.formattedBody, msg.msgtype);
     case BodyRole: return msg.body;
     case FormattedBodyRole: return msg.formattedBody;
     case TimestampRole: return msg.timestamp;
@@ -139,7 +156,8 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {MentionsMeRole, "mentionsMe"},
         {MentionsRoomRole, "mentionsRoom"},
         {SenderIsBotRole, "senderIsBot"},
-        {DeliveryStateRole, "deliveryState"}
+        {DeliveryStateRole, "deliveryState"},
+        {PlainBodyRole, "plainBody"}
     };
 }
 
@@ -524,7 +542,8 @@ void MessageModel::adoptEventId(int row, const QString& eventId, qint64 serverTs
 
     auto idx = index(row);
     emit dataChanged(idx, idx, {EventIdRole, DeliveryStateRole, BodyRole,
-                                FormattedBodyRole, EditedRole, ReactionsRole});
+                                FormattedBodyRole, EditedRole, ReactionsRole,
+                                PlainBodyRole});
 }
 
 void MessageModel::appendLocalEcho(const QString& localId, const QString& body,
@@ -1109,7 +1128,8 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
         }
         if (applyEditToEntry(m_messages[i], edit)) {
             auto idx = index(i);
-            emit dataChanged(idx, idx, {BodyRole, FormattedBodyRole, EditedRole});
+            emit dataChanged(idx, idx, {BodyRole, FormattedBodyRole, EditedRole,
+                                         PlainBodyRole});
         }
         return;
     }
@@ -1350,9 +1370,16 @@ MessageModel::absorbHistoryPage(const QString& requestedFrom,
     // which is the entire fix. Dedupe against the loaded rows and against
     // earlier pages of this fill, exactly as prependEvents will.
     int newRows = 0;
+    // Whether the page reaches rows that were on screen before this fill
+    // began (a cached window, or /sync beating the open) — HistoryFill stops
+    // an open there. A row THIS fill added is in the index too by the time a
+    // later page arrives, which is what the second half excludes.
+    bool overlapsLoaded = false;
     for (const auto& event : chronological) {
         if (!rendersAsRow(event)) continue;
         const QString id = QString::fromStdString(event.event_id);
+        if (m_indexByEventId.contains(id) && !m_historyFillRowIds.contains(id))
+            overlapsLoaded = true;
         if (m_indexByEventId.contains(id) || m_historyFillRowIds.contains(id)) continue;
         m_historyFillRowIds.insert(id);
         ++newRows;
@@ -1382,7 +1409,7 @@ MessageModel::absorbHistoryPage(const QString& requestedFrom,
     setPrevBatchToken(endToken);
 
     const bool wasSpent = m_historyFill.autoBudgetSpent();
-    if (m_historyFill.onPage(newRows, endToken.isEmpty())) {
+    if (m_historyFill.onPage(newRows, endToken.isEmpty(), overlapsLoaded)) {
         m_historyFillFrom = endToken;
         if (wasSpent != m_historyFill.autoBudgetSpent()) emit historyAutoFillSpentChanged();
         result.outcome = HistoryPageOutcome::FetchMore;
@@ -1435,11 +1462,44 @@ void MessageModel::ingestCachedWindow(const QVector<bsfchat::RoomEvent>& chronol
 
     if (!rows.isEmpty()) {
         const int first = static_cast<int>(m_messages.size());
+        QSet<QString> threadRoots;
+        for (const auto& row : rows)
+            if (!row.threadRootId.isEmpty()) threadRoots.insert(row.threadRootId);
         beginInsertRows(QModelIndex(), first, first + static_cast<int>(rows.size()) - 1);
         for (auto& row : rows) m_messages.append(std::move(row));
         rebuildIndices();
         endInsertRows();
         emit countChanged();
+
+        // What appendEvent does per row, once for the batch. A thread root
+        // that was already on screen gets its reply badge refreshed, and a
+        // reaction that arrived (over /sync) before its target row did is
+        // folded in now rather than waiting for a target that has already
+        // gone past.
+        for (const QString& root : std::as_const(threadRoots)) {
+            const int rootRow = rowForEventId(root);
+            if (rootRow >= 0 && rootRow < first) {
+                auto rootIdx = index(rootRow);
+                emit dataChanged(rootIdx, rootIdx, {ThreadReplyCountRole});
+            }
+        }
+        if (!m_pendingReactions.isEmpty()) {
+            for (int row = first; row < m_messages.size(); ++row) {
+                const QString eventId = m_messages[row].eventId;
+                auto pIt = m_pendingReactions.find(eventId);
+                if (pIt == m_pendingReactions.end()) continue;
+                for (const auto& pr : pIt.value()) {
+                    if (m_reactionIndex.contains(pr.reactionEventId)) continue;
+                    auto& bucket = m_messages[row].reactionsByEmoji[pr.emoji];
+                    bucket.append(qMakePair(pr.userId, pr.reactionEventId));
+                    m_reactionIndex.insert(pr.reactionEventId,
+                                           ReactionRef{eventId, pr.emoji, pr.userId});
+                }
+                m_pendingReactions.erase(pIt);
+                auto idx = index(row);
+                emit dataChanged(idx, idx, {ReactionsRole});
+            }
+        }
     }
 
     // The window's relations, for ingestHistoryEvents' reason: a reaction, a
@@ -1458,11 +1518,19 @@ void MessageModel::ingestHistoryEvents(const QVector<bsfchat::RoomEvent>& chrono
     if (chronological.isEmpty()) return;
 
     if (m_messages.isEmpty()) {
-        // Nothing loaded: replay the lot in order, so reactions, redactions
-        // and in-window edits all take the live path.
-        for (const auto& event : chronological)
-            bsfchat::client::guardEvent(event, "ingestHistoryEvents",
-                                        [&] { appendEvent(event, ownUserId); });
+        // Nothing loaded: the cold open of a channel with no cached window.
+        // This used to replay the page through appendEvent one event at a
+        // time, which is one beginInsertRows/endInsertRows/countChanged PER
+        // ROW — and MessageView answers each countChanged with a divider
+        // scan and a read-marker update (a QSettings write, a sidebar
+        // re-evaluation and, with a newer timestamp every row, a POST). Fifty
+        // of each on every cold open.
+        //
+        // ingestCachedWindow is exactly the batched form of that replay: the
+        // rows go in as ONE insertion, then the page's reactions, redactions
+        // and edits are applied in order through appendEvent's relation
+        // branches, the same as before. The result is the same timeline.
+        ingestCachedWindow(chronological, ownUserId);
         return;
     }
 

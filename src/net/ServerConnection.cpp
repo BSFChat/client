@@ -1,4 +1,6 @@
 #include "net/ServerConnection.h"
+
+#include <utility>
 #include "net/MatrixClient.h"
 #include "net/SyncLoop.h"
 #include "net/SyncBackoff.h"
@@ -70,6 +72,12 @@ namespace js = bsfchat::jsonsafe;
 #include <QCoreApplication>
 #include <QPermissions>
 #endif
+
+// How long read-marker advances are gathered before the one POST that carries
+// them (ServerConnection::m_pendingReadMarkers). Long enough to cover the
+// burst a room entry produces, short enough that another device sees the
+// channel read effectively at once.
+static constexpr int kReadMarkerCoalesceMs = 750;
 
 // HistoryFillStop as a word, for the channel-switch trace. Not a QMetaEnum:
 // util/HistoryFill.h is header-only and Qt-Core-free on purpose, so that its
@@ -825,6 +833,14 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     m_typingTimer->setSingleShot(true);
     m_typingTimer->setInterval(4000);
 
+    // Read-marker coalescing — see m_pendingReadMarkers. Not restarted by
+    // later calls, so a marker is never held back for longer than this.
+    m_readMarkerTimer = new QTimer(this);
+    m_readMarkerTimer->setSingleShot(true);
+    m_readMarkerTimer->setInterval(kReadMarkerCoalesceMs);
+    connect(m_readMarkerTimer, &QTimer::timeout, this,
+            &ServerConnection::flushReadMarkers);
+
     // Stop timer: sends typing=false after 5 seconds of no typing activity
     m_typingStopTimer = new QTimer(this);
     m_typingStopTimer->setSingleShot(true);
@@ -1471,7 +1487,16 @@ void ServerConnection::disconnectFromServer()
     // is a privacy incident; the cost of clearing is one round trip per
     // channel. The member fetch times go with them for the same reason.
     m_timelines.clear();
+    m_persistedTimelineGen.clear();
     m_membersFetchedAt.clear();
+    // Queued read markers belong to the session being torn down; sending
+    // them after it would go out with whatever token comes next, or none.
+    // Forget that they were "sent" too, so the next advance after a
+    // reconnect is not deduplicated against a POST that never happened.
+    m_readMarkerTimer->stop();
+    for (const QString& roomId : std::as_const(m_pendingReadMarkers))
+        m_sentReadMarkerTs.remove(roomId);
+    m_pendingReadMarkers.clear();
 
     m_connected = false;
     m_connectionStatus = 0;
@@ -1512,8 +1537,11 @@ void ServerConnection::startSync()
         // a phone is nearly every open: iOS kills the app on most
         // backgroundings.
         const auto persisted = m_cache->timelines();
-        for (auto it = persisted.constBegin(); it != persisted.constEnd(); ++it)
+        for (auto it = persisted.constBegin(); it != persisted.constEnd(); ++it) {
             m_timelines.adopt(it.key(), it.value());
+            // What was just read IS what is on disk.
+            m_persistedTimelineGen.insert(it.key(), m_timelines.generation(it.key()));
+        }
         if (!persisted.isEmpty()) {
             qCInfo(logTimeline).nospace()
                 << "cache loaded rooms=" << persisted.size() << " from disk";
@@ -1574,23 +1602,25 @@ void ServerConnection::noteTimelineVisible(int rows)
 
 void ServerConnection::loadMembersForRoom(const QString& roomId)
 {
-    m_memberListModel->clear();
-
     // First, load from our cache (events we've seen in sync)
-    if (m_roomMembers.contains(roomId)) {
-        // Replay cached member events to build current state
-        // We need to build the final state, not just replay — a user might have
-        // joined then left. Process all events in order, keeping latest per-user.
+    //
+    // Replay cached member events to build current state
+    // We need to build the final state, not just replay — a user might have
+    // joined then left. Process all events in order, keeping latest per-user.
+    // Then hand the model the result as one reset rather than one insertion
+    // per member.
+    QVector<bsfchat::RoomEvent> latest;
+    if (const auto it = m_roomMembers.constFind(roomId); it != m_roomMembers.constEnd()) {
         QMap<QString, bsfchat::RoomEvent> latestByUser;
-        for (const auto& ev : m_roomMembers[roomId]) {
+        for (const auto& ev : it.value()) {
             if (ev.state_key.has_value()) {
                 latestByUser[QString::fromStdString(*ev.state_key)] = ev;
             }
         }
-        for (const auto& ev : latestByUser) {
-            m_memberListModel->processEvent(ev);
-        }
+        latest.reserve(latestByUser.size());
+        for (const auto& ev : std::as_const(latestByUser)) latest.append(ev);
     }
+    m_memberListModel->resetFromEvents(latest);
 
     // Then fetch from the server — but not on every single switch.
     //
@@ -1650,9 +1680,19 @@ void ServerConnection::setActiveRoom(const QString& roomId)
     // write point: it is rare, the window is complete, and it is the only
     // moment at which the user has demonstrably finished with the room.
     // Best-effort — a failed write costs the next launch one round trip.
+    //
+    // Only when the window has changed since it was last written (or read
+    // back from disk). The write is a DELETE plus up to 150 INSERTs and a
+    // commit on the GUI thread, at the start of every switch — and flicking
+    // back and forth between two quiet channels used to rewrite both,
+    // unchanged, every time.
     if (!m_activeRoomId.isEmpty() && m_cacheWired) {
-        if (const auto* window = m_timelines.window(m_activeRoomId))
+        const quint64 gen = m_timelines.generation(m_activeRoomId);
+        if (const auto* window = m_timelines.window(m_activeRoomId);
+            window && m_persistedTimelineGen.value(m_activeRoomId, 0) != gen) {
             m_cache->recordTimeline(m_activeRoomId, *window);
+            m_persistedTimelineGen.insert(m_activeRoomId, gen);
+        }
     }
 
     // The incoming room has its own scroll position; assume nothing about
@@ -1770,10 +1810,13 @@ void ServerConnection::markRoomRead(const QString& roomId, qint64 tsMs)
 
     // One POST per advance, not one per inbound message: this is called
     // from the view on every count change while the user sits at the
-    // bottom of a busy channel.
+    // bottom of a busy channel. And not one per advance either while those
+    // advances come in a burst — entering a room moves the marker several
+    // times in the first second — so the POST itself is coalesced.
     if (tsMs > 0 && m_sentReadMarkerTs.value(roomId, 0) >= tsMs) return;
     if (tsMs > 0) m_sentReadMarkerTs.insert(roomId, tsMs);
-    m_client->sendReadMarker(roomId);
+    m_pendingReadMarkers.insert(roomId);
+    if (!m_readMarkerTimer->isActive()) m_readMarkerTimer->start();
 
     const bool hadUnread = m_hasUnread;
     m_hasUnread = m_roomListModel && m_roomListModel->totalUnreadCount() > 0;
@@ -1782,12 +1825,23 @@ void ServerConnection::markRoomRead(const QString& roomId, qint64 tsMs)
 
 void ServerConnection::markActiveRoomRead()
 {
-    if (m_activeRoomId.isEmpty()) return;
-    if (!m_timelineAtBottom) return;
-    if (!m_messageModel) return;
+    // Whatever happens below, anything already queued goes now: this is the
+    // app leaving the foreground, and a suspended process runs no timers.
+    if (m_activeRoomId.isEmpty() || !m_timelineAtBottom || !m_messageModel) {
+        flushReadMarkers();
+        return;
+    }
     const qint64 ts = m_messageModel->newestServerTimestampMs();
-    if (ts <= 0) return;
-    markRoomRead(m_activeRoomId, ts);
+    if (ts > 0) markRoomRead(m_activeRoomId, ts);
+    flushReadMarkers();
+}
+
+void ServerConnection::flushReadMarkers()
+{
+    m_readMarkerTimer->stop();
+    if (m_pendingReadMarkers.isEmpty()) return;
+    const QSet<QString> rooms = std::exchange(m_pendingReadMarkers, {});
+    for (const QString& roomId : rooms) m_client->sendReadMarker(roomId);
 }
 
 void ServerConnection::resyncNow()
@@ -3612,25 +3666,40 @@ void ServerConnection::rebuildCategorizedRooms()
     // from a delegate is not a reactive dependency: a name that arrives after
     // the row was built would never repaint. Every path that learns a new name
     // rebuilds, so the sidebar renames in step with the member list.
+    //
+    // The same pass takes OUT the three fields that move on almost every
+    // sync: unreadCount, mentionCount and lastMessageTime. This snapshot
+    // drives ChannelList's nested Repeaters, and a Repeater handed a new
+    // array destroys and recreates every row — so while it carried unread
+    // state, one message in any channel rebuilt the whole sidebar, and so
+    // did opening a channel (its count resets, the next sync republishes).
+    // Rows read those values live from RoomListModel (unreadCountFor,
+    // mentionCountFor, lastMessageTimeFor, gated on activityGeneration), so
+    // this list now changes only when the set, order, names or voice
+    // rosters of channels do.
+    static const QString kUnread = QStringLiteral("unreadCount");
+    static const QString kMention = QStringLiteral("mentionCount");
+    static const QString kLastTs = QStringLiteral("lastMessageTime");
     for (auto& g : groups) {
         QVariantMap cat = g.toMap();
         QVariantList channels = cat.value(QStringLiteral("channels")).toList();
-        bool touched = false;
         for (auto& c : channels) {
             QVariantMap ch = c.toMap();
+            ch.remove(kUnread);
+            ch.remove(kMention);
+            ch.remove(kLastTs);
             QVariantList members = ch.value(QStringLiteral("voiceMembers")).toList();
-            if (members.isEmpty()) continue;
-            for (auto& m : members) {
-                QVariantMap row = m.toMap();
-                row[QStringLiteral("displayName")] = displayNameForSender(
-                    row.value(QStringLiteral("user_id")).toString());
-                m = row;
+            if (!members.isEmpty()) {
+                for (auto& m : members) {
+                    QVariantMap row = m.toMap();
+                    row[QStringLiteral("displayName")] = displayNameForSender(
+                        row.value(QStringLiteral("user_id")).toString());
+                    m = row;
+                }
+                ch[QStringLiteral("voiceMembers")] = members;
             }
-            ch[QStringLiteral("voiceMembers")] = members;
             c = ch;
-            touched = true;
         }
-        if (!touched) continue;
         cat[QStringLiteral("channels")] = channels;
         g = cat;
     }

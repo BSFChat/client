@@ -152,6 +152,10 @@ bool LocalCache::open(const QString& userId, const QString& homeserver)
     qWarning() << "LocalCache: unusable cache at" << path << "— recreating";
     close();
     QFile::remove(path);
+    // The WAL and its index belong to the image just deleted; replayed
+    // against a fresh file they would be at best ignored, at worst applied.
+    QFile::remove(path + QStringLiteral("-wal"));
+    QFile::remove(path + QStringLiteral("-shm"));
     if (openAt(path)) return true;
 
     qWarning() << "LocalCache: cache unavailable — falling back to full sync";
@@ -168,6 +172,7 @@ bool LocalCache::openAt(const QString& path)
         return false;
     }
     m_path = path;
+    configureConnection();
     if (!ensureSchema()) return false;
 
     m_open = true;
@@ -197,6 +202,33 @@ bool LocalCache::openAt(const QString& path)
         clearSyncToken();
     }
     return true;
+}
+
+void LocalCache::configureConnection()
+{
+    // Every write here runs on the GUI thread — recordSync after nearly every
+    // /sync, recordTimeline at the start of a channel switch — and SQLite's
+    // defaults (rollback journal, synchronous=FULL) put several fsyncs on
+    // each commit. WAL with synchronous=NORMAL commits with no fsync at all
+    // (the log is synced at checkpoints), and stays crash-safe: a power cut
+    // can lose the last commits, never corrupt the file. For a cache that the
+    // server can always rebuild — and whose sync token is written in the same
+    // transaction as the state it belongs to — that is the right trade.
+    //
+    // Failures are not fatal: a file these cannot be applied to is either
+    // fine on the defaults or unusable, and ensureSchema() decides which.
+    QSqlQuery q(QSqlDatabase::database(m_connectionName, false));
+    if (!q.exec(QStringLiteral("PRAGMA journal_mode=WAL")))
+        qWarning() << "LocalCache: WAL unavailable:" << q.lastError().text();
+    q.finish();
+    if (!q.exec(QStringLiteral("PRAGMA synchronous=NORMAL")))
+        qWarning() << "LocalCache: synchronous=NORMAL refused:" << q.lastError().text();
+    // Only this process writes the file, one connection per cache, so a lock
+    // can only be another instance of the app on the same profile. Wait a
+    // little rather than failing the write outright.
+    if (!q.exec(QStringLiteral("PRAGMA busy_timeout=2000")))
+        qWarning() << "LocalCache: busy_timeout refused:" << q.lastError().text();
+    q.finish();
 }
 
 bool LocalCache::ensureSchema()

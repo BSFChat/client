@@ -175,6 +175,9 @@ Rectangle {
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
                 cache: true
+                // The tile is at most 270pt tall at 16:9, i.e. 480pt wide.
+                // Width only, so the decode keeps the thumbnail's aspect.
+                sourceSize.width: 480 * Screen.devicePixelRatio
                 // YouTube returns a small "video thumbnail not found"
                 // grey placeholder as a 200 for missing maxres — we
                 // can't easily detect that without pixel-peeping,
@@ -360,6 +363,12 @@ Rectangle {
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
                 cache: true
+                // Decode at tile size, not at whatever the page's og:image
+                // is — routinely 1200x630 and sometimes several thousand
+                // pixels a side, for a 96pt square. Fixed numbers, not the
+                // tile's live size, so a relayout never re-decodes.
+                sourceSize.width: 96 * Screen.devicePixelRatio
+                sourceSize.height: 96 * Screen.devicePixelRatio
                 // If the thumbnail itself 404s or the origin blocks
                 // hotlinking, hide the tile so the card doesn't look
                 // broken — the text side still stands on its own.

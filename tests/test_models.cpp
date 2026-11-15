@@ -464,6 +464,40 @@ private slots:
         QCOMPARE(model.data(idx, RoomListModel::LastMessageTimeRole).toLongLong(), 12345);
     }
 
+    void testRoomActivityGenerationCoalescesLiveChanges()
+    {
+        // The sidebar's rows read unread / mention / last-message-time live
+        // through these invokables, gated on activityGeneration, because the
+        // categorized snapshot no longer carries them (it rebuilt every row
+        // on every sync). The generation must move for each of the three, and
+        // once per burst rather than once per room.
+        RoomListModel model;
+        model.ensureRoom("!a:server");
+        model.ensureRoom("!b:server");
+        QCoreApplication::processEvents();
+        QSignalSpy gen(&model, &RoomListModel::activityGenerationChanged);
+
+        model.updateLastMessage("!a:server", "hi", 4242);
+        model.setUnreadCount("!a:server", 3);
+        model.setMentionCount("!b:server", 1);
+        QCOMPARE(gen.count(), 0);   // queued, not emitted inline
+        QTRY_COMPARE(gen.count(), 1);
+        QCOMPARE(model.lastMessageTimeFor("!a:server"), qint64(4242));
+        QCOMPARE(model.unreadCountFor("!a:server"), 3);
+        QCOMPARE(model.mentionCountFor("!b:server"), 1);
+        QCOMPARE(model.lastMessageTimeFor("!nope:server"), qint64(0));
+
+        // A no-op last-message update is silent.
+        model.updateLastMessage("!a:server", "hi", 4242);
+        QCoreApplication::processEvents();
+        QCOMPARE(gen.count(), 1);
+
+        // A role the rows do not read does not bump it.
+        model.updateRoomTopic("!a:server", "topic");
+        QCoreApplication::processEvents();
+        QCOMPARE(gen.count(), 1);
+    }
+
     void testRoomDisplayName()
     {
         RoomListModel model;
@@ -540,6 +574,37 @@ private slots:
     // `displayname`, so no client code has to choose. NicknameRole exists only so
     // admin UI can distinguish "this IS a nickname" from "this is their real name",
     // which is what makes a "Remove nickname" affordance possible.
+    void testMemberListResetFromEventsIsOneResetAndIndexesRows()
+    {
+        // A room switch rebuilds the roster from cached member events. It
+        // used to be one insertion per member through processEvent, with a
+        // linear findMember per event — O(n^2) for the rebuild alone.
+        MemberListModel model;
+        QSignalSpy resets(&model, &QAbstractItemModel::modelReset);
+        QSignalSpy inserts(&model, &QAbstractItemModel::rowsInserted);
+        model.resetFromEvents({makeMemberEvent("@a:server", "A", "join"),
+                               makeMemberEvent("@b:server", "B", "join"),
+                               makeMemberEvent("@c:server", "C", "join"),
+                               makeMemberEvent("@gone:server", "G", "leave")});
+        QCOMPARE(resets.count(), 1);
+        QCOMPARE(inserts.count(), 0);
+        QCOMPARE(model.rowCount(), 3);
+        QCOMPARE(model.displayNameForUser("@c:server"), QString("C"));
+
+        // The index survives a removal in the middle: rows after it moved.
+        model.processEvent(makeMemberEvent("@a:server", "A", "leave"));
+        QCOMPARE(model.rowCount(), 2);
+        QCOMPARE(model.displayNameForUser("@a:server"), QString());
+        QCOMPARE(model.displayNameForUser("@c:server"), QString("C"));
+        model.processEvent(makeMemberEvent("@c:server", "C2", "join"));
+        QCOMPARE(model.rowCount(), 2);
+        QCOMPARE(model.data(model.index(1), MemberListModel::DisplayNameRole).toString(),
+                 QString("C2"));
+
+        model.clear();
+        QCOMPARE(model.displayNameForUser("@b:server"), QString());
+    }
+
     void testMemberListNicknamePreferredOverGlobalName()
     {
         MemberListModel model;
@@ -2106,6 +2171,41 @@ private slots:
         QCOMPARE(cache.window("!a")->last().event_id, std::string("$net1"));
     }
 
+    void testTimelineCacheGenerationMovesOnlyWhenTheWindowDoes()
+    {
+        // ServerConnection skips rewriting a room's window to disk on a
+        // switch when this has not moved since the last write — so it must
+        // move on every real change and on nothing else.
+        bsfchat::client::RoomTimelineCache cache;
+        QCOMPARE(cache.generation("!a"), quint64(0));
+        cache.adopt("!a", hist::messagePage(3, "$disk", 1000));
+        const quint64 g0 = cache.generation("!a");
+        QVERIFY(g0 != 0);
+
+        // A replayed event and a page of already-held events change nothing.
+        cache.appendLive("!a", hist::message("$disk0", 1000));
+        cache.markFresh();
+        cache.prependHistory("!a", hist::messagePage(3, "$disk", 1000));
+        QCOMPARE(cache.generation("!a"), g0);
+        // Unrelated rooms do not touch it.
+        cache.appendLive("!b", hist::message("$b", 1));
+        QCOMPARE(cache.generation("!a"), g0);
+
+        cache.appendLive("!a", hist::message("$new", 5000));
+        const quint64 g1 = cache.generation("!a");
+        QVERIFY(g1 != g0);
+        cache.prependHistory("!a", hist::messagePage(1, "$older", 10));
+        QVERIFY(cache.generation("!a") != g1);
+
+        // Never reused: a room forgotten and re-adopted with the same events
+        // must not look like the window that was written before.
+        const quint64 before = cache.generation("!a");
+        cache.forget("!a");
+        QCOMPARE(cache.generation("!a"), quint64(0));
+        cache.adopt("!a", hist::messagePage(3, "$disk", 1000));
+        QVERIFY(cache.generation("!a") > before);
+    }
+
     void testCachedWindowReplaysAsOneInsertionWithItsRelations()
     {
         // The replay path a room switch takes. Two things matter: the model
@@ -2156,6 +2256,8 @@ private slots:
         const auto res = model.absorbHistoryPage(QString(), page, "t1", "@me:server");
 
         // The overlap deduplicated, the older two on top, nothing reordered.
+        // And the open stops there: the page overlapped the cached window.
+        QCOMPARE(res.outcome, hist::Outcome::Done);
         QCOMPARE(model.rowCount(), 6);
         QCOMPARE(model.data(model.index(0), MessageModel::EventIdRole).toString(),
                  QString("$older0"));
@@ -2165,7 +2267,6 @@ private slots:
                  QString("$cached3"));
         // And the cursor is live, so the user can still scroll back.
         QVERIFY(model.hasMoreHistory());
-        Q_UNUSED(res);
     }
 
     void testOpenFillShowsPageOneBeforeTheFillEnds()
@@ -2195,6 +2296,67 @@ private slots:
                  QString("$b0"));
         QCOMPARE(model.data(model.index(13), MessageModel::EventIdRole).toString(),
                  QString("$a7"));
+    }
+
+    void testColdOpenPageArrivesAsOneInsertion()
+    {
+        // A cold open (nothing cached) used to replay its first page through
+        // appendEvent, one insertion and one countChanged per row — and
+        // MessageView answers every countChanged with a divider scan and a
+        // read-marker update. The page must land as one insertion, with its
+        // relations still applied in order, and with a reaction that /sync
+        // delivered before its target folded in.
+        MessageModel model;
+        model.appendEvent(hist::reaction("$early", "$m4"), "@me:server");
+        QCOMPARE(model.rowCount(), 0);
+
+        QSignalSpy inserted(&model, &QAbstractItemModel::rowsInserted);
+        QSignalSpy counted(&model, &MessageModel::countChanged);
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open,
+                                       bsfchat::client::kHistoryFirstPageLimit)
+                    .has_value());
+        QVector<bsfchat::RoomEvent> page = hist::messagePage(40, "$m", 700000000);
+        page.append(hist::reaction("$react", "$m1"));
+        page.append(hist::edit("$ed", "$m2", 700100000, "edited"));
+        page.append(makeRedactionEvent("$red", "@alice:server", "$m3"));
+        model.absorbHistoryPage(QString(), page, "t1", "@me:server");
+
+        QCOMPARE(inserted.count(), 1);
+        // One for the insertion, one for the redaction taking $m3 out.
+        QCOMPARE(counted.count(), 2);
+        QCOMPARE(model.rowCount(), 39);
+        QCOMPARE(model.ownReactionEventId("$m1", "+1", "@bob:server"), "$react");
+        QCOMPARE(model.ownReactionEventId("$m4", "+1", "@bob:server"), "$early");
+        QCOMPARE(model.data(model.index(2), MessageModel::BodyRole).toString(),
+                 QString("edited"));
+        QCOMPARE(model.indexForEventId("$m3"), -1);
+    }
+
+    void testOpenFillOverACachedWindowStopsOnOverlap()
+    {
+        // A cache hit still sends the open fill — for the pagination cursor,
+        // not for rows. A first page that overlaps the cached window has
+        // proved the window is head-current and handed over the cursor, so
+        // there is nothing left for the open to do: no second and third
+        // serial round trip that the viewport/gesture fills would cover
+        // anyway if the user wants older history.
+        MessageModel model;
+        model.ingestCachedWindow(hist::messagePage(6, "$cached", 900000000),
+                                 "@me:server");
+        QVERIFY(model.beginHistoryFill(hist::Kind::Open,
+                                       bsfchat::client::kHistoryFirstPageLimit)
+                    .has_value());
+        QVector<bsfchat::RoomEvent> page = hist::editPage(20, "$board", "$e", 800000000);
+        page += hist::messagePage(6, "$cached", 900000000);
+        const auto r = model.absorbHistoryPage(QString(), page, "t1", "@me:server");
+        QCOMPARE(r.outcome, hist::Outcome::Done);
+        QCOMPARE(model.historyFill().pagesThisFill(), 1);
+        QCOMPARE(model.rowCount(), 6);
+        QVERIFY(!model.loadingHistory());
+        QVERIFY(model.hasMoreHistory());
+        // The automatic budget is not spent: a viewport that is still not
+        // full may top up once, as before.
+        QVERIFY(!model.historyAutoFillSpent());
     }
 
     void testOpenFillAppliesRelationsCarriedByLaterPages()

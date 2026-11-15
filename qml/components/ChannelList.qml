@@ -1463,13 +1463,39 @@ Rectangle {
                                         channelListRoot.muteGeneration;
                                         return appSettings.isRoomMuted(modelData.roomId);
                                     }
+                                    // Live activity for this row, read from
+                                    // the room model rather than from
+                                    // modelData. categorizedRooms no longer
+                                    // carries these three (they moved on
+                                    // nearly every sync, and a new snapshot
+                                    // makes the Repeaters destroy and rebuild
+                                    // every row); RoomListModel's
+                                    // activityGeneration is the dependency
+                                    // that repaints just these bindings.
+                                    readonly property var _roomModel:
+                                        serverManager.activeServer
+                                            ? serverManager.activeServer.roomListModel
+                                            : null
+                                    readonly property int unreadCount: {
+                                        var m = _roomModel;
+                                        if (!m) return 0;
+                                        m.activityGeneration;
+                                        return m.unreadCountFor(channelRoomId);
+                                    }
                                     // Mentions of the local user in this room
-                                    // since it was last opened. Comes from the
-                                    // room model (not QSettings), so it needs
-                                    // no generation counter — categorizedRooms
-                                    // is rebuilt after every sync.
-                                    readonly property int mentionCount:
-                                        modelData.mentionCount || 0
+                                    // since it was last opened.
+                                    readonly property int mentionCount: {
+                                        var m = _roomModel;
+                                        if (!m) return 0;
+                                        m.activityGeneration;
+                                        return m.mentionCountFor(channelRoomId);
+                                    }
+                                    readonly property real lastMessageTime: {
+                                        var m = _roomModel;
+                                        if (!m) return 0;
+                                        m.activityGeneration;
+                                        return m.lastMessageTimeFor(channelRoomId);
+                                    }
                                     readonly property bool hasUnread: {
                                         channelListRoot.unreadGeneration;
                                         channelListRoot.muteGeneration;
@@ -1483,7 +1509,7 @@ Rectangle {
                                         // comparable against everything after.
                                         return appSettings.isRoomUnread(
                                             modelData.roomId,
-                                            modelData.lastMessageTime || 0);
+                                            channelDelegate.lastMessageTime);
                                     }
                                     // Drag state — while `dragging` is
                                     // true, the row lifts via bg + z
@@ -1671,12 +1697,12 @@ Rectangle {
                                                     font.family: Theme.fontSans
                                                     font.pixelSize: Theme.fontSize.base
                                                     font.weight: (channelItemContent.parent.parent.isActive
-                                                                  || modelData.unreadCount > 0)
+                                                                  || channelDelegate.unreadCount > 0)
                                                                  ? Theme.fontWeight.medium
                                                                  : Theme.fontWeight.regular
                                                     color: channelItemContent.parent.parent.isActive
                                                            ? Theme.fg0
-                                                           : (modelData.unreadCount > 0
+                                                           : (channelDelegate.unreadCount > 0
                                                               ? Theme.fg0
                                                               : Theme.fg1)
                                                     elide: Text.ElideRight
@@ -3038,16 +3064,10 @@ Rectangle {
                 if (!serverManager.activeServer) return 0;
                 var rid = roomContextMenu.roomId;
                 if (!rid) return 0;
-                var s = serverManager.activeServer;
-                var groups = s.categorizedRooms;
-                for (var i = 0; i < groups.length; i++) {
-                    var ch = groups[i].channels || [];
-                    for (var j = 0; j < ch.length; j++) {
-                        if (ch[j].roomId === rid)
-                            return ch[j].lastMessageTime || 0;
-                    }
-                }
-                return 0;
+                var m = serverManager.activeServer.roomListModel;
+                if (!m) return 0;
+                m.activityGeneration;   // dep — see the channel rows
+                return m.lastMessageTimeFor(rid);
             }
             enabled: {
                 channelListRoot.unreadGeneration;

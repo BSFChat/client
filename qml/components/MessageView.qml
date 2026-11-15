@@ -695,6 +695,11 @@ Rectangle {
                     _disarmPaginationAnchor();
                     _jumpPendingEventId = "";
                     _jumpAttemptsLeft = 10;
+                    // The shared reaction picker is for a row of the room
+                    // being left. A per-row picker went down with its row;
+                    // this one has to be told.
+                    if (messageViewRoot._reactPicker)
+                        messageViewRoot._reactPicker.close();
                     settleTimer.stop();
                     scrollTimer.restart();
 
@@ -1610,6 +1615,7 @@ Rectangle {
                         senderIsBot: model.senderIsBot === true
                         body: model.body
                         formattedBody: model.formattedBody
+                        plainBody: model.plainBody === true
                         timestamp: model.timestamp
                         msgtype: model.msgtype
                         mediaUrl: model.mediaUrl || ""
@@ -1689,6 +1695,13 @@ Rectangle {
                         onReactionToggled: (targetId, emoji) => {
                             if (!serverManager.activeServer) return;
                             serverManager.activeServer.toggleReaction(targetId, emoji);
+                        }
+                        // Hover-bar smiley or "Add reaction" — open the ONE
+                        // shared picker for this row (see reactPicker below).
+                        reactPickerOpen: messageViewRoot.reactPickerEventId !== ""
+                                         && messageViewRoot.reactPickerEventId === model.eventId
+                        onReactPickerRequested: (targetId) => {
+                            messageViewRoot.openReactPickerFor(targetId);
                         }
                         // Inline image left-click — route to the shared
                         // lightbox. Middle-click bypasses this entirely and
@@ -2344,6 +2357,42 @@ Rectangle {
                     }
                 }
             }
+        }
+    }
+
+    // The reaction picker every timeline row shares. Each MessageBubble used
+    // to build its own EmojiPicker — a Popup holding a GridView over the
+    // whole emoji table, a category bar and a JS filter — the moment the row
+    // was created, so switching to a channel built thirty-odd of them for
+    // the one a user might open. Now there is one, created the first time it
+    // is asked for, and the row it was opened for is remembered here.
+    //
+    // Parented and centred on the window overlay exactly as each row's own
+    // picker was, modal as it was, and the pick goes through the same
+    // toggleReaction call the row's reactionToggled handler makes.
+    property string reactPickerEventId: ""
+    property var _reactPicker: null
+    function openReactPickerFor(eventId) {
+        if (!eventId) return;
+        if (!_reactPicker) _reactPicker = reactPickerComponent.createObject(messageViewRoot);
+        if (!_reactPicker) return;
+        reactPickerEventId = eventId;
+        _reactPicker.open();
+    }
+    Component {
+        id: reactPickerComponent
+        EmojiPicker {
+            id: sharedReactPicker
+            parent: Overlay.overlay
+            anchors.centerIn: Overlay.overlay
+            modal: true
+            onEmojiSelected: function(emoji) {
+                var target = messageViewRoot.reactPickerEventId;
+                if (target && serverManager.activeServer)
+                    serverManager.activeServer.toggleReaction(target, emoji);
+                sharedReactPicker.close();
+            }
+            onClosed: messageViewRoot.reactPickerEventId = ""
         }
     }
 
