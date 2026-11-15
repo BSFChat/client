@@ -93,6 +93,10 @@ class ServerConnection : public QObject {
     Q_PROPERTY(RoomListModel* roomListModel READ roomListModel CONSTANT)
     Q_PROPERTY(MessageModel* messageModel READ messageModel CONSTANT)
     Q_PROPERTY(MemberListModel* memberListModel READ memberListModel CONSTANT)
+    // Where the active room's member list stands, for its loading / error
+    // state (audit U-4): 0 = what is shown is the answer, 1 = fetching with
+    // nothing cached to show meanwhile, 2 = the fetch failed.
+    Q_PROPERTY(int membersStatus READ membersStatus NOTIFY membersStatusChanged)
     // View-model behind the bot management dialog. Always present, even for a
     // user with no MANAGE_BOTS — the dialog binds to it unconditionally and is
     // itself gated on canManageBots(), so a null here would only move the
@@ -391,6 +395,9 @@ public:
     QJsonArray serverRoles() const { return m_serverRoles; }
     QVariantList categorizedRooms() const { return m_categorizedRooms; }
     int permissionsGeneration() const { return m_permissionsGeneration; }
+    int membersStatus() const { return m_membersStatus; }
+    // The member list's "Retry" after a failed fetch.
+    Q_INVOKABLE void retryMembers();
     int botFlagsGeneration() const { return m_botFlagsGeneration; }
 
     RoomListModel* roomListModel() const { return m_roomListModel; }
@@ -1179,6 +1186,7 @@ signals:
     void myPowerLevelChanged();
     void serverRolesChanged();
     void permissionsChanged();
+    void membersStatusChanged();
     // A bot flag was learned or changed. Coalesced to once per event-loop
     // turn — see flushBotFlagRepaint().
     void botFlagsChanged();
@@ -1434,6 +1442,8 @@ public:
     // the same key with the same meaning.
     void recordBotFlag(const QString& userId, bool isBot);
     void loadMembersForRoom(const QString& roomId);
+    void setMembersStatus(int status);
+    int m_membersStatus = 0;
     // Start a history fill of `kind` in the active room and send its first
     // request, if the model agrees to start one (see beginHistoryFill).
     void requestHistoryFill(bsfchat::client::HistoryFillKind kind, int firstPageLimit);

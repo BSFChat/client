@@ -580,8 +580,19 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     });
 
     // Connect room members response
+    // The list's loading / error state (U-4). A failure with rows already
+    // on screen (from the sync cache) is not worth a word — what is shown
+    // is still right — but it is forgotten, so the next open asks again.
+    connect(m_client, &MatrixClient::roomMembersError, this,
+            [this](const QString& roomId, const QString& error) {
+        qWarning().noquote() << "[ServerConnection] /members failed for" << roomId << ":" << error;
+        m_membersFetchedAt.remove(roomId);
+        if (roomId != m_activeRoomId) return;
+        setMembersStatus(m_memberListModel->rowCount() == 0 ? 2 : 0);
+    });
     connect(m_client, &MatrixClient::roomMembersResult, this, [this](const QString& roomId, const QJsonArray& members) {
         if (roomId != m_activeRoomId) return;
+        setMembersStatus(0);
         if (m_membersTimer.isValid()) {
             qCInfo(logTimeline).nospace()
                 << "/members rt=" << m_membersTimer.elapsed() << "ms n=" << members.size()
@@ -1658,11 +1669,30 @@ void ServerConnection::loadMembersForRoom(const QString& roomId)
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     const qint64 last = m_membersFetchedAt.value(roomId, 0);
     const bool haveCached = !m_roomMembers.value(roomId).isEmpty();
+    bool fetching = false;
     if (!haveCached || last == 0 || now - last >= kMembersRefetchMs) {
         m_membersFetchedAt.insert(roomId, now);
         m_membersTimer.restart();
         m_client->getRoomMembers(roomId);
+        fetching = true;
     }
+    // "Loading" only when there is nothing to show meanwhile; a refetch
+    // behind a cached list is invisible, as it always was.
+    setMembersStatus(fetching && m_memberListModel->rowCount() == 0 ? 1 : 0);
+}
+
+void ServerConnection::setMembersStatus(int status)
+{
+    if (m_membersStatus == status) return;
+    m_membersStatus = status;
+    emit membersStatusChanged();
+}
+
+void ServerConnection::retryMembers()
+{
+    if (m_activeRoomId.isEmpty()) return;
+    m_membersFetchedAt.remove(m_activeRoomId);
+    loadMembersForRoom(m_activeRoomId);
 }
 
 void ServerConnection::setActiveRoom(const QString& roomId)

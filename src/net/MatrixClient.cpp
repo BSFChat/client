@@ -457,7 +457,10 @@ void MatrixClient::getRoomMembers(const QString& roomId)
     connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         auto data = reply->readAll();
-        if (reply->error() != QNetworkReply::NoError) return;
+        if (reply->error() != QNetworkReply::NoError) {
+            emit roomMembersError(roomId, bsfchat::net::replyFailureText(reply, data));
+            return;
+        }
         // QJsonDocument reports rather than throws, so a bad body is caught
         // here rather than by an exception handler. An absent or non-array
         // "chunk" is not emitted at all: ServerConnection folds the chunk into
@@ -468,16 +471,19 @@ void MatrixClient::getRoomMembers(const QString& roomId)
         if (parseError.error != QJsonParseError::NoError) {
             qWarning().noquote() << "[getRoomMembers] malformed body for" << roomId
                                  << "-" << parseError.errorString();
+            emit roomMembersError(roomId, QStringLiteral("malformed member list"));
             return;
         }
         if (!doc.isObject()) {
             qWarning().noquote() << "[getRoomMembers] body is not an object for"
                                  << roomId;
+            emit roomMembersError(roomId, QStringLiteral("malformed member list"));
             return;
         }
         const QJsonValue chunk = doc.object().value("chunk");
         if (!chunk.isArray()) {
             qWarning().noquote() << "[getRoomMembers] no members array for" << roomId;
+            emit roomMembersError(roomId, QStringLiteral("malformed member list"));
             return;
         }
         emit roomMembersResult(roomId, chunk.toArray());
