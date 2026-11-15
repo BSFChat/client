@@ -1478,6 +1478,7 @@ void ServerConnection::disconnectFromServer()
     // is a privacy incident; the cost of clearing is one round trip per
     // channel. The member fetch times go with them for the same reason.
     m_timelines.clear();
+    m_persistedTimelineGen.clear();
     m_membersFetchedAt.clear();
     // Queued read markers belong to the session being torn down; sending
     // them after it would go out with whatever token comes next, or none.
@@ -1525,8 +1526,11 @@ void ServerConnection::startSync()
         // a phone is nearly every open: iOS kills the app on most
         // backgroundings.
         const auto persisted = m_cache->timelines();
-        for (auto it = persisted.constBegin(); it != persisted.constEnd(); ++it)
+        for (auto it = persisted.constBegin(); it != persisted.constEnd(); ++it) {
             m_timelines.adopt(it.key(), it.value());
+            // What was just read IS what is on disk.
+            m_persistedTimelineGen.insert(it.key(), m_timelines.generation(it.key()));
+        }
         if (!persisted.isEmpty()) {
             qCInfo(logTimeline).nospace()
                 << "cache loaded rooms=" << persisted.size() << " from disk";
@@ -1663,9 +1667,19 @@ void ServerConnection::setActiveRoom(const QString& roomId)
     // write point: it is rare, the window is complete, and it is the only
     // moment at which the user has demonstrably finished with the room.
     // Best-effort — a failed write costs the next launch one round trip.
+    //
+    // Only when the window has changed since it was last written (or read
+    // back from disk). The write is a DELETE plus up to 150 INSERTs and a
+    // commit on the GUI thread, at the start of every switch — and flicking
+    // back and forth between two quiet channels used to rewrite both,
+    // unchanged, every time.
     if (!m_activeRoomId.isEmpty() && m_cacheWired) {
-        if (const auto* window = m_timelines.window(m_activeRoomId))
+        const quint64 gen = m_timelines.generation(m_activeRoomId);
+        if (const auto* window = m_timelines.window(m_activeRoomId);
+            window && m_persistedTimelineGen.value(m_activeRoomId, 0) != gen) {
             m_cache->recordTimeline(m_activeRoomId, *window);
+            m_persistedTimelineGen.insert(m_activeRoomId, gen);
+        }
     }
 
     // The incoming room has its own scroll position; assume nothing about

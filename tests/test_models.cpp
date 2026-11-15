@@ -2104,6 +2104,41 @@ private slots:
         QCOMPARE(cache.window("!a")->last().event_id, std::string("$net1"));
     }
 
+    void testTimelineCacheGenerationMovesOnlyWhenTheWindowDoes()
+    {
+        // ServerConnection skips rewriting a room's window to disk on a
+        // switch when this has not moved since the last write — so it must
+        // move on every real change and on nothing else.
+        bsfchat::client::RoomTimelineCache cache;
+        QCOMPARE(cache.generation("!a"), quint64(0));
+        cache.adopt("!a", hist::messagePage(3, "$disk", 1000));
+        const quint64 g0 = cache.generation("!a");
+        QVERIFY(g0 != 0);
+
+        // A replayed event and a page of already-held events change nothing.
+        cache.appendLive("!a", hist::message("$disk0", 1000));
+        cache.markFresh();
+        cache.prependHistory("!a", hist::messagePage(3, "$disk", 1000));
+        QCOMPARE(cache.generation("!a"), g0);
+        // Unrelated rooms do not touch it.
+        cache.appendLive("!b", hist::message("$b", 1));
+        QCOMPARE(cache.generation("!a"), g0);
+
+        cache.appendLive("!a", hist::message("$new", 5000));
+        const quint64 g1 = cache.generation("!a");
+        QVERIFY(g1 != g0);
+        cache.prependHistory("!a", hist::messagePage(1, "$older", 10));
+        QVERIFY(cache.generation("!a") != g1);
+
+        // Never reused: a room forgotten and re-adopted with the same events
+        // must not look like the window that was written before.
+        const quint64 before = cache.generation("!a");
+        cache.forget("!a");
+        QCOMPARE(cache.generation("!a"), quint64(0));
+        cache.adopt("!a", hist::messagePage(3, "$disk", 1000));
+        QVERIFY(cache.generation("!a") > before);
+    }
+
     void testCachedWindowReplaysAsOneInsertionWithItsRelations()
     {
         // The replay path a room switch takes. Two things matter: the model

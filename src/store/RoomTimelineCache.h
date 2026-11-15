@@ -103,6 +103,7 @@ public:
         room.ids.insert(id);
         room.events.append(event);
         trim(room);
+        room.generation = ++m_generation;
     }
 
     // One /messages page, oldest-first, for a room whose window we may
@@ -117,6 +118,7 @@ public:
         // ordered against it — the page might hold messages NEWER than
         // everything in it. Start the window over from this page instead.
         if (!m_fresh) {
+            if (!room.events.isEmpty()) room.generation = ++m_generation;
             room.events.clear();
             room.ids.clear();
         }
@@ -132,6 +134,7 @@ public:
         if (fresh.isEmpty()) return;
         room.events = fresh + room.events;
         trim(room);
+        room.generation = ++m_generation;
     }
 
     // A window loaded from disk. Replaces whatever is held for the room.
@@ -147,6 +150,7 @@ public:
         }
         if (room.events.isEmpty()) return;
         trim(room);
+        room.generation = ++m_generation;
         m_rooms.insert(roomId, std::move(room));
     }
 
@@ -172,6 +176,16 @@ public:
         return it == m_rooms.constEnd() ? 0 : static_cast<int>(it->events.size());
     }
 
+    // A number that changes whenever the room's window does — any append,
+    // prepend, restart or adopt — and is never reused, even across forget()
+    // or clear(). 0 for a room with no window. Lets a writer skip persisting
+    // a window it has already written (ServerConnection::setActiveRoom).
+    quint64 generation(const QString& roomId) const
+    {
+        auto it = m_rooms.constFind(roomId);
+        return it == m_rooms.constEnd() ? 0 : it->generation;
+    }
+
     void forget(const QString& roomId) { m_rooms.remove(roomId); }
     void clear()
     {
@@ -183,6 +197,7 @@ private:
     struct Room {
         QVector<bsfchat::RoomEvent> events;  // oldest first
         QSet<QString> ids;
+        quint64 generation = 0;
     };
 
     static void trim(Room& room)
@@ -198,6 +213,8 @@ private:
 
     QHash<QString, Room> m_rooms;
     bool m_fresh = false;
+    // Source of Room::generation. Deliberately not reset by clear().
+    quint64 m_generation = 0;
 };
 
 } // namespace bsfchat::client

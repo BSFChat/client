@@ -136,6 +136,7 @@ public:
 
 private:
     bool openAt(const QString& path);
+    void configureConnection();
     bool ensureSchema();
     void setMeta(const QString& key, const QString& value);
     QString meta(const QString& key) const;
