@@ -1207,9 +1207,12 @@ ApplicationWindow {
     // the boundary that also owns the restore, and reached by every path
     // that opens a channel rather than only the ones this shell sees.)
 
-    // Android "Share to BSFChat" handler — sends the shared payload
-    // to the currently-active channel. Text payloads become normal
-    // messages; files go through the media-upload pipeline.
+    // Android "Share to BSFChat" (M-4). Nothing is posted until the user
+    // confirms on shareSheet: the share target is exported, so any app can
+    // hand us a payload, and the old handler uploaded it on arrival. Files
+    // reach here only as another app's content:// URI (UrlHandler +
+    // core/SharePolicy.h refuse file:// and anything backed by our own
+    // storage), and go up through sendSharedMediaMessage, which re-checks.
     Connections {
         target: typeof urlHandler !== "undefined" ? urlHandler : null
         // The target is null on every build without the Android share
@@ -1217,29 +1220,190 @@ ApplicationWindow {
         // way an unguarded Connections is a hard QML error at load (U-M6).
         ignoreUnknownSignals: true
         function onSharedPayloadReceived(payload, mimeType, isFile) {
+            if (isFile) return;  // files arrive as sharedFileReceived
+            shareSheet.offer(false, payload, "", -1);
+        }
+        function onSharedFileReceived(uri, mimeType, displayName, sizeBytes) {
+            shareSheet.offer(true, uri, displayName, sizeBytes);
+        }
+        function onShareRejected(reason) {
+            root.toastError(reason);
+        }
+    }
+
+    Drawer {
+        id: shareSheet
+        // Client-side ceiling, mirrored from SharePolicy::kDefaultMaxUploadBytes
+        // (the server does not advertise its own). sendMediaMessage enforces
+        // it again; this is so the sheet can say so before anything is read.
+        readonly property real maxBytes: 100 * 1024 * 1024
+        property bool isFile: false
+        property string payload: ""
+        property string fileName: ""
+        property real sizeBytes: -1
+        // The destination is pinned when the sheet opens; if the channel
+        // changes underneath it, Send refuses rather than posting elsewhere.
+        property var targetServer: null
+        property string targetRoomId: ""
+        property string targetRoomName: ""
+        readonly property bool tooLarge: isFile && sizeBytes > maxBytes
+
+        function offer(file, value, name, size) {
             var s = serverManager.activeServer;
             if (!s || !s.activeRoomId || s.activeRoomId.length === 0) {
-                // No channel open — stash for the user to retry once
-                // they pick one. For now just toast.
-                toast("Pick a channel first, then share again.", "info");
+                root.toast("Pick a channel first, then share again.", "info");
+                return;
+            }
+            isFile = file;
+            payload = value;
+            fileName = name && name.length > 0 ? name : (file ? "attachment" : "");
+            sizeBytes = size;
+            targetServer = s;
+            targetRoomId = s.activeRoomId;
+            targetRoomName = s.activeRoomName || "";
+            open();
+        }
+        function _sizeText() {
+            if (sizeBytes < 0) return "Size unknown";
+            if (sizeBytes < 1024) return sizeBytes + " B";
+            if (sizeBytes < 1024 * 1024) return (sizeBytes / 1024).toFixed(1) + " KB";
+            return (sizeBytes / (1024 * 1024)).toFixed(1) + " MB";
+        }
+        function send() {
+            var s = serverManager.activeServer;
+            close();
+            if (!s || s !== targetServer || s.activeRoomId !== targetRoomId) {
+                root.toast("The channel changed — share again to post it.", "info");
                 return;
             }
             if (isFile) {
+                if (tooLarge) return;
                 // Same two lines, in the same order, as every other site that
-                // starts a composer upload — see MessageInput.noteUploadStarted.
-                // This one used to send without counting, which is the
-                // ownership half of U-H6 reached from the producing side: the
-                // upload's mediaSendCompleted / mediaSendFailed arrives at the
-                // composer's Connections block regardless, so a share while an
-                // attachment was uploading unlocked the composer with the
-                // attachment still on the wire, and a share with nothing in
-                // flight was an unmatched decrement the clamp ate in silence.
-                s.sendMediaMessage(payload);
+                // starts a composer upload — see MessageInput.noteUploadStarted
+                // (U-H6: the upload's completion reaches the composer's
+                // counter regardless of who started it).
+                s.sendSharedMediaMessage(payload);
                 chatView.noteUploadStarted();
-                toast("Uploading shared file…", "info");
+                root.toast("Uploading shared file…", "info");
             } else {
                 s.sendMessage(payload);
-                toast("Shared text posted", "success");
+                root.toast("Shared text posted", "success");
+            }
+        }
+        onClosed: { payload = ""; targetServer = null; }
+
+        // On the Drawer (a Popup) — docs/accessibility.md §11.
+        Accessible.role: Accessible.Dialog
+        Accessible.name: isFile ? qsTr("Send %1 to #%2?").arg(fileName).arg(targetRoomName)
+                                : qsTr("Post shared text to #%1?").arg(targetRoomName)
+        // Focus the way out: this posts into a channel other people read,
+        // on behalf of an app the user may not have meant to trust.
+        onOpened: shareCancel.forceActiveFocus()
+        edge: Qt.BottomEdge
+        width: root.width
+        height: shareColumn.implicitHeight + Theme.sp.s4 * 2 + root.bottomInset
+        modal: true
+        interactive: false
+        topPadding: Theme.sp.s4
+        bottomPadding: Theme.sp.s4 + root.bottomInset
+        leftPadding: Theme.sp.s4 + root.leftInset
+        rightPadding: Theme.sp.s4 + root.rightInset
+        background: Rectangle { color: Theme.bg1; radius: Theme.r3 }
+
+        ColumnLayout {
+            id: shareColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            spacing: Theme.sp.s3
+
+            Text {
+                Layout.fillWidth: true
+                text: shareSheet.isFile ? "Send this file?" : "Post this text?"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.lg
+                font.weight: Theme.fontWeight.semibold
+                color: Theme.fg0
+                Accessible.ignored: true
+            }
+            Text {
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                maximumLineCount: shareSheet.isFile ? 2 : 6
+                elide: Text.ElideRight
+                text: shareSheet.isFile
+                      ? shareSheet.fileName + " · " + shareSheet._sizeText()
+                      : shareSheet.payload
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.md
+                color: Theme.fg1
+                Accessible.role: Accessible.StaticText
+                Accessible.name: text
+            }
+            Text {
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                text: shareSheet.tooLarge
+                      ? "This file is larger than the 100 MB upload limit."
+                      : "Shared by another app. It will be posted in #"
+                        + shareSheet.targetRoomName + " for everyone there to see."
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: shareSheet.tooLarge ? Theme.danger : Theme.fg2
+                Accessible.role: Accessible.StaticText
+                Accessible.name: text
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                spacing: Theme.sp.s3
+                Button {
+                    id: shareCancel
+                    text: "Cancel"
+                    flat: true
+                    Layout.preferredHeight: Theme.touchTarget
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Cancel")
+                    Accessible.description: qsTr("Discard the shared item")
+                    Accessible.onPressAction: shareSheet.close()
+                    contentItem: Text {
+                        text: parent.text
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        color: Theme.fg1
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        Accessible.ignored: true
+                    }
+                    background: Rectangle {
+                        color: parent.pressed ? Theme.bg2 : "transparent"
+                        radius: Theme.r2
+                    }
+                    onClicked: shareSheet.close()
+                }
+                Button {
+                    text: "Send"
+                    enabled: !shareSheet.tooLarge
+                    Layout.preferredHeight: Theme.touchTarget
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Send to #%1").arg(shareSheet.targetRoomName)
+                    Accessible.onPressAction: shareSheet.send()
+                    contentItem: Text {
+                        text: parent.text
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.semibold
+                        color: Theme.onAccent
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        Accessible.ignored: true
+                    }
+                    background: Rectangle {
+                        color: parent.enabled ? Theme.accent : Theme.bg3
+                        radius: Theme.r2
+                    }
+                    onClicked: shareSheet.send()
+                }
             }
         }
     }

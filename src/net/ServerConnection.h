@@ -591,6 +591,10 @@ public:
     // all segments. Returns "" if no active room.
     Q_INVOKABLE QString messageLink(const QString& eventId) const;
     Q_INVOKABLE void sendMediaMessage(const QString& fileUrl);
+    // The Android share target's upload (M-4): sendMediaMessage, but only
+    // for a content:// URI — never a path read with this app's permissions.
+    // Same mediaSendCompleted/mediaSendFailed contract.
+    Q_INVOKABLE void sendSharedMediaMessage(const QString& uri);
     Q_INVOKABLE void createRoom(const QString& name, const QString& topic);
     Q_INVOKABLE void joinRoom(const QString& roomIdOrAlias);
     Q_INVOKABLE void leaveRoom(const QString& roomId);

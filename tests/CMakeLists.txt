@@ -60,6 +60,13 @@ target_include_directories(test_sed_edit PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_sed_edit PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_sed_edit COMMAND test_sed_edit)
 
+# Android share target (M-4): content:// from another app only, never a path
+# inside our own storage. Header-only.
+qt_add_executable(test_share_policy test_share_policy.cpp)
+target_include_directories(test_share_policy PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_share_policy PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_share_policy COMMAND test_share_policy)
+
 # Startup-cost path: the persisted sync token + room snapshot that lets a
 # launch skip the server's initial /sync, and the retry schedule that keeps a
 # downed server from being dialled every 5s forever. Both are deliberately

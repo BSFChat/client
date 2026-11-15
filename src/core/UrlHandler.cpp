@@ -1,6 +1,7 @@
 #include "core/UrlHandler.h"
 
 #include "core/AppProfile.h"
+#include "core/SharePolicy.h"
 
 #include <QByteArray>
 #include <QCoreApplication>
@@ -335,11 +336,91 @@ void UrlHandler::checkAndroidLaunchIntent()
         "getParcelableExtra",
         "(Ljava/lang/String;)Landroid/os/Parcelable;",
         streamKey.object<jstring>());
+    // Cleared before any refusal below, so a rejected share is not re-read
+    // and re-refused on every resume.
+    clearAction();
     if (!uri.isValid()) return;
     QString uriStr = uri.callObjectMethod(
         "toString", "()Ljava/lang/String;").toString();
     if (uriStr.isEmpty()) return;
-    emit sharedPayloadReceived(uriStr, mime, true);
-    clearAction();
+
+    // M-4: content:// from someone else's provider only — see SharePolicy.h.
+    namespace share = bsfchat::client::share;
+    const QString pkg = activity.callObjectMethod(
+        "getPackageName", "()Ljava/lang/String;").toString();
+    if (share::classifyUri(uriStr, pkg) != share::UriVerdict::Accept) {
+        qWarning() << "[share] refused a shared stream that is not another app's content:// URI";
+        emit shareRejected(QStringLiteral("BSFChat only accepts files shared through "
+                                          "another app's file provider."));
+        return;
+    }
+
+    // Name, size and (if the provider still reports one) the backing path.
+    QString displayName;
+    qint64 size = -1;
+    QString dataPath;
+    {
+        QJniEnvironment env;
+        QJniObject resolver = activity.callObjectMethod(
+            "getContentResolver", "()Landroid/content/ContentResolver;");
+        QJniObject cursor;
+        if (resolver.isValid()) {
+            cursor = resolver.callObjectMethod(
+                "query",
+                "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;"
+                "[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;",
+                uri.object(), static_cast<jobjectArray>(nullptr),
+                static_cast<jstring>(nullptr), static_cast<jobjectArray>(nullptr),
+                static_cast<jstring>(nullptr));
+        }
+        if (env.checkAndClearExceptions()) cursor = QJniObject();
+        if (cursor.isValid() && cursor.callMethod<jboolean>("moveToFirst")) {
+            const auto column = [&cursor](const char* name) {
+                return cursor.callMethod<jint>("getColumnIndex", "(Ljava/lang/String;)I",
+                                               QJniObject::fromString(QString::fromLatin1(name))
+                                                   .object<jstring>());
+            };
+            const jint nameCol = column("_display_name");
+            const jint sizeCol = column("_size");
+            const jint dataCol = column("_data");
+            if (nameCol >= 0)
+                displayName = cursor.callObjectMethod("getString", "(I)Ljava/lang/String;",
+                                                      nameCol).toString();
+            if (sizeCol >= 0 && !cursor.callMethod<jboolean>("isNull", "(I)Z", sizeCol))
+                size = cursor.callMethod<jlong>("getLong", "(I)J", sizeCol);
+            if (dataCol >= 0)
+                dataPath = cursor.callObjectMethod("getString", "(I)Ljava/lang/String;",
+                                                   dataCol).toString();
+        }
+        env.checkAndClearExceptions();
+        if (cursor.isValid()) cursor.callMethod<void>("close");
+        env.checkAndClearExceptions();
+    }
+
+    if (!dataPath.isEmpty()) {
+        QStringList ownDirs;
+        for (auto loc : {QStandardPaths::AppDataLocation, QStandardPaths::AppLocalDataLocation,
+                         QStandardPaths::AppConfigLocation, QStandardPaths::ConfigLocation,
+                         QStandardPaths::CacheLocation, QStandardPaths::TempLocation})
+            ownDirs += QStandardPaths::standardLocations(loc);
+        if (!pkg.isEmpty()) {
+            ownDirs << QStringLiteral("/data/data/") + pkg
+                    << QStringLiteral("/data/user/0/") + pkg
+                    << QStringLiteral("/data/user_de/0/") + pkg;
+        }
+        const QString filesDir = activity.callObjectMethod("getFilesDir", "()Ljava/io/File;")
+                                     .callObjectMethod("getParent", "()Ljava/lang/String;")
+                                     .toString();
+        if (!filesDir.isEmpty()) ownDirs << filesDir;
+        if (share::isInsideAny(dataPath, ownDirs)) {
+            qWarning() << "[share] refused a shared stream backed by BSFChat's own storage";
+            emit shareRejected(QStringLiteral("That file belongs to BSFChat itself and "
+                                              "can't be shared."));
+            return;
+        }
+    }
+
+    if (displayName.isEmpty()) displayName = QUrl(uriStr).fileName();
+    emit sharedFileReceived(uriStr, mime, displayName, size);
 #endif
 }
