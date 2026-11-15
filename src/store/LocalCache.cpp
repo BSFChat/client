@@ -607,3 +607,27 @@ QHash<QString, QVector<bsfchat::RoomEvent>> LocalCache::timelines() const
     }
     return out;
 }
+
+void LocalCache::forgetRoom(const QString& roomId)
+{
+    if (!m_open || roomId.isEmpty()) return;
+
+    auto db = QSqlDatabase::database(m_connectionName, false);
+    const bool inTransaction = db.transaction();
+    QSqlQuery q(db);
+    for (const auto& stmt : { QStringLiteral("DELETE FROM room_state WHERE room_id = ?"),
+                              QStringLiteral("DELETE FROM rooms WHERE room_id = ?"),
+                              QStringLiteral("DELETE FROM timeline WHERE room_id = ?") }) {
+        q.prepare(stmt);
+        q.addBindValue(roomId);
+        if (!q.exec()) {
+            qWarning() << "LocalCache: forgetting room failed:" << q.lastError().text();
+            if (inTransaction) db.rollback();
+            return;
+        }
+    }
+    if (inTransaction && !db.commit()) {
+        qWarning() << "LocalCache: forget commit failed:" << db.lastError().text();
+        db.rollback();
+    }
+}
