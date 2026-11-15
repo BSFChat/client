@@ -2805,7 +2805,20 @@ void ServerConnection::applyCallMemberEvent(const QString& roomId,
     // drives mesh peer reconciliation and doubles as our liveness heartbeat.
     // Every other channel's occupancy is fully described by the state event we
     // just folded in, so it costs nothing to display.
-    if (roomId == m_activeVoiceRoomId) m_client->getVoiceMembers(roomId);
+    if (roomId == m_activeVoiceRoomId) {
+        // Feed the sync-side roster to the engine's invite gate (V-8) right
+        // away instead of one /voice/members round trip later, so a member
+        // who just left can no longer be answered and one who just joined is.
+#ifdef BSFCHAT_VOICE_ENABLED
+        if (m_voiceEngine) {
+            QStringList ids;
+            for (const auto& member : m_roomListModel->voiceMembers(roomId))
+                ids << member.userId;
+            m_voiceEngine->setVoiceRoster(ids);
+        }
+#endif
+        m_client->getVoiceMembers(roomId);
+    }
 }
 
 void ServerConnection::restoreLastTextRoom()
