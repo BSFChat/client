@@ -241,7 +241,8 @@ private slots:
         const QString view = withoutComments(readAll(
             QStringLiteral(BSFCHAT_QML_DIR "/components/MessageView.qml")));
         QVERIFY2(!view.isEmpty(), "MessageView.qml not readable — has it moved?");
-        QVERIFY2(!view.contains(QStringLiteral("Window.active")),
+        // Whole word: Window.activeFocusItem (keyboard focus tracking) is fine.
+        QVERIFY2(!view.contains(QRegularExpression(QStringLiteral("Window\\.active\\b"))),
                  "MessageView gates on Window.active, which is false for the "
                  "whole life of a mobile app");
 
