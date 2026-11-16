@@ -1177,7 +1177,8 @@ private slots:
                  "LinkPreview.qml fetches with XMLHttpRequest; previews must come from the server");
         // No `//` in the pattern: withoutComments() strips from any `//`,
         // string or not, so "https://host" reaches here as "https:.
-        static const QRegularExpression literalUrl(QStringLiteral(R"(["'`]https?:)"));
+        // Plain string, not R"(...)": moc cannot lex that raw literal.
+        static const QRegularExpression literalUrl(QStringLiteral("[\"'`]https?:"));
         QVERIFY2(!src.contains(literalUrl),
                  "LinkPreview.qml has a literal http(s) URL; every image it shows must be "
                  "the server's mxc:// og:image, loaded through resolveMediaUrl");
