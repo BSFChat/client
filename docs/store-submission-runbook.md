@@ -542,7 +542,7 @@ are the bulk of the work and none of them needs the artefact.
 | **App access** | the demo account from §1.7; tick "All functionality is restricted" and give the credentials |
 | **Ads** | No |
 | **Target audience** | 13+; not directed at children |
-| **Data deletion** | `STORE-LISTING.md` §5.3 — in-app path plus `https://bsfchat.com/support` as the web route |
+| **Data deletion** | `STORE-LISTING.md` §5.3 — in-app path plus `https://bsfchat.com/support` as the web route. The in-app path now has **two** entries in the user settings: "Delete account on this server" (deactivates the chat-server account) and "Delete BSFChat ID…" (explains what is deleted, then opens the identity provider's account page, `<issuer>/profile.html#delete`, in a Custom Tab / ASWebAuthenticationSession sheet). Check `STORE-LISTING.md` §5.3 describes both; that file lives in the `web` repo. |
 | **Government apps / financial features / health** | No to all |
 
 ### 5.3 [YOU] Foreground-service declarations — 45 min, four videos
@@ -569,6 +569,36 @@ declaration that it maintains the Matrix sync connection so messages can
 raise a **local** notification, that there is no Firebase Cloud
 Messaging anywhere in the app, and that no notification content is sent
 to Google.
+
+**The risk, stated plainly (audit M2-7).** `SyncService` is a `dataSync`
+foreground service used as a *permanent* sync connection: it starts
+when a server is added and runs for as long as the user is signed in.
+Google's policy describes `dataSync` as for user-initiated transfers
+that finish (uploads, backups, imports), Android 15 caps it at six hours
+per 24 (`SyncService.onTimeout`, which the client already handles by
+dropping to foreground-only sync), and Google's guidance for chat apps
+is push. Expect the declaration to be rejected, or accepted and later
+challenged at a policy sweep. Plan for that outcome rather than hoping
+the argument above wins:
+
+- **If it is rejected,** ship with background sync off: remove the
+  `SyncService` declaration and `FOREGROUND_SERVICE_DATA_SYNC`, keep
+  sync while the app is foregrounded (it already degrades to that when
+  the budget runs out), and say in the listing that notifications
+  arrive while the app is open or recently used.
+- **The durable alternative is push-only background delivery:** FCM
+  (Firebase Cloud Messaging) on Android, APNs on iOS, carrying a
+  content-free "you have new messages" wake-up so the client can sync
+  briefly and post the notification locally. That needs a push gateway
+  on the server side (the homeserver posts to a BSFChat-run gateway,
+  which forwards to FCM/APNs), a Firebase project and
+  `google-services.json`, and the Play Data Safety form updated for the
+  device token. No message content needs to pass through Google — but
+  the fact that a message arrived, and when, does, which is the
+  trade-off against the self-hosting promise that `SyncService.java`
+  documents. It is a server + client project of its own; nothing in
+  the client today depends on `dataSync` that would make the switch
+  harder.
 
 ### 5.4 [YOU] The first upload is manual — 15 min
 

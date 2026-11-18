@@ -298,12 +298,23 @@ checked every time.
 ### 5.2 Guideline 5.1.1(v) — account deletion
 
 An app that lets users create an account must let them **delete** it
-from inside the app, not merely sign out. The client creates accounts
-two ways (password registration and implicit OIDC first-sign-in) and
-offers only "Sign out", which removes local credentials.
+from inside the app, not merely sign out. BSFChat has two accounts and
+the user settings now offer both, labelled apart:
 
-Needs a real account-deletion path — server endpoint plus a confirmable
-entry in per-server user settings.
+- **Delete account on this server** — `DeleteAccountDialog`, typed
+  confirmation, `POST /account/deactivate` on the chat server.
+- **Delete BSFChat ID…** — explains what the identity provider deletes
+  (email, password, 2FA, server list, every session; the username stays
+  reserved; chat-server accounts and messages are separate) and then
+  opens `<issuer>/profile.html#delete` in an `ASWebAuthenticationSession`
+  sheet (`ios_auth_session::presentPage`), which shares Safari's cookies
+  so a signed-in user lands on the delete form.
+
+Tell the reviewer where both are in the review notes. Owner follow-up in
+the identity repo: `profile.html` has no `id="delete"` on its "Delete
+Account" section, and `login.html` returns to `/profile.html` without the
+fragment; the section is on the default tab, so the page works, but an
+anchor would land the user on it directly.
 
 ### 5.3 Guideline 2.1 — the reviewer must be able to sign in
 
@@ -317,24 +328,13 @@ Also put a sentence in the review notes explaining that BSFChat is
 self-hosted and the demo server is one instance of it, or the reviewer
 may treat the empty server field as a broken first-run.
 
-### 5.4 The OIDC sign-in flow is desktop-shaped and will not work on iOS
+### 5.4 The OIDC sign-in on iOS
 
-`src/identity/IdentityClient.cpp` implements the RFC 8252 *loopback*
-redirect: it opens a `QTcpServer` on `127.0.0.1`, sends the user to
-Safari with `QDesktopServices::openUrl`, and waits for the browser to
-call back into that local port. On iOS the app is suspended once Safari
-takes the foreground, and a suspended process does not accept
-connections — the callback is lost and sign-in hangs on "Waiting for
-browser login…".
-
-The fix is `ASWebAuthenticationSession` with a **custom-scheme**
-redirect (`bsfchat://oauth/callback`), which is why `CFBundleURLTypes`
-is declared in `ios/Info.plist.in`. It also needs an iOS branch in
-`src/core/UrlHandler.cpp`, which currently has Android `#ifdef`s and no
-iOS path, and the redirect URI registered on the identity server.
-
-Until that lands, **the only sign-in that works on iOS is username +
-password**, which is another reason the demo account must use it.
+Done: `ASWebAuthenticationSession` with the claimed-https callback
+(`https://bsfchat.com/oauth/callback`, iOS 17.4+, which is why the
+deployment target is 17.4). See "Sign-in: Associated Domains" below for
+the portal half. The demo account should still use password login so
+the reviewer does not need a BSFChat ID.
 
 ### 5.5 Guideline 4.8 — not triggered
 
@@ -383,16 +383,26 @@ Functionality only, never for tracking:**
 | Category | What | Why |
 | --- | --- | --- |
 | Contact Info → Name | Display name, nickname | Shown beside the user's messages |
-| User Content → Other | Messages, attachments, avatars, reactions | The product |
-| User Content → Audio/Video | Voice and camera streams | Only when voice is enabled — **not in the current iOS build** |
+| User Content → Other | Files, reactions, profile text | The product |
+| User Content → Emails or Text Messages | Chat messages | The product |
+| User Content → Photos or Videos | Attachments, avatars | The product |
+| Contact Info → Email Address | The BSFChat ID's email | Sign-in, password reset |
 | Identifiers → User ID | Matrix account id, device id | Authentication and multi-device |
+
+Voice and camera streams are real-time and not retained, so they are not
+"collected" in Apple's sense.
 
 **Answer "No" / not collected for:** Analytics, Product Interaction,
 Advertising Data, Purchases, Financial Info, Location (precise or
 coarse), Contacts, Health, Sensitive Info, Browsing History, Search
 History, Diagnostics, Crash Data, Performance Data, Device IDs
 (no IDFA, no `identifierForVendor`, no hardware identifiers anywhere),
-Email Address, Phone Number, Physical Address.
+Phone Number, Physical Address.
+
+These answers must match `ios/PrivacyInfo.xcprivacy`, the privacy
+manifest bundled with the app (ITMS-91053 without one), which also
+declares the required-reason APIs: UserDefaults CA92.1, FileTimestamp
+C617.1, SystemBootTime 35F9.1, DiskSpace E174.1.
 
 **"Used to Track You": No, for everything.** There is no ad network, no
 attribution SDK and no data sharing with anyone.
@@ -452,11 +462,11 @@ Ordered by how visible they are to a reviewer holding a phone.
    `src/core/Haptics.cpp` is wrapped in `#ifdef Q_OS_ANDROID`, so the
    long-press feedback the mobile UI asks for silently does nothing.
    `UIImpactFeedbackGenerator` is the iOS counterpart.
-8. **Voice and video are compiled out.** `BSFCHAT_ENABLE_VOICE` defaults
-   `OFF` for iOS in `CMakeLists.txt`. The first iOS build is a
-   text-chat client — which is a coherent thing to ship, but the store
-   listing and screenshots must not promise voice, or it is a 2.3.1
-   ("accurate metadata") rejection.
+8. **Voice is on; screen share is not.** `BSFCHAT_ENABLE_VOICE` is `ON`
+   for iOS (since 2026-09-23; `UIBackgroundModes` = `audio` follows it),
+   so voice and camera ship. Screen sharing does not exist on iOS (§5.6),
+   so the listing and screenshots must not show it — a 2.3.1 ("accurate
+   metadata") rejection otherwise.
 
 ## Sign-in: Associated Domains (required from the claimed-https sign-in on)
 
