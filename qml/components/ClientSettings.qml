@@ -1514,6 +1514,56 @@ Popup {
                         }
                     }
 
+                    // ---- Mobile push (docs/push-notifications.md) ----
+                    // Only in builds that carry FCM (Android) or APNs (iOS).
+                    SettingRow {
+                        title: "Show sender and room names in notifications"
+                        description: "Shared with Google/Apple to deliver them. When off, "
+                                   + "notifications only say \"New message\" and Google/Apple "
+                                   + "learn nothing about who wrote or where."
+                        visible: appSettings.pushAvailable
+                        ThemedSwitch {
+                            Accessible.name: qsTr("Show sender and room names in notifications")
+                            enabled: appSettings.notificationsEnabled
+                            checked: appSettings.pushShowNames
+                            onToggled: {
+                                appSettings.pushShowNames = checked;
+                                checked = Qt.binding(function() {
+                                    return appSettings.pushShowNames;
+                                });
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        title: "Keep a background connection instead of push"
+                        description: "Uses more battery, and nothing goes through Google. "
+                                   + "BSFChat keeps its own connection open and shows an "
+                                   + "ongoing notification while it does."
+                        visible: appSettings.pushAvailable && Qt.platform.os === "android"
+                        ThemedSwitch {
+                            Accessible.name: qsTr("Keep a background connection instead of push")
+                            checked: appSettings.backgroundConnection
+                            onToggled: {
+                                appSettings.backgroundConnection = checked;
+                                checked = Qt.binding(function() {
+                                    return appSettings.backgroundConnection;
+                                });
+                            }
+                        }
+                    }
+
+                    // Where push stands: a server that does not allow the
+                    // gateway is normal for a self-hosted server and is
+                    // reported here, not as an error.
+                    SettingRow {
+                        readonly property string status: typeof pushManager !== "undefined"
+                            ? pushManager.statusText : ""
+                        title: "Push status"
+                        description: status
+                        visible: appSettings.pushAvailable && status.length > 0
+                    }
+
                     InfoBanner {
                         icon: "bolt"
                         tint: Theme.warn
@@ -1637,6 +1687,40 @@ Popup {
                     spacing: Theme.sp.s7
 
                     SectionHeader { text: "Advanced" }
+
+                    SettingRow {
+                        title: "Push gateway"
+                        description: "The Matrix push gateway servers deliver your "
+                                   + "notifications through. Leave empty for the default ("
+                                   + appSettings.defaultPushGatewayUrl + "). A server must "
+                                   + "allow it in its push settings."
+                        visible: appSettings.pushAvailable
+                        TextField {
+                            id: pushGatewayField
+                            Accessible.role: Accessible.EditableText
+                            Accessible.name: qsTr("Push gateway URL")
+                            implicitWidth: Theme.isMobile ? 220 : 320
+                            text: appSettings.pushGatewayUrl
+                            color: Theme.fg0
+                            placeholderText: appSettings.defaultPushGatewayUrl
+                            inputMethodHints: Qt.ImhUrlCharactersOnly | Qt.ImhNoAutoUppercase
+                            background: Rectangle {
+                                color: Theme.bg0
+                                radius: Theme.r2
+                                border.color: parent.activeFocus ? Theme.accent : Theme.line
+                                border.width: 1
+                            }
+                            leftPadding: Theme.sp.s3
+                            rightPadding: Theme.sp.s3
+                            topPadding: Theme.sp.s2
+                            bottomPadding: Theme.sp.s2
+                            // Invalid input is not stored; show what is.
+                            onEditingFinished: {
+                                appSettings.pushGatewayUrl = text;
+                                text = Qt.binding(function() { return appSettings.pushGatewayUrl; });
+                            }
+                        }
+                    }
 
                     SettingRow {
                         title: "Video diagnostics overlay"
