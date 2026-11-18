@@ -9,8 +9,12 @@
 Q_LOGGING_CATEGORY(logAomDec, "bsfchat.video.aom", QtWarningMsg)
 
 namespace {
-// Matches DECODE_{WIDTH,HEIGHT}_LIMIT in cmake/Dependencies.cmake.
-constexpr unsigned kMaxDecodeDimension = 8192;
+// Matches DECODE_{WIDTH,HEIGHT}_LIMIT in cmake/Dependencies.cmake. Senders
+// cap the long edge at 3840 (ScreenShareController), so 4096 is margin; the
+// area cap (4096x2304, ~38 MB of BGRA) also admits a 2160x3840 portrait.
+// It was 8192², about 270 MB per frame at a peer's choosing (C2-7).
+constexpr unsigned kMaxDecodeDimension = 4096;
+constexpr quint64 kMaxDecodePixels = 4096ull * 2304ull;
 }
 
 struct AomDecoderState {
@@ -65,7 +69,8 @@ VideoDecoder::Result AomLosslessDecoder::decode(const QByteArray& tu,
     // DECODE_{WIDTH,HEIGHT}_LIMIT (cmake/Dependencies.cmake) so it should
     // never get here, but the BGRA frame below is ours to bound (V-7).
     if (img->d_w == 0 || img->d_h == 0
-        || img->d_w > kMaxDecodeDimension || img->d_h > kMaxDecodeDimension) {
+        || img->d_w > kMaxDecodeDimension || img->d_h > kMaxDecodeDimension
+        || quint64(img->d_w) * img->d_h > kMaxDecodePixels) {
         qCWarning(logAomDec, "refusing %ux%u aom frame (max %u)",
                  img->d_w, img->d_h, kMaxDecodeDimension);
         return Result::Error;

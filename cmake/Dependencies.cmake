@@ -159,8 +159,8 @@ if(BSFCHAT_ENABLE_VOICE)
         # before it allocates (decoder-only; the encoder ignores these).
         # AomLosslessDecoder checks the same limit again.
         set(CONFIG_SIZE_LIMIT 1 CACHE STRING "" FORCE)
-        set(DECODE_WIDTH_LIMIT 8192 CACHE STRING "" FORCE)
-        set(DECODE_HEIGHT_LIMIT 8192 CACHE STRING "" FORCE)
+        set(DECODE_WIDTH_LIMIT 4096 CACHE STRING "" FORCE)
+        set(DECODE_HEIGHT_LIMIT 4096 CACHE STRING "" FORCE)
         FetchContent_MakeAvailable(libaom)
         set(BSFCHAT_HAVE_AOM ON)
     endif()
