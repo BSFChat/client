@@ -30,6 +30,8 @@
 #include <QJsonObject>
 #include <QUrl>
 
+#include <memory>
+
 ServerManager::ServerManager(Settings* settings, QObject* parent)
     : QObject(parent)
     , m_settings(settings)
@@ -480,7 +482,8 @@ void ServerManager::removeServer(int index)
     // server until it expired), the account's LocalCache file goes, and the
     // keychain entry goes with the settings row (Settings::writeServers).
     if (ServerConnection* conn = m_roster.at(index)) {
-        revokeOnServer(conn->homeserverUrl(), conn->accessToken());
+        revokeOnServer(conn->homeserverUrl(), conn->accessToken(),
+                       m_pusherDeletions ? m_pusherDeletions(conn) : QList<QByteArray>());
         conn->forgetLocalData();
     }
     // All of the ordering — clear the active pointer before anything can
@@ -490,7 +493,8 @@ void ServerManager::removeServer(int index)
     m_roster.remove(index);
 }
 
-void ServerManager::revokeOnServer(const QString& homeserver, const QString& accessToken)
+void ServerManager::revokeOnServer(const QString& homeserver, const QString& accessToken,
+                                   const QList<QByteArray>& pusherDeletions)
 {
     if (homeserver.isEmpty() || accessToken.isEmpty()) return;
     // Its own client, parented here: the connection is retired right after
@@ -499,7 +503,25 @@ void ServerManager::revokeOnServer(const QString& homeserver, const QString& acc
     client->setHomeserver(homeserver);
     client->setAccessToken(accessToken);
     connect(client, &MatrixClient::logoutFinished, client, &QObject::deleteLater);
-    client->logout();
+    if (pusherDeletions.isEmpty()) {
+        client->logout();
+        return;
+    }
+    // Delete this device's pushers first, then log out — whatever the
+    // deletions answer. The server also drops a session's pushers at logout;
+    // this is the explicit half, and it covers a server that does not.
+    auto remaining = std::make_shared<int>(int(pusherDeletions.size()));
+    for (const QByteArray& body : pusherDeletions) {
+        client->setPusher(body, [client, remaining](int, const QByteArray&, bool) {
+            if (--*remaining == 0) client->logout();
+        });
+    }
+    // The revocation must not hang on a deletion that never answers.
+    QTimer::singleShot(10000, client, [client, remaining]() {
+        if (*remaining <= 0) return;
+        *remaining = -1;
+        client->logout();
+    });
 }
 
 void ServerManager::leaveServer(int index)
@@ -1419,8 +1441,70 @@ void ServerManager::copyToClipboard(const QString& text)
         cb->setText(text);
 }
 
+ServerConnection* ServerManager::connectionForRoom(const QString& roomId) const
+{
+    if (roomId.isEmpty()) return nullptr;
+    for (auto* conn : m_roster.connections()) {
+        if (conn && conn->roomListModel() && conn->roomListModel()->hasRoom(roomId))
+            return conn;
+    }
+    // Room ids are !opaque:server_name, user ids @local:server_name.
+    const QString domain = roomId.section(QLatin1Char(':'), 1);
+    if (!domain.isEmpty()) {
+        for (auto* conn : m_roster.connections()) {
+            if (conn && conn->userId().section(QLatin1Char(':'), 1) == domain) return conn;
+        }
+    }
+    return m_roster.count() == 1 ? m_roster.connections().first() : nullptr;
+}
+
+void ServerManager::openPushTarget(const QString& roomId, const QString& eventId, int attempt)
+{
+    ServerConnection* conn = nullptr;
+    for (auto* c : m_roster.connections()) {
+        if (c && c->roomListModel() && c->roomListModel()->hasRoom(roomId)) { conn = c; break; }
+    }
+    // Until the room lists are in (a cold start from the tap), only an exact
+    // match is trusted; after that, the best guess.
+    constexpr int kAttempts = 20;   // × 500 ms
+    if (!conn && attempt < kAttempts) {
+        QTimer::singleShot(500, this, [this, roomId, eventId, attempt]() {
+            openPushTarget(roomId, eventId, attempt + 1);
+        });
+        return;
+    }
+    if (!conn) conn = connectionForRoom(roomId);
+    if (!conn) {
+        qWarning() << "push: no connection for tapped room" << roomId;
+        return;
+    }
+    const int index = m_roster.indexOf(conn);
+    if (index != m_roster.activeIndex()) setActiveServer(index);
+    QPointer<ServerConnection> guard(conn);
+    QMetaObject::invokeMethod(conn, [guard, roomId, eventId]() {
+        if (!guard) return;
+        if (guard->activeRoomId() != roomId) guard->setActiveRoom(roomId);
+        if (eventId.isEmpty()) return;
+        QMetaObject::invokeMethod(guard, [guard, eventId]() {
+            if (guard) emit guard->scrollToEventRequested(eventId);
+        }, Qt::QueuedConnection);
+    }, Qt::QueuedConnection);
+}
+
 bool ServerManager::openMessageLink(const QString& link)
 {
+    // bsfchat://push/<roomId>/<eventId> — from a push notification, which
+    // knows the room but not the server (PushBridge.java, PushManager).
+    const QString pushPrefix = QStringLiteral("bsfchat://push/");
+    if (link.startsWith(pushPrefix)) {
+        const QString rest = link.mid(pushPrefix.size());
+        const QString roomId = QUrl::fromPercentEncoding(rest.section(QLatin1Char('/'), 0, 0).toUtf8());
+        const QString eventId = QUrl::fromPercentEncoding(rest.section(QLatin1Char('/'), 1, 1).toUtf8());
+        if (roomId.isEmpty()) return false;
+        openPushTarget(roomId, eventId, 0);
+        return true;
+    }
+
     // Expected: bsfchat://message/<percent-encoded server URL>/<roomId>/<eventId>
     const QString prefix = QStringLiteral("bsfchat://message/");
     if (!link.startsWith(prefix)) return false;

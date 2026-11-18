@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <functional>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QPointer>
@@ -388,6 +389,14 @@ public:
     // evaluate what to push for the user on any other device.
     void getRoomNotifyLevel(const QString& roomId);
     void setRoomNotifyLevel(const QString& roomId, const QString& level);
+
+    // POST /_matrix/client/v3/pushers/set with `body` verbatim (PushRegistrar
+    // builds it). `done` gets the HTTP status (0 on a transport failure), the
+    // body and whether the transport failed; it is not called if this client
+    // is destroyed first.
+    void setPusher(const QByteArray& body,
+                   std::function<void(int status, const QByteArray& body,
+                                      bool transportError)> done);
 
     // Permissions / roles
     void setMemberRoles(const QString& roomId, const QString& userId, const QStringList& roleIds);

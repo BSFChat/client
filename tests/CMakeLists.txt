@@ -878,6 +878,7 @@ qt_add_executable(test_identity_provider_url
     ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
     ${CMAKE_SOURCE_DIR}/src/util/ExternalBrowser.cpp
     ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/PushRegistrar.cpp
     # Settings keeps access tokens out of the settings file through these.
     ${CMAKE_SOURCE_DIR}/src/core/ServerSecrets.cpp
     ${CMAKE_SOURCE_DIR}/src/core/SecretStore.cpp
@@ -942,6 +943,7 @@ qt_add_executable(test_error_surface_guards
     ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
     ${CMAKE_SOURCE_DIR}/src/util/ExternalBrowser.cpp
     ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/PushRegistrar.cpp
     # Settings keeps access tokens out of the settings file through these.
     ${CMAKE_SOURCE_DIR}/src/core/ServerSecrets.cpp
     ${CMAKE_SOURCE_DIR}/src/core/SecretStore.cpp
@@ -997,6 +999,7 @@ qt_add_executable(test_composer_upload_lock
     ${CMAKE_SOURCE_DIR}/src/identity/IdentityClient.cpp
     ${CMAKE_SOURCE_DIR}/src/util/ExternalBrowser.cpp
     ${CMAKE_SOURCE_DIR}/src/core/Settings.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/PushRegistrar.cpp
     # Settings keeps access tokens out of the settings file through these.
     ${CMAKE_SOURCE_DIR}/src/core/ServerSecrets.cpp
     ${CMAKE_SOURCE_DIR}/src/core/SecretStore.cpp

@@ -1710,6 +1710,18 @@ void MatrixClient::setRoomNotifyLevel(const QString& roomId, const QString& leve
     });
 }
 
+void MatrixClient::setPusher(const QByteArray& body,
+                             std::function<void(int, const QByteArray&, bool)> done)
+{
+    auto* reply = makeRequest("POST", QStringLiteral("/_matrix/client/v3/pushers/set"), body);
+    connect(reply, &QNetworkReply::finished, this, [reply, done = std::move(done)]() {
+        reply->deleteLater();
+        const QByteArray data = reply->readAll();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (done) done(status, data, status == 0 && reply->error() != QNetworkReply::NoError);
+    });
+}
+
 QString MatrixClient::voiceJoinRefusalText(const QByteArray& body)
 {
     const QJsonObject err = QJsonDocument::fromJson(body).object();

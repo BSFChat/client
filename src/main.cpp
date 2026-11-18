@@ -9,6 +9,7 @@
 #include "core/App.h"
 #include "core/AppProfile.h"
 #include "core/NotificationManager.h"
+#include "core/PushManager.h"
 #include "core/Settings.h"
 #include "core/UrlHandler.h"
 // Mobile routes an inbound URL through the sign-in before treating it as a
@@ -253,6 +254,8 @@ int main(int argc, char *argv[])
 
     engine.rootContext()->setContextProperty("serverManager", application.serverManager());
     engine.rootContext()->setContextProperty("appSettings", application.settings());
+    // Mobile push status + settings rows (Settings > Notifications).
+    engine.rootContext()->setContextProperty("pushManager", application.pushManager());
     // Screen-share controller binds for every desktop platform that
     // has voice compiled in (ScreenShareController.cpp is voice-gated
     // in CMakeLists, and the capture feeds the voice transport).

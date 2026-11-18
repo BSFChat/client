@@ -73,6 +73,18 @@ class Settings : public QObject {
     // persists so the UI keeps the user's choice across restarts.)
     Q_PROPERTY(bool notificationsEnabled READ notificationsEnabled WRITE setNotificationsEnabled NOTIFY notificationsEnabledChanged)
     Q_PROPERTY(bool notificationSound READ notificationSound WRITE setNotificationSound NOTIFY notificationSoundChanged)
+    // Mobile push (docs/push-notifications.md). pushAvailable: this build
+    // carries FCM (Android) or APNs (iOS). pushShowNames: ask servers for the
+    // "names" payload tier — sender and room names then travel through
+    // Google/Apple; off (the default) they only learn that something arrived.
+    // pushGatewayUrl: the Matrix push gateway pushers point at.
+    // backgroundConnection (Android): keep the persistent dataSync foreground
+    // service instead of push. Defaults to on only when push is not built in.
+    Q_PROPERTY(bool pushAvailable READ pushAvailable CONSTANT)
+    Q_PROPERTY(bool pushShowNames READ pushShowNames WRITE setPushShowNames NOTIFY pushShowNamesChanged)
+    Q_PROPERTY(QString pushGatewayUrl READ pushGatewayUrl WRITE setPushGatewayUrl NOTIFY pushGatewayUrlChanged)
+    Q_PROPERTY(QString defaultPushGatewayUrl READ defaultPushGatewayUrl CONSTANT)
+    Q_PROPERTY(bool backgroundConnection READ backgroundConnection WRITE setBackgroundConnection NOTIFY backgroundConnectionChanged)
     // Whether the right-hand member list is expanded. Also toggleable via
     // the chat-header users button and the Ctrl+M shortcut.
     Q_PROPERTY(bool showMemberList READ showMemberList WRITE setShowMemberList NOTIFY showMemberListChanged)
@@ -248,6 +260,17 @@ public:
     void setNotificationsEnabled(bool v);
     bool notificationSound() const;
     void setNotificationSound(bool v);
+    bool pushAvailable() const;
+    bool pushShowNames() const;
+    void setPushShowNames(bool v);
+    QString pushGatewayUrl() const;
+    void setPushGatewayUrl(const QString& url);
+    QString defaultPushGatewayUrl() const;
+    bool backgroundConnection() const;
+    void setBackgroundConnection(bool v);
+    // account key -> pushkey last registered there (PushRegistrar).
+    QVariantMap registeredPushers() const;
+    void setRegisteredPusher(const QString& account, const QString& pushkey);
 
     bool showMemberList() const;
     void setShowMemberList(bool v);
@@ -519,6 +542,9 @@ signals:
     void autoGainControlChanged();
     void notificationsEnabledChanged();
     void notificationSoundChanged();
+    void pushShowNamesChanged();
+    void pushGatewayUrlChanged();
+    void backgroundConnectionChanged();
     void showMemberListChanged();
     void showLinkPreviewsChanged();
     void windowXChanged();

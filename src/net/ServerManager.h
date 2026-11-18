@@ -4,6 +4,8 @@
 #include <QList>
 #include <QStringList>
 
+#include <functional>
+
 #include "identity/IdTokenAccount.h"
 #include "net/ServerDiscovery.h"
 #include "net/ServerRoster.h"
@@ -231,6 +233,20 @@ public:
     // server is connected.
     Q_INVOKABLE bool openMessageLink(const QString& link);
 
+    // The connection a room belongs to: the one whose room list has it, else
+    // the one whose user id shares the room id's server name, else the only
+    // connection. Null when none fits. Used to route push notifications,
+    // which carry a room id and nothing about the server.
+    ServerConnection* connectionForRoom(const QString& roomId) const;
+
+    // Called by removeServer before the session is revoked: the
+    // /pushers/set deletion bodies still owed for that account (PushManager).
+    // They are sent on the session first, and the logout follows once they
+    // are answered, so the explicit deletion does not race the server's own
+    // pusher cleanup at logout.
+    using PusherDeletionHook = std::function<QList<QByteArray>(ServerConnection*)>;
+    void setPusherDeletionHook(PusherDeletionHook hook) { m_pusherDeletions = std::move(hook); }
+
     // Best-effort voice disconnect for every connection that's currently
     // in a voice channel. Called on application shutdown / Android
     // onStop so the server doesn't keep stale presence for a client
@@ -374,7 +390,13 @@ private:
     void signInWithSessionOrBrowser(ServerConnection* conn, const QString& providerUrl);
     void adoptBrowserGrant(const QString& providerUrl, const QString& refreshToken,
                            bool spentHeld);
-    void revokeOnServer(const QString& homeserver, const QString& accessToken);
+    void revokeOnServer(const QString& homeserver, const QString& accessToken,
+                        const QList<QByteArray>& pusherDeletions = {});
+    // bsfchat://push/<room>/<event>: open the room once its server is known.
+    // A cold start from a notification tap gets here before the room lists
+    // have loaded, so it retries for a while.
+    void openPushTarget(const QString& roomId, const QString& eventId, int attempt);
+    PusherDeletionHook m_pusherDeletions;
     void noteIfNotPersisted();
     bool m_warnedNotPersisted = false;
     QString m_identityUrl;

@@ -239,6 +239,10 @@ qt_add_library(bsfchat-lib STATIC
     src/core/AudioDeviceStatus.cpp
     src/core/AudioGainSettings.cpp
     src/core/NotificationManager.cpp
+    # Mobile push: settings/connection glue and the platform token bridge
+    # (JNI on Android, PushBridgeIos.mm on iOS). docs/push-notifications.md.
+    src/core/PushManager.cpp
+    src/core/PushBridge.cpp
     src/core/Settings.cpp
     src/core/TintedIconProvider.cpp
     src/core/MediaDownloader.cpp
@@ -622,6 +626,10 @@ if(ANDROID)
     # dexer fail on every anonymous inner class -- see the file for the
     # full story. Sets BSFCHAT_ANDROID_PACKAGE_SOURCE_DIR.
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/AndroidJdk.cmake)
+    # Firebase Cloud Messaging, from the four public BSFCHAT_FCM_* values;
+    # edits the staged copy AndroidJdk.cmake just made. Sets
+    # BSFCHAT_ANDROID_FCM. See docs/push-notifications.md.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/AndroidPush.cmake)
 
     set_property(TARGET bsfchat-app PROPERTY
         QT_ANDROID_PACKAGE_SOURCE_DIR
@@ -738,6 +746,38 @@ if(ANDROID)
             "${BSFCHAT_OPENSSL_DIR}. Run scripts/build-openssl-android.sh "
             "or HTTPS requests will fail at runtime.")
     endif()
+endif()
+
+# Mobile push (docs/push-notifications.md). BSFCHAT_PUSH_ENABLED when this
+# build carries a push transport; BSFCHAT_PUSH_APP_ID is the pusher app_id
+# the Sygnal gateway knows the build by, and follows the bundle id so a
+# Debug (.dev) build never registers under the release app's id:
+#   Android  com.bsfchat.app       (debug: com.bsfchat.app.dev)
+#   iOS      com.bsfchat.app.ios   (debug: com.bsfchat.app.ios.dev)
+# The gateway's iOS entry is separate because APNs needs its own pushkin;
+# its APNs topic is still the bundle id, com.bsfchat.app.
+#
+# iOS: ON by default. It adds aps-environment to the entitlements, which
+# the App ID must have the Push Notifications capability for (CI's
+# scripts/asc-provisioning.py --require-entitlements says so by name).
+option(BSFCHAT_IOS_PUSH "APNs push notifications on iOS" ON)
+set(BSFCHAT_PUSH_ENABLED OFF)
+if(ANDROID AND BSFCHAT_ANDROID_FCM)
+    set(BSFCHAT_PUSH_ENABLED ON)
+    set(BSFCHAT_PUSH_APP_ID "${BSFCHAT_BUNDLE_ID}")
+elseif(IOS AND BSFCHAT_IOS_PUSH)
+    set(BSFCHAT_PUSH_ENABLED ON)
+    string(REGEX REPLACE "\\.dev$" "" _push_base "${BSFCHAT_BUNDLE_ID}")
+    set(BSFCHAT_PUSH_APP_ID "${_push_base}.ios")
+    if(NOT _push_base STREQUAL BSFCHAT_BUNDLE_ID)
+        string(APPEND BSFCHAT_PUSH_APP_ID ".dev")
+    endif()
+endif()
+if(BSFCHAT_PUSH_ENABLED)
+    target_compile_definitions(bsfchat-lib PUBLIC
+        BSFCHAT_PUSH_ENABLED=1
+        BSFCHAT_PUSH_APP_ID="${BSFCHAT_PUSH_APP_ID}")
+    message(STATUS "Push: on, pusher app_id ${BSFCHAT_PUSH_APP_ID}")
 endif()
 
 # The user-visible version string. Read by the Updater for its

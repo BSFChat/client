@@ -3,6 +3,8 @@
 #include "core/AudioDeviceStatus.h"
 #include "core/AudioGainSettings.h"
 #include "core/AudioVolume.h"
+#include "core/PushPlatform.h"
+#include "net/PushRegistrar.h"
 #include "core/ReadState.h"
 #include "core/ReleaseSelection.h"
 #include "util/FileLogger.h"
@@ -447,6 +449,58 @@ void Settings::setNotificationSound(bool v) {
         m_settings.setValue("notifications/sound", v);
         emit notificationSoundChanged();
     }
+}
+
+bool Settings::pushAvailable() const {
+    return bsfchat::push::kCompiledIn;
+}
+bool Settings::pushShowNames() const {
+    return m_settings.value("notifications/pushShowNames", false).toBool();
+}
+void Settings::setPushShowNames(bool v) {
+    if (pushShowNames() != v) {
+        m_settings.setValue("notifications/pushShowNames", v);
+        emit pushShowNamesChanged();
+    }
+}
+QString Settings::defaultPushGatewayUrl() const {
+    return QString::fromLatin1(bsfchat::client::push::kDefaultGatewayUrl);
+}
+QString Settings::pushGatewayUrl() const {
+    return m_settings.value("notifications/pushGateway", defaultPushGatewayUrl()).toString();
+}
+void Settings::setPushGatewayUrl(const QString& url) {
+    // Empty resets to the default; anything else is stored normalised, or
+    // not at all if it is not an http(s) URL.
+    QString v = url.trimmed().isEmpty()
+        ? defaultPushGatewayUrl()
+        : bsfchat::client::push::normaliseGatewayUrl(url);
+    if (v.isEmpty() || v == pushGatewayUrl()) return;
+    if (v == defaultPushGatewayUrl()) m_settings.remove("notifications/pushGateway");
+    else m_settings.setValue("notifications/pushGateway", v);
+    emit pushGatewayUrlChanged();
+}
+bool Settings::backgroundConnection() const {
+    // No push transport in this build: the foreground service is the only
+    // way anything arrives in the background, so it is not optional.
+    if (!bsfchat::push::kCompiledIn) return true;
+    return m_settings.value("notifications/backgroundConnection", false).toBool();
+}
+void Settings::setBackgroundConnection(bool v) {
+    if (backgroundConnection() != v) {
+        m_settings.setValue("notifications/backgroundConnection", v);
+        emit backgroundConnectionChanged();
+    }
+}
+QVariantMap Settings::registeredPushers() const {
+    return m_settings.value("push/registered").toMap();
+}
+void Settings::setRegisteredPusher(const QString& account, const QString& pushkey) {
+    QVariantMap map = registeredPushers();
+    if (pushkey.isEmpty()) map.remove(account);
+    else map.insert(account, pushkey);
+    if (map.isEmpty()) m_settings.remove("push/registered");
+    else m_settings.setValue("push/registered", map);
 }
 
 bool Settings::showMemberList() const {

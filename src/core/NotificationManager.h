@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QPointer>
 #include <QString>
+#include <functional>
 #include <memory>
 
 class QSystemTrayIcon;
@@ -32,6 +33,13 @@ public:
     // window — we need it to tell "is the app currently focused?" apart from
     // "is any random popover focused?" and to raise/activate on click.
     void setWindow(QWindow* window);
+
+    // Android: whether the persistent SyncService should run while a server
+    // is connected. Default: Settings::backgroundConnection(). App points it
+    // at PushManager, which also falls back to it when push cannot work on
+    // the device. Call refreshBackgroundSync() when the answer changes.
+    void setBackgroundSyncPolicy(std::function<bool()> policy);
+    void refreshBackgroundSync();
 
 private slots:
     void onServerAdded(int index);
@@ -70,6 +78,7 @@ private:
     // server connects, posts actual Android notifications via
     // NotificationManager API. No-op off Android.
     AndroidNotifier* m_androidNotifier = nullptr;
+    std::function<bool()> m_backgroundSyncPolicy;
 
     // Remember the server+room of the most recently shown notification so
     // messageClicked can navigate there. QSystemTrayIcon fires a single

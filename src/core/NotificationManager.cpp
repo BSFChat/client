@@ -38,16 +38,20 @@ NotificationManager::NotificationManager(ServerManager* serverManager,
     m_androidNotifier = new AndroidNotifier(this);
 
     // Spin up the Android SyncService once the first connection
-    // appears so /sync keeps pumping when the app is backgrounded.
-    // This only records the intent: AndroidNotifier decides when the
-    // platform will actually permit the start (this signal can fire
-    // during a restore, before the activity is resumed, and starting a
-    // foreground service from the background is fatal on Android 12+).
-    // Torn down in onServerRemoved once the last connection goes.
+    // appears so /sync keeps pumping when the app is backgrounded —
+    // when the background-connection policy says so. With push built
+    // in and working that is off by default: FCM wakes the app instead
+    // (docs/push-notifications.md), and a dataSync foreground service
+    // is only kept for users who chose it or devices without Google
+    // Play services. This only records the intent: AndroidNotifier
+    // decides when the platform will actually permit the start (this
+    // signal can fire during a restore, before the activity is resumed,
+    // and starting a foreground service from the background is fatal on
+    // Android 12+). Torn down in onServerRemoved once the last
+    // connection goes.
+    m_backgroundSyncPolicy = [settings]() { return settings->backgroundConnection(); };
     connect(serverManager, &ServerManager::serverAdded, this,
-        [this](int /*index*/) {
-            if (m_androidNotifier) m_androidNotifier->startSyncService();
-        });
+        [this](int /*index*/) { refreshBackgroundSync(); });
 
     // QSystemTrayIcon is the portable Qt 6 path for OS notifications.
     // On macOS this routes through NSUserNotificationCenter, on Windows
@@ -113,6 +117,21 @@ void NotificationManager::setWindow(QWindow* window)
     m_window = window;
 }
 
+void NotificationManager::setBackgroundSyncPolicy(std::function<bool()> policy)
+{
+    m_backgroundSyncPolicy = std::move(policy);
+    refreshBackgroundSync();
+}
+
+void NotificationManager::refreshBackgroundSync()
+{
+    if (!m_androidNotifier || !m_serverManager) return;
+    const bool wanted = m_serverManager->connectionCount() > 0
+                        && (!m_backgroundSyncPolicy || m_backgroundSyncPolicy());
+    if (wanted) m_androidNotifier->startSyncService();
+    else m_androidNotifier->stopSyncService();
+}
+
 void NotificationManager::onServerAdded(int index)
 {
     wireConnection(m_serverManager->connectionAt(index));
@@ -166,6 +185,9 @@ void NotificationManager::wireConnection(ServerConnection* conn)
             if (roomId.isEmpty()) return;
             m_androidNotifier->cancelByTag(conn->serverUrl()
                 + QStringLiteral("|") + roomId);
+            // And the one a push may have posted while BSFChat was not
+            // running (PushBridge.java tags those by room alone).
+            m_androidNotifier->cancelByTag(QStringLiteral("push|") + roomId);
         });
 }
 

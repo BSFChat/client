@@ -5,6 +5,7 @@
 
 class ServerManager;
 class NotificationManager;
+class PushManager;
 
 class App : public QObject {
     Q_OBJECT
@@ -16,9 +17,11 @@ public:
     ServerManager* serverManager() const { return m_serverManager; }
     Settings* settings() const { return m_settings; }
     NotificationManager* notificationManager() const { return m_notificationManager; }
+    PushManager* pushManager() const { return m_pushManager; }
 
 private:
     Settings* m_settings;
     ServerManager* m_serverManager;
     NotificationManager* m_notificationManager;
+    PushManager* m_pushManager;
 };
