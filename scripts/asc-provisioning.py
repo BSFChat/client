@@ -53,6 +53,7 @@ import base64
 import hashlib
 import json
 import os
+import plistlib
 import subprocess
 import sys
 import time
@@ -416,14 +417,17 @@ def cmd_fetch_profile(args: argparse.Namespace) -> int:
     # Sanity: it has to parse as a CMS blob, or xcodebuild will reject it
     # with something far less legible than this.
     try:
-        subprocess.run(
+        decoded = subprocess.run(
             ["security", "cms", "-D", "-i", written[0]],
             check=True,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-        )
+        ).stdout
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         die(f"installed profile does not parse as a provisioning profile: {exc}")
+
+    if args.require_entitlements:
+        check_entitlements(name, decoded, args.require_entitlements, args.bundle_id)
 
     if args.github_output:
         with open(args.github_output, "a", encoding="utf-8") as fh:
@@ -432,6 +436,49 @@ def cmd_fetch_profile(args: argparse.Namespace) -> int:
             fh.write(f"expires={attrs.get('expirationDate')}\n")
             fh.write("available=true\n")
     return 0
+
+
+# Portal names for the entitlements the app's .entitlements file can ask
+# for, so the error says which box to tick rather than which plist key.
+CAPABILITY_NAMES = {
+    "com.apple.developer.associated-domains": "Associated Domains",
+    "aps-environment": "Push Notifications",
+    "com.apple.security.application-groups": "App Groups",
+    "com.apple.developer.applesignin": "Sign In with Apple",
+}
+
+
+def check_entitlements(name: str, decoded: bytes, path: str, bundle_id: str) -> None:
+    """Fail unless the profile grants every entitlement the app requests.
+
+    Otherwise the archive fails twenty minutes later with Xcode's
+    "Provisioning profile ... doesn't include the ... capability", which
+    names the symptom but not the fix (v0.0.49-rc.1)."""
+    try:
+        granted = plistlib.loads(decoded).get("Entitlements", {})
+    except Exception as exc:  # plistlib raises several unrelated types
+        die(f"could not read the entitlements of profile '{name}': {exc}")
+    with open(path, "rb") as fh:
+        wanted = plistlib.load(fh)
+    missing = sorted(key for key in wanted if key not in granted)
+    if not missing:
+        print(f"OK: profile grants every entitlement in {path}")
+        return
+    caps = ", ".join(CAPABILITY_NAMES.get(k, k) for k in missing)
+    die(
+        f"provisioning profile '{name}' does not include the {caps} "
+        f"capability ({', '.join(missing)}), which {path} requests. CI cannot "
+        "change the developer account; a human must, once: Apple Developer "
+        "-> Certificates, Identifiers & Profiles -> Identifiers -> "
+        f"{bundle_id} -> enable {caps} -> Save (confirm the warning that "
+        f"existing profiles become invalid); then Profiles -> '{name}' -> "
+        "Edit -> keep the Apple Distribution certificate that matches the "
+        "IOS_DIST_CERTIFICATE secret selected -> Save, so the profile is "
+        "regenerated with the capability. No secret needs updating: this "
+        "job downloads the newest ACTIVE App Store profile through the App "
+        "Store Connect API (ASC_KEY_ID / ASC_ISSUER_ID / "
+        "ASC_PRIVATE_KEY_BASE64) on every run. Re-run the job afterwards."
+    )
 
 
 def main() -> int:
@@ -447,6 +494,11 @@ def main() -> int:
         "--require-sha1",
         default=os.environ.get("IOS_SIGNING_SHA1", ""),
         help="fail unless the profile authorises this certificate fingerprint",
+    )
+    fetch.add_argument(
+        "--require-entitlements",
+        default="",
+        help="fail unless the profile grants every key in this .entitlements file",
     )
     fetch.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT", ""))
     fetch.set_defaults(func=cmd_fetch_profile)

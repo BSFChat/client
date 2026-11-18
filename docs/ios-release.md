@@ -32,12 +32,14 @@ on if it ever drifts. It is also the same id the macOS build already
 ships under, which is correct and intended — one app identity across
 platforms.
 
-**Capabilities to enable on the App ID: none.** The current feature set
-needs no entitlement beyond the implicit ones. Specifically *not*
-needed: Push Notifications (no APNs anywhere in the client), Associated
-Domains (invite links use the `bsfchat://` scheme, not universal
-links), App Groups, iCloud, Sign in with Apple. Turning one on
+**Capabilities to enable on the App ID: Associated Domains only** (the
+sign-in callback needs it; see "Sign-in: Associated Domains" below).
+Specifically *not* needed: Push Notifications (no APNs anywhere in the
+client), App Groups, iCloud, Sign in with Apple. Turning one on
 unnecessarily invalidates the provisioning profile and buys nothing.
+The iOS job checks the downloaded profile against
+`ios/BSFChat.entitlements` before archiving and fails with the portal
+steps if a capability is missing.
 
 ### 1.3 Signing certificate
 
