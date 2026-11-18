@@ -227,9 +227,12 @@ What to check when it finishes:
    `bsfchat-app_make_aab` target, the release-bundle path resolution and
    the `jarsigner` invocation all work before a release depends on them.
 3. **ios** job green through "Export .ipa", with a `BSFChat-iOS`
-   artefact. Read the "Minimum iOS version (chosen by the Qt toolchain)"
-   line out of the log and keep it — you need that number for the
-   listing and nothing else will tell you.
+   artefact. The "Minimum iOS version" line in the log must read
+   **17.4**: CMakeLists.txt raises Qt's toolchain default (17.0) to
+   `BSFCHAT_IOS_MIN_VERSION` because the sign-in's claimed-https
+   `ASWebAuthenticationSession` callback does not exist before 17.4, and
+   `MinimumOSVersion` in the bundle's Info.plist comes from the same
+   variable. Use 17.4 in the listing.
 
 > **Do not set `version` to something real and `android_aab` true unless
 > you intend to upload the result.** An Android `versionCode` is burned

@@ -58,6 +58,11 @@
 
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- 17.4: the sign-in's claimed-https ASWebAuthenticationSession
+	     callback does not exist before it. Same variable as the build's
+	     deployment target (BSFCHAT_IOS_MIN_VERSION in CMakeLists.txt). -->
+	<key>MinimumOSVersion</key>
+	<string>@BSFCHAT_IOS_MIN_VERSION@</string>
 
 	<!-- App icon, named rather than inherited.
 	     ======================================
