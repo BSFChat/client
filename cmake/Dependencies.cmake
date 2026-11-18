@@ -29,6 +29,11 @@ if(BSFCHAT_ENABLE_KEYCHAIN)
         GIT_REPOSITORY https://github.com/frankosterfeld/qtkeychain.git
         GIT_TAG        0.15.0
         GIT_SHALLOW    TRUE
+        # iOS: store items AfterFirstUnlockThisDeviceOnly instead of the
+        # WhenUnlocked default, so a token refresh while the phone is locked
+        # can still be saved (M2-6). Idempotent; fails the configure if its
+        # anchors stop matching. See the script.
+        PATCH_COMMAND  ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_LIST_DIR}/patch-qtkeychain.cmake"
     )
     set(BUILD_WITH_QT6 ON CACHE BOOL "" FORCE)
     # Static, explicitly. QtKeychain declares option(BUILD_SHARED_LIBS ON),
