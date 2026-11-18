@@ -301,7 +301,11 @@ jobs:
         # test_video_rtp_loopback (two real managers, two m-lines, DTLS-SRTP)
         # does not; that test stays gating everywhere. Non-gating in CI until
         # the runner-side ICE stall is understood (see PLAN-2026-09.md).
-        run: ctest --test-dir build --output-on-failure -C Release -j4 -E test_media_loopback
+        #
+        # --timeout: default for tests without their own TIMEOUT. Without it
+        # a hung test (v0.0.49-rc.1: Windows' "DLL not found" loader dialog)
+        # holds the job until GitHub's 6 h limit and reports "cancelled".
+        run: ctest --test-dir build --output-on-failure -C Release -j4 --timeout 600 -E test_media_loopback
 
       # qmllint over the whole QML tree, using the aqt-installed Qt and the
       # build directory's generated qmldir/qmltypes so C++-registered types
@@ -1378,7 +1382,7 @@ jobs:
           ASAN_OPTIONS: abort_on_error=1:strict_string_checks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         # test_media_loopback: non-gating on hosted runners, see the Test step above.
-        run: ctest --test-dir build-asan --output-on-failure -j4 -E test_media_loopback
+        run: ctest --test-dir build-asan --output-on-failure -j4 --timeout 900 -E test_media_loopback
 
   # === iOS: device archive → .ipa → TestFlight ===
   #
@@ -1746,7 +1750,8 @@ jobs:
           python3 scripts/asc-provisioning.py fetch-profile \
             --bundle-id com.bsfchat.app \
             --profile-type IOS_APP_STORE \
-            --require-sha1 "$IOS_SIGNING_SHA1"
+            --require-sha1 "$IOS_SIGNING_SHA1" \
+            --require-entitlements ios/BSFChat.entitlements
 
       # -G Xcode, not Ninja: `xcodebuild archive` needs a real Xcode
       # project and the whole codesign/export path is driven through
