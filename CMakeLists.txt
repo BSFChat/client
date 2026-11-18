@@ -8,6 +8,21 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Version.cmake)
 
 project(bsfchat-client VERSION ${BSFCHAT_VERSION_DOTS} LANGUAGES CXX)
 
+# iOS floor: 17.4, not whatever Qt's toolchain picks (17.0 for Qt 6.10).
+# Sign-in completes through ASWebAuthenticationSession's claimed-https
+# callback, which is iOS 17.4+ (src/identity/IosAuthSession.mm); on 17.0-17.3
+# the app installed and could then never sign in. Raised here, after
+# project() so IOS is known, and before any target exists so every target
+# (and FetchContent dependency) is built for it. A higher -D value wins.
+# MinimumOSVersion in ios/Info.plist.in is filled from the same variable.
+set(BSFCHAT_IOS_MIN_VERSION "17.4")
+if(IOS AND (NOT CMAKE_OSX_DEPLOYMENT_TARGET
+            OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS BSFCHAT_IOS_MIN_VERSION))
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "${BSFCHAT_IOS_MIN_VERSION}" CACHE STRING
+        "Minimum iOS version" FORCE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "${BSFCHAT_IOS_MIN_VERSION}")
+endif()
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Ccache.cmake)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -933,6 +948,25 @@ if(IOS)
             "backend, which does not link on iOS.")
     endif()
 
+    # Both the build setting and the plist say 17.4 (see the note under
+    # project()); the archive's Info.plist is what the App Store reads.
+    set_target_properties(bsfchat-app PROPERTIES
+        XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+
+    # IosAuthSession.mm keeps its sessions alive with strong globals and
+    # releases them with `g = nil`, which only releases under ARC. Without
+    # it every sign-in leaked its session and anchor.
+    set_source_files_properties(src/identity/IosAuthSession.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+
+    # Apple privacy manifest (ITMS-91053 without it): required-reason API
+    # declarations and the data the app collects. Lands at the bundle root,
+    # which is Resources for a flat iOS bundle.
+    set(BSFCHAT_IOS_PRIVACY "${CMAKE_CURRENT_SOURCE_DIR}/ios/PrivacyInfo.xcprivacy")
+    target_sources(bsfchat-app PRIVATE "${BSFCHAT_IOS_PRIVACY}")
+    set_source_files_properties("${BSFCHAT_IOS_PRIVACY}" PROPERTIES
+        MACOSX_PACKAGE_LOCATION Resources)
+
     set(BSFCHAT_IOS_ASSETS "${CMAKE_CURRENT_SOURCE_DIR}/ios/Assets.xcassets")
     target_sources(bsfchat-app PRIVATE "${BSFCHAT_IOS_ASSETS}")
     set_source_files_properties("${BSFCHAT_IOS_ASSETS}" PROPERTIES
@@ -1063,6 +1097,12 @@ for key in NSMicrophoneUsageDescription NSCameraUsageDescription \
         missing="$missing $key"
     fi
 done
+# The privacy manifest is a file beside Info.plist, not a key in it; its
+# absence is ITMS-91053 after a full upload.
+if [ ! -f "${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/PrivacyInfo.xcprivacy" ]; then
+    echo "check-ios-plist: PrivacyInfo.xcprivacy is not in the bundle (ios/)." >&2
+    exit 1
+fi
 # ITSAppUsesNonExemptEncryption is deliberately NOT in that list: it is
 # valid for it to be absent (= "not answered yet", which makes App Store
 # Connect ask on the build) and valid for it to be true ALONGSIDE an

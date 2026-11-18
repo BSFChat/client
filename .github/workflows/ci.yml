@@ -1820,16 +1820,16 @@ jobs:
             -DOPENSSL_CRYPTO_LIBRARY="$OPENSSL_IOS/lib/libcrypto.a" \
             -DOPENSSL_SSL_LIBRARY="$OPENSSL_IOS/lib/libssl.a"
 
-      # We deliberately pass no -DCMAKE_OSX_DEPLOYMENT_TARGET: Qt's own
-      # toolchain picks it, so the floor we declare always matches what
-      # Qt's objects were actually built for. That does mean a Qt
-      # upgrade can move the minimum iOS version under us — and raising
-      # it drops devices — so print it here, where a diff in the log
-      # makes the change visible instead of silent.
+      # No -DCMAKE_OSX_DEPLOYMENT_TARGET here: CMakeLists.txt raises Qt's
+      # toolchain default to BSFCHAT_IOS_MIN_VERSION (17.4, the first iOS
+      # with the claimed-https ASWebAuthenticationSession callback sign-in
+      # needs) and leaves anything higher alone. A Qt upgrade can still
+      # move the floor up, and raising it drops devices, so print it here
+      # where a diff in the log makes the change visible.
       - name: Report iOS deployment target
         run: |
           TARGET=$(grep -m1 '^CMAKE_OSX_DEPLOYMENT_TARGET:' build-ios/CMakeCache.txt | cut -d= -f2)
-          echo "Minimum iOS version (chosen by the Qt toolchain): ${TARGET:-<unset>}"
+          echo "Minimum iOS version: ${TARGET:-<unset>}"
           echo "iOS deployment target: ${TARGET:-<unset>}" >> "$GITHUB_STEP_SUMMARY"
 
       # Compile-only gate. Runs on fork PRs where no secrets exist, so

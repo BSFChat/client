@@ -1407,6 +1407,70 @@ Popup {
 
                     SectionHeader { text: "Notifications" }
 
+                    // Android 13+: without POST_NOTIFICATIONS nothing below
+                    // reaches the user (M2-4). Re-checked whenever the pane
+                    // is shown, since the answer can change in system
+                    // settings behind our back.
+                    SettingRow {
+                        id: osNotifRow
+                        property bool granted: true
+                        function refresh() {
+                            osNotifRow.granted = (typeof androidPerms === "undefined")
+                                || androidPerms.hasNotifications();
+                        }
+                        visible: Qt.platform.os === "android" && !osNotifRow.granted
+                        Component.onCompleted: refresh()
+                        title: "Notifications are off for BSFChat"
+                        description: "Android is blocking BSFChat's notifications, "
+                                   + "so new messages won't alert you."
+                        Button {
+                            id: allowNotifBtn
+                            text: "Allow…"
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Allow notifications")
+                            Accessible.onPressAction: allowNotifBtn.clicked()
+                            onClicked: {
+                                var once = function(granted) {
+                                    androidPerms.notificationsResult.disconnect(once);
+                                    // Denied for good, the system shows no
+                                    // prompt at all: send the user to the
+                                    // one place they can still turn it on.
+                                    if (!granted) androidPerms.openNotificationSettings();
+                                    osNotifRow.refresh();
+                                };
+                                androidPerms.notificationsResult.connect(once);
+                                androidPerms.requestNotifications();
+                            }
+                            contentItem: Text {
+                                textFormat: Text.PlainText
+                                text: parent.text
+                                Accessible.ignored: true
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                font.weight: Theme.fontWeight.medium
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                color: parent.hovered ? Theme.bg3 : Theme.bg2
+                                border.color: Theme.line
+                                border.width: 1
+                                radius: Theme.r2
+                                implicitWidth: 100
+                                implicitHeight: Theme.controlHeight.md
+                            }
+                        }
+                    }
+                    // Back from system settings (or anywhere else): re-check.
+                    Connections {
+                        target: Qt.application
+                        function onStateChanged() {
+                            if (Qt.application.state === Qt.ApplicationActive)
+                                osNotifRow.refresh();
+                        }
+                    }
+
                     SettingRow {
                         title: "Enable notifications"
                         description: "Show an OS notification when a new message arrives in a channel you're not currently viewing."

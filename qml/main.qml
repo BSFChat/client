@@ -552,7 +552,9 @@ ApplicationWindow {
         reportDialogGlobal.openFor(kind, userId, displayName, roomId, eventId, preview);
     }
     function openBlockedUsers() { blockedUsersGlobal.open(); }
-    function openDeleteAccount() { deleteAccountGlobal.open(); }
+    function openDeleteAccount() { deleteAccountGlobal.openForServer(); }
+    // The BSFChat ID itself, not this server's account (M2-2).
+    function openDeleteIdentity() { deleteAccountGlobal.openForIdentity(); }
     // Toast API — kind defaults to "info". Shortcut helpers are also
     // exposed so call sites read naturally (`Window.window.toastError(...)`).
     function toast(text, kind)   { toastHostGlobal.toast(text, kind || "info"); }

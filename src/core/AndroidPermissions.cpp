@@ -3,6 +3,7 @@
 #include <QtGlobal>
 
 #ifdef Q_OS_ANDROID
+#include <QSettings>
 #include <QCoreApplication>
 #include <QDebug>
 #include <QJniEnvironment>
@@ -207,6 +208,51 @@ void AndroidPermissions::requestNotifications()
         kRequestNotifications);
 #else
     emit notificationsResult(true);
+#endif
+}
+
+void AndroidPermissions::requestNotificationsAfterFirstServer()
+{
+#ifdef Q_OS_ANDROID
+    if (QNativeInterface::QAndroidApplication::sdkVersion() < 33) return;
+    if (hasNotifications()) return;
+    QSettings settings;
+    const QString key = QStringLiteral("android/notificationsAskedAfterServer");
+    if (settings.value(key, false).toBool()) return;
+    settings.setValue(key, true);
+    requestNotifications();
+#endif
+}
+
+void AndroidPermissions::openNotificationSettings()
+{
+#ifdef Q_OS_ANDROID
+    QJniObject act = activity();
+    if (!act.isValid()) return;
+    // Settings.ACTION_APP_NOTIFICATION_SETTINGS + EXTRA_APP_PACKAGE (API 26+;
+    // minSdk is 28).
+    QJniObject action = QJniObject::fromString(
+        QStringLiteral("android.settings.APP_NOTIFICATION_SETTINGS"));
+    QJniObject intent("android/content/Intent", "(Ljava/lang/String;)V",
+                      action.object<jstring>());
+    if (!intent.isValid()) return;
+    QJniObject pkg = act.callObjectMethod("getPackageName", "()Ljava/lang/String;");
+    QJniObject extra = QJniObject::fromString(
+        QStringLiteral("android.provider.extra.APP_PACKAGE"));
+    intent.callObjectMethod("putExtra",
+        "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
+        extra.object<jstring>(), pkg.object<jstring>());
+    // Raw JNI so a thrown ActivityNotFoundException is visible here:
+    // QJniObject::callMethod clears exceptions itself and reports nothing.
+    QJniEnvironment env;
+    jclass cls = env->GetObjectClass(act.object());
+    jmethodID start = cls ? env->GetMethodID(cls, "startActivity",
+                                             "(Landroid/content/Intent;)V")
+                          : nullptr;
+    if (start) env->CallVoidMethod(act.object(), start, intent.object());
+    if (cls) env->DeleteLocalRef(cls);
+    if (!start || env.checkAndClearExceptions())
+        qWarning("[permissions] could not open the notification settings");
 #endif
 }
 

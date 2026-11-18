@@ -38,15 +38,36 @@
 //       * iOS presents ASWebAuthenticationSession, which keeps the app in
 //         the foreground and hands the redirect straight to a completion
 //         handler (src/identity/IosAuthSession.h).
-//       * Android keeps QDesktopServices::openUrl — which maps to an
-//         ACTION_VIEW intent — and the redirect comes back as an
-//         ACTION_VIEW intent of our own, through UrlHandler.
+//       * Android opens the page in a Custom Tab (BrowserTab.java, falling
+//         back to QDesktopServices::openUrl), and the redirect comes back as
+//         an ACTION_VIEW intent of our own, through UrlHandler.
 //
 // Every transport converges on handleCallback(), so state and PKCE are
 // validated by the same code on every platform (oidc::parseCallbackQuery).
 #if defined(Q_OS_IOS) || defined(Q_OS_ANDROID)
 #  define BSFCHAT_NATIVE_OIDC_REDIRECT 1
 #endif
+
+// Process-wide outlet for a sign-in finished on behalf of an attempt that no
+// longer exists (audit M2-5): Android killed the process while the browser
+// had the page, and the redirect cold-started a new one. IdentityClient
+// redeems the code from the persisted request (identity/PendingOidcRequest.h)
+// and reports here, because the object that asked for it is gone; whoever
+// owns sign-ins (ServerManager) listens once at startup. Never emits on
+// desktop or iOS, where no request is persisted.
+class IdentityRecovery : public QObject {
+    Q_OBJECT
+public:
+    using QObject::QObject;
+signals:
+    // `resource` empty: the account-level sign-in. Otherwise the chat server
+    // the id_token is audienced to (oidc::resourceForHomeserver).
+    void loginRecovered(const QString& providerUrl, const QString& resource,
+                        const QString& idToken, const QString& accessToken,
+                        const QString& refreshToken);
+    // The callback could not be completed. `message` is user-facing.
+    void recoveryFailed(const QString& message);
+};
 
 class IdentityClient : public QObject {
     Q_OBJECT
@@ -148,6 +169,16 @@ public:
     // worth having.)
     static bool deliverCallbackUrl(const QString& url);
 #endif
+    // See IdentityRecovery. Created on first use; lives for the process.
+    static IdentityRecovery* recovery();
+
+    // Show one of the identity provider's own pages — the account page
+    // where a BSFChat ID is deleted (store requirement, M2-2) — in the same
+    // in-app browser session the sign-in uses, so it shares that session's
+    // cookies and reads as part of the app: ASWebAuthenticationSession on
+    // iOS, a Custom Tab on Android, the system browser on desktop. Does not
+    // touch any sign-in in flight. False when nothing could be shown.
+    static bool openProviderPage(const QUrl& url);
 
 signals:
     void loginCompleted(const QString& idToken, const QString& accessToken, const QString& refreshToken);
@@ -212,6 +243,18 @@ private:
     QString generateCodeVerifier();
     QString computeCodeChallenge(const QString& verifier);
     QString generateState();
+
+#ifdef Q_OS_ANDROID
+    // M2-5: write this attempt's PKCE/state/nonce to SecretStore while the
+    // page is shown, and drop it once the attempt ends either way.
+    void persistPendingRequest();
+    void forgetPendingRequest();
+    // A callback arrived with no live attempt: finish it from the persisted
+    // request if it is ours and fresh, otherwise say the sign-in was
+    // interrupted.
+    static void resumeInterruptedSignIn(const QUrl& callbackUrl);
+    bool m_persistedPending = false;
+#endif
 
 #ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
     // What isActive() reports where there is no listening socket to ask:

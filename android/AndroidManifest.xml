@@ -64,10 +64,11 @@
          "microphone|camera" so a single FGS anchors both uses
          during a call. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
-    <!-- Allow the foreground-service notification to appear on
-         Android 13+ which gates all notification posting behind
-         a runtime opt-in. We request this lazily before first
-         voice-join (see AndroidPermissions). -->
+    <!-- Allow notifications (messages, and the foreground-service
+         notification) on Android 13+, which gates all notification
+         posting behind a runtime opt-in. Requested after the first
+         server sign-in succeeds, before the first voice join, and from
+         Settings > Notifications (see AndroidPermissions). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Keep wake during a call so the OS doesn't doze us off the
          network mid-conversation. -->
@@ -122,7 +123,8 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:allowNativeHeapPointerTagging="false"
         android:allowBackup="false"
-        android:fullBackupOnly="false">
+        android:fullBackupOnly="false"
+        android:dataExtractionRules="@xml/data_extraction_rules">
         <!--
           allowBackup="false": Android Auto Backup would copy this
           app's private data dir — which holds the OIDC refresh token,
@@ -132,6 +134,11 @@
           direct contradiction of the project's own-your-server
           promise. Was "true" (Qt's template default) until the Play
           hardening pass; it has never shipped to a store.
+
+          dataExtractionRules: from Android 12 allowBackup="false" no
+          longer covers device-to-device transfer, so res/xml/
+          data_extraction_rules.xml excludes everything from both cloud
+          backup and device transfer.
         -->
         <!--
           screenOrientation="portrait" — PORTRAIT ONLY, deliberately, for
@@ -239,10 +246,10 @@
                  instance and onNewIntent -> nativeOnNewIntent ->
                  UrlHandler::checkAndroidLaunchIntent picks it up.
 
-                 Cold start is the case this cannot rescue: if the process
-                 dies while the browser has the foreground, the PKCE verifier
-                 died with it. IdentityClient::deliverCallbackUrl consumes the
-                 callback with a warning.
+                 Cold start: if the process dies while the browser has the
+                 foreground, IdentityClient::deliverCallbackUrl finishes the
+                 sign-in from the request persisted in SecretStore (ten
+                 minutes), or tells the user it was interrupted.
 
                  bsfchat://room/... deep links are still not claimed on
                  Android; in-app notification taps use an EXPLICIT intent

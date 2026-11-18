@@ -420,14 +420,14 @@ Popup {
             Layout.fillWidth: true
             Layout.preferredHeight: 32
             Accessible.role: Accessible.Button
-            Accessible.name: qsTr("Delete account")
+            Accessible.name: qsTr("Delete account on this server")
             // Nothing is deleted by this click — it opens the
             // confirmation — so the description says that as well as
             // what the confirmed action destroys.
             Accessible.description: qsTr("Opens a confirmation for permanently deleting your account on this server")
             Accessible.onPressAction: deleteAccountBtn.clicked()
             contentItem: Text {
-                text: "Delete account"
+                text: "Delete account on this server"
                 Accessible.ignored: true
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
@@ -443,6 +443,39 @@ Popup {
             onClicked: {
                 userSettings.close();
                 Window.window.openDeleteAccount();
+            }
+        }
+
+        // Deleting the BSFChat ID itself (M2-2): a different account from the
+        // one above, held by the identity provider rather than this server.
+        // Opens DeleteAccountDialog's explanation, which then opens the
+        // provider's account page in the in-app browser session.
+        Button {
+            id: deleteIdentityBtn
+            Layout.fillWidth: true
+            Layout.preferredHeight: 32
+            visible: serverManager.hasIdentityAccount()
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Delete BSFChat ID")
+            Accessible.description: qsTr("Explains what deleting your BSFChat ID removes, then opens your BSFChat ID account page")
+            Accessible.onPressAction: deleteIdentityBtn.clicked()
+            contentItem: Text {
+                text: "Delete BSFChat ID…"
+                Accessible.ignored: true
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                font.weight: Theme.fontWeight.medium
+                color: deleteIdentityBtn.hovered ? Theme.danger : Theme.fg3
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+            }
+            background: Rectangle {
+                color: "transparent"
+                radius: Theme.r2
+            }
+            onClicked: {
+                userSettings.close();
+                Window.window.openDeleteIdentity();
             }
         }
     }

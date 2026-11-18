@@ -108,6 +108,12 @@ public class VoiceService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // Only a system restart delivers a null intent, and there is no
+        // call behind one (see the return value below).
+        if (intent == null) {
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
         Notification n = buildNotification();
         try {
             int type = foregroundTypeFor(this);
@@ -128,12 +134,13 @@ public class VoiceService extends Service {
             stopSelf(startId);
             return START_NOT_STICKY;
         }
-        // START_STICKY means if the system kills us under memory pressure
-        // it'll try to restart us — but VoiceEngine's network state won't
-        // have survived, so the user will land in a broken room. We
-        // accept that: a stale "in voice" banner is less confusing than
-        // being silently dropped mid-call.
-        return START_STICKY;
+        // START_NOT_STICKY, deliberately (M2-8). A sticky restart after the
+        // system kills the process brings back only this service — with a
+        // null intent, no VoiceEngine and no call — so all it did was post
+        // a ghost "in a voice call" notification and hold the wake lock
+        // until the user force-stopped the app. A call cannot survive the
+        // process anyway; better that it ends visibly.
+        return START_NOT_STICKY;
     }
 
     // Which foreground-service types we may legally claim right now.
@@ -159,13 +166,18 @@ public class VoiceService extends Service {
     // set. Called when the camera is turned on part-way through a call,
     // at which point CAMERA has just been granted and the camera bit
     // becomes both necessary and legal to claim.
-    public static void refreshForegroundType(Context ctx) {
-        if (ctx == null) return;
+    //
+    // Returns whether the platform accepted the start. The answer has to
+    // come back as a value: QJniObject clears a Java exception itself, so
+    // the caller cannot see one after the fact.
+    public static boolean refreshForegroundType(Context ctx) {
+        if (ctx == null) return false;
         try {
-            ctx.startForegroundService(
-                new Intent(ctx, VoiceService.class));
+            return ctx.startForegroundService(
+                new Intent(ctx, VoiceService.class)) != null;
         } catch (Throwable t) {
             Log.w(TAG, "foreground-type refresh refused: " + t);
+            return false;
         }
     }
 

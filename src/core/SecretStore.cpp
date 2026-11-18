@@ -5,6 +5,7 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QEventLoop>
+#include <QHash>
 #include <QPointer>
 #include <QTimer>
 
@@ -19,10 +20,16 @@ class KeychainSecretStore : public SecretStore {
 public:
     bool write(const QString& key, const QString& value) override
     {
+        // A newer value supersedes one still waiting for an unlock.
+        dropDeferred(key);
         auto* job = new QKeychain::WritePasswordJob(service());
         job->setKey(key);
         job->setTextData(value);
         const Outcome out = run(job);
+        if (isDeviceLocked(out.error)) {
+            deferWrite(key, value);
+            return true;
+        }
         if (out.error != QKeychain::NoError) {
             qWarning().noquote() << "[SecretStore] could not store a secret in the OS keychain:"
                                  << out.errorString;
@@ -33,6 +40,8 @@ public:
 
     std::optional<QString> read(const QString& key) override
     {
+        // The newest value, even if the keychain has not taken it yet.
+        if (auto it = m_deferred.constFind(key); it != m_deferred.constEnd()) return *it;
         auto* job = new QKeychain::ReadPasswordJob(service());
         job->setKey(key);
         const Outcome out = run(job);
@@ -48,6 +57,7 @@ public:
 
     bool remove(const QString& key) override
     {
+        dropDeferred(key);
         auto* job = new QKeychain::DeletePasswordJob(service());
         job->setKey(key);
         const Outcome out = run(job);
@@ -56,11 +66,16 @@ public:
 
     void writeLater(const QString& key, const QString& value) override
     {
+        dropDeferred(key);
         auto* job = new QKeychain::WritePasswordJob(service());
         job->setAutoDelete(true);
         job->setKey(key);
         job->setTextData(value);
-        QObject::connect(job, &QKeychain::Job::finished, [](QKeychain::Job* j) {
+        QObject::connect(job, &QKeychain::Job::finished, [this, key, value](QKeychain::Job* j) {
+            if (isDeviceLocked(j->error())) {
+                deferWrite(key, value);
+                return;
+            }
             if (j->error() != QKeychain::NoError) {
                 qWarning().noquote() << "[SecretStore] could not store a secret in the OS keychain:"
                                      << j->errorString();
@@ -71,6 +86,7 @@ public:
 
     void removeLater(const QString& key) override
     {
+        dropDeferred(key);
         auto* job = new QKeychain::DeletePasswordJob(service());
         job->setAutoDelete(true);
         job->setKey(key);
@@ -100,6 +116,77 @@ public:
     }
 
 private:
+    // ── Device locked (iOS, M2-6) ──
+    //
+    // errSecInteractionNotAllowed (QtKeychain: AccessDenied) means the
+    // keychain is locked, not that the write is refused. Items are written
+    // AfterFirstUnlock (cmake/patch-qtkeychain.cmake), so this is only seen
+    // before the first unlock after a reboot, or for an item written by an
+    // older build that is still WhenUnlocked. Either way the right answer is
+    // to keep the value and write it once the device unlocks — NOT to report
+    // failure, because IdentitySession answers a failed write by deleting the
+    // stored refresh token (which is already spent), signing the user out.
+    // Reported as written: the value is held here, read() returns it, and it
+    // reaches the keychain on the next retry that finds the device unlocked.
+    static bool isDeviceLocked(QKeychain::Error error)
+    {
+#ifdef Q_OS_IOS
+        return error == QKeychain::AccessDenied;
+#else
+        Q_UNUSED(error);
+        return false;
+#endif
+    }
+
+    void deferWrite(const QString& key, const QString& value)
+    {
+        if (m_deferred.isEmpty()) {
+            qWarning() << "[SecretStore] keychain locked; holding a write until the device "
+                          "is unlocked";
+        }
+        m_deferred.insert(key, value);
+        scheduleRetry();
+    }
+
+    void dropDeferred(const QString& key) { m_deferred.remove(key); }
+
+    void scheduleRetry()
+    {
+        if (m_retryScheduled || m_deferred.isEmpty() || !QCoreApplication::instance()) return;
+        m_retryScheduled = true;
+        QTimer::singleShot(kLockedRetryMs, QCoreApplication::instance(), [this]() {
+            m_retryScheduled = false;
+            const auto pending = m_deferred;
+            for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
+                const QString key = it.key();
+                const QString value = it.value();
+                auto* job = new QKeychain::WritePasswordJob(service());
+                job->setAutoDelete(true);
+                job->setKey(key);
+                job->setTextData(value);
+                QObject::connect(job, &QKeychain::Job::finished,
+                                 [this, key, value](QKeychain::Job* j) {
+                    // Superseded or removed meanwhile: not ours to settle.
+                    if (m_deferred.value(key) != value) return;
+                    if (isDeviceLocked(j->error())) {
+                        scheduleRetry();
+                        return;
+                    }
+                    m_deferred.remove(key);
+                    if (j->error() != QKeychain::NoError) {
+                        qWarning().noquote()
+                            << "[SecretStore] deferred keychain write failed:" << j->errorString();
+                    }
+                });
+                job->start();
+            }
+        });
+    }
+
+    static constexpr int kLockedRetryMs = 15000;
+    QHash<QString, QString> m_deferred;
+    bool m_retryScheduled = false;
+
     mutable bool m_probed = false;
     mutable bool m_available = false;
     // A job that outlived its deadline. QtKeychain runs jobs strictly one

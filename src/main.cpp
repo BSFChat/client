@@ -221,6 +221,16 @@ int main(int argc, char *argv[])
     AndroidPermissions androidPerms;
     QQmlEngine::setObjectOwnership(&androidPerms, QQmlEngine::CppOwnership);
     engine.rootContext()->setContextProperty("androidPerms", &androidPerms);
+#ifdef Q_OS_ANDROID
+    // Message notifications need POST_NOTIFICATIONS on Android 13+, and the
+    // only prompt used to be on the voice path (M2-4). Ask once, right after
+    // the first server sign-in succeeds — the moment notifications start to
+    // mean something. Queued so the prompt follows the login UI settling.
+    QObject::connect(application.serverManager(), &ServerManager::loginSuccess,
+        &androidPerms, [&androidPerms]() {
+            androidPerms.requestNotificationsAfterFirstServer();
+        }, Qt::QueuedConnection);
+#endif
 
     // UrlHandler exposes two signals — `urlReceived` for
     // `bsfchat://…` deep-links and `sharedPayloadReceived` for

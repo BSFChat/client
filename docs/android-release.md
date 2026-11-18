@@ -162,7 +162,9 @@ at least once if any is missing.
     `SyncService.java`: routing every user's push traffic through Google
     would contradict the self-hosting promise). Be ready to argue that,
     and to fall back to "sync only while the app is in the foreground /
-    recently used" if the declaration is rejected.
+    recently used" if the declaration is rejected. The fallback and the
+    FCM push-only alternative are written up in
+    `docs/store-submission-runbook.md` §5.3.
   * `mediaProjection` (MediaProjectionService) — screen share.
 * **Data safety form.** The app collects an account identifier and
   transmits message content, audio and video to a **user-chosen**
@@ -419,13 +421,14 @@ works on a device.
   an `am start`, which adds `NEW_TASK` itself. Worth confirming against
   an actual browser round trip.
 * **Cold-start sign-in.** If the process dies while the browser has the
-  foreground, the redirect relaunches us and the PKCE verifier is gone
-  with the old process.
-  `IdentityClient::deliverCallbackUrl` consumes the callback with a
-  warning rather than mistaking it for a room link — correct, but
-  *silent*: the user lands back on the sign-in screen with no
-  explanation. Needs a line of UI, which belongs with whoever owns the
-  mobile sign-in QML.
+  foreground, the redirect relaunches us. The attempt's PKCE verifier,
+  state, nonce and resource are now persisted in SecretStore (Keystore)
+  for ten minutes (`identity/PendingOidcRequest.h`), so
+  `IdentityClient::deliverCallbackUrl` redeems the code and ServerManager
+  finishes the sign-in; anything it cannot finish shows "Sign-in was
+  interrupted — please try again." Verify on a device with "Don't keep
+  activities" on. The page itself opens in a Custom Tab
+  (`BrowserTab.java`) where the default browser supports one.
 * **POST_NOTIFICATIONS denial.** The foreground service is not killed
   when the permission is denied on 13+ — the notification is suppressed
   and the service runs. That is the documented behaviour, unverified

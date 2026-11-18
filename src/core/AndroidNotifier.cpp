@@ -180,6 +180,45 @@ QJniObject buildTapIntent(const QString& deepLink)
     return pi;
 }
 
+// Message text must not be readable on a locked phone (M2-8). VISIBILITY_
+// PRIVATE shows the notification on the lock screen only as its public
+// version, which says that something arrived and nothing else; the full
+// title and text appear once the device is unlocked. (The user's own
+// "show sensitive content" system setting can still widen or narrow this.)
+void applyLockScreenPrivacy(QJniObject& builder, const QJniObject& ctx)
+{
+    constexpr jint kVisibilityPrivate = 0; // Notification.VISIBILITY_PRIVATE
+    builder.callObjectMethod("setVisibility",
+        "(I)Landroid/app/Notification$Builder;", kVisibilityPrivate);
+
+    QJniObject pub;
+    if (QNativeInterface::QAndroidApplication::sdkVersion() >= 26) {
+        pub = QJniObject("android/app/Notification$Builder",
+            "(Landroid/content/Context;Ljava/lang/String;)V",
+            ctx.object(),
+            QJniObject::fromString(kChannelId).object<jstring>());
+    } else {
+        pub = QJniObject("android/app/Notification$Builder",
+            "(Landroid/content/Context;)V", ctx.object());
+    }
+    if (!pub.isValid()) return;
+    pub.callObjectMethod("setContentTitle",
+        "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;",
+        QJniObject::fromString(QStringLiteral("BSFChat")).object<jstring>());
+    pub.callObjectMethod("setContentText",
+        "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;",
+        QJniObject::fromString(QStringLiteral("New message")).object<jstring>());
+    pub.callObjectMethod("setSmallIcon",
+        "(I)Landroid/app/Notification$Builder;",
+        jint(0x01080088)); // android.R.drawable.sym_action_chat
+    QJniObject publicVersion = pub.callObjectMethod(
+        "build", "()Landroid/app/Notification;");
+    if (!publicVersion.isValid()) return;
+    builder.callObjectMethod("setPublicVersion",
+        "(Landroid/app/Notification;)Landroid/app/Notification$Builder;",
+        publicVersion.object());
+}
+
 } // namespace
 #endif // Q_OS_ANDROID
 
@@ -246,19 +285,21 @@ void AndroidNotifier::tryStartSyncService()
         ctx.object(), classRef.object());
     env->DeleteLocalRef(svc);
 
+    // QJniObject clears a pending exception itself after each call, so
+    // asking the environment afterwards always answered "no exception" —
+    // the old check here was dead. A refused start (the exception) and a
+    // missing service both come back as an invalid ComponentName.
+    QJniObject started;
     if (QNativeInterface::QAndroidApplication::sdkVersion() >= 26) {
-        ctx.callObjectMethod("startForegroundService",
+        started = ctx.callObjectMethod("startForegroundService",
             "(Landroid/content/Intent;)Landroid/content/ComponentName;",
             intent.object());
     } else {
-        ctx.callObjectMethod("startService",
+        started = ctx.callObjectMethod("startService",
             "(Landroid/content/Intent;)Landroid/content/ComponentName;",
             intent.object());
     }
-    // Belt as well as braces: QJniObject clears a pending exception after
-    // each call, but it does not tell the caller, so the start would
-    // otherwise look like it succeeded. This asks explicitly.
-    if (env.checkAndClearExceptions()) {
+    if (!started.isValid()) {
         qWarning("[notifier] SyncService start was refused by the platform; "
                  "background sync stays off until the app is foregrounded "
                  "again");
@@ -373,6 +414,8 @@ void AndroidNotifier::postChatNotification(const QString& tag,
             pi.object());
     }
 
+    applyLockScreenPrivacy(builder, ctx);
+
     if (!groupKey.isEmpty()) {
         builder.callObjectMethod("setGroup",
             "(Ljava/lang/String;)Landroid/app/Notification$Builder;",
@@ -423,6 +466,8 @@ void AndroidNotifier::postChatNotification(const QString& tag,
             sb.callObjectMethod("setGroupSummary",
                 "(Z)Landroid/app/Notification$Builder;",
                 jboolean(true));
+            // The summary's title is the room/server name: private too.
+            applyLockScreenPrivacy(sb, ctx);
             QJniObject summary = sb.callObjectMethod(
                 "build", "()Landroid/app/Notification;");
             if (summary.isValid()) {

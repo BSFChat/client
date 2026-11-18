@@ -6,6 +6,18 @@ import BSFChat
 
 // Delete this account, permanently. Apple App Store guideline 5.1.1(v).
 //
+// Two different deletions, deliberately kept apart (M2-2):
+//
+//   * open()            — the account on THIS chat server (POST
+//                         /account/deactivate). Everything below.
+//   * openForIdentity() — the BSFChat ID itself. That lives with the identity
+//                         provider, not with any chat server, so this dialog
+//                         only explains what goes and then opens the
+//                         provider's account page in the in-app browser
+//                         session (ServerManager.openIdentityAccountDeletion).
+//                         The confirmation (username, password, 2FA) is the
+//                         provider's.
+//
 // ── The confirmation is the whole dialog ─────────────────────────────────
 //
 // POST /account/deactivate is irreversible and, for an account that signs in
@@ -32,6 +44,14 @@ Popup {
     id: deleteDialog
 
     readonly property var conn: serverManager.activeServer
+    // See the header: true while showing the BSFChat ID explanation.
+    property bool identityMode: false
+    property string _identityError: ""
+
+    function openForServer() { deleteDialog.identityMode = false; deleteDialog.open(); }
+    function openForIdentity() { deleteDialog.identityMode = true; deleteDialog.open(); }
+    // Plain open() keeps meaning the server deletion it always meant: the
+    // mode is reset in onClosed below.
 
     // What the user must type. The localpart, not the full mxid: "@amy:h" has
     // punctuation that is easy to get wrong and proves nothing extra.
@@ -90,19 +110,23 @@ Popup {
     onAboutToShow: {
         confirmField.text = "";
         passwordField.text = "";
+        deleteDialog._identityError = "";
         deleteDialog._deleting = false;
         deleteDialog._finished = false;
         deleteDialog._serverUrl = deleteDialog.conn ? deleteDialog.conn.serverUrl : "";
         // Abandons any challenge left over from a dialog that was closed
         // mid-flight, so this attempt starts from the first request rather
         // than inheriting a half-finished UIA session.
-        if (deleteDialog.conn) deleteDialog.conn.cancelAccountDeletion();
+        if (deleteDialog.conn && !deleteDialog.identityMode)
+            deleteDialog.conn.cancelAccountDeletion();
     }
-    onOpened: confirmField.forceActiveFocus()
+    onOpened: if (!deleteDialog.identityMode) confirmField.forceActiveFocus()
     onClosed: {
         passwordField.text = "";
         confirmField.text = "";
-        if (deleteDialog.conn) deleteDialog.conn.cancelAccountDeletion();
+        if (deleteDialog.conn && !deleteDialog.identityMode)
+            deleteDialog.conn.cancelAccountDeletion();
+        deleteDialog.identityMode = false;
     }
 
     Connections {
@@ -132,7 +156,7 @@ Popup {
     // its own right. It also covers the ordinary case of the user switching
     // servers with this open, where there is nothing to announce.
     onConnChanged: {
-        if (!deleteDialog.opened) return;
+        if (!deleteDialog.opened || deleteDialog.identityMode) return;
         deleteDialog._finish(deleteDialog._serverUrl);
     }
 
@@ -155,7 +179,8 @@ Popup {
     // docs/accessibility.md §11 for why this is the right place and why
     // the warning in the log is a Qt wart rather than a mistake here.
     Accessible.role: Accessible.Dialog
-    Accessible.name: qsTr("Delete your account")
+    Accessible.name: deleteDialog.identityMode ? qsTr("Delete your BSFChat ID")
+                                               : qsTr("Delete your account on this server")
 
     contentItem: Flickable {
         id: contentFlick
@@ -164,20 +189,157 @@ Popup {
         // invisible. Tracking the form means the dialog is exactly as tall as
         // its content until the window is too short for it, and scrolls from
         // there.
-        implicitHeight: form.implicitHeight
+        implicitHeight: deleteDialog.identityMode ? identityForm.implicitHeight
+                                                  : form.implicitHeight
         // The ApplicationWindow, for the toast helpers. Resolved HERE, on an
         // Item: `Window` is an Item attached property, so reading it off the
         // Popup (which is not an Item) or off a Connections block (U-M6)
         // silently yields undefined and swallows the toast.
         readonly property var hostWindow: contentFlick.Window.window
         contentWidth: width
-        contentHeight: form.implicitHeight
+        contentHeight: deleteDialog.identityMode ? identityForm.implicitHeight
+                                                 : form.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         ScrollBar.vertical: ThemedScrollBar {}
 
+        // ── BSFChat ID mode ──
+        ColumnLayout {
+            id: identityForm
+            visible: deleteDialog.identityMode
+            width: contentFlick.width
+            spacing: Theme.sp.s4
+
+            Text {
+                Layout.fillWidth: true
+                text: "Delete your BSFChat ID"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xl
+                font.weight: Theme.fontWeight.semibold
+                font.letterSpacing: Theme.trackTight.xl
+                color: Theme.fg0
+                wrapMode: Text.WordWrap
+            }
+            Text {
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                text: "Your BSFChat ID is the sign-in you use across servers. "
+                    + "Deleting it is permanent and is done on your BSFChat ID "
+                    + "account page, which opens next. You will confirm there "
+                    + "with your username and password."
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.fg2
+                wrapMode: Text.WordWrap
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "What is deleted"
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                font.weight: Theme.fontWeight.semibold
+                font.letterSpacing: Theme.trackWidest.xs
+                color: Theme.fg3
+            }
+            Text {
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                text: "• Your email address and password\n"
+                    + "• Your two-factor settings\n"
+                    + "• Your saved server list\n"
+                    + "• Every session and app sign-in, on every device\n"
+                    + "Your username stays reserved so nobody else can take it."
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.fg1
+                wrapMode: Text.WordWrap
+            }
+            InfoBanner {
+                icon: "eye"
+                tint: Theme.warn
+                text: "Chat servers keep their own accounts and messages. Deleting "
+                    + "your BSFChat ID does not delete them — use \"Delete account "
+                    + "on this server\" in each server's settings first if you "
+                    + "want those gone too."
+            }
+            Text {
+                Layout.fillWidth: true
+                visible: deleteDialog._identityError.length > 0
+                textFormat: Text.PlainText
+                text: deleteDialog._identityError
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.sm
+                color: Theme.danger
+                wrapMode: Text.WrapAnywhere
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.sp.s2
+                spacing: Theme.sp.s3
+                Item { Layout.fillWidth: true }
+                Button {
+                    id: identityCancelBtn
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Cancel")
+                    Accessible.onPressAction: deleteDialog.close()
+                    implicitHeight: Theme.controlHeight.md
+                    contentItem: Text {
+                        text: "Cancel"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.medium
+                        color: Theme.fg1
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: 100
+                        radius: Theme.r2
+                        color: identityCancelBtn.hovered ? Theme.bg3 : "transparent"
+                        border.color: Theme.line
+                        border.width: 1
+                    }
+                    onClicked: deleteDialog.close()
+                }
+                Button {
+                    id: identityContinueBtn
+                    Accessible.role: Accessible.Button
+                    Accessible.name: qsTr("Continue to BSFChat ID account page")
+                    Accessible.description: qsTr("Opens your BSFChat ID account page, where you can permanently delete your BSFChat ID")
+                    Accessible.onPressAction: identityContinueBtn.clicked()
+                    implicitHeight: Theme.controlHeight.md
+                    contentItem: Text {
+                        text: "Continue…"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.md
+                        font.weight: Theme.fontWeight.semibold
+                        color: Theme.onAccent
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: 140
+                        radius: Theme.r2
+                        color: identityContinueBtn.hovered ? Qt.darker(Theme.danger, 1.15)
+                                                           : Theme.danger
+                    }
+                    onClicked: {
+                        if (serverManager.openIdentityAccountDeletion()) {
+                            deleteDialog.close();
+                            return;
+                        }
+                        var url = serverManager.identityAccountDeletionUrl();
+                        deleteDialog._identityError = url.length > 0
+                            ? "Couldn't open the page. Open this address in a browser: " + url
+                            : "No BSFChat ID provider is known on this device.";
+                    }
+                }
+            }
+        }
+
         ColumnLayout {
             id: form
+            visible: !deleteDialog.identityMode
             width: contentFlick.width
             spacing: Theme.sp.s4
 
@@ -201,7 +363,7 @@ Popup {
                 }
                 Text {
                     Layout.fillWidth: true
-                    text: "Delete your account"
+                    text: "Delete your account on this server"
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.xl
                     font.weight: Theme.fontWeight.semibold
@@ -216,7 +378,9 @@ Popup {
                 textFormat: Text.PlainText
                 text: "This deletes your account on "
                     + (deleteDialog.conn ? deleteDialog.conn.serverUrl : "this server")
-                    + ". It cannot be undone, and support cannot bring it back."
+                    + ". It cannot be undone, and support cannot bring it back. "
+                    + "It does not delete your BSFChat ID; that is a separate "
+                    + "option in your settings."
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
                 color: Theme.fg2

@@ -15,6 +15,7 @@
 // browser, no socket, no provider, no GUI.
 
 #include "identity/OidcRequest.h"
+#include "identity/PendingOidcRequest.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -389,6 +390,45 @@ private slots:
         QCOMPARE(q.queryItemValue("resource", QUrl::FullyDecoded),
                  QString("https://chat.example"));
         QCOMPARE(q.queryItemValue("nonce"), QString("n1"));
+    }
+
+    // M2-5: the request persisted across process death round-trips, and is
+    // refused once stale, from the future, or missing a field it needs.
+    void aPendingRequestRoundTrips()
+    {
+        oidc::PendingOidcRequest r;
+        r.providerUrl = "https://id.example";
+        r.codeVerifier = "v";
+        r.state = "s";
+        r.nonce = "n";
+        r.resource = "https://chat.example";
+        r.createdAtMs = 1'700'000'000'000;
+        const auto back = oidc::PendingOidcRequest::fromJson(r.toJson());
+        QVERIFY(back.has_value());
+        QCOMPARE(back->providerUrl, r.providerUrl);
+        QCOMPARE(back->codeVerifier, r.codeVerifier);
+        QCOMPARE(back->state, r.state);
+        QCOMPARE(back->nonce, r.nonce);
+        QCOMPARE(back->resource, r.resource);
+        QCOMPARE(back->createdAtMs, r.createdAtMs);
+
+        QVERIFY(back->isFresh(r.createdAtMs));
+        QVERIFY(back->isFresh(r.createdAtMs + oidc::kPendingOidcLifetimeMs));
+        QVERIFY(!back->isFresh(r.createdAtMs + oidc::kPendingOidcLifetimeMs + 1));
+        QVERIFY(!back->isFresh(r.createdAtMs - 1));
+    }
+
+    void aDamagedPendingRequestIsRefused()
+    {
+        QVERIFY(!oidc::PendingOidcRequest::fromJson("").has_value());
+        QVERIFY(!oidc::PendingOidcRequest::fromJson("not json").has_value());
+        oidc::PendingOidcRequest r;
+        r.providerUrl = "https://id.example";
+        r.state = "s";
+        r.nonce = "n";
+        r.createdAtMs = 1;
+        // No verifier: the code could not be redeemed anyway.
+        QVERIFY(!oidc::PendingOidcRequest::fromJson(r.toJson()).has_value());
     }
 };
 

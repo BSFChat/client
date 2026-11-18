@@ -32,6 +32,15 @@ public:
     Q_INVOKABLE void requestNotifications();
     Q_INVOKABLE void requestCamera();
 
+    // Android 13+ (M2-4): ask for POST_NOTIFICATIONS once, the first time
+    // a server is successfully added, so message notifications work for
+    // users who never join voice. Persisted so it is asked at most once by
+    // this path; Settings > Notifications can always offer it again.
+    void requestNotificationsAfterFirstServer();
+    // The system's notification settings for this app — the only way back
+    // once the user has denied the permission for good. No-op elsewhere.
+    Q_INVOKABLE void openNotificationSettings();
+
     // Called from the JNI bridge (see BSFChatActivity). Public so the
     // extern "C" callback in the .cpp can route through it.
     void onNativePermissionResult(const QString& permission,

@@ -62,4 +62,11 @@ bool start(const QUrl& authUrl, const QString& callbackHost, const QString& call
 // the sheet cannot outlive the attempt that put it on screen.
 void cancel();
 
+// Show a page of the identity provider (the account-deletion page, M2-2) in
+// the same kind of sheet, sharing Safari's cookies so a signed-in user lands
+// signed in. Independent of start()/cancel(): it never disturbs a sign-in.
+// Nothing comes back from it; the user closes the sheet with Cancel. False if
+// the sheet could not be shown.
+bool presentPage(const QUrl& url);
+
 } // namespace ios_auth_session
