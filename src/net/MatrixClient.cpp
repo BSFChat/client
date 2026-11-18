@@ -1710,18 +1710,37 @@ void MatrixClient::setRoomNotifyLevel(const QString& roomId, const QString& leve
     });
 }
 
-void MatrixClient::joinVoice(const QString& roomId)
+QString MatrixClient::voiceJoinRefusalText(const QByteArray& body)
+{
+    const QJsonObject err = QJsonDocument::fromJson(body).object();
+    if (err.value(QStringLiteral("bsfchat.errcode")).toString()
+        != QLatin1String(kVoiceChannelFullCode)) {
+        return QString();
+    }
+    const int cap = err.value(QStringLiteral("max_participants")).toInt(0);
+    return cap > 0
+        ? QStringLiteral("This voice channel is full — calls here are limited "
+                         "to %1 people.").arg(cap)
+        : QStringLiteral("This voice channel is full.");
+}
+
+void MatrixClient::joinVoice(const QString& roomId, const QString& deviceId)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                    + QUrl::toPercentEncoding(roomId) + "/voice/join";
 
-    auto* reply = makeRequest("POST", path, "{}");
+    json body = json::object();
+    if (!deviceId.isEmpty()) body["device_id"] = deviceId.toStdString();
+    auto* reply = makeRequest("POST", path, QByteArray::fromStdString(body.dump()));
     connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit voiceError(bsfchat::net::replyFailureText(reply, data));
-            emit voiceJoinError(roomId, bsfchat::net::replyFailureText(reply, data));
+            // The participant cap gets a sentence, not a raw body.
+            QString text = voiceJoinRefusalText(data);
+            if (text.isEmpty()) text = bsfchat::net::replyFailureText(reply, data);
+            emit voiceError(text);
+            emit voiceJoinError(roomId, text);
             return;
         }
         try {
@@ -1765,13 +1784,13 @@ void MatrixClient::leaveVoice(const QString& roomId, const QString& sessionId)
     });
 }
 
-void MatrixClient::getVoiceMembers(const QString& roomId)
+void MatrixClient::getVoiceMembers(const QString& roomId, quint64 seq)
 {
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                    + QUrl::toPercentEncoding(roomId) + "/voice/members";
 
     auto* reply = makeRequest("GET", path);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId, seq]() {
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
@@ -1781,7 +1800,7 @@ void MatrixClient::getVoiceMembers(const QString& roomId)
         }
         auto doc = QJsonDocument::fromJson(data);
         QJsonArray members = doc.object().value("members").toArray();
-        emit voiceMembersResult(roomId, members);
+        emit voiceMembersResult(roomId, members, seq);
     });
 }
 
@@ -1810,9 +1829,11 @@ void MatrixClient::updateVoiceState(const QString& roomId, bool muted,
             // i.e. we were reaped or replaced. It never re-activates a
             // reaped row, so the caller must re-POST voice/join.
             if (status == 403) emit voiceStateSuperseded(roomId);
-            // The local toggle was optimistic — the caller rolls it back
-            // on this (V-M7).
-            emit voiceStateError(roomId, err);
+            // No status (network/timeout), 408, 429 and 5xx are worth a
+            // retry; VoiceSession leaves the local toggle alone for them.
+            const bool transient = status == 0 || status == 408
+                || status == 429 || status >= 500;
+            emit voiceStateError(roomId, err, transient);
             return;
         }
         emit voiceStateUpdated(roomId);
@@ -1848,12 +1869,10 @@ void MatrixClient::updateVoiceMediaState(const QString& roomId,
             // i.e. we were reaped or replaced. It never re-activates a
             // reaped row, so the caller must re-POST voice/join.
             if (status == 403) emit voiceStateSuperseded(roomId);
-            // The local toggle was optimistic — the caller rolls it back
-            // on this (V-M7).
-            emit voiceStateError(roomId, err);
+            emit voiceMediaStateError(roomId, err);
             return;
         }
-        emit voiceStateUpdated(roomId);
+        emit voiceMediaStateUpdated(roomId);
     });
 }
 

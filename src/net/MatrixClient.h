@@ -415,14 +415,24 @@ public:
     void unbanUser(const QString& roomId, const QString& userId);
 
     // Voice
-    void joinVoice(const QString& roomId);
+    // `deviceId` goes into the m.call.member row, which is how a client
+    // tells "another device of mine took the seat" from a reap (V2-3).
+    void joinVoice(const QString& roomId, const QString& deviceId = QString());
+    // The participant-cap refusal from voice/join (403 with
+    // bsfchat.errcode BSFCHAT.VOICE_CHANNEL_FULL and max_participants).
+    static constexpr const char* kVoiceChannelFullCode = "BSFCHAT.VOICE_CHANNEL_FULL";
+    // A user-facing sentence for a voice/join failure body, recognising
+    // the participant cap. Empty when the body is not that refusal.
+    static QString voiceJoinRefusalText(const QByteArray& body);
     // `sessionId` is the opaque token the join response returned for this
     // membership (empty against a server that does not issue one). The
     // server refuses to act on a token its stored row has moved past, so
     // echoing it is what stops a late leave from cancelling a FRESH join
     // — the server half of V-H1.
     void leaveVoice(const QString& roomId, const QString& sessionId = QString());
-    void getVoiceMembers(const QString& roomId);
+    // `seq` is echoed on voiceMembersResult so the caller can tell a reply
+    // that was overtaken by fresher sync-side roster data (V2-7).
+    void getVoiceMembers(const QString& roomId, quint64 seq = 0);
     void updateVoiceState(const QString& roomId, bool muted, bool deafened,
                           const QString& sessionId = QString());
     // Media-flag-only PUT to the same voice/state endpoint. The server
@@ -546,7 +556,8 @@ signals:
     void voiceJoinedSession(const QString& roomId, const QJsonArray& members,
                             const QString& sessionId, qint64 joinedAt);
     void voiceLeft(const QString& roomId);
-    void voiceMembersResult(const QString& roomId, const QJsonArray& members);
+    void voiceMembersResult(const QString& roomId, const QJsonArray& members,
+                            quint64 seq = 0);
     // Generic voice failure, kept for the user-facing toast: every voice
     // endpoint still reports through it. It is deliberately NOT the input
     // to the join/leave state machine — attributing failures by "a voice
@@ -560,7 +571,13 @@ signals:
     void voiceJoinError(const QString& roomId, const QString& error);
     void voiceLeaveError(const QString& roomId, const QString& error);
     void voiceStateUpdated(const QString& roomId);
-    void voiceStateError(const QString& roomId, const QString& error);
+    // `transient`: network failure, timeout, 429 or 5xx — worth retrying.
+    void voiceStateError(const QString& roomId, const QString& error,
+                         bool transient = false);
+    // The media-flag PUT's outcome, kept apart from the mute PUT's so a
+    // media reply is never credited as a mute acknowledgement.
+    void voiceMediaStateUpdated(const QString& roomId);
+    void voiceMediaStateError(const QString& roomId, const QString& error);
     // The server rejected a state PUT because our token is not the one it
     // holds (HTTP 403, "Voice session superseded") — our membership was
     // reaped or replaced. Recovery is re-POSTing voice/join, never

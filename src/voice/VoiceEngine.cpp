@@ -40,22 +40,10 @@ VoiceEngine::VoiceEngine(MatrixClient* client, QObject* parent)
     connect(m_client, &MatrixClient::callEventSendResult,
             this, &VoiceEngine::onCallEventSendResult);
 
-    // V-8 roster gate source: GET /voice/members for our room. Server
-    // side this is the m.call.member roster, and ServerConnection
-    // re-polls it whenever an m.call.member event lands for the room we
-    // are in, so a join or leave reaches the gate within one round trip
-    // (not only on the 5 s tick).
-    connect(m_client, &MatrixClient::voiceMembersResult, this,
-            [this](const QString& roomId, const QJsonArray& members) {
-                if (!m_running || roomId != m_roomId) return;
-                QStringList ids;
-                for (const auto& v : members) {
-                    const QJsonObject row = v.toObject();
-                    if (!row.value(QStringLiteral("active")).toBool(true)) continue;
-                    ids.append(row.value(QStringLiteral("user_id")).toString());
-                }
-                setVoiceRoster(ids);
-            });
+    // V-8 roster gate source: ServerConnection calls setVoiceRoster from
+    // every sync-side m.call.member fold and from every GET /voice/members
+    // reply that is not stale (it tracks which poll predates which fold;
+    // this class cannot, so it no longer listens to the poll directly).
 }
 
 VoiceEngine::~VoiceEngine() {

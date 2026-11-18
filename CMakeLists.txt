@@ -263,6 +263,7 @@ qt_add_library(bsfchat-lib STATIC
     src/net/ServerConnectionRoomRemoval.cpp
     src/net/VoiceSession.cpp
     src/net/ServerManager.cpp
+    src/net/PttKeyFilter.cpp
     src/net/ServerDiscovery.cpp
     src/net/HttpFetch.cpp
     src/model/ServerListModel.cpp

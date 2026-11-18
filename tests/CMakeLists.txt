@@ -101,6 +101,16 @@ target_include_directories(test_voice_lifecycle PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_voice_lifecycle PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_voice_lifecycle COMMAND test_voice_lifecycle)
 
+# Push-to-talk key edges (audit 2 V2-2): real press/release, auto-repeat
+# swallowed, modifiers matched on the opening edge only.
+qt_add_executable(test_ptt_keys
+    test_ptt_keys.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/PttKeyFilter.cpp
+)
+target_include_directories(test_ptt_keys PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_ptt_keys PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+add_test(NAME test_ptt_keys COMMAND test_ptt_keys)
+
 # The m.call.* wire format, both ends at once (V-C3): the builders
 # VoiceEngine sends with, taken through the protocol's real sync parser,
 # read back by the parser ServerConnection dispatches with. The failure

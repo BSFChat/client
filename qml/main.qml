@@ -36,6 +36,7 @@ ApplicationWindow {
     // geometry — a more thorough "is any screen covering this rect"
     // sweep would be nicer but this handles the common case.
     Component.onCompleted: {
+        configurePtt()
         // Clamped to the screen we are actually on. An unclamped restore
         // opens taller than the display when the size came from a bigger
         // one, and everything below the fold — the bottom of both side
@@ -382,30 +383,20 @@ ApplicationWindow {
         }
     }
 
-    // Push-to-talk hotkey. Only meaningful while voiceMode === "ptt" and
-    // the user is in a voice call. autoRepeat re-fires every ~30ms while
-    // held, so the release timer acts as a "finger off key" detector —
-    // once the shortcut stops firing for `interval` ms, we release PTT.
-    Shortcut {
-        sequence: appSettings.pttKeySequence
-        enabled: appSettings.voiceMode === "ptt"
-              && serverManager.activeServer
-              && serverManager.activeServer.inVoiceChannel
-        autoRepeat: true
-        context: Qt.ApplicationShortcut
-        onActivated: {
-            if (serverManager.activeServer)
-                serverManager.activeServer.setPttPressed(true);
-            pttReleaseTimer.restart();
-        }
+    // Push-to-talk hotkey. The key's real press and release are tracked in
+    // C++ (PttKeyFilter, owned by ServerManager) — a QML Shortcut only
+    // reports presses, and the old "no auto-repeat for 120 ms = released"
+    // timer fired inside the OS repeat delay, clipping every sentence.
+    // Routed to the server that holds the call, not the one being browsed.
+    readonly property bool pttArmed: appSettings.voiceMode === "ptt"
+                                     && serverManager.voiceServer !== null
+    function configurePtt() {
+        serverManager.configurePushToTalk(pttArmed, appSettings.pttKeySequence)
     }
-    Timer {
-        id: pttReleaseTimer
-        interval: 120
-        onTriggered: {
-            if (serverManager.activeServer)
-                serverManager.activeServer.setPttPressed(false);
-        }
+    onPttArmedChanged: configurePtt()
+    Connections {
+        target: appSettings
+        function onPttKeySequenceChanged() { root.configurePtt() }
     }
 
     // Global popup instances. ChannelList reaches these via

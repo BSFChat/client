@@ -1203,6 +1203,10 @@ signals:
     // joining needs this second edge as well — otherwise a live share
     // silently disappears from everyone else's roster.
     void voiceMembershipRenewed();
+    // Emitted synchronously from joinVoiceChannel() once the join has
+    // passed its local refusals and is about to be requested.
+    // ServerManager leaves voice on every other connection on it.
+    void aboutToJoinVoice();
     void voiceErrorChanged();
     void viewingVoiceRoomChanged();
     void voiceMutedChanged();
@@ -1776,6 +1780,10 @@ private:
     bool m_voiceDeafened = false;
     QJsonArray m_voiceMembers;
     QTimer* m_voicePollTimer = nullptr;
+    // Bumped on every sync-side m.call.member fold for the room we are in
+    // and echoed by GET /voice/members; a reply carrying an older value is
+    // stale and ignored.
+    quint64 m_voiceRosterEpoch = 0;
     // Bounds a re-authentication that never answers (audit C-6). Armed for
     // the network and browser steps, disarmed while a password prompt is up:
     // that wait is the user's, and the prompt's Cancel ends it.
