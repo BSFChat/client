@@ -242,7 +242,7 @@ Popup {
                             cursorShape: Qt.PointingHandCursor
                             onClicked: emojiPicker.currentCategory = modelData.id
 
-                            ToolTip {
+                            PlainToolTip {
                                 visible: categoryTabHover.containsMouse
                                 text: modelData.name
                                 delay: 500
@@ -377,7 +377,7 @@ Popup {
                             emojiPicker.emojiSelected(modelData.emoji);
                         }
 
-                        ToolTip {
+                        PlainToolTip {
                             visible: emojiCellHover.containsMouse
                             text: modelData.name
                             delay: 400

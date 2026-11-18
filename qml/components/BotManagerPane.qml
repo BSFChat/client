@@ -264,6 +264,7 @@ Item {
                                 Layout.alignment: Qt.AlignVCenter
                             }
                             Text {
+                                textFormat: Text.PlainText
                                 text: copyTokenBtn.copied ? "Copied" : "Copy token"
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.sm
@@ -544,6 +545,7 @@ Item {
                 anchors.centerIn: parent
                 width: parent.width - Theme.sp.s7 * 2
                 visible: parent.count === 0
+                textFormat: Text.PlainText
                 text: (botPane._model && botPane._model.loaded)
                     ? "No bots on this server yet."
                     : "Loading bots…"

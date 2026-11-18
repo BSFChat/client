@@ -696,6 +696,7 @@ Rectangle {
                             Text {
                                 id: unreadText
                                 anchors.centerIn: parent
+                                textFormat: Text.PlainText
                                 text: modelData.unreadCount > 99
                                     ? "99+" : modelData.unreadCount
                                 color: Theme.onAccent
@@ -1784,6 +1785,7 @@ Rectangle {
                                                     Text {
                                                         id: mentionBadgeText
                                                         anchors.centerIn: parent
+                                                        textFormat: Text.PlainText
                                                         text: channelDelegate.mentionCount > 99
                                                               ? "99+" : channelDelegate.mentionCount
                                                         color: Theme.onAccent
@@ -1856,6 +1858,7 @@ Rectangle {
                                                         }
                                                         Text {
                                                             anchors.verticalCenter: parent.verticalCenter
+                                                            textFormat: Text.PlainText
                                                             text: channelDelegate.voiceRoster.length
                                                             font.family: Theme.fontMono
                                                             font.pixelSize: 11
@@ -2204,6 +2207,7 @@ Rectangle {
                         // "Voice connected" label in fg2, small caps wide-
                         // tracked so it reads as a status line not a title.
                         Text {
+                            textFormat: Text.PlainText
                             text: serverManager.activeServer
                                   && serverManager.activeServer.voiceConnecting
                                   ? "CONNECTING…" : "VOICE CONNECTED"
@@ -2663,6 +2667,7 @@ Rectangle {
                             Layout.leftMargin: Theme.sp.s3
                         }
                         Text {
+                            textFormat: Text.PlainText
                             text: ui.text
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.md
@@ -2903,6 +2908,7 @@ Rectangle {
         }
         Text {
             Layout.alignment: Qt.AlignHCenter
+            textFormat: Text.PlainText
             text: welcomeState.serverCount === 0 ? "Welcome to BSFChat" : "No server selected"
             color: Theme.fg0
             font.family: Theme.fontSans
@@ -2914,6 +2920,7 @@ Rectangle {
             Layout.alignment: Qt.AlignHCenter
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
+            textFormat: Text.PlainText
             text: {
                 return welcomeState.serverCount === 0
                     ? "Add a server to start chatting. Sign in with a BSFChat ID to pull in all the servers you've joined."
@@ -3055,6 +3062,7 @@ Rectangle {
                     Layout.leftMargin: Theme.sp.s3
                 }
                 Text {
+                    textFormat: Text.PlainText
                     text: ri.text
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.md
@@ -3463,6 +3471,7 @@ Rectangle {
                     Layout.leftMargin: Theme.sp.s3
                 }
                 Text {
+                    textFormat: Text.PlainText
                     text: ci.text
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.md
@@ -3568,6 +3577,7 @@ Rectangle {
             // Channel-name label — widest-tracked small-caps fg3 matches
             // the rest of the app's label vocabulary.
             Text {
+                textFormat: Text.PlainText
                 text: createPrompt.kind === "category" ? "CATEGORY NAME" : "CHANNEL NAME"
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.xs
@@ -3683,6 +3693,7 @@ Rectangle {
                     Accessible.onPressAction: if (createSubmitBtn.enabled)
                                                   createPrompt.submit()
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: createPrompt.kind === "category"
                               ? "Create category"
                               : (createPrompt.kind === "voice"
@@ -3827,6 +3838,7 @@ Rectangle {
                     Accessible.onPressAction: newDmPrompt.close()
                     onClicked: newDmPrompt.close()
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: parent.text
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md
@@ -3858,6 +3870,7 @@ Rectangle {
                                                   newDmPrompt.submit()
                     onClicked: newDmPrompt.submit()
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: parent.text
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md

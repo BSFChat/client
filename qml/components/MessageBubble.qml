@@ -465,6 +465,7 @@ Item {
                 Layout.leftMargin: Theme.sp.s3
             }
             Text {
+                textFormat: Text.PlainText
                 text: ci.text
                 Accessible.ignored: true
                 font.family: Theme.fontSans
@@ -474,6 +475,7 @@ Item {
                 verticalAlignment: Text.AlignVCenter
             }
             Text {
+                textFormat: Text.PlainText
                 text: ci.shortcut
                 Accessible.ignored: true
                 visible: ci.shortcut.length > 0
@@ -1014,6 +1016,7 @@ Item {
                     // Strip leading non-alphanumerics (@, _, etc.) before
                     // picking the initial — otherwise "@josh" renders as
                     // "@" and the swatch looks like a typo.
+                    textFormat: Text.PlainText
                     text: {
                         var n = bubble.senderDisplayName || "?";
                         var s = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -1058,6 +1061,7 @@ Item {
 
             Text {
                 anchors.centerIn: parent
+                textFormat: Text.PlainText
                 text: {
                     var date = new Date(bubble.timestamp);
                     return date.toLocaleTimeString(Qt.locale(), "HH:mm");
@@ -1143,6 +1147,7 @@ Item {
 
                 Text {
                     id: senderTimestamp
+                    textFormat: Text.PlainText
                     text: {
                         var date = new Date(bubble.timestamp);
                         var today = new Date();
@@ -1506,6 +1511,7 @@ Item {
                             }
 
                             Text {
+                                textFormat: Text.PlainText
                                 text: bubble.mediaFileSize > 0 ? formatFileSize(bubble.mediaFileSize) : ""
                                 Accessible.ignored: true
                                 font.pixelSize: Theme.fontSize.sm
@@ -1604,6 +1610,7 @@ Item {
                                     Layout.fillWidth: true
                                 }
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: bubble.mediaFileSize > 0
                                         ? formatFileSize(bubble.mediaFileSize)
                                           + " · click to open"
@@ -1831,6 +1838,7 @@ Item {
                                 anchors.verticalCenter: parent.verticalCenter
                             }
                             Text {
+                                textFormat: Text.PlainText
                                 text: entry ? entry.count : 0
                                 Accessible.ignored: true
                                 font.family: Theme.fontMono
@@ -1993,6 +2001,7 @@ Item {
                         textSelectionSheet.close();
                     }
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: parent.text
                         color: Theme.fg0
                         font.family: Theme.fontSans
@@ -2020,6 +2029,7 @@ Item {
                     Accessible.onPressAction: selectionDoneButton.clicked()
                     onClicked: textSelectionSheet.close()
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: parent.text
                         color: Theme.onAccent
                         font.family: Theme.fontSans

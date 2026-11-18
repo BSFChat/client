@@ -107,6 +107,7 @@ Popup {
             Text {
                 visible: blockedDialog.blockModel !== null
                     && blockedDialog.blockModel.loaded
+                textFormat: Text.PlainText
                 text: blockedDialog.blockModel
                     ? blockedDialog.blockModel.count + " of 1000"
                     : ""
@@ -180,6 +181,7 @@ Popup {
                 anchors.centerIn: parent
                 visible: blockedDialog.blockModel !== null
                     && !blockedDialog.blockModel.loaded
+                textFormat: Text.PlainText
                 text: blockedDialog.blockModel && blockedDialog.blockModel.busy
                     ? "Checking…" : "Not loaded."
                 font.family: Theme.fontSans
@@ -265,6 +267,7 @@ Popup {
                                                           unblockBtn.clicked()
                             implicitHeight: Theme.controlHeight.sm
                             contentItem: Text {
+                                textFormat: Text.PlainText
                                 text: blockedRow.modelData.pending
                                     ? "Unblocking…" : "Unblock"
                                 font.family: Theme.fontSans

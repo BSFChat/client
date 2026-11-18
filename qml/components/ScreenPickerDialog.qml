@@ -172,6 +172,7 @@ Dialog {
                                 color: Theme.fg0
                             }
                             Text {
+                                textFormat: Text.PlainText
                                 text: row.modelData.width + " × " + row.modelData.height
                                 font.family: Theme.fontMono
                                 font.pixelSize: Theme.fontSize.xs
@@ -343,6 +344,7 @@ Dialog {
                 }
                 Text {
                     Layout.fillWidth: true
+                    textFormat: Text.PlainText
                     text: hideIpSwitch.enabled
                         ? "Routes the call through the server for as long as you are "
                           + "sharing, so nobody in it sees your address. Reconnects "

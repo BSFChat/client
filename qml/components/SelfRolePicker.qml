@@ -391,6 +391,7 @@ Popup {
 
                 Text {
                     Layout.fillWidth: true
+                    textFormat: Text.PlainText
                     text: {
                         if (!popup.model) return "";
                         if (popup.model.busy) return "Saving…";

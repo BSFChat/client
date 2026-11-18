@@ -351,6 +351,7 @@ Popup {
                     // "Done" once something has been added, because the
                     // dialog stays open on success — adding three bots to a
                     // channel is one errand, not three.
+                    textFormat: Text.PlainText
                     text: (addMemberDialog._model
                            && addMemberDialog._model.noticeText.length > 0)
                           ? "Done" : "Cancel"
@@ -386,6 +387,7 @@ Popup {
                 Accessible.onPressAction: if (addConfirmBtn.enabled)
                                               addConfirmBtn.clicked()
                 contentItem: Text {
+                    textFormat: Text.PlainText
                     text: addMemberDialog._model && addMemberDialog._model.busy
                           ? "Adding…" : "Add"
                     font.family: Theme.fontSans

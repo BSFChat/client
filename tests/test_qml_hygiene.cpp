@@ -3628,6 +3628,61 @@ private slots:
     }
 
 
+    // C2-4 / Q-S3: Text and Label default to AutoText, which turns any string
+    // that looks like markup into rich text — a display name of
+    // `<img src=… width=4000>` becomes a remote fetch from every viewer.
+    // ToolTip has no textFormat at all; its style's contentItem is AutoText.
+    //
+    // Rule: a Text or Label whose `text:` is anything but a string literal
+    // (or qsTr of one) declares its textFormat explicitly, and a standalone
+    // ToolTip with a non-literal text is a PlainToolTip instead. Literal-only
+    // ternaries and numbers are not exempted: telling them apart from a
+    // binding that carries a user's string needs a JS parser, and one line of
+    // textFormat costs nothing. Attached `ToolTip.text:` goes through the
+    // style's shared instance and is not covered here.
+    void dynamicTextDeclaresItsFormat()
+    {
+        const QStringList qmlFiles = filesUnder(QStringLiteral(BSFCHAT_QML_DIR),
+                                                QStringLiteral("*.qml"));
+        QVERIFY2(!qmlFiles.isEmpty(), "no QML files found under BSFCHAT_QML_DIR");
+        static const QRegularExpression element(
+            QStringLiteral(R"((?<![\w.])(Text|Label|ToolTip)\s*\{)"));
+        static const QRegularExpression hasFormat(QStringLiteral(R"((^|[\s;])textFormat\s*:)"));
+        static const QRegularExpression textBinding(
+            QStringLiteral(R"((?:^|[\s;])text\s*:[ \t]*([^\n]*))"));
+        // A string literal, or qsTr() of one. (Not a raw string: moc's
+        // tokenizer trips over a raw literal full of quotes.)
+        static const QRegularExpression literal(QStringLiteral(
+            "^\\s*(qsTr\\(\\s*)?(\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*')\\s*\\)?\\s*;?\\s*$"));
+
+        QStringList offenders;
+        int checked = 0;
+        for (const QString& path : qmlFiles) {
+            const QString src = commentsBlanked(readAll(path));
+            for (auto it = element.globalMatch(src); it.hasNext();) {
+                const auto m = it.next();
+                const qsizetype open = m.capturedEnd() - 1;
+                const QString own = directLevel(src, open, matchingBrace(src, open));
+                const auto t = textBinding.match(own);
+                if (!t.hasMatch()) continue;
+                ++checked;
+                if (literal.match(t.captured(1)).hasMatch()) continue;
+                if (m.captured(1) != QLatin1String("ToolTip") && hasFormat.match(own).hasMatch())
+                    continue;
+                offenders << QStringLiteral("%1:%2: %3 { text: %4 }")
+                                 .arg(QFileInfo(path).fileName())
+                                 .arg(lineOf(src, m.capturedStart()))
+                                 .arg(m.captured(1), t.captured(1).trimmed().left(60));
+            }
+        }
+        QVERIFY2(checked > 100, "the scan found almost no Text elements; is the regex broken?");
+        QVERIFY2(offenders.isEmpty(),
+                 qPrintable(QStringLiteral(
+                     "Text/Label with a non-literal text and no textFormat (add "
+                     "`textFormat: Text.PlainText`), or a ToolTip with one (use "
+                     "PlainToolTip):\n  ") + offenders.join(QStringLiteral("\n  "))));
+    }
+
 private:
     // The text between the braces of the first block whose opening matches
     // `opener` (which must end at that block's `{`). Null when there is none.

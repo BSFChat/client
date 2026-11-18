@@ -489,7 +489,7 @@ Rectangle {
                         interval: 8000
                         onTriggered: pinned = false
                     }
-                    ToolTip {
+                    PlainToolTip {
                         visible: (ipShieldHover.containsMouse
                                   || ipShieldPin.pinned) && text.length > 0
                         text: serverManager.activeServer

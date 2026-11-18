@@ -248,6 +248,7 @@ Popup {
                         : qsTr("%n match(es)", "", searchPopup.totalMatches)
                     // Distinguish "showing all of them" from "showing the first
                     // page of many", so the count never looks like a lie.
+                    textFormat: Text.PlainText
                     text: searchPopup.results.length < searchPopup.totalMatches
                           ? searchPopup.results.length + " of "
                             + searchPopup.totalMatches
@@ -363,6 +364,7 @@ Popup {
                         }
                         Text {
                             Accessible.ignored: true
+                            textFormat: Text.PlainText
                             text: {
                                 var d = new Date(modelData.timestamp);
                                 return d.toLocaleString(Qt.locale(), "MMM d, h:mm ap");

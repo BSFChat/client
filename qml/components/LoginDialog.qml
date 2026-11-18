@@ -331,6 +331,7 @@ Dialog {
         height: 64
         Text {
             anchors.centerIn: parent
+            textFormat: Text.PlainText
             text: dialog.mode === "signedIn" ? "Signed in"
                 : dialog.mode === "noServers" ? "Almost there"
                 : dialog.mode === "address" ? "Join a server"
@@ -572,6 +573,7 @@ Dialog {
                                               identityButton.clicked()
                 enabled: !dialog.identitySyncInProgress && !dialog.isConnecting && !dialog.oidcInProgress
                 contentItem: Text {
+                    textFormat: Text.PlainText
                     text: dialog.identitySyncInProgress ? "Waiting for browser login…"
                                                         : "Sign in with BSFChat ID"
                     font.family: Theme.fontSans
@@ -969,6 +971,7 @@ Dialog {
                         Accessible.onPressAction: if (checkButton.enabled)
                                                       checkButton.clicked()
                         contentItem: Text {
+                            textFormat: Text.PlainText
                             text: serverManager.identitySignedIn ? "Join" : "Check"
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.sm
@@ -1084,6 +1087,7 @@ Dialog {
                 Accessible.onPressAction: if (oidcButton.enabled)
                                               oidcButton.clicked()
                 contentItem: Text {
+                    textFormat: Text.PlainText
                     text: serverManager.usesSignedInIdentity(dialog.oidcProviderUrl)
                           ? (serverManager.identityAccountName !== ""
                              ? "Join as " + serverManager.identityAccountName
@@ -1143,6 +1147,7 @@ Dialog {
                 Accessible.onToggleAction: passwordToggle.clicked()
                 Accessible.onPressAction: passwordToggle.clicked()
                 contentItem: Text {
+                    textFormat: Text.PlainText
                     text: dialog.showPasswordFallback ? "Hide password login"
                                                       : "Use password instead"
                     font.family: Theme.fontSans
@@ -1353,6 +1358,7 @@ Dialog {
 
             // Connecting indicator
             Text {
+                textFormat: Text.PlainText
                 text: dialog.oidcInProgress ? "Waiting for browser login..." : "Connecting..."
                 font.pixelSize: Theme.fontSize.md
                 color: Theme.fg2

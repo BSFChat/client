@@ -73,6 +73,7 @@ Dialog {
 
         Text {
             Layout.fillWidth: true
+            textFormat: Text.PlainText
             text: removeServerDialog.signOut ? "Sign out?" : "Remove server?"
             elide: Text.ElideRight
             font.family: Theme.fontSans
@@ -109,6 +110,7 @@ Dialog {
                 Accessible.description: qsTr("Keep the server")
                 Accessible.onPressAction: removeServerDialog.close()
                 contentItem: Text {
+                    textFormat: Text.PlainText
                     text: parent.text
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.md
@@ -131,6 +133,7 @@ Dialog {
                     "Removes the server and its saved login from this device")
                 Accessible.onPressAction: removeServerDialog.confirm()
                 contentItem: Text {
+                    textFormat: Text.PlainText
                     text: parent.text
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.md

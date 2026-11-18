@@ -260,6 +260,7 @@ Popup {
             // ── The confirmation ──
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: "Type " + deleteDialog.confirmWord + " to confirm"
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.xs

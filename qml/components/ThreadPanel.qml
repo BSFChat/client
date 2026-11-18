@@ -296,6 +296,7 @@ Item {
                                 }
                                 Text {
                                     Accessible.ignored: true
+                                    textFormat: Text.PlainText
                                     text: {
                                         var d = new Date(threadRow.timestamp);
                                         return d.toLocaleString(Qt.locale(), "h:mm ap");

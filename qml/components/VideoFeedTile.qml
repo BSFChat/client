@@ -215,6 +215,7 @@ Rectangle {
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
             visible: !tile.compact
+            textFormat: Text.PlainText
             text: VideoStage.placeholderText(tile.feed ? tile.feed.kind : "")
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.sm

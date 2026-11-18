@@ -1226,6 +1226,7 @@ qt_add_qml_module(bsfchat-lib
         qml/components/ExternalOpenPrompts.qml
         qml/components/ScreenPickerDialog.qml
         qml/components/BotBadge.qml
+        qml/components/PlainToolTip.qml
         qml/components/BotManagerPane.qml
         qml/components/AddMemberDialog.qml
         qml/components/ReportDialog.qml

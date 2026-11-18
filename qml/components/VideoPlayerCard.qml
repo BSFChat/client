@@ -775,6 +775,7 @@ ColumnLayout {
         }
         Text {
             visible: root.fileSize > 0
+            textFormat: Text.PlainText
             text: "· " + formatFileSize(root.fileSize)
             font.family: Theme.fontMono
             font.pixelSize: Theme.fontSize.xs

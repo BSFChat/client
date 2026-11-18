@@ -327,6 +327,7 @@ Popup {
             Text {
                 Layout.fillWidth: true
                 visible: reasonField.text.length > 700
+                textFormat: Text.PlainText
                 text: reasonField.text.length > 1024
                     ? "That is too long to send — shorten it a little."
                     : reasonField.text.length + " / 1024"
@@ -432,6 +433,7 @@ Popup {
                                                   reportSendBtn.clicked()
                     implicitHeight: Theme.controlHeight.md
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: reportDialog.busy ? "Sending…" : "Send report"
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md

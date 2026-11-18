@@ -109,6 +109,7 @@ Rectangle {
                     Accessible.name: qsTr("%n member(s)", "", headerItem.memberCount)
                 }
                 Text {
+                    textFormat: Text.PlainText
                     text: "— " + headerItem.memberCount
                     font.family: Theme.fontMono
                     font.pixelSize: Theme.fontSize.xs
@@ -819,6 +820,7 @@ Rectangle {
                         Accessible.ignored: true
                     }
                     Text {
+                        textFormat: Text.PlainText
                         text: Math.round(peerVolumeSlider.value) + "%"
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm

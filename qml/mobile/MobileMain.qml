@@ -739,6 +739,7 @@ ApplicationWindow {
                             Layout.alignment: Qt.AlignHCenter
                         }
                         Text {
+                            textFormat: Text.PlainText
                             text: _noServers
                                 ? "No servers yet"
                                 : _noChannels
@@ -751,6 +752,7 @@ ApplicationWindow {
                             Layout.alignment: Qt.AlignHCenter
                         }
                         Text {
+                            textFormat: Text.PlainText
                             text: _noServers
                                 ? "Sign in with your BSFChat ID, or join a server by the "
                                   + "address whoever runs it gave you."
@@ -1321,6 +1323,7 @@ ApplicationWindow {
 
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: shareSheet.isFile ? "Send this file?" : "Post this text?"
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.lg
@@ -1370,6 +1373,7 @@ ApplicationWindow {
                     Accessible.description: qsTr("Discard the shared item")
                     Accessible.onPressAction: shareSheet.close()
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: parent.text
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md
@@ -1392,6 +1396,7 @@ ApplicationWindow {
                     Accessible.name: qsTr("Send to #%1").arg(shareSheet.targetRoomName)
                     Accessible.onPressAction: shareSheet.send()
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: parent.text
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md

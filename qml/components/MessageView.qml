@@ -1737,6 +1737,7 @@ Rectangle {
                             Text {
                                 id: dateSepText
                                 anchors.centerIn: parent
+                                textFormat: Text.PlainText
                                 text: messageListView.formatDateSeparator(model.timestamp).toUpperCase()
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.xs
@@ -2094,6 +2095,7 @@ Rectangle {
                     Text {
                         Layout.alignment: Qt.AlignHCenter
                         horizontalAlignment: Text.AlignHCenter
+                        textFormat: Text.PlainText
                         text: TimelineOverlay.emptyStateTitle(timelineOverlay._emptyKind)
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xl
@@ -2104,6 +2106,7 @@ Rectangle {
                     Text {
                         Layout.alignment: Qt.AlignHCenter
                         horizontalAlignment: Text.AlignHCenter
+                        textFormat: Text.PlainText
                         text: TimelineOverlay.emptyStateBody(timelineOverlay._emptyKind)
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md
@@ -2390,6 +2393,7 @@ Rectangle {
                             }
                             Text {
                                 visible: preview !== null
+                                textFormat: Text.PlainText
                                 text: {
                                     if (!preview) return "";
                                     var d = new Date(preview.timestamp);
@@ -2797,6 +2801,7 @@ Rectangle {
                         spacing: 4
                         RowLayout {
                             Text {
+                                textFormat: Text.PlainText
                                 text: {
                                     if (original) return "Original";
                                     if (current) return "Current";
@@ -2810,6 +2815,7 @@ Rectangle {
                                 Layout.fillWidth: true
                             }
                             Text {
+                                textFormat: Text.PlainText
                                 text: {
                                     var d = new Date(modelData.timestamp);
                                     return d.toLocaleString(Qt.locale(),

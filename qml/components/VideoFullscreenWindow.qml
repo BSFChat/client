@@ -156,6 +156,7 @@ Window {
     Text {
         anchors.centerIn: parent
         visible: !fsWin._live
+        textFormat: Text.PlainText
         text: VideoStage.placeholderText(fsWin.feed ? fsWin.feed.kind : "")
         font.family: Theme.fontSans
         font.pixelSize: Theme.fontSize.lg

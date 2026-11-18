@@ -224,6 +224,7 @@ Window {
     Text {
         anchors.centerIn: parent
         visible: !pop._live
+        textFormat: Text.PlainText
         text: VideoStage.placeholderText(pop.feed ? pop.feed.kind : "")
         font.family: Theme.fontSans
         font.pixelSize: Theme.fontSize.md

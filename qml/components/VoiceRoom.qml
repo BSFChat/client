@@ -427,6 +427,7 @@ Rectangle {
             }
 
             Text {
+                textFormat: Text.PlainText
                 text: {
                     var s = serverManager.activeServer;
                     if (!s || !s.voiceMembers) return "";
@@ -625,7 +626,7 @@ Rectangle {
                     interval: 8000
                     onTriggered: cryptoBadge.detailPinned = false
                 }
-                ToolTip {
+                PlainToolTip {
                     visible: (cryptoHover.containsMouse
                               || cryptoBadge.detailPinned) && text.length > 0
                     text: serverManager.activeServer

@@ -765,6 +765,7 @@ Popup {
                             }
                             Text {
                                 Layout.preferredWidth: 40
+                                textFormat: Text.PlainText
                                 text: appSettings.inputVolume + "%"
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.sm
@@ -864,6 +865,7 @@ Popup {
                             }
                             Text {
                                 Layout.preferredWidth: 40
+                                textFormat: Text.PlainText
                                 text: appSettings.outputVolume + "%"
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.sm
@@ -1075,6 +1077,7 @@ Popup {
                         // Compact on purpose — it sits at the end of
                         // rows that already carry a slider + value and
                         // was the first casualty of tight width.
+                        textFormat: Text.PlainText
                         text: cap < 0 ? " · uncapped"
                                       : " · cap " + cap + suffix
                         color: cap < 0 ? Theme.fg3 : Theme.warn
@@ -1104,6 +1107,7 @@ Popup {
                             }
                             Text {
                                 Layout.preferredWidth: 56
+                                textFormat: Text.PlainText
                                 text: appSettings.screenShareFps + " fps"
                                 font.family: Theme.fontMono
                                 font.pixelSize: Theme.fontSize.sm
@@ -1139,6 +1143,7 @@ Popup {
                             }
                             Text {
                                 Layout.preferredWidth: 64
+                                textFormat: Text.PlainText
                                 text: appSettings.screenShareMaxWidth + " px"
                                 font.family: Theme.fontMono
                                 font.pixelSize: Theme.fontSize.sm
@@ -1176,6 +1181,7 @@ Popup {
                             }
                             Text {
                                 Layout.preferredWidth: 80
+                                textFormat: Text.PlainText
                                 text: appSettings.screenShareTargetKbps >= 1000
                                     ? (appSettings.screenShareTargetKbps / 1000).toFixed(1) + " Mbps"
                                     : appSettings.screenShareTargetKbps + " kbps"
@@ -1212,6 +1218,7 @@ Popup {
                             }
                             Text {
                                 Layout.preferredWidth: 48
+                                textFormat: Text.PlainText
                                 text: appSettings.screenShareKeyframeSec + " s"
                                 font.family: Theme.fontMono
                                 font.pixelSize: Theme.fontSize.sm
@@ -1317,6 +1324,7 @@ Popup {
                             }
                             Text {
                                 Layout.preferredWidth: 48
+                                textFormat: Text.PlainText
                                 text: "Q" + appSettings.screenShareJpegQuality
                                 font.family: Theme.fontMono
                                 font.pixelSize: Theme.fontSize.sm
@@ -1363,6 +1371,7 @@ Popup {
                             }
                             Text {
                                 Layout.preferredWidth: 120
+                                textFormat: Text.PlainText
                                 text: appSettings.videoSmoothingMs === 0
                                     ? "Off · lowest delay"
                                     : "up to " + appSettings.videoSmoothingMs + " ms"

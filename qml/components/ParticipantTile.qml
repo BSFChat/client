@@ -272,6 +272,7 @@ Rectangle {
             Text {
                 anchors.centerIn: parent
                 horizontalAlignment: Text.AlignHCenter
+                textFormat: Text.PlainText
                 text: {
                     switch (tile.peerState) {
                     case "connected":    return tile.speaking ? "Speaking" : "";

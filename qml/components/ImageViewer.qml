@@ -425,6 +425,7 @@ Popup {
                     visible: viewer.fileSize > 0
                     Accessible.role: Accessible.StaticText
                     Accessible.name: qsTr("File size %1").arg(text)
+                    textFormat: Text.PlainText
                     text: viewer.fileSize < 1024 ? viewer.fileSize + " B"
                         : viewer.fileSize < 1024 * 1024
                             ? (viewer.fileSize / 1024).toFixed(1) + " KB"
@@ -445,6 +446,7 @@ Popup {
                 Text {
                     visible: viewer.zoom !== 1.0
                     Accessible.ignored: true
+                    textFormat: Text.PlainText
                     text: Math.round(viewer.zoom * 100) + "%"
                     color: Theme.accent
                     font.family: Theme.fontMono

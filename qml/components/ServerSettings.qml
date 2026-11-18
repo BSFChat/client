@@ -1077,6 +1077,7 @@ Popup {
                         }
                         Text {
                             Layout.preferredWidth: 80
+                            textFormat: Text.PlainText
                             text: pr.value < 0 ? "no cap" : pr.value + pr.suffix
                             font.family: Theme.fontMono
                             font.pixelSize: Theme.fontSize.sm
@@ -2638,6 +2639,7 @@ Popup {
                                     }
 
                                     Text {
+                                        textFormat: Text.PlainText
                                         text: modelData.channels ? modelData.channels.length + " channels" : "0 channels"
                                         font.family: Theme.fontMono
                                         font.pixelSize: Theme.fontSize.xs
@@ -3286,6 +3288,7 @@ Popup {
                     Accessible.description: _confirmModDialog.descText
                     Accessible.onPressAction: confirmModBtn.clicked()
                     contentItem: Text {
+                        textFormat: Text.PlainText
                         text: {
                             switch (serverSettingsPopup.confirmMod.kind) {
                                 case "kick":  return "Kick member";

@@ -734,6 +734,7 @@ Rectangle {
                 // characters is what the server counts, and saying so is more
                 // honest than quoting a character figure that is wrong for
                 // anything outside ASCII.
+                textFormat: Text.PlainText
                 text: "— " + (inputRoot.bodyBytes - inputRoot.maxBodyBytes)
                       + " bytes over the " + inputRoot.maxBodyBytes
                       + "-byte limit. Shorten it, or attach it as a file."
@@ -1089,6 +1090,7 @@ Rectangle {
         Text {
             Layout.alignment: Qt.AlignVCenter
             visible: inputRoot.nearLimit
+            textFormat: Text.PlainText
             text: (inputRoot.maxBodyBytes - inputRoot.bodyBytes).toString()
             color: inputRoot.overLimit ? Theme.danger : Theme.fg3
             font.family: Theme.fontSans
