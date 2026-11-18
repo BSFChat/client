@@ -204,6 +204,11 @@ bool AudioWorker::startDevices() {
     m_playbackTimer->start();
 
     m_started = true;
+    m_healthClock.start();
+    m_lastCaptureDataMs = 0;          // "now" on the health clock
+    m_lastStallCheckMs = 0;
+    m_captureStalled = false;
+    m_lastInputReopenMs = m_lastOutputReopenMs = -1'000'000;
     qInfo("[voice] audio pipeline running on thread %p",
           static_cast<void*>(QThread::currentThread()));
     return true;
@@ -301,6 +306,8 @@ void AudioWorker::drainCapture() {
         if (got < m_captureChunk.size()) break;
     }
     const int appended = int(m_captureBuffer.size()) - appendedFrom;
+    if (appended > 0 && m_healthClock.isValid())
+        m_lastCaptureDataMs = m_healthClock.elapsed();
 
     // Log the first N frames so we can confirm captured data actually has
     // amplitude. macOS TCC-denied mic returns all zeros silently.
@@ -693,6 +700,7 @@ void AudioWorker::pumpPlayback() {
     // restart, most concretely. The pump is the only thing still running
     // when that happens, so it is where we notice. One bool per 10 ms.
     checkBackendHealth();
+    checkCaptureStall();
 
     // A polled backend has no readyRead to hang capture off — a
     // CoreAudio input callback cannot call into a QObject — so the pump
@@ -1062,6 +1070,11 @@ bool AudioWorker::demoteBackend(const QString& reason, Direction retrying) {
 void AudioWorker::checkBackendHealth() {
     if (!m_started || !m_backend) return;
     if (m_stopping.load(std::memory_order_relaxed)) return;
+    if (m_backend->kind() == bsfchat::voice::AudioBackendKind::Qt) {
+        // Nothing to demote to; reopen the direction that died instead.
+        checkQtDirections();
+        return;
+    }
     if (m_backend->healthy()) return;
 
     // The backend has given up on itself. Demotion reopens whichever
@@ -1086,6 +1099,54 @@ void AudioWorker::checkBackendHealth() {
         if (const QAudioDevice* d = snapshotDevice(Direction::Output, outId))
             openSink(*d);
     }
+}
+
+void AudioWorker::checkQtDirections() {
+    const qint64 now = m_healthClock.elapsed();
+    if (!m_inputInUseId.isEmpty() && m_backend->captureOpen()
+        && !m_backend->captureHealthy()
+        && now - m_lastInputReopenMs >= kQtReopenIntervalMs) {
+        m_lastInputReopenMs = now;
+        qWarning("[voice] capture stream stopped or stalled — reopening %s",
+                 qPrintable(m_inputInUseDesc));
+        if (const QAudioDevice* d = snapshotDevice(Direction::Input, m_inputInUseId)) {
+            closeSource();
+            openSource(*d);
+        }
+    }
+    if (!m_outputInUseId.isEmpty() && m_backend->renderOpen()
+        && !m_backend->renderHealthy()
+        && now - m_lastOutputReopenMs >= kQtReopenIntervalMs) {
+        m_lastOutputReopenMs = now;
+        qWarning("[voice] playback stream stopped or stalled — reopening %s",
+                 qPrintable(m_outputInUseDesc));
+        if (const QAudioDevice* d = snapshotDevice(Direction::Output, m_outputInUseId)) {
+            closeSink();
+            openSink(*d);
+        }
+    }
+}
+
+void AudioWorker::checkCaptureStall() {
+    if (!m_started || !m_healthClock.isValid()) return;
+    const qint64 now = m_healthClock.elapsed();
+    if (now - m_lastStallCheckMs < 500) return;
+    m_lastStallCheckMs = now;
+    if (!devicesOpen()) {
+        // Suspended (platform interruption): that has its own banner, and
+        // the clock restarts when the devices come back.
+        m_lastCaptureDataMs = now;
+        return;
+    }
+    // Stalled = no capture data for kCaptureStallMs, whether because the
+    // stream died, the OS is feeding nothing (privacy toggle), or no input
+    // ever opened. Muting does not count: the device still delivers.
+    const bool stalled = now - m_lastCaptureDataMs > kCaptureStallMs;
+    if (stalled == m_captureStalled) return;
+    m_captureStalled = stalled;
+    qWarning("[voice] microphone %s", stalled ? "is delivering no audio"
+                                              : "is delivering audio again");
+    emit captureStalledChanged(stalled);
 }
 
 // ---------------------------------------------------------------------

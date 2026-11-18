@@ -61,6 +61,7 @@
 // AudioPacketQueue, drained at the top of each pump. There is no mutex
 // on pop(), and there must never need to be.
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QMap>
 #include <QByteArray>
@@ -310,6 +311,11 @@ signals:
     // startDevices() finished, as AudioEngine::startAsync() asked. Emitted
     // from the audio thread; AudioEngine receives it queued.
     void devicesStartFinished(bool ok);
+    // No capture data has reached the encoder for kCaptureStallMs while
+    // the call is up (or capture never opened) — true; data flowing
+    // again — false. Edges only. Drives "Your microphone isn't sending
+    // audio" in the UI (V2-5).
+    void captureStalledChanged(bool stalled);
 
 private:
     // Pulls everything the backend has captured and encodes whole
@@ -360,6 +366,11 @@ private:
     // died. Called from the pump, which is the only thing guaranteed to
     // keep running when everything else has stopped working.
     void checkBackendHealth();
+    // Qt backend: reopen whichever direction has stopped or stalled, at
+    // most once per kQtReopenIntervalMs per direction.
+    void checkQtDirections();
+    // Edge detector behind captureStalledChanged.
+    void checkCaptureStall();
     // A VPIO unit failed to start. Swap in the Qt backend for the rest
     // of the process and reopen whatever was open. Returns true if the
     // swap happened (so the caller can retry its open), false if we were
@@ -499,4 +510,14 @@ private:
     // producing samples" diagnostic. Per-instance rather than a
     // function-local static: see onMicDataReady().
     int m_debugFrameCount = 0;
+
+    // Health bookkeeping (audio thread). Monotonic ms from m_healthClock.
+    QElapsedTimer m_healthClock;
+    qint64 m_lastCaptureDataMs = 0;
+    qint64 m_lastInputReopenMs = -1'000'000;
+    qint64 m_lastOutputReopenMs = -1'000'000;
+    qint64 m_lastStallCheckMs = 0;
+    bool m_captureStalled = false;
+    static constexpr qint64 kQtReopenIntervalMs = 3000;
+    static constexpr qint64 kCaptureStallMs = 3000;
 };

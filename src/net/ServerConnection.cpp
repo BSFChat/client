@@ -3161,6 +3161,18 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
 
     connect(m_voiceEngine, &VoiceEngine::error,
             this, [this](const QString& message) { setVoiceError(message); });
+    // V2-5: a microphone that delivers nothing at all (dead stream, OS
+    // privacy switch, no input device) used to be silent in both senses.
+    connect(m_voiceEngine, &VoiceEngine::micCaptureStalled,
+            this, [this](bool stalled) {
+        if (stalled) {
+            setVoiceError(QStringLiteral("Your microphone isn't sending audio"));
+        }
+        if (m_micSilent != stalled) {
+            m_micSilent = stalled;
+            emit micSilentChanged();
+        }
+    });
     // The async half of start()'s refusal: the devices failed to open
     // after the join went ahead. Leave, which unwinds the server-side
     // membership exactly as a refused start used to.

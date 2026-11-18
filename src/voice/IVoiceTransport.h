@@ -318,6 +318,16 @@ signals:
     void audioStartFailed();
     // The audio devices are open and the pipeline is running.
     void audioStarted();
+    // The microphone has delivered no samples for a few seconds (stream
+    // died, OS privacy toggle, no input device) — true; flowing again —
+    // false. Edges only (V2-5).
+    void micCaptureStalled(bool stalled);
+    // Media path state for the whole call (audit 2 "network change"):
+    // true from a network change / wake until media flows again.
+    void reconnectingChanged(bool reconnecting);
+    // The machine's network path changed or it woke from sleep. The owner
+    // refreshes TURN credentials if they may have expired.
+    void networkPathChanged();
 
     // ---- Audio levels (drive the QML speaking indicators) ----
     void micLevelChanged(float level);

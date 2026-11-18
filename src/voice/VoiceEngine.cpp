@@ -128,6 +128,8 @@ bool VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
     });
     connect(m_audioEngine, &AudioEngine::peerLevelChanged,
             this, &VoiceEngine::peerLevelChanged);
+    connect(m_audioEngine, &AudioEngine::captureStalledChanged,
+            this, &VoiceEngine::micCaptureStalled);
     // Opened WITHOUT blocking the GUI thread. On macOS opening the devices
     // (VoiceProcessingIO, a Bluetooth headset changing profile) takes one
     // to three seconds, and the blocking start() froze the whole window

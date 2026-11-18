@@ -177,6 +177,8 @@ signals:
     // peer's participant tile. Rate-limited to ~12.5Hz — see
     // AudioWorker::kPeerLevelEmitFrames.
     void peerLevelChanged(const QString& peerId, float level);
+    // AudioWorker::captureStalledChanged, forwarded to the GUI thread.
+    void captureStalledChanged(bool stalled);
 
 private:
     // Joins the audio thread (bounded, never terminate()) and disposes of

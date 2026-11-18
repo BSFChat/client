@@ -225,6 +225,8 @@ void AudioEngine::prepareThread() {
             this, &AudioEngine::peerLevelChanged, Qt::QueuedConnection);
     // Queued for the same reason as the rest: AudioDeviceStatus is read
     // by a QML binding and must only ever be touched from here.
+    connect(m_worker, &AudioWorker::captureStalledChanged,
+            this, &AudioEngine::captureStalledChanged, Qt::QueuedConnection);
     connect(m_worker, &AudioWorker::deviceInUseChanged, this,
             [](bool input, const QString& description) {
                 auto& status = bsfchat::AudioDeviceStatus::instance();
