@@ -32,10 +32,14 @@ on if it ever drifts. It is also the same id the macOS build already
 ships under, which is correct and intended — one app identity across
 platforms.
 
-**Capabilities to enable on the App ID: Associated Domains only** (the
-sign-in callback needs it; see "Sign-in: Associated Domains" below).
-Specifically *not* needed: Push Notifications (no APNs anywhere in the
-client), App Groups, iCloud, Sign in with Apple. Turning one on
+**Capabilities to enable on the App ID: Associated Domains and Push
+Notifications.** Associated Domains for the sign-in callback (see
+"Sign-in: Associated Domains" below); Push Notifications because
+`ios/BSFChat.entitlements` carries `aps-environment = production` for
+APNs (docs/push-notifications.md — the APNs auth key itself goes to the
+Sygnal gateway, not to this app or CI). Specifically *not* needed: App
+Groups, iCloud, Sign in with Apple (a future Notification Service
+Extension would add App Groups / a keychain group). Turning one on
 unnecessarily invalidates the provisioning profile and buys nothing.
 The iOS job checks the downloaded profile against
 `ios/BSFChat.entitlements` before archiving and fails with the portal
@@ -403,6 +407,13 @@ These answers must match `ios/PrivacyInfo.xcprivacy`, the privacy
 manifest bundled with the app (ITMS-91053 without one), which also
 declares the required-reason APIs: UserDefaults CA92.1, FileTimestamp
 C617.1, SystemBootTime 35F9.1, DiskSpace E174.1.
+
+**Push notifications.** The APNs device token is sent to the user's
+chat servers and BSFChat's push gateway to deliver notifications. Apple
+does not list push tokens as a "Device ID" data type, so no extra label
+row is needed; notification payloads carry room/event ids and, only if
+the user opts in, sender and room names — never message text
+(docs/push-notifications.md).
 
 **"Used to Track You": No, for everything.** There is no ad network, no
 attribution SDK and no data sharing with anyone.

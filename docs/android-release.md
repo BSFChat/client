@@ -155,22 +155,27 @@ at least once if any is missing.
   in use:
   * `microphone` (VoiceService) — voice channels.
   * `camera` (VoiceService) — camera in a call.
-  * `dataSync` (SyncService) — this is the one most likely to be
-    challenged. Google's stated position is that `dataSync` is not for
-    indefinite background work and pushes apps towards FCM. BSFChat
-    deliberately does not use FCM (see the comment in
-    `SyncService.java`: routing every user's push traffic through Google
-    would contradict the self-hosting promise). Be ready to argue that,
-    and to fall back to "sync only while the app is in the foreground /
-    recently used" if the declaration is rejected. The fallback and the
-    FCM push-only alternative are written up in
-    `docs/store-submission-runbook.md` §5.3.
+  * `dataSync` (SyncService) — no longer the default. With FCM built in
+    (docs/push-notifications.md) background delivery is push, and
+    SyncService runs only when the user turns on "Keep a background
+    connection instead of push", on devices without Google Play services,
+    or in a build without the FCM values. The declaration is still needed
+    while the service exists; justify it as a user-chosen alternative to
+    push (show the setting in the video). If Play rejects it, removing
+    SyncService and `FOREGROUND_SERVICE_DATA_SYNC` now costs only that
+    opt-in; see `docs/store-submission-runbook.md` §5.3.
   * `mediaProjection` (MediaProjectionService) — screen share.
 * **Data safety form.** The app collects an account identifier and
   transmits message content, audio and video to a **user-chosen**
   homeserver. Declare it honestly; "data is not collected by the
   developer" is arguably true for a self-hosted server but the form asks
   about transmission too.
+  Push adds one row: a **device identifier** (the FCM registration token)
+  is shared with BSFChat's push gateway and Google, for App functionality
+  (delivering notifications), not optional while push is on, not used for
+  tracking. Notification payloads carry room/event ids and an unread
+  count, and sender/room names only if the user turns that on; never
+  message text (docs/push-notifications.md, Privacy).
 * **Privacy policy URL.** Mandatory for any app requesting camera or
   microphone. Needs to exist at a stable URL on BSFChat.com.
 * **Sensitive permission justifications** for `CAMERA`, `RECORD_AUDIO`

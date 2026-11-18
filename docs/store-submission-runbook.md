@@ -564,41 +564,28 @@ declaration:
 — but they must come off a device or emulator where the feature really
 works, which for the call videos means real audio.
 
-`dataSync` is the one Google pushes back on hardest. Say plainly in the
-declaration that it maintains the Matrix sync connection so messages can
-raise a **local** notification, that there is no Firebase Cloud
-Messaging anywhere in the app, and that no notification content is sent
-to Google.
+`dataSync` is the one Google pushes back on hardest. Since push
+(docs/push-notifications.md) it is **not the default** any more: with
+the FCM repository variables set, background delivery goes through
+Firebase Cloud Messaging and `SyncService` runs only when the user picks
+Settings > Notifications > "Keep a background connection instead of
+push", or the device has no Google Play services. Say that in the
+declaration: an optional, user-selected persistent connection for users
+who do not want notifications routed through Google. The video shows the
+setting being turned on, then a message notification with the app
+backgrounded.
 
-**The risk, stated plainly (audit M2-7).** `SyncService` is a `dataSync`
-foreground service used as a *permanent* sync connection: it starts
-when a server is added and runs for as long as the user is signed in.
-Google's policy describes `dataSync` as for user-initiated transfers
-that finish (uploads, backups, imports), Android 15 caps it at six hours
-per 24 (`SyncService.onTimeout`, which the client already handles by
-dropping to foreground-only sync), and Google's guidance for chat apps
-is push. Expect the declaration to be rejected, or accepted and later
-challenged at a policy sweep. Plan for that outcome rather than hoping
-the argument above wins:
+**If the declaration is still rejected,** remove the `SyncService`
+declaration and `FOREGROUND_SERVICE_DATA_SYNC` and hide the setting:
+push keeps working, and only the no-Google option is lost.
 
-- **If it is rejected,** ship with background sync off: remove the
-  `SyncService` declaration and `FOREGROUND_SERVICE_DATA_SYNC`, keep
-  sync while the app is foregrounded (it already degrades to that when
-  the budget runs out), and say in the listing that notifications
-  arrive while the app is open or recently used.
-- **The durable alternative is push-only background delivery:** FCM
-  (Firebase Cloud Messaging) on Android, APNs on iOS, carrying a
-  content-free "you have new messages" wake-up so the client can sync
-  briefly and post the notification locally. That needs a push gateway
-  on the server side (the homeserver posts to a BSFChat-run gateway,
-  which forwards to FCM/APNs), a Firebase project and
-  `google-services.json`, and the Play Data Safety form updated for the
-  device token. No message content needs to pass through Google — but
-  the fact that a message arrived, and when, does, which is the
-  trade-off against the self-hosting promise that `SyncService.java`
-  documents. It is a server + client project of its own; nothing in
-  the client today depends on `dataSync` that would make the switch
-  harder.
+**Data safety (push).** Add: Device or other IDs → collected (shared
+with Google and BSFChat's push gateway) for App functionality, ephemeral
+no, required while push is on, not for tracking. Notification payloads
+contain no message text; with the opt-in names setting they contain
+sender and room names (declare under Messages → "Other in-app messages"
+metadata only if counsel thinks names qualify). Update STORE-LISTING.md
+§3 in the `web` repo to match.
 
 ### 5.4 [YOU] The first upload is manual — 15 min
 
