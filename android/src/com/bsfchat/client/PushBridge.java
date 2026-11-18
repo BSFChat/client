@@ -89,11 +89,13 @@ public final class PushBridge {
             notifyUnavailable("not-configured");
             return;
         }
+        String stored = prefs(ctx).getString(KEY_TOKEN, null);
         if (!wanted) {
-            FcmPush.disable(ctx);
+            // Only if there is a token to delete: a user who never used
+            // push must not have Firebase contacted on every launch.
+            if (stored != null && !stored.isEmpty()) FcmPush.disable(ctx);
             return;
         }
-        String stored = prefs(ctx).getString(KEY_TOKEN, null);
         if (stored != null && !stored.isEmpty()) notifyToken(stored);
         FcmPush.requestToken(ctx);
     }
@@ -208,6 +210,9 @@ public final class PushBridge {
         }
     }
 
+    // "Visible or better" also covers a process held up by a foreground
+    // service (a voice call, or the background connection): /sync is
+    // running then, so the push has nothing to add either.
     private static boolean isForeground(Context ctx) {
         ActivityManager.RunningAppProcessInfo info = new ActivityManager.RunningAppProcessInfo();
         ActivityManager.getMyMemoryState(info);

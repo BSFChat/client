@@ -213,7 +213,9 @@ void PushManager::watch(ServerConnection* conn)
         const QString key = m_keys.take(conn);
         // A rebuilt connection or app shutdown: the server-side pusher
         // stays. A sign-out has already taken the account (takeDeletions).
-        if (!key.isEmpty()) m_registrar->dropAccount(key);
+        // A rebuild's replacement may already own the same key (it is
+        // created before this one is deleted); then there is nothing to drop.
+        if (!key.isEmpty() && !connectionFor(key)) m_registrar->dropAccount(key);
     });
     evaluate(conn);
 }
@@ -224,8 +226,8 @@ void PushManager::evaluate(ServerConnection* conn)
     const QString key = accountKey(conn);
     const QString old = m_keys.value(conn);
     if (!old.isEmpty() && old != key) {
-        m_registrar->dropAccount(old);
         m_keys.remove(conn);
+        if (!connectionFor(old)) m_registrar->dropAccount(old);
     }
     if (key.isEmpty() || !conn->isConnected() || conn->accessToken().isEmpty()) return;
     m_keys.insert(conn, key);
