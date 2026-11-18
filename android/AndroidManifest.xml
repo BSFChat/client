@@ -303,11 +303,14 @@
             android:name="com.bsfchat.client.VoiceService"
             android:exported="false"
             android:foregroundServiceType="microphone|camera" />
-        <!-- Sync service — keeps the Matrix /sync alive so inbound
-             messages can fire Android notifications while the app
-             is backgrounded. Low-priority ongoing notification so
-             users know we're there (and can turn us off via channel
-             settings if they don't want background sync). -->
+        <!-- Sync service: the persistent background connection. Keeps
+             the Matrix /sync alive so inbound messages can fire Android
+             notifications while the app is backgrounded. Since push
+             (docs/push-notifications.md) it runs only when push is not
+             built in, unavailable on the device (no Google Play
+             services), or the user chose "Keep a background connection
+             instead of push" in Settings. Low-priority ongoing
+             notification so users know we're there. -->
         <service
             android:name="com.bsfchat.client.SyncService"
             android:exported="false"
@@ -323,5 +326,10 @@
             android:name="com.bsfchat.client.MediaProjectionService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+        <!-- BSFCHAT_PUSH_COMPONENTS
+             Replaced in the staged copy by cmake/AndroidPush.cmake: with
+             the FCM values configured, the Firebase messaging service
+             (exported=false, MESSAGING_EVENT) and auto-init off; without
+             them, nothing. Keep this marker on its own line. -->
     </application>
 </manifest>
