@@ -328,6 +328,9 @@ signals:
     // The machine's network path changed or it woke from sleep. The owner
     // refreshes TURN credentials if they may have expired.
     void networkPathChanged();
+    // A peer connection is being built with TURN credentials that are
+    // expired or about to be. The owner refetches them (V2-6).
+    void turnRefreshWanted();
 
     // ---- Audio levels (drive the QML speaking indicators) ----
     void micLevelChanged(float level);

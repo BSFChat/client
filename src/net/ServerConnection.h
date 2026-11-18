@@ -182,6 +182,11 @@ class ServerConnection : public QObject {
     Q_PROPERTY(QString voiceConnectingRoomId READ voiceConnectingRoomId
                NOTIFY voiceConnectingChanged)
     Q_PROPERTY(bool voiceConnecting READ voiceConnecting NOTIFY voiceConnectingChanged)
+    // In a call whose media path is being rebuilt after a network change
+    // or wake — "Reconnecting…" until a peer is connected again. While it
+    // is true voiceConnecting is also true for the call's room.
+    Q_PROPERTY(bool voiceReconnecting READ voiceReconnecting
+               NOTIFY voiceReconnectingChanged)
     // Last voice-subsystem error (join/leave REST failures, engine
     // init failures). Auto-clears after ~8 s or on the next successful
     // join; QML routes non-empty values into the toast surface.
@@ -325,6 +330,7 @@ public:
     bool inVoiceChannel() const { return !m_activeVoiceRoomId.isEmpty(); }
     QString voiceConnectingRoomId() const { return m_voiceConnectingRoomId; }
     bool voiceConnecting() const { return !m_voiceConnectingRoomId.isEmpty(); }
+    bool voiceReconnecting() const { return m_voiceReconnecting; }
 
     // Empty until a transport has actually started, and empty again the
     // moment it stops. Deliberately not "assume mesh until told
@@ -1196,6 +1202,7 @@ signals:
     void avatarUploadFailed(const QString& error);
     void activeVoiceRoomIdChanged();
     void voiceConnectingChanged();
+    void voiceReconnectingChanged();
     // The server retired our voice row and the V-H2 re-join was
     // accepted: same room and same engine, but a NEW membership whose
     // screen_sharing/camera_on both start false. activeVoiceRoomId does
@@ -1668,6 +1675,8 @@ public:
     bool m_joinChimePending = false;
     QString m_voiceConnectingRoomId;
     void setVoiceConnecting(const QString& roomId);
+    bool m_voiceReconnecting = false;
+    void setVoiceReconnecting(bool on);
     // Wire the session to MatrixClient, to the engine, and to the mirrors
     // above. Called once from the constructor.
     void setupVoiceSession();

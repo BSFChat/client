@@ -2576,6 +2576,19 @@ void ServerConnection::joinVoiceChannel(const QString& roomId)
     }
 }
 
+void ServerConnection::setVoiceReconnecting(bool on)
+{
+    if (m_voiceReconnecting == on) return;
+    m_voiceReconnecting = on;
+    // Until a dedicated indicator exists everywhere, the existing
+    // "Connecting…" affordance carries it: same room, same meaning to the
+    // user — audio is not flowing yet.
+    if (on && !m_activeVoiceRoomId.isEmpty()) setVoiceConnecting(m_activeVoiceRoomId);
+    else if (!on && m_voiceConnectingRoomId == m_activeVoiceRoomId)
+        setVoiceConnecting(QString());
+    emit voiceReconnectingChanged();
+}
+
 void ServerConnection::setVoiceConnecting(const QString& roomId)
 {
     if (m_voiceConnectingRoomId == roomId) return;
@@ -3161,6 +3174,17 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
 
     connect(m_voiceEngine, &VoiceEngine::error,
             this, [this](const QString& message) { setVoiceError(message); });
+    // Network change / wake: TURN may need refetching (VoiceSession
+    // decides from the credentials' expiry), and the UI says
+    // "Reconnecting…" until a peer is connected again.
+    connect(m_voiceEngine, &VoiceEngine::networkPathChanged, this, [this]() {
+        if (m_voiceSession) m_voiceSession->onWakeOrNetworkChange();
+    });
+    connect(m_voiceEngine, &VoiceEngine::turnRefreshWanted, this, [this]() {
+        if (m_voiceSession) m_voiceSession->onWakeOrNetworkChange();
+    });
+    connect(m_voiceEngine, &VoiceEngine::reconnectingChanged, this,
+            [this](bool on) { setVoiceReconnecting(on); });
     // V2-5: a microphone that delivers nothing at all (dead stream, OS
     // privacy switch, no input device) used to be silent in both senses.
     connect(m_voiceEngine, &VoiceEngine::micCaptureStalled,
@@ -3288,6 +3312,7 @@ void ServerConnection::dispatchCallSignal(const CallSignal& signal)
 
 void ServerConnection::teardownVoiceSession()
 {
+    setVoiceReconnecting(false);
     // First thing, and outside the voice #ifdef: the badge must not
     // survive the session by even one event loop turn. Every leave /
     // switch / kick / failed-start path funnels through here.
