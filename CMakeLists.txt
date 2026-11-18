@@ -278,6 +278,9 @@ qt_add_library(bsfchat-lib STATIC
     src/net/ServerConnectionRoomRemoval.cpp
     src/net/VoiceSession.cpp
     src/net/ServerManager.cpp
+    # One Matrix HTTP pusher per account for FCM/APNs push. Transport-free;
+    # see docs/push-notifications.md and tests/test_push_registrar.cpp.
+    src/net/PushRegistrar.cpp
     src/net/PttKeyFilter.cpp
     src/net/ServerDiscovery.cpp
     src/net/HttpFetch.cpp

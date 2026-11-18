@@ -1668,3 +1668,15 @@ target_link_libraries(test_untrusted_content PRIVATE
     Qt6::Core Qt6::Test
 )
 add_test(NAME test_untrusted_content COMMAND test_untrusted_content)
+
+# The push pusher registrar's state machine (docs/push-notifications.md):
+# register, token rotation (new pusher first, then delete the old one),
+# opt-out, sign-out, a server refusing our gateway or the names tier, and
+# backoff on transient failures. A fake PushTransport plays the homeserver.
+qt_add_executable(test_push_registrar
+    test_push_registrar.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/PushRegistrar.cpp
+)
+target_include_directories(test_push_registrar PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_push_registrar PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_push_registrar COMMAND test_push_registrar)
