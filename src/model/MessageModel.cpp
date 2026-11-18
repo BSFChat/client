@@ -627,10 +627,20 @@ QString MessageModel::localEchoBody(const QString& localId) const
     return row < 0 ? QString() : m_messages[row].body;
 }
 
-bool MessageModel::mediaInfoForMxc(const QString& mxc, QString* fileName,
-                                   QString* mimeType) const
+bool MessageModel::mediaInfoForMxc(const QString& mxc, const QString& eventId,
+                                   QString* fileName, QString* mimeType) const
 {
     if (mxc.isEmpty()) return false;
+    // The clicked row first: the same mxc can be posted again by someone
+    // else under another name and type (C2-7).
+    if (!eventId.isEmpty()) {
+        for (const auto& m : m_messages) {
+            if (m.eventId != eventId || m.mediaMxc != mxc) continue;
+            if (fileName) *fileName = m.mediaFileName;
+            if (mimeType) *mimeType = m.mediaMimeType;
+            return true;
+        }
+    }
     for (const auto& m : m_messages) {
         if (m.mediaMxc != mxc) continue;
         if (fileName) *fileName = m.mediaFileName;

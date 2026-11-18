@@ -32,6 +32,9 @@ ColumnLayout {
     // The mxc:// URI behind `source` — see MessageBubble.mediaMxc. `source`
     // carries a ticket that expires; anything leaving the app uses this.
     property string sourceMxc: ""
+    // The message this card belongs to: the external open judges its file
+    // name and type, not those of another message reusing the mxc.
+    property string eventId: ""
 
     // Effective URL fed to MediaPlayer. On desktop this is identical to
     // `source`. On Android we download first (see below) and swap in a
@@ -742,7 +745,7 @@ ColumnLayout {
                     // file.
                     if (serverManager.activeServer) {
                         serverManager.activeServer
-                            .openMediaExternally(root.sourceMxc);
+                            .openMediaExternally(root.sourceMxc, false, root.eventId);
                     }
                 } else {
                     root.togglePlay();

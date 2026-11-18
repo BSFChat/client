@@ -47,10 +47,20 @@ Item {
     Connections {
         target: typeof linkOpener !== "undefined" ? linkOpener : null
         ignoreUnknownSignals: true
-        function onConfirmationRequested(href, host) {
+        // `host` is ASCII (punycode) and `shownUrl` fully percent-encoded,
+        // so a lookalike domain cannot pass for the real one here (C2-7).
+        function onConfirmationRequested(href, host, shownUrl) {
+            if (String(shownUrl).toLowerCase().indexOf("mailto:") === 0) {
+                prompts._ask(qsTr("Write an email?"),
+                             qsTr("This opens your mail app to write to %1.\n\n%2")
+                                 .arg(host).arg(shownUrl),
+                             qsTr("Open mail app"),
+                             function() { linkOpener.openConfirmed(href); });
+                return;
+            }
             prompts._ask(qsTr("Open this link?"),
                          qsTr("This link goes to %1, not the address its text shows.\n\n%2")
-                             .arg(host).arg(href),
+                             .arg(host).arg(shownUrl),
                          qsTr("Open link"),
                          function() { linkOpener.openConfirmed(href); });
         }
@@ -65,15 +75,20 @@ Item {
     Connections {
         target: serverManager ? serverManager.activeServer : null
         ignoreUnknownSignals: true
-        function onMediaOpenConfirmationRequested(mxcUri, fileName) {
+        // `fileName` arrives with bidi/control characters stripped, and the
+        // type it will really open as is shown on its own line, so a name
+        // like "invoice<U+202E>fdp.exe" cannot dress itself up (C2-7).
+        function onMediaOpenConfirmationRequested(mxcUri, fileName, fileType, eventId) {
             var server = serverManager.activeServer;
             prompts._ask(qsTr("Open this file?"),
                          qsTr("“%1” will be opened with your system's default app. "
-                              + "Only open files from people you trust.")
-                             .arg(fileName !== "" ? fileName : qsTr("Unnamed file")),
+                              + "Only open files from people you trust.\n\nOpens as: %2")
+                             .arg(fileName !== "" ? fileName : qsTr("Unnamed file"))
+                             .arg(fileType !== "" ? fileType
+                                                  : qsTr("no file type (your system will ask)")),
                          qsTr("Open file"),
                          function() {
-                             if (server) server.openMediaExternally(mxcUri, true);
+                             if (server) server.openMediaExternally(mxcUri, true, eventId);
                          });
         }
         function onMediaOpenFailed(error) {

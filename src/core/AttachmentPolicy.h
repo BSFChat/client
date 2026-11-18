@@ -154,6 +154,27 @@ inline Kind classify(const QString& fileName, const QString& mimeType)
     return t && t->media ? Kind::Media : Kind::Document;
 }
 
+// The sender's file name as a prompt may show it (C2-7): bidi overrides and
+// isolates, zero-width and other format characters, and control characters
+// are removed, so "invoice\u202Efdp.exe" cannot display as "invoiceexe.pdf".
+// Capped, since it is only a label.
+inline QString displayName(const QString& fileName)
+{
+    QString out;
+    const QList<uint> cps = fileName.toUcs4();
+    for (const uint cp : cps) {
+        const auto cat = QChar::category(char32_t(cp));
+        if (cat == QChar::Other_Control || cat == QChar::Other_Format
+            || cat == QChar::Separator_Line || cat == QChar::Separator_Paragraph
+            || cat == QChar::Other_Surrogate || cat == QChar::Other_NotAssigned)
+            continue;
+        const char32_t c = cp;
+        out += QString::fromUcs4(&c, 1);
+        if (out.size() >= 255) break;
+    }
+    return out.trimmed();
+}
+
 // ".png", ".pdf", … or "" — the extension the cached copy is written under.
 // Only ever a member of kSafeTypes.
 inline QString cacheExtension(const QString& fileName, const QString& mimeType)

@@ -30,6 +30,7 @@ Popup {
     // carries an expiring ticket; the mxc is the stable handle, and the only
     // thing the "open it" button is allowed to work from.
     property string imageMxc: ""
+    property string imageEventId: ""
     property string filename: ""
     property real   fileSize: 0
 
@@ -39,9 +40,10 @@ Popup {
     property real panX: 0
     property real panY: 0
 
-    function openFor(url, mxc, name, size) {
+    function openFor(url, mxc, name, size, eventId) {
         imageUrl = url;
         imageMxc = mxc || "";
+        imageEventId = eventId || "";
         filename = name || "";
         fileSize = size || 0;
         zoom = 1.0;
@@ -368,7 +370,7 @@ Popup {
                 onClicked: {
                     if (serverManager.activeServer) {
                         serverManager.activeServer
-                            .openMediaExternally(viewer.imageMxc);
+                            .openMediaExternally(viewer.imageMxc, false, viewer.imageEventId);
                     }
                 }
             }

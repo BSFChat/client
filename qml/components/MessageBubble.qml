@@ -1282,6 +1282,7 @@ Item {
                 sourceComponent: VideoPlayerCard {
                     source: bubble.mediaUrl
                     sourceMxc: bubble.mediaMxc
+                    eventId: bubble.eventId
                     fileName: bubble.mediaFileName
                     fileSize: bubble.mediaFileSize
                     mediaWidth: bubble.mediaWidth
@@ -1482,7 +1483,7 @@ Item {
                                         // completed the takeover chain.
                                         if (serverManager.activeServer) {
                                             serverManager.activeServer
-                                                .openMediaExternally(bubble.mediaMxc);
+                                                .openMediaExternally(bubble.mediaMxc, false, bubble.eventId);
                                         }
                                     } else {
                                         bubble.imageOpenRequested(
@@ -1552,7 +1553,7 @@ Item {
                         Accessible.onPressAction: {
                             if (serverManager.activeServer)
                                 serverManager.activeServer
-                                    .openMediaExternally(bubble.mediaMxc);
+                                    .openMediaExternally(bubble.mediaMxc, false, bubble.eventId);
                         }
                         implicitHeight: fileRow.implicitHeight + Theme.sp.s7
                         implicitWidth: fileRow.implicitWidth + Theme.sp.s7 * 2
@@ -1640,7 +1641,7 @@ Item {
                             onClicked: {
                                 if (serverManager.activeServer) {
                                     serverManager.activeServer
-                                        .openMediaExternally(bubble.mediaMxc);
+                                        .openMediaExternally(bubble.mediaMxc, false, bubble.eventId);
                                 }
                             }
                         }

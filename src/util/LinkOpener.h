@@ -6,9 +6,11 @@
 //   * only http, https and mailto leave the app (util/LinkPolicy.h); anything
 //     else — file:, smb:, UNC paths, javascript:, custom protocol handlers —
 //     is refused and reported through `refused`, which the UI toasts;
-//   * an http(s) link whose visible text names a different host is not
-//     opened until the user confirms: `confirmationRequested` carries the
-//     real host, and the prompt answers with openConfirmed();
+//   * an http(s) link whose visible text names a different host, and every
+//     mailto: link, is not opened until the user confirms:
+//     `confirmationRequested` carries the real host in punycode and the full
+//     percent-encoded URL as it will be opened (a mailto: with everything
+//     but subject/body dropped), and the prompt answers with openConfirmed();
 //   * it opens through bsfchat::openExternalUrl, so links work in the Linux
 //     release tarball too (see util/ExternalBrowser.h) and a launch failure
 //     is reported rather than silent.
@@ -40,7 +42,7 @@ public:
     Q_INVOKABLE bool openLocalDirectory(const QString& path);
 
 signals:
-    void confirmationRequested(QString href, QString host);
+    void confirmationRequested(QString href, QString host, QString shownUrl);
     void refused(QString href, QString reason);
     void openFailed(QString href);
 };

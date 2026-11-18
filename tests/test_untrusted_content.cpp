@@ -19,6 +19,7 @@
 #include "voice/PeerCaps.h"
 
 #include <QTest>
+#include <QUrlQuery>
 
 #include <bsfchat/Constants.h>
 
@@ -202,7 +203,7 @@ private slots:
         using A = links::Action;
         QCOMPARE(links::decide("https://example.com/x").action, A::Open);
         QCOMPARE(links::decide("HTTP://example.com").action, A::Open);
-        QCOMPARE(links::decide("mailto:a@b.c").action, A::Open);
+        QCOMPARE(links::decide("mailto:a@b.c").action, A::Confirm); // C2-7: always asked
         QCOMPARE(links::decide("bsfchat://channel/x").action, A::Internal);
         for (const char* bad : {"file:///C:/Windows/calc.exe", "file://server/share/x",
                                 "\\\\server\\share\\x", "smb://server/share", "javascript:alert(1)",
@@ -232,6 +233,92 @@ private slots:
         QCOMPARE(links::anchorTextsFor("<a href=\"https://x/?a=1&amp;b=2\">x</a>",
                                        "https://x/?a=1&b=2"),
                  QStringList{"x"});
+    }
+
+    // C2-7: the prompt shows the ASCII (punycode) host and the encoded URL,
+    // so a lookalike cannot pass for the real site.
+    void theSpoofPromptShowsTheAsciiHost()
+    {
+        using A = links::Action;
+        // "bаnk.example" with a Cyrillic а, fronted by text naming the real one.
+        const QString href = QString::fromUtf8("https://b\xD0\xB0nk.example/login?x=a%20b");
+        const auto d = links::decide(href, {"https://bank.example/login"});
+        QCOMPARE(d.action, A::Confirm);
+        QVERIFY2(d.host.startsWith("xn--"), qPrintable(d.host));
+        QVERIFY(d.shown.startsWith("https://xn--"));
+        QVERIFY(d.shown.contains("%20"));
+        for (const QChar c : d.shown) QVERIFY(c.unicode() < 0x80);
+        // A lookalike in the TEXT is caught the same way.
+        QCOMPARE(links::decide("https://bank.example/",
+                               {QString::fromUtf8("b\xD0\xB0nk.example")}).action,
+                 A::Confirm);
+        // The real IDN on both sides is fine.
+        QCOMPARE(links::decide(QString::fromUtf8("https://b\xC3\xBC" "cher.example/"),
+                               {QString::fromUtf8("b\xC3\xBC" "cher.example")}).action,
+                 A::Open);
+    }
+
+    void punctuationAroundTheTextDoesNotHideTheHost()
+    {
+        using A = links::Action;
+        for (const char* text : {"bank.example.", "bank.example,", "(bank.example)",
+                                 "<bank.example>", "\"bank.example\"", "'bank.example'!",
+                                 "https://bank.example/login).", "[bank.example]?"}) {
+            QVERIFY2(links::decide("https://evil.example/", {QString::fromUtf8(text)}).action
+                         == A::Confirm, text);
+            QVERIFY2(links::decide("https://bank.example/", {QString::fromUtf8(text)}).action
+                         == A::Open, text);
+        }
+        QCOMPARE(links::trimLinkText(" (\"x.example\"). "), QStringLiteral("x.example"));
+    }
+
+    void mailtoKeepsOnlySubjectAndBody()
+    {
+        const auto d = links::decide(
+            "mailto:a@b.example?subject=Hi&attach=C:%5Csecret.txt&cc=x@y&body=Yo&X-Header=1");
+        QCOMPARE(d.action, links::Action::Confirm);
+        QCOMPARE(d.host, QStringLiteral("a@b.example"));
+        const QUrlQuery q(d.url);
+        QCOMPARE(q.queryItemValue("subject"), QStringLiteral("Hi"));
+        QCOMPARE(q.queryItemValue("body"), QStringLiteral("Yo"));
+        QVERIFY(!q.hasQueryItem("attach"));
+        QVERIFY(!q.hasQueryItem("cc"));
+        QVERIFY(!q.hasQueryItem("X-Header"));
+        QCOMPARE(d.shown, d.url.toString(QUrl::FullyEncoded));
+        QCOMPARE(links::decide("mailto:a@b.example?attach=/etc/passwd").url.toString(),
+                 QStringLiteral("mailto:a@b.example"));
+    }
+
+    void anAttachmentNameCannotReorderItself()
+    {
+        // U+202E RIGHT-TO-LEFT OVERRIDE, U+2066 LRI, U+200B ZWSP, a BEL.
+        const QString name = QString::fromUtf8("invoice\xE2\x80\xAE" "fdp\xE2\x81\xA6\xE2\x80\x8B\a.exe");
+        QCOMPARE(attachment::displayName(name), QStringLiteral("invoicefdp.exe"));
+        QCOMPARE(attachment::displayName(QString::fromUtf8("caf\xC3\xA9 \xF0\x9F\x98\x80.pdf")),
+                 QString::fromUtf8("caf\xC3\xA9 \xF0\x9F\x98\x80.pdf"));
+        QVERIFY(attachment::displayName(QString(1000, 'a')).size() <= 255);
+    }
+
+    // C2-7: the external open judges the clicked message's file, not the
+    // first message that happens to carry the same mxc.
+    void mediaInfoComesFromTheClickedRow()
+    {
+        MessageModel model;
+        auto file = [](const char* name, const char* mime) {
+            return nlohmann::json{{"msgtype", "m.file"}, {"body", name},
+                                  {"url", "mxc://s/same"}, {"info", {{"mimetype", mime}}}};
+        };
+        model.appendEvent(messageWith("$first", file("cat.png", "image/png")), "@me:s");
+        model.appendEvent(messageWith("$second", file("report.pdf", "application/pdf")), "@me:s");
+        QString name, mime;
+        QVERIFY(model.mediaInfoForMxc("mxc://s/same", "$second", &name, &mime));
+        QCOMPARE(name, QStringLiteral("report.pdf"));
+        QCOMPARE(mime, QStringLiteral("application/pdf"));
+        QVERIFY(model.mediaInfoForMxc("mxc://s/same", "$first", &name, &mime));
+        QCOMPARE(name, QStringLiteral("cat.png"));
+        QVERIFY(model.mediaInfoForMxc("mxc://s/same", QString(), &name, &mime));
+        QCOMPARE(name, QStringLiteral("cat.png"));
+        QVERIFY(!model.mediaInfoForMxc("mxc://s/other", "$first", &name, &mime));
     }
 };
 

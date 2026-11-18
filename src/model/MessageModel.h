@@ -385,7 +385,10 @@ public:
     // The sender's file name and info.mimetype for a loaded media row, so
     // "open externally" can judge the file without trusting QML to pass them.
     // False when no loaded row shows `mxc`.
-    bool mediaInfoForMxc(const QString& mxc, QString* fileName, QString* mimeType) const;
+    // The file name and MIME type of the message `eventId` if it carries
+    // `mxc` (the row the user clicked), else of the first message that does.
+    bool mediaInfoForMxc(const QString& mxc, const QString& eventId, QString* fileName,
+                         QString* mimeType) const;
 
     void appendEvent(const bsfchat::RoomEvent& event, const QString& ownUserId);
     void appendEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);

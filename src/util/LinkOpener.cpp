@@ -23,7 +23,7 @@ void LinkOpener::open(const QString& href, const QString& contextHtml)
         emit refused(href, d.reason);
         return;
     case links::Action::Confirm:
-        emit confirmationRequested(href, d.host);
+        emit confirmationRequested(href, d.host, d.shown);
         return;
     case links::Action::Open:
         if (!bsfchat::openExternalUrl(d.url)) emit openFailed(href);
@@ -33,8 +33,10 @@ void LinkOpener::open(const QString& href, const QString& contextHtml)
 
 void LinkOpener::openConfirmed(const QString& href)
 {
+    // Without the anchor text this is Open for http(s) and Confirm for
+    // mailto: — which the user just did confirm.
     const auto d = links::decide(href);
-    if (d.action != links::Action::Open) {
+    if (d.action != links::Action::Open && d.action != links::Action::Confirm) {
         emit refused(href, d.reason);
         return;
     }

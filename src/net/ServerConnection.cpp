@@ -4282,7 +4282,8 @@ bool ServerConnection::linkPreviewsSupported() const
     return m_linkPreviews->supported();
 }
 
-void ServerConnection::openMediaExternally(const QString& mxcUri, bool confirmed)
+void ServerConnection::openMediaExternally(const QString& mxcUri, bool confirmed,
+                                           const QString& eventId)
 {
     namespace attachment = bsfchat::client::attachment;
     // The bare object URL: no ticket, no token, no query string at all. The
@@ -4296,18 +4297,21 @@ void ServerConnection::openMediaExternally(const QString& mxcUri, bool confirmed
     // What the sender says the file is. Looked up here rather than passed in
     // from QML so every call site gets the same judgement (M-1).
     QString fileName, mimeType;
-    if (m_messageModel) m_messageModel->mediaInfoForMxc(mxcUri, &fileName, &mimeType);
+    if (m_messageModel) m_messageModel->mediaInfoForMxc(mxcUri, eventId, &fileName, &mimeType);
     switch (attachment::classify(fileName, mimeType)) {
     case attachment::Kind::Blocked:
         qWarning() << "[media] refused to open a program/script attachment" << fileName
                    << mimeType;
         emit mediaOpenFailed(QStringLiteral("\u201c%1\u201d is a program or script. "
                                             "BSFChat never opens those for you.")
-                                 .arg(fileName.isEmpty() ? QStringLiteral("This file") : fileName));
+                                 .arg(fileName.isEmpty() ? QStringLiteral("This file")
+                                                         : attachment::displayName(fileName)));
         return;
     case attachment::Kind::Document:
         if (!confirmed) {
-            emit mediaOpenConfirmationRequested(mxcUri, fileName);
+            emit mediaOpenConfirmationRequested(mxcUri, attachment::displayName(fileName),
+                                                attachment::cacheExtension(fileName, mimeType),
+                                                eventId);
             return;
         }
         break;

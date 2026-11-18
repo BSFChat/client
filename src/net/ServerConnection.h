@@ -1076,7 +1076,10 @@ public:
     // and scripts are refused with mediaOpenFailed; anything but plain
     // image/video/audio first emits mediaOpenConfirmationRequested, and the
     // prompt calls back with `confirmed` set.
-    Q_INVOKABLE void openMediaExternally(const QString& mxcUri, bool confirmed = false);
+    // `eventId` names the message that was clicked, whose file name and type
+    // are the ones judged; empty falls back to the first message with mxcUri.
+    Q_INVOKABLE void openMediaExternally(const QString& mxcUri, bool confirmed = false,
+                                         const QString& eventId = QString());
 
     // Server-side link previews (GET /_matrix/media/v3/preview_url). The
     // homeserver fetches the page; this app never contacts the linked site.
@@ -1105,8 +1108,11 @@ signals:
     // the same way a failed media send is surfaced.
     void mediaOpenFailed(QString error);
     // openMediaExternally wants the user's go-ahead first. `fileName` is the
-    // sender's name for the file (may be empty), for the prompt to show.
-    void mediaOpenConfirmationRequested(QString mxcUri, QString fileName);
+    // sender's name for the file with bidi/control characters removed (may be
+    // empty), `fileType` the extension it will be opened as (".pdf", or "" for
+    // none); `eventId` goes back to openMediaExternally with the answer.
+    void mediaOpenConfirmationRequested(QString mxcUri, QString fileName, QString fileType,
+                                        QString eventId);
     // Bumped whenever presence-relevant state changes (activity
     // observed, self-status set). Views use it as a cheap reactive
     // hook since presenceFor() is a lookup on a regular QMap.

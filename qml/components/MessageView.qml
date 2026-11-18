@@ -1854,7 +1854,7 @@ Rectangle {
                         // lightbox. Middle-click bypasses this entirely and
                         // downloads-then-opens the local file (in the bubble).
                         onImageOpenRequested: (url, mxc, filename, size) => {
-                            imageViewer.openFor(url, mxc, filename, size);
+                            imageViewer.openFor(url, mxc, filename, size, model.eventId);
                         }
                         // Context-menu delete → confirm, then redact. The
                         // server enforces MANAGE_MESSAGES / sender-ownership
