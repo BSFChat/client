@@ -361,7 +361,10 @@ void TestAndroidRuntime::syncServiceStartIsGatedOnTheAppBeingActive()
 
     // And a start that the platform refuses anyway must be noticed rather
     // than silently swallowed by QJniObject's own exception clearing.
-    QVERIFY(notifier.contains(QStringLiteral("checkAndClearExceptions()")));
+    // QJniObject already clears the exception, so a refused start shows up as
+    // an invalid ComponentName from the start call (audit 2, M2-8).
+    QVERIFY(notifier.contains(QStringLiteral("Landroid/content/ComponentName;")));
+    QVERIFY(notifier.contains(QStringLiteral("started.isValid()")));
 
     // The service is also stopped when the last connection goes. It never
     // was: stopSyncService() had no caller in the whole tree, so a
@@ -503,7 +506,7 @@ void TestAndroidRuntime::cameraFgsTypeIsGatedOnTheCameraPermission()
 
     // Turning the camera on mid-call has to re-run that, or the call keeps
     // a microphone-only anchor and loses video on backgrounding.
-    QVERIFY(voice.contains(QStringLiteral("public static void refreshForegroundType(")));
+    QVERIFY(voice.contains(QStringLiteral("public static boolean refreshForegroundType(")));
     QVERIFY(code(readAll(srcDir() + "/voice/CameraController.cpp"))
                 .contains(QStringLiteral("refreshVoiceService()")));
 }
