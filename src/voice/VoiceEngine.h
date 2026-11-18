@@ -200,6 +200,16 @@ public:
     // stop so a share restart costs no renegotiation.
     void prepareVideoSend() override;
     // Fan an encoded access unit out to every peer with an open track.
+    //
+    // Still on the GUI thread, deliberately (audit 2 V2-7 asked whether
+    // it could move to a send thread). Not done: PeerConnectionManager's
+    // send paths read m_dc/track handles and per-peer counters and pacer
+    // state that the GUI thread mutates on renegotiation, glare and
+    // teardown, and m_peers itself changes under the reconciler. Moving
+    // the fan-out means a per-peer send lock across PeerConnectionManager
+    // and an audit of libdatachannel's per-track thread-safety, which
+    // cannot be validated without running real calls. The server-side
+    // participant cap (default 10) bounds the fan-out meanwhile.
     void broadcastEncodedVideo(VideoStreamId stream, const EncodedFrame& frame) override;
     // Fan an AV1 lossless temporal unit out over the reliable
     // "video-lossless" channels.
