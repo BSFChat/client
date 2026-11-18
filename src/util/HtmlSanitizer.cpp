@@ -212,6 +212,8 @@ struct Attr {
     QString value; // raw, entities not yet decoded
 };
 
+constexpr int kMaxAttrs = 64;
+
 struct Tag {
     QString name; // ASCII-lowercased
     QVector<Attr> attrs;
@@ -243,8 +245,11 @@ Tag parseTag(const QString& html, int i)
         while (j < n && !isHtmlSpace(html[j]) && html[j] != QLatin1Char('/')
                && html[j] != QLatin1Char('>') && html[j] != QLatin1Char('='))
             ++j;
+        // Past the cap the attribute is still scanned (to find the tag's end)
+        // but nothing is copied: a tag of 30 000 attributes costs one pass.
+        const bool keep = tag.attrs.size() < kMaxAttrs;
         Attr attr;
-        attr.name = asciiLower(html.mid(an, j - an));
+        if (keep) attr.name = asciiLower(html.mid(an, j - an));
         int k = j;
         while (k < n && isHtmlSpace(html[k])) ++k;
         if (k < n && html[k] == QLatin1Char('=')) {
@@ -254,16 +259,16 @@ Tag parseTag(const QString& html, int i)
                 const QChar q = html[k];
                 const int close = html.indexOf(q, k + 1);
                 if (close < 0) return tag; // unterminated quote: no tag
-                attr.value = html.mid(k + 1, close - k - 1);
+                if (keep) attr.value = html.mid(k + 1, close - k - 1);
                 j = close + 1;
             } else {
                 const int vs = k;
                 while (k < n && !isHtmlSpace(html[k]) && html[k] != QLatin1Char('>')) ++k;
-                attr.value = html.mid(vs, k - vs);
+                if (keep) attr.value = html.mid(vs, k - vs);
                 j = k;
             }
         }
-        if (tag.attrs.size() < 64) tag.attrs.append(std::move(attr));
+        if (keep) tag.attrs.append(std::move(attr));
     }
     return tag;
 }
@@ -350,13 +355,20 @@ QString sanitizeHtml(const QString& html)
 
         const bool looksLikeTag = isAsciiAlpha(next)
             || (next == QLatin1Char('/') && i + 2 < n && isAsciiAlpha(html[i + 2]));
-        Tag tag;
-        if (looksLikeTag) tag = parseTag(html, i);
-        if (!looksLikeTag || tag.end < 0) {
-            // Not markup (or never terminated): the '<' is text.
+        if (!looksLikeTag) {
+            // Not markup: the '<' is text.
             out += QLatin1String("&lt;");
             i = textStart = i + 1;
             continue;
+        }
+        const Tag tag = parseTag(html, i);
+        if (tag.end < 0) {
+            // Never terminated: parseTag scanned to the end of the input, so
+            // the whole remainder is text, escaped in one pass. Re-parsing
+            // from every later '<' instead was quadratic: 64 KiB of "<a "
+            // froze each viewer for seconds.
+            textStart = i;
+            break;
         }
         i = textStart = tag.end;
 

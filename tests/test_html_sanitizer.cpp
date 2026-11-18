@@ -10,8 +10,12 @@
 
 #include "util/HtmlSanitizer.h"
 
+#include <QElapsedTimer>
 #include <QRegularExpression>
 #include <QTest>
+
+#include <algorithm>
+#include <limits>
 
 using bsfchat::client::isAllowedLinkHref;
 using bsfchat::client::sanitizeHtml;
@@ -281,6 +285,60 @@ private slots:
             const QString once = sanitizeHtml(QString::fromUtf8(in));
             QCOMPARE(sanitizeHtml(once), once);
         }
+    }
+
+    // C2-1: an unterminated tag used to be re-parsed from every later '<',
+    // so 64 KiB of "<a " froze each viewer for seconds (GUI thread, replayed
+    // from the cache at every launch). Every shape here must be linear.
+    void adversarialInputIsLinear_data()
+    {
+        QTest::addColumn<QString>("input");
+        const int kSize = 64 * 1024;
+        auto fill = [kSize](const QString& unit) {
+            QString s;
+            s.reserve(kSize + unit.size());
+            while (s.size() < kSize) s += unit;
+            return s;
+        };
+        QTest::newRow("<a ") << fill(QStringLiteral("<a "));
+        QTest::newRow("<a b=") << fill(QStringLiteral("<a b="));
+        QTest::newRow("</a ") << fill(QStringLiteral("</a "));
+        QTest::newRow("<") << fill(QStringLiteral("<"));
+        QTest::newRow("<!-- unterminated") << fill(QStringLiteral("<!--"));
+        QTest::newRow("<! unterminated") << fill(QStringLiteral("<!x"));
+        QTest::newRow("nested quotes") << fill(QStringLiteral("<a b=\"'"));
+        QTest::newRow("nested quotes 2") << fill(QStringLiteral("<a b='\" c=\""));
+        QTest::newRow("unterminated quote") << QStringLiteral("<a b=\"") + fill(QStringLiteral("<i "));
+        QTest::newRow("many attributes") << QStringLiteral("<b") + fill(QStringLiteral(" c=d")) + QStringLiteral(">x</b>");
+        QTest::newRow("many attributes, unterminated") << QStringLiteral("<b") + fill(QStringLiteral(" c"));
+        QTest::newRow("script never closed") << fill(QStringLiteral("<script>"));
+        QTest::newRow("well-formed") << fill(QStringLiteral("<b>x</b>"));
+        QTest::newRow("entities") << fill(QStringLiteral("&#x3C"));
+    }
+
+    void adversarialInputIsLinear()
+    {
+        QFETCH(QString, input);
+        // Best of three, so a busy CI runner doesn't flake: quadratic
+        // behaviour on these inputs takes seconds, linear well under 5 ms.
+        qint64 best = std::numeric_limits<qint64>::max();
+        QString out;
+        for (int run = 0; run < 3; ++run) {
+            QElapsedTimer t;
+            t.start();
+            out = sanitizeHtml(input);
+            best = std::min(best, t.elapsed());
+        }
+        QVERIFY2(best < 50, qPrintable(QStringLiteral("took %1 ms").arg(best)));
+        verifyNoActiveContent(out);
+    }
+
+    void anUnterminatedTagMakesTheRestText()
+    {
+        QCOMPARE(sanitizeHtml("<b>x</b><a b='<i>y</i>"),
+                 QStringLiteral("<b>x</b>&lt;a b='&lt;i&gt;y&lt;/i&gt;"));
+        QCOMPARE(sanitizeHtml("x<a <i "), QStringLiteral("x&lt;a &lt;i "));
+        QCOMPARE(sanitizeHtml("<b>x<a href=\"y"), QStringLiteral("<b>x&lt;a href=\"y</b>"));
     }
 
     void theHrefRuleOnItsOwn()
