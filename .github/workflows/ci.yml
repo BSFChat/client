@@ -2295,6 +2295,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    # RELEASE_SIGNING_KEY lives in this protected environment, not in the
+    # repository secrets, so only this job — on a tag the environment's
+    # deployment rules allow — can read it; a workflow edited on a branch or
+    # another job cannot (C2-7). Owner setup: docs/release-signing.md.
+    environment: release
     permissions:
       contents: write
     steps:
@@ -2347,14 +2352,13 @@ jobs:
       # signed with the Ed25519 key in RELEASE_SIGNING_KEY. The client
       # refuses to install a release without a valid SHA256SUMS.sig.
       #
-      # Missing secret: a STABLE tag fails here. An RC warns and publishes
-      # without the .sig, and clients then show "This update isn't signed"
-      # with a link to the release page instead of installing it.
+      # Missing secret: the job fails, for RCs too. From 0.0.49-rc.1 on
+      # clients treat ANY unsigned release as failing verification (C2-2,
+      # kSignaturesRequiredFrom), so publishing one unsigned helps nobody.
       - name: Checksum and sign release assets
         shell: bash
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
-          PRERELEASE: ${{ steps.channel.outputs.prerelease }}
         run: |
           set -euo pipefail
           mkdir dist
@@ -2369,11 +2373,7 @@ jobs:
           cat SHA256SUMS
 
           if [ -z "$RELEASE_SIGNING_KEY" ]; then
-            if [ "$PRERELEASE" = "true" ]; then
-              echo "::warning::RELEASE_SIGNING_KEY is not set: ${GITHUB_REF_NAME} is published UNSIGNED and the in-app updater will not install it (users are sent to the release page). Add the secret — see docs/release-signing.md."
-              exit 0
-            fi
-            echo "::error::RELEASE_SIGNING_KEY is not set. Stable releases must be signed or the in-app updater refuses them. See docs/release-signing.md."
+            echo "::error::RELEASE_SIGNING_KEY is not available to this job. Every release (RCs included) must be signed or the in-app updater reports it as failing verification. It belongs in the 'release' environment — see docs/release-signing.md."
             exit 1
           fi
 

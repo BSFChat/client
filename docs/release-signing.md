@@ -99,18 +99,25 @@ installers are unsigned. Once one is, add a `WinVerifyTrust` check to
    openssl pkey -in release-signing-ed25519.pem -pubout -outform DER | tail -c 32 | od -An -tx1 -v | tr -d ' \n'
    ```
 
-3. In GitHub, under BSFChat/client → Settings → Secrets and variables →
-   Actions, add a repository secret named **`RELEASE_SIGNING_KEY`**. Its value
-   is the whole PEM file, including the `BEGIN`/`END` lines.
-4. Keep an offline backup of the PEM. If it is lost, you will need to ship a
+3. In GitHub, under BSFChat/client → Settings → Environments, create an
+   environment named **`release`** (the `release` job in `ci.yml` declares
+   `environment: release`). Protect it:
+   - *Deployment branches and tags*: "Selected branches and tags", add the tag
+     rule `v*`;
+   - optionally *Required reviewers* (yourself), so every signing waits for a
+     click.
+   Under that environment's *Environment secrets*, add **`RELEASE_SIGNING_KEY`**.
+   Its value is the whole PEM file, including the `BEGIN`/`END` lines.
+4. **Delete the repository-level `RELEASE_SIGNING_KEY`** (Settings → Secrets
+   and variables → Actions → Repository secrets) once the environment secret
+   is in place. While a repository copy exists, any job in any workflow can
+   still read it, which is what the environment is there to prevent.
+5. Keep an offline backup of the PEM. If it is lost, you will need to ship a
    client update with a new key to every user.
 
-When the secret is missing:
-
-- **Stable tags** (`vX.Y.Z`): the release job fails.
-- **RC tags** (`vX.Y.Z-suffix`): the job warns and publishes without
-  `SHA256SUMS.sig`. Clients report such an RC as failing verification (see
-  above), so configure the secret before tagging.
+When the secret is missing the release job fails, for RC and stable tags
+alike: from 0.0.49-rc.1 on clients treat an unsigned release as failing
+verification, so there is no point publishing one.
 
 ## Rotation
 
