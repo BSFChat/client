@@ -26,10 +26,24 @@
 //
 //     Idle → Joining → FetchingTurn → Active → Leaving → Idle
 //
-// and putting every server-mutating voice request (voice/join,
-// voice/leave, voice/state) through ONE in-flight-at-a-time queue. A join
-// issued while a leave is in flight waits for the leave's reply rather
-// than racing it.
+// and putting every membership-changing voice request (voice/join,
+// voice/leave) through ONE in-flight-at-a-time queue. A join issued while
+// a leave is in flight waits for the leave's reply rather than racing it.
+//
+// LEAVE IS LOCAL FIRST (audit 2 "leave still blocks"). requestLeave()
+// stops the transport and moves to Leaving at once, whatever is on the
+// wire: a join still in flight is CANCELLED (its reply, success or not,
+// never starts an engine — a success only lends the queued leave its
+// session token), and a mute PUT in flight is orphaned rather than
+// waited for. Only the server-side leave still waits its turn.
+//
+// MUTE/DEAFEN ARE "LATEST DESIRED STATE" (V2-1), not queued snapshots.
+// At most one voice/state PUT is in flight; when it is answered the next
+// one carries whatever the user wants NOW. Transient failures retry with
+// backoff and never touch the local toggle. A permanent failure rolls the
+// toggle back only when no newer user action exists and only towards
+// muted/deafened — a refused mute never reopens the microphone. Both
+// gates are re-applied after any rollback.
 //
 // TESTABILITY
 // -----------
@@ -41,6 +55,8 @@
 // audio device — which is the whole point, because none of the code this
 // replaces was ever covered by a test.
 
+#include <QElapsedTimer>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
@@ -92,8 +108,10 @@ public:
     // non-empty in Joining/FetchingTurn/Leaving too, so callers that mean
     // "the user is in a call" must use this.
     bool isActive() const { return m_state == State::Active; }
-    // True while a server round trip we issued is outstanding.
+    // True while a join/leave round trip we issued is outstanding.
     bool busy() const { return m_inFlight.has_value(); }
+    // True while a voice/state PUT is outstanding. Test/diagnostic.
+    bool statePutInFlight() const { return m_statePut.has_value(); }
 
     bool muted() const { return m_muted; }
     bool deafened() const { return m_deafened; }
@@ -112,6 +130,10 @@ public:
     // the old behaviour in that case.
     QString sessionId() const { return m_sessionId; }
     QString localUserId() const { return m_localUserId; }
+    // The device id this client joins with. Lets an m.call.member row for
+    // our user be told apart as "this device" or "another device" (V2-3).
+    void setLocalDeviceId(const QString& deviceId) { m_localDeviceId = deviceId; }
+    QString localDeviceId() const { return m_localDeviceId; }
 
     // ---- Transport hooks -------------------------------------------
     // startEngine returns false when the session cannot possibly work
@@ -155,10 +177,32 @@ public:
     void toggleMute();
     void toggleDeafen();
     void setPttMode(bool ptt);
+    // Gates the mic locally at once. The roster is told through the same
+    // coalesced state PUT as mute, never more often than one PUT per
+    // minStatePutIntervalMs — a PTT user used to cost ~4 PUTs a press.
     void setPttPressed(bool pressed);
-    // Announce media flags (screen share / camera). Queued like any other
-    // state PUT so it cannot overtake a join or a leave.
+    // Announce media flags (screen share / camera). Only while Active.
     void announceMedia(bool screenSharing, bool cameraOn);
+
+    // The machine woke from sleep or its network changed. Refetches TURN
+    // when the credentials are expired or close to it (V2-7).
+    void onWakeOrNetworkChange();
+
+    // ---- tunables (tests shorten them) -------------------------------
+    // Minimum spacing between two voice/state PUTs.
+    void setMinStatePutIntervalMs(int ms) { m_minStatePutIntervalMs = qMax(0, ms); }
+    // How long a retraction of OUR session waits for a sign that another
+    // device of ours took the seat before re-joining (V2-3). 0 = at once.
+    void setRejoinGraceMs(int ms) { m_rejoinGraceMs = qMax(0, ms); }
+    // First retry delay after a transient voice/state failure; doubles to
+    // kMaxStateRetryMs.
+    void setStateRetryBaseMs(int ms) { m_stateRetryBaseMs = qMax(1, ms); }
+    // Wall clock for TURN scheduling, ms since the epoch.
+    void setClockForTest(std::function<qint64()> clock) { m_clock = std::move(clock); }
+    // When the current TURN credentials expire / will be refetched (ms
+    // since the epoch; 0 = none). Test/diagnostic.
+    qint64 turnExpiresAtMs() const { return m_turnExpiresAtMs; }
+    qint64 turnRefreshAtMs() const { return m_turnRefreshAtMs; }
 
     // ---- Replies from the server -----------------------------------
     void onJoinSucceeded(const QString& roomId, const QJsonArray& members,
@@ -169,7 +213,11 @@ public:
     void onTurnConfig(const QJsonObject& config);
     void onTurnConfigFailed(const QString& error);
     void onStateUpdateSucceeded(const QString& roomId);
-    void onStateUpdateFailed(const QString& roomId, const QString& error);
+    // `transient` = network error, timeout, 429 or 5xx: retried with
+    // backoff and the local toggle is left alone. Anything else is
+    // permanent (see the class comment for what that may roll back).
+    void onStateUpdateFailed(const QString& roomId, const QString& error,
+                             bool transient = false);
     // The server refused a state PUT because our token is stale (403).
     // The membership is gone and no state PUT can bring it back, so this
     // takes the same recovery path as a retracted self-row: re-POST the
@@ -188,8 +236,18 @@ public:
     // not about the session we are running — ignoring it is what stops a
     // join-over-active-row's own active=false edge from tearing down the
     // session it just created.
+    //
+    // V2-3: an ACTIVE row for us that names a different device (or, when
+    // no device is known, a different session) while we are Active and no
+    // re-join of ours is in flight means the same account joined from
+    // another device. That ends the call here, with
+    // "You joined this call from another device", and never re-joins —
+    // re-joining is what made two devices evict each other forever.
+    // A retraction of our session therefore waits rejoinGraceMs for that
+    // evidence before re-joining.
     void onSelfMembership(const QString& roomId, bool active,
-                          const QString& sessionId = QString());
+                          const QString& sessionId = QString(),
+                          const QString& deviceId = QString());
 
     // ---- Inbound signalling ----------------------------------------
     // Buffers while the engine does not exist yet (V-C1) and drops
@@ -199,6 +257,8 @@ public:
 
     // Number of events currently parked for replay. Test/diagnostic.
     int bufferedSignalCount() const { return m_buffered.size(); }
+    // The message shown when another device of ours took the seat.
+    static QString takenOverMessage();
     // Queue depth of pending server requests. Test/diagnostic.
     int queuedRequestCount() const { return m_queue.size(); }
 
@@ -242,22 +302,33 @@ signals:
     // larger change than this repair needs.
     void membershipRenewed(const QString& roomId);
 
+    // Our seat was taken by another device of ours (V2-3). Emitted after
+    // the local teardown, alongside errorOccurred(takenOverMessage()).
+    void takenOverByOtherDevice(const QString& roomId);
+
     // Emitted once the session has reached Idle with an empty queue, i.e.
     // every leave we issued has been answered. The quit path waits on it.
     void settled();
 
 private:
-    enum class OpKind { Join, Rejoin, Leave, StateUpdate, MediaUpdate };
+    enum class OpKind { Join, Rejoin, Leave };
     struct Op {
         OpKind kind;
         QString roomId;
         // Snapshot of m_sessionId at the moment the op was ISSUED, so a
         // reply can be matched even after the token has moved on.
         QString sessionId;
-        bool muted = false;
+        // A join/rejoin the user has since left: its reply must not start
+        // anything (requestLeave).
+        bool cancelled = false;
+    };
+    // The one voice/state PUT allowed in flight, and what it carried.
+    struct StatePut {
+        QString roomId;
+        bool muted = false;        // announced (effective) mute
         bool deafened = false;
-        bool screenSharing = false;
-        bool cameraOn = false;
+        bool manualMuted = false;  // m_muted when it was sent
+        quint64 actionSeq = 0;     // m_userActionSeq when it was sent
     };
 
     // Where the queue, once drained, leaves this session: the room we
@@ -265,10 +336,22 @@ private:
     QString destinationRoom() const;
     // Builds an op stamped with the CURRENT session token.
     Op makeOp(OpKind kind, const QString& roomId) const;
-    // A state PUT announcing the EFFECTIVE mic gate plus the deafen
-    // flag, stamped with the current token.
-    Op stateOp(const QString& roomId) const;
     void enqueue(Op op);
+    // Local half of leaving: stop the transport, cancel/orphan whatever
+    // is in flight, drop queued joins, move to Leaving. Returns the room
+    // the server still has to be told about (empty = none).
+    QString leaveLocally();
+    // Stops the transport if this session may have started one. Every
+    // teardown path goes through here so the stopper runs once.
+    void stopEngineOnce();
+    // Tear down locally and end in Idle with `message` (re-join refused,
+    // retired twice, taken over).
+    void endSession(const QString& message);
+    // The state channel.
+    void maybeSendState();
+    void resetStateChannel();
+    void scheduleRejoin(const QString& roomId);
+    qint64 nowMs() const;
     void pump();
     void completeOp();
     void setState(State s);
@@ -277,7 +360,10 @@ private:
     void replayBufferedSignals();
     void applyMicGate();
     void applyDeafenGate();
+    // Records the credentials' expiry and arms the wall-clock check.
     void scheduleTurnRefresh(const QJsonObject& config);
+    void checkTurnRefresh();
+    void requestTurnRefresh(const char* why);
     // True when `op` is the request currently awaiting a reply and it
     // concerns `roomId`. Late replies to superseded requests are dropped.
     bool inFlightIs(OpKind kind, const QString& roomId) const;
@@ -285,6 +371,7 @@ private:
     State m_state = State::Idle;
     QString m_roomId;
     QString m_localUserId;
+    QString m_localDeviceId;
     // Token for the membership we currently hold; cleared whenever the
     // session leaves Active/FetchingTurn, so a stale one is never echoed.
     QString m_sessionId;
@@ -295,12 +382,34 @@ private:
     std::optional<Op> m_inFlight;
 
     // Mute/deafen: `m_muted`/`m_deafened` are what the user asked for;
-    // `m_ackedMuted`/`m_ackedDeafened` are what the server last accepted.
-    // A failed PUT rolls the former back to the latter (V-M7).
+    // `m_ackedMuted`/`m_ackedDeafened` are what the server's row holds
+    // (announced, i.e. effective, mute) and `m_ackedManualMuted` is the
+    // manual toggle that accompanied it — the rollback target.
     bool m_muted = false;
     bool m_deafened = false;
     bool m_ackedMuted = false;
     bool m_ackedDeafened = false;
+    bool m_ackedManualMuted = false;
+    // Bumped by every user toggle; a rollback never crosses a newer one.
+    quint64 m_userActionSeq = 0;
+    std::optional<StatePut> m_statePut;
+    // Replies still owed for PUTs abandoned by a leave, per room. They
+    // are swallowed rather than credited to a later membership.
+    QHash<QString, int> m_orphanedStateReplies;
+    // Set by a permanent failure; cleared by the next user action or a
+    // new membership. Stops an unsendable state being resent forever.
+    bool m_stateGaveUp = false;
+    QTimer* m_stateRetryTimer = nullptr;
+    QTimer* m_stateSpacingTimer = nullptr;
+    int m_stateRetryMs = 0;
+    int m_stateRetryBaseMs = 1000;
+    int m_minStatePutIntervalMs = 1000;
+    qint64 m_lastStatePutMs = 0;   // monotonic, see m_monotonic
+    QElapsedTimer m_monotonic;
+    static constexpr int kMaxStateRetryMs = 30'000;
+    // True from the moment a join goes out until the transport has been
+    // stopped: local resources (engine, roster mirrors) may exist.
+    bool m_localLive = false;
     bool m_pttMode = false;
     bool m_pttPressed = false;
     // Last gate value handed to the transport, so a redundant apply is
@@ -314,6 +423,11 @@ private:
 
     // V-H2 — one re-POST per retirement, never a loop.
     bool m_rejoinAttempted = false;
+    // V2-3 — a retraction of our session waits here for evidence of a
+    // takeover before the re-join goes out.
+    QTimer* m_rejoinGraceTimer = nullptr;
+    QString m_pendingRejoinRoom;
+    int m_rejoinGraceMs = 1500;
 
     // V-M1 — local ms epoch at which the current join attempt started.
     // Invites stamped before it belong to a previous session.
@@ -322,6 +436,10 @@ private:
     QVector<CallSignal> m_buffered;
 
     QTimer* m_turnRefreshTimer = nullptr;
+    qint64 m_turnExpiresAtMs = 0;
+    qint64 m_turnRefreshAtMs = 0;
+    bool m_turnRefreshInFlight = false;
+    std::function<qint64()> m_clock;
 
     EngineStarter m_startEngine;
     EngineStopper m_stopEngine;
@@ -344,6 +462,6 @@ public:
     // them.
     static constexpr qint64 kClockSkewAllowanceMs = 60'000;
     // Fallback TURN lifetime when the server omits `ttl`, matching the
-    // server's own default of 3600 s.
-    static constexpr int kDefaultTurnTtlSeconds = 3600;
+    // server's own default (voice.turn_ttl, 24 h). See TurnCredentials.h.
+    static constexpr int kDefaultTurnTtlSeconds = 24 * 3600;
 };

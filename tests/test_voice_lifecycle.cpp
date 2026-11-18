@@ -14,6 +14,7 @@
 #include "net/VoiceQuit.h"
 #include "net/VoiceSession.h"
 #include "voice/CallEventOutbox.h"
+#include "voice/TurnCredentials.h"
 #include "voice/VoiceRosterReconcile.h"
 #include "voice/VoiceStartPolicy.h"
 #include "voice/VoiceTransportSelector.h"
@@ -239,6 +240,28 @@ private slots:
     void failedStatePutRollsBackLocalMute();
     void muteSurvivesAChannelSwitch();
 
+    // ---- V2-1 / V2-2 --------------------------------------------------
+    void rollbackNeverCrossesANewerAction();
+    void stateUpdatesCoalesceToTheLatest();
+    void transientStateFailureRetriesWithoutRollback();
+    void pttEdgesAreSpacedNotSentPerEdge();
+
+    // ---- leave latency (audit 2) ---------------------------------------
+    void leaveDuringJoinStopsAtOnceAndNeverStarts();
+    void leaveDuringTurnFetchGoesOutImmediately();
+    void leaveDoesNotWaitForAStatePut();
+    void cancelledJoinThatFailsStillSendsTheLeave();
+
+    // ---- V2-3 ----------------------------------------------------------
+    void anotherDeviceTakingTheSeatEndsTheCall();
+    void ourOwnRowsAreNotATakeover();
+    void retractionWaitsForTakeoverEvidence();
+
+    // ---- V2-6 / V2-7 TURN ----------------------------------------------
+    void turnScheduleUsesWallClockExpiry();
+    void wakeRefetchesExpiredTurn();
+    void rejoinRefetchesTurn();
+
     // ---- V-M5 -------------------------------------------------------
     void rosterReconcilerAddsAndPrunes();
 
@@ -265,6 +288,8 @@ private slots:
 void TestVoiceLifecycle::joinReachesActiveThroughEveryState()
 {
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -304,6 +329,8 @@ void TestVoiceLifecycle::inviteDuringJoinIsBufferedNotLost()
     // discarded it — the offerer then sat in Connecting until its 30 s
     // watchdog re-offered.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -334,6 +361,8 @@ void TestVoiceLifecycle::inviteDuringJoinIsBufferedNotLost()
 void TestVoiceLifecycle::inviteBeforeJoinReplyIsBufferedNotLost()
 {
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -360,6 +389,8 @@ void TestVoiceLifecycle::inviteBeforeJoinReplyIsBufferedNotLost()
 void TestVoiceLifecycle::bufferIsBoundedAndDroppedOnUnwind()
 {
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -383,6 +414,8 @@ void TestVoiceLifecycle::joinWaitsForAnInFlightLeave()
     // parallel connections; if the server processed the join first the
     // user ended up active=false but believing they were in the call.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -405,6 +438,8 @@ void TestVoiceLifecycle::joinWaitsForAnInFlightLeave()
 void TestVoiceLifecycle::channelSwitchSendsLeaveBeforeJoin()
 {
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -438,6 +473,8 @@ void TestVoiceLifecycle::unrelatedErrorDuringTurnWindowDoesNotUnwind()
     // while the new room's TURN fetch was in flight; the one generic
     // voiceError signal then unwound a join that was perfectly healthy.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -465,6 +502,8 @@ void TestVoiceLifecycle::unrelatedErrorDuringTurnWindowDoesNotUnwind()
 void TestVoiceLifecycle::turnFailureUnwindsTheJoin()
 {
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -494,6 +533,8 @@ void TestVoiceLifecycle::engineStartFailureUnwindsTheJoin()
     // V-H4's caller half: start() returning false (no audio device,
     // relay-only with no TURN) must unwind the join, not leave a ghost.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -524,6 +565,8 @@ void TestVoiceLifecycle::selfRetirementRejoinsOnce()
     // m.call.member active=false. The old client ignored it entirely and
     // stayed reaped forever: engine up, mic hot, unlisted.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -542,8 +585,9 @@ void TestVoiceLifecycle::selfRetirementRejoinsOnce()
     QCOMPARE(engine.starts, 1);      // NOT restarted
     QCOMPARE(engine.stops, 0);
 
-    // A second retirement after a healthy row gets its own attempt.
-    s.onSelfMembership("!room:x", true);
+    // A second retirement after a healthy row OF OURS gets its own
+    // attempt (V2-3: only a row carrying our session id resets it).
+    s.onSelfMembership("!room:x", true, net.lastIssuedToken);
     net.requests.clear();
     s.onSelfMembership("!room:x", false);
     QCOMPARE(net.requests, QStringList{"join:!room:x"});
@@ -552,6 +596,8 @@ void TestVoiceLifecycle::selfRetirementRejoinsOnce()
 void TestVoiceLifecycle::selfRetirementTearsDownWhenRejoinFails()
 {
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -569,6 +615,8 @@ void TestVoiceLifecycle::selfRetirementTearsDownWhenRejoinFails()
     // Retired twice in a row without the re-join ever failing: the
     // second retirement tears down rather than looping on re-joins.
     VoiceSession s2;
+    s2.setRejoinGraceMs(0);
+    s2.setMinStatePutIntervalMs(0);
     s2.setLocalUserId("@me:x");
     FakeMatrixClient net2(&s2);
     FakeEngine engine2;
@@ -587,6 +635,8 @@ void TestVoiceLifecycle::requestsCarryTheCurrentSessionToken()
     // has moved past. That is what makes leave-then-join robust even if the
     // two cross on the wire — but only if we echo the RIGHT token.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -629,6 +679,8 @@ void TestVoiceLifecycle::retractionOfASupersededSessionIsIgnored()
     // Acting on that retraction would tear down the session it just
     // created.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -649,6 +701,8 @@ void TestVoiceLifecycle::retractionOfASupersededSessionIsIgnored()
 
     // A server that issues no token at all keeps the old behaviour.
     VoiceSession legacy;
+    legacy.setRejoinGraceMs(0);
+    legacy.setMinStatePutIntervalMs(0);
     legacy.setLocalUserId("@me:x");
     FakeMatrixClient legacyNet(&legacy);
     FakeEngine legacyEngine;
@@ -665,6 +719,8 @@ void TestVoiceLifecycle::supersededStatePutTriggersRecovery()
     // A reaped row is never re-activated by a state PUT, so the only
     // recovery is re-POSTing the join.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -691,6 +747,8 @@ void TestVoiceLifecycle::staleInviteIsIgnored()
     // which on a voice channel is old invites with dead call ids. Applying
     // one looks like "peer restarted" and tears down a healthy peer.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -725,6 +783,8 @@ void TestVoiceLifecycle::turnIsRefetchedAtHalfLife()
     // reconciler built peer connections with expired TURN creds after
     // `ttl` had passed.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -758,6 +818,8 @@ void TestVoiceLifecycle::pttAnnouncesTheEffectiveGate()
     // roster was told muted=false — so everyone saw an unmuted user who
     // was never audible.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -787,31 +849,152 @@ void TestVoiceLifecycle::pttAnnouncesTheEffectiveGate()
 
 void TestVoiceLifecycle::failedStatePutRollsBackLocalMute()
 {
+    // V2-1. A permanent failure may roll a toggle back only towards
+    // privacy: a refused UNmute goes back to muted, a refused mute stays
+    // muted (rolling it back reopened the microphone while the roster
+    // said "muted"). Both gates follow.
     VoiceSession s;
     s.setLocalUserId("@me:x");
+    s.setMinStatePutIntervalMs(0);
     FakeMatrixClient net(&s);
     FakeEngine engine;
     engine.install(&s);
     joinTo(s, net, "!room:x");
 
-    QSignalSpy muteSpy(&s, &VoiceSession::mutedChanged);
     s.toggleMute();
     QVERIFY(s.muted());
     QCOMPARE(net.stateUpdates.last(), qMakePair(true, false));
-
     net.replyStateError("!room:x", "nope");
-    QVERIFY(!s.muted());                  // rolled back to what the server has
-    QCOMPARE(muteSpy.size(), 2);
-    QCOMPARE(engine.gates.last(), false); // and the engine follows the rollback
+    QVERIFY(s.muted());                   // never rolled back to live
+    QCOMPARE(engine.gates.last(), true);
 
-    // An accepted toggle sticks.
+    // Unmuting matches what the server already holds: nothing to send.
     s.toggleMute();
+    QCOMPARE(net.stateUpdates.size(), 1);
+    // An accepted mute, then a refused unmute: back to muted.
+    s.toggleMute();                       // mute → PUT(true)
+    QCOMPARE(net.stateUpdates.size(), 2);
     net.replyStateOk("!room:x");
-    QVERIFY(s.muted());
-    s.toggleDeafen();
+    QSignalSpy muteSpy(&s, &VoiceSession::mutedChanged);
+    s.toggleMute();                       // unmute → PUT(false), refused
+    QVERIFY(!s.muted());
     net.replyStateError("!room:x", "nope");
-    QVERIFY(!s.deafened());
-    QVERIFY(s.muted());                   // the accepted mute is untouched
+    QVERIFY(s.muted());
+    QCOMPARE(muteSpy.size(), 2);
+    QCOMPARE(engine.gates.last(), true);  // the engine follows the rollback
+    QCOMPARE(engine.deafenGates.last(), false);
+
+    // Same for deafen.
+    s.toggleDeafen();
+    net.replyStateOk("!room:x");
+    s.toggleDeafen();                     // undeafen, refused
+    net.replyStateError("!room:x", "nope");
+    QVERIFY(s.deafened());
+    QCOMPARE(engine.deafenGates.last(), true);
+}
+
+void TestVoiceLifecycle::rollbackNeverCrossesANewerAction()
+{
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    s.setMinStatePutIntervalMs(0);
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    joinTo(s, net, "!room:x");
+    s.toggleMute();
+    net.replyStateOk("!room:x");          // server: muted
+
+    s.toggleMute();                       // unmute → PUT(false) in flight
+    QCOMPARE(net.stateUpdates.size(), 2);
+    s.toggleDeafen();                     // newer action while in flight
+    QCOMPARE(net.stateUpdates.size(), 2); // coalesced: one PUT at a time
+    net.replyStateError("!room:x", "nope");
+    QVERIFY(!s.muted());                  // not rolled back past the deafen
+    QVERIFY(s.deafened());
+}
+
+void TestVoiceLifecycle::stateUpdatesCoalesceToTheLatest()
+{
+    // V2-1: the old FIFO sent every intermediate snapshot. Now one PUT is
+    // in flight and the next carries the newest wish only.
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    s.setMinStatePutIntervalMs(0);
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    joinTo(s, net, "!room:x");
+
+    s.toggleMute();                       // PUT(true) out
+    s.toggleMute();
+    s.toggleMute();
+    s.toggleDeafen();
+    QCOMPARE(net.stateUpdates.size(), 1);
+    QVERIFY(s.statePutInFlight());
+    net.replyStateOk("!room:x");
+    QCOMPARE(net.stateUpdates.size(), 2);
+    QCOMPARE(net.stateUpdates.last(), qMakePair(true, true));
+    net.replyStateOk("!room:x");
+    QVERIFY(!s.statePutInFlight());
+
+    // Toggling back to what the server already holds sends nothing more.
+    s.toggleDeafen();
+    s.toggleDeafen();
+    QCOMPARE(net.stateUpdates.size(), 3);  // the first toggle's PUT only
+    net.replyStateOk("!room:x");
+    QCOMPARE(net.stateUpdates.size(), 4);  // and the correction back
+}
+
+void TestVoiceLifecycle::transientStateFailureRetriesWithoutRollback()
+{
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    s.setMinStatePutIntervalMs(0);
+    s.setStateRetryBaseMs(20);
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    joinTo(s, net, "!room:x");
+    QSignalSpy errors(&s, &VoiceSession::errorOccurred);
+
+    s.toggleMute();
+    s.onStateUpdateFailed("!room:x", "timeout", /*transient=*/true);
+    QVERIFY(s.muted());
+    QCOMPARE(errors.size(), 0);
+    QCOMPARE(net.stateUpdates.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(net.stateUpdates.size(), 2, 2000);
+    QCOMPARE(net.stateUpdates.last(), qMakePair(true, false));
+    net.replyStateOk("!room:x");
+    QVERIFY(!s.statePutInFlight());
+}
+
+void TestVoiceLifecycle::pttEdgesAreSpacedNotSentPerEdge()
+{
+    // V2-2: every PTT edge was a PUT (~4 per press, past the rate limit).
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    s.setMinStatePutIntervalMs(200);
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    s.setPttMode(true);
+    joinTo(s, net, "!room:x");
+    QCOMPARE(net.stateUpdates.size(), 1);   // muted-by-PTT announced
+    net.replyStateOk("!room:x");
+
+    for (int i = 0; i < 5; ++i) {
+        s.setPttPressed(true);
+        QCOMPARE(engine.gates.last(), false);   // the local gate is instant
+        s.setPttPressed(false);
+        QCOMPARE(engine.gates.last(), true);
+    }
+    // Within the spacing window nothing more went out, and once it
+    // passes the server already holds the truth (muted) — so nothing does.
+    QCOMPARE(net.stateUpdates.size(), 1);
+    s.setPttPressed(true);
+    QTRY_COMPARE_WITH_TIMEOUT(net.stateUpdates.size(), 2, 2000);
+    QCOMPARE(net.stateUpdates.last(), qMakePair(false, false));
 }
 
 void TestVoiceLifecycle::muteSurvivesAChannelSwitch()
@@ -819,6 +1002,8 @@ void TestVoiceLifecycle::muteSurvivesAChannelSwitch()
     // V-M7's third leg: joining reset mute to false, so a muted user who
     // changed channel started transmitting.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -936,6 +1121,8 @@ void TestVoiceLifecycle::settledFiresOnceEveryLeaveIsAnswered()
     // V-H3's testable half: the quit path needs to know when the leave
     // has actually been answered rather than merely queued.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -957,6 +1144,8 @@ void TestVoiceLifecycle::settledFiresOnceEveryLeaveIsAnswered()
 
     // Nothing to leave settles immediately.
     VoiceSession idle;
+    idle.setRejoinGraceMs(0);
+    idle.setMinStatePutIntervalMs(0);
     QSignalSpy idleSettled(&idle, &VoiceSession::settled);
     idle.requestLeave();
     QCOMPARE(idle.state(), VoiceSession::State::Idle);
@@ -969,6 +1158,8 @@ void TestVoiceLifecycle::quitWaitsForLeavesButIsBounded()
     // the process exit before the socket was written, so nothing ever
     // left the machine and the roster row lingered 30-40 s.
     VoiceSession a;
+    a.setRejoinGraceMs(0);
+    a.setMinStatePutIntervalMs(0);
     VoiceSession b;
     a.setLocalUserId("@me:x");
     b.setLocalUserId("@me:y");
@@ -1005,6 +1196,8 @@ void TestVoiceLifecycle::quitWaitsForLeavesButIsBounded()
 
     // Nothing to wait for returns immediately without entering a loop.
     VoiceSession idle;
+    idle.setRejoinGraceMs(0);
+    idle.setMinStatePutIntervalMs(0);
     QVERIFY(voice::waitForSessionsToSettle({&idle}, 5000));
     QVERIFY(voice::waitForSessionsToSettle({}, 5000));
     QVERIFY(voice::waitForSessionsToSettle({nullptr}, 5000));
@@ -1181,6 +1374,8 @@ void TestVoiceLifecycle::joiningWhileDeafenedDeafensTheNewEngine()
     // this covered (V-M7, the m_appliedGate reset in onTurnConfig);
     // deafen had no hook at all.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -1229,6 +1424,8 @@ void TestVoiceLifecycle::anAcceptedRejoinAnnouncesItsNewMembership()
     // reaper fired therefore disappeared from every other participant's
     // roster and did not come back until the user toggled it.
     VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
     s.setLocalUserId("@me:x");
     FakeMatrixClient net(&s);
     FakeEngine engine;
@@ -1275,6 +1472,288 @@ void TestVoiceLifecycle::transportSelectorRefusesMixedRoster()
 
     in.voiceMembers = QJsonArray();
     QVERIFY(voice::chooseTransport(in).isMesh());
+}
+
+void TestVoiceLifecycle::leaveDuringJoinStopsAtOnceAndNeverStarts()
+{
+    // Leave used to queue behind an in-flight join for up to its timeout
+    // with the microphone live. Now the local side ends at once and the
+    // join's reply starts nothing.
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+
+    s.requestJoin("!room:x");
+    QSignalSpy states(&s, &VoiceSession::stateChanged);
+    s.requestLeave();
+    QCOMPARE(s.state(), VoiceSession::State::Leaving);   // immediately
+    QVERIFY(states.size() >= 1);
+    QVERIFY(net.leaves.isEmpty());   // server order still: join answered first
+
+    net.replyJoinOk("!room:x");
+    QCOMPARE(net.turnFetches, 0);    // no TURN, no engine
+    QCOMPARE(engine.starts, 0);
+    // The leave names the membership the join just minted.
+    QCOMPARE(net.leaves, QStringList{"!room:x"});
+    QCOMPARE(net.leaveTokens, QStringList{net.lastIssuedToken});
+    net.replyLeaveOk("!room:x");
+    QCOMPARE(s.state(), VoiceSession::State::Idle);
+}
+
+void TestVoiceLifecycle::leaveDuringTurnFetchGoesOutImmediately()
+{
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+
+    s.requestJoin("!room:x");
+    net.replyJoinOk("!room:x");
+    QCOMPARE(s.state(), VoiceSession::State::FetchingTurn);
+    s.requestLeave();
+    QCOMPARE(s.state(), VoiceSession::State::Leaving);
+    QCOMPARE(net.leaves, QStringList{"!room:x"});
+    QCOMPARE(net.leaveTokens, QStringList{net.lastIssuedToken});
+    net.replyTurn(turnConfig());     // late TURN reply
+    QCOMPARE(engine.starts, 0);
+    net.replyLeaveOk("!room:x");
+    QCOMPARE(s.state(), VoiceSession::State::Idle);
+}
+
+void TestVoiceLifecycle::leaveDoesNotWaitForAStatePut()
+{
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    s.setMinStatePutIntervalMs(0);
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    joinTo(s, net, "!room:x");
+
+    s.toggleMute();
+    QVERIFY(s.statePutInFlight());
+    s.requestLeave();
+    QCOMPARE(engine.stops, 1);
+    QCOMPARE(net.leaves, QStringList{"!room:x"});
+    // The orphaned PUT's late reply is swallowed, not credited to the
+    // next membership in the same room.
+    net.replyLeaveOk("!room:x");
+    s.requestJoin("!room:x");
+    net.replyJoinOk("!room:x");
+    net.replyTurn(turnConfig());
+    const int before = net.stateUpdates.size();
+    QVERIFY(s.statePutInFlight());   // carry-over mute announced afresh
+    net.replyStateOk("!room:x");     // the OLD PUT's reply
+    QVERIFY(s.statePutInFlight());   // still waiting for the new one
+    net.replyStateOk("!room:x");
+    QVERIFY(!s.statePutInFlight());
+    QCOMPARE(net.stateUpdates.size(), before);
+}
+
+void TestVoiceLifecycle::cancelledJoinThatFailsStillSendsTheLeave()
+{
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    QSignalSpy errors(&s, &VoiceSession::errorOccurred);
+
+    s.requestJoin("!room:x");
+    s.requestLeave();
+    net.replyJoinError("!room:x", "timeout");
+    QCOMPARE(errors.size(), 0);       // the user left; no join error toast
+    QCOMPARE(net.leaves, QStringList{"!room:x"});
+    net.replyLeaveOk("!room:x");
+    QCOMPARE(s.state(), VoiceSession::State::Idle);
+
+    // A join that was only QUEUED (behind a leave) is simply dropped.
+    joinTo(s, net, "!a:x");
+    s.requestJoin("!b:x");           // leave(a) out, join(b) queued
+    net.requests.clear();
+    s.requestLeave();
+    net.replyLeaveOk("!a:x");
+    QVERIFY(net.requests.isEmpty());
+    QCOMPARE(s.state(), VoiceSession::State::Idle);
+}
+
+void TestVoiceLifecycle::anotherDeviceTakingTheSeatEndsTheCall()
+{
+    // V2-3: the same account on two devices evicted each other forever,
+    // each re-joining on its own retraction.
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    s.setLocalDeviceId("LAPTOP");
+    s.setRejoinGraceMs(0);
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    QSignalSpy errors(&s, &VoiceSession::errorOccurred);
+    QSignalSpy taken(&s, &VoiceSession::takenOverByOtherDevice);
+    joinTo(s, net, "!room:x");
+    net.requests.clear();
+
+    s.onSelfMembership("!room:x", true, QStringLiteral("sess-phone"),
+                       QStringLiteral("PHONE"));
+    QCOMPARE(s.state(), VoiceSession::State::Idle);
+    QCOMPARE(engine.stops, 1);
+    QCOMPARE(taken.size(), 1);
+    QCOMPARE(errors.size(), 1);
+    QCOMPARE(errors.first().first().toString(), VoiceSession::takenOverMessage());
+    QVERIFY(net.requests.isEmpty());   // no re-join, and no leave either
+
+    // Without device ids, a foreign session id is the evidence.
+    VoiceSession t;
+    t.setLocalUserId("@me:x");
+    FakeMatrixClient net2(&t);
+    FakeEngine engine2;
+    engine2.install(&t);
+    joinTo(t, net2, "!room:x");
+    t.onSelfMembership("!room:x", true, QStringLiteral("sess-other"));
+    QCOMPARE(t.state(), VoiceSession::State::Idle);
+}
+
+void TestVoiceLifecycle::ourOwnRowsAreNotATakeover()
+{
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    s.setLocalDeviceId("LAPTOP");
+    s.setRejoinGraceMs(0);
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    joinTo(s, net, "!room:x");
+
+    // A replayed older row from THIS device.
+    s.onSelfMembership("!room:x", true, QStringLiteral("sess-old"),
+                       QStringLiteral("LAPTOP"));
+    QVERIFY(s.isActive());
+    // A row with no session id at all says nothing.
+    s.onSelfMembership("!room:x", true);
+    QVERIFY(s.isActive());
+
+    // Our own re-join's row landing before its reply.
+    s.onSelfMembership("!room:x", false, net.lastIssuedToken);
+    QCOMPARE(net.joins.size(), 2);
+    s.onSelfMembership("!room:x", true, QStringLiteral("sess-next"),
+                       QStringLiteral("LAPTOP"));
+    s.onSelfMembership("!room:x", true, QStringLiteral("sess-next"));
+    QVERIFY(s.isActive());
+    net.replyJoinOk("!room:x");
+    QVERIFY(s.isActive());
+
+    // Only a row with OUR session resets the one-rejoin budget: a foreign
+    // active row while the budget is spent does not grant another.
+    s.onSelfMembership("!room:x", false, net.lastIssuedToken);
+    QCOMPARE(s.state(), VoiceSession::State::Idle);   // second retirement
+}
+
+void TestVoiceLifecycle::retractionWaitsForTakeoverEvidence()
+{
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    s.setLocalDeviceId("LAPTOP");
+    s.setRejoinGraceMs(150);
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    joinTo(s, net, "!room:x");
+
+    // Retraction then the other device's row: no re-join, ever.
+    s.onSelfMembership("!room:x", false, net.lastIssuedToken);
+    QCOMPARE(net.joins.size(), 1);
+    s.onSelfMembership("!room:x", true, QStringLiteral("sess-phone"),
+                       QStringLiteral("PHONE"));
+    QCOMPARE(s.state(), VoiceSession::State::Idle);
+    QTest::qWait(300);
+    QCOMPARE(net.joins.size(), 1);
+
+    // Retraction with no takeover: the re-join goes out after the grace.
+    VoiceSession t;
+    t.setLocalUserId("@me:x");
+    t.setRejoinGraceMs(50);
+    FakeMatrixClient net2(&t);
+    FakeEngine engine2;
+    engine2.install(&t);
+    joinTo(t, net2, "!room:x");
+    t.onSelfMembership("!room:x", false, net2.lastIssuedToken);
+    QCOMPARE(net2.joins.size(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(net2.joins.size(), 2, 2000);
+}
+
+void TestVoiceLifecycle::turnScheduleUsesWallClockExpiry()
+{
+    using namespace voice::turn;
+    const qint64 now = 1'800'000'000'000LL;
+    QJsonObject cfg = turnConfig(24 * 3600);
+    // ttl only: expiry counted from receipt, refresh 10 min ahead.
+    QCOMPARE(expiresAtMs(cfg, now), now + 24LL * 3600 * 1000);
+    QCOMPARE(refreshAtMs(cfg, now), now + 24LL * 3600 * 1000 - kRefreshLeadMs);
+    // A TURN REST username carries the expiry coturn enforces.
+    cfg["username"] = QStringLiteral("1800000600:@me:x");
+    QCOMPARE(expiresAtMs(cfg, now), 1'800'000'600'000LL);
+    QCOMPARE(refreshAtMs(cfg, now), now + 300'000);   // half of a 10 min life
+    QVERIFY(!unusableForNewPeer(expiresAtMs(cfg, now), now));
+    QVERIFY(unusableForNewPeer(expiresAtMs(cfg, now), 1'800'000'600'000LL - 30'000));
+
+    // The session follows the injected wall clock, so a jump (sleep) is
+    // seen by the next check rather than a stretched monotonic timer.
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    qint64 clock = now;
+    s.setClockForTest([&clock]() { return clock; });
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    s.requestJoin("!room:x");
+    net.replyJoinOk("!room:x");
+    net.replyTurn(turnConfig(24 * 3600));
+    QCOMPARE(s.turnRefreshAtMs(), now + 24LL * 3600 * 1000 - kRefreshLeadMs);
+    QCOMPARE(net.turnFetches, 1);
+    clock += 25LL * 3600 * 1000;          // slept through the expiry
+    s.onWakeOrNetworkChange();
+    QCOMPARE(net.turnFetches, 2);
+    s.onWakeOrNetworkChange();            // already in flight: no duplicate
+    QCOMPARE(net.turnFetches, 2);
+}
+
+void TestVoiceLifecycle::wakeRefetchesExpiredTurn()
+{
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    qint64 clock = 1'800'000'000'000LL;
+    s.setClockForTest([&clock]() { return clock; });
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    joinTo(s, net, "!room:x");
+    QCOMPARE(net.turnFetches, 1);
+    // Fresh credentials: a network change alone does not refetch.
+    s.onWakeOrNetworkChange();
+    QCOMPARE(net.turnFetches, 1);
+    clock += 3600LL * 1000 - 30'000;      // within the safety margin
+    s.onWakeOrNetworkChange();
+    QCOMPARE(net.turnFetches, 2);
+    net.replyTurn(turnConfig());
+    QCOMPARE(engine.turnUpdates.size(), 1);
+}
+
+void TestVoiceLifecycle::rejoinRefetchesTurn()
+{
+    VoiceSession s;
+    s.setLocalUserId("@me:x");
+    s.setRejoinGraceMs(0);
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    joinTo(s, net, "!room:x");
+    QCOMPARE(net.turnFetches, 1);
+    s.onSelfMembership("!room:x", false, net.lastIssuedToken);
+    net.replyJoinOk("!room:x");
+    QCOMPARE(net.turnFetches, 2);
 }
 
 QTEST_MAIN(TestVoiceLifecycle)
