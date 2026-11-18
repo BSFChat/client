@@ -69,6 +69,17 @@ VideoReceivePipeline::VideoReceivePipeline(const QString& userId,
 }
 
 VideoReceivePipeline::~VideoReceivePipeline() {
+    if (m_retired) {
+        // retire() already destroyed the decoder on the worker and the
+        // thread has finished (that is what scheduled this deletion);
+        // wait() only covers the instant between finished() and the
+        // thread function actually returning.
+        m_thread.wait();
+        return;
+    }
+    // Direct deletion: the caller wants the thread gone now (tests,
+    // application exit). The leave path uses retire() instead.
+    m_stopping.store(true);
     QMetaObject::invokeMethod(&m_worker, [this]() {
         m_decoder.reset();
     }, Qt::BlockingQueuedConnection);
@@ -76,10 +87,44 @@ VideoReceivePipeline::~VideoReceivePipeline() {
     m_thread.wait();
 }
 
+void VideoReceivePipeline::retire() {
+    if (m_retired) return;
+    m_retired = true;
+    m_stopping.store(true);
+    // Nobody may observe a retired pipeline: no more frames, keyframe
+    // requests or caps corrections. Done first so a decode finishing on
+    // the worker right now emits into nothing.
+    // (Only the media signals: `destroyed` must still reach its
+    // listeners when the deferred deletion happens.)
+    disconnect(this, &VideoReceivePipeline::frameDecoded, nullptr, nullptr);
+    disconnect(this, &VideoReceivePipeline::keyframeNeeded, nullptr, nullptr);
+    disconnect(this, &VideoReceivePipeline::decoderUnavailable, nullptr, nullptr);
+    // Owned by nobody from here on; it deletes itself.
+    setParent(nullptr);
+    m_playoutTimer.stop();
+    m_presentActivity.end();
+    m_playout.clear();
+    {
+        QMutexLocker lock(&m_mutex);
+        m_queue.clear();
+    }
+    // Context `this` lives on the GUI thread, so the deletion is queued
+    // there and runs after the worker has left its event loop.
+    connect(&m_thread, &QThread::finished, this, &QObject::deleteLater);
+    // Decoder reset and quit in ONE queued call: posting quit()
+    // separately could end the loop before the decoder was destroyed on
+    // the thread that created it.
+    QMetaObject::invokeMethod(&m_worker, [this]() {
+        m_decoder.reset();
+        QThread::currentThread()->quit();
+    }, Qt::QueuedConnection);
+}
+
 void VideoReceivePipeline::submitAccessUnit(const QByteArray& au,
                                             bool keyframeHint,
                                             bool lossSuspected,
                                             qint64 mediaTimeUs) {
+    if (m_stopping.load(std::memory_order_relaxed)) return;
     m_rxFrames.fetch_add(1);
     m_rxBytes.fetch_add(quint64(au.size()));
     bool overflowed = false;
@@ -120,6 +165,9 @@ void VideoReceivePipeline::requestKeyframeThrottled() {
 void VideoReceivePipeline::drainQueue() {
     m_drainQueued.store(false);
     for (;;) {
+        // retire(): stop at the next unit boundary instead of decoding a
+        // backlog nobody will see.
+        if (m_stopping.load(std::memory_order_relaxed)) return;
         QueuedAu queued;
         {
             QMutexLocker lock(&m_mutex);

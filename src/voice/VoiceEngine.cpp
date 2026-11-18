@@ -257,9 +257,12 @@ void VoiceEngine::stop() {
     m_disconnectTimers.clear();
     qDeleteAll(m_connectWatchdogs);
     m_connectWatchdogs.clear();
-    // Decode pipelines block on their worker threads in their dtors,
-    // so tear them down synchronously with the call.
-    qDeleteAll(m_recvPipelines);
+    // Retired, never deleted here: deleting a pipeline joins its decode
+    // thread, and doing that per stream, serially, on the GUI thread was
+    // the bulk of the "leave freezes the app" complaint. Each one now
+    // destroys its decoder on its own thread and deletes itself after.
+    for (auto* p : std::as_const(m_recvPipelines))
+        if (p) p->retire();
     m_recvPipelines.clear();
     m_videoSendActive = false;
     m_rrTimer.stop();
@@ -1022,7 +1025,9 @@ VideoReceivePipeline* VoiceEngine::recvPipeline(const QString& userId, int strea
         // Sender switched codec mid-call (lossless toggle, or the
         // H.264 ↔ H.265 renegotiation-free switch) — rebuild.
         m_recvPipelines.remove(key);
-        existing->deleteLater();
+        // deleteLater() would still run the joining destructor, just one
+        // event-loop turn later — on the GUI thread all the same.
+        existing->retire();
     }
     auto* pipeline = new VideoReceivePipeline(userId, VideoStreamId(streamId),
                                               codec, this);
@@ -1057,8 +1062,9 @@ void VoiceEngine::retireRecvPipeline(VideoReceivePipeline* p) {
     // frames would land in a tile the stream's stop has just blanked and
     // mark it live again for the registry's 4 s timeout. Cut the output
     // first; nothing a retired pipeline shows is wanted.
-    disconnect(p, &VideoReceivePipeline::frameDecoded, this, nullptr);
-    p->deleteLater();
+    // retire() cuts every output itself and never joins the decode
+    // thread on this one.
+    p->retire();
 }
 
 void VoiceEngine::setVideoSmoothingMs(int ms) {
