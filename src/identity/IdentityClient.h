@@ -38,9 +38,9 @@
 //       * iOS presents ASWebAuthenticationSession, which keeps the app in
 //         the foreground and hands the redirect straight to a completion
 //         handler (src/identity/IosAuthSession.h).
-//       * Android keeps QDesktopServices::openUrl — which maps to an
-//         ACTION_VIEW intent — and the redirect comes back as an
-//         ACTION_VIEW intent of our own, through UrlHandler.
+//       * Android opens the page in a Custom Tab (BrowserTab.java, falling
+//         back to QDesktopServices::openUrl), and the redirect comes back as
+//         an ACTION_VIEW intent of our own, through UrlHandler.
 //
 // Every transport converges on handleCallback(), so state and PKCE are
 // validated by the same code on every platform (oidc::parseCallbackQuery).
@@ -160,6 +160,14 @@ public:
 #endif
     // See IdentityRecovery. Created on first use; lives for the process.
     static IdentityRecovery* recovery();
+
+    // Show one of the identity provider's own pages — the account page
+    // where a BSFChat ID is deleted (store requirement, M2-2) — in the same
+    // in-app browser session the sign-in uses, so it shares that session's
+    // cookies and reads as part of the app: ASWebAuthenticationSession on
+    // iOS, a Custom Tab on Android, the system browser on desktop. Does not
+    // touch any sign-in in flight. False when nothing could be shown.
+    static bool openProviderPage(const QUrl& url);
 
 signals:
     void loginCompleted(const QString& idToken, const QString& accessToken, const QString& refreshToken);

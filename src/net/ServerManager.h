@@ -149,6 +149,19 @@ public:
     // lands the UI says so in words rather than pretending.
     Q_INVOKABLE void forgetIdentitySession();
 
+    // Deleting the BSFChat ID itself (App Store 5.1.1(v), M2-2). The chat
+    // server's own "Delete account" only deactivates the account on that
+    // server; the identity is deleted on the provider's account page, which
+    // this opens in the in-app browser session the sign-in uses
+    // (IdentityClient::openProviderPage). Empty URL when no provider is
+    // known at all. The provider is the signed-in one, else the remembered
+    // one, else the active server's, else the hosted default.
+    Q_INVOKABLE QString identityAccountDeletionUrl() const;
+    // False when nothing could be shown; the caller should then show the URL.
+    Q_INVOKABLE bool openIdentityAccountDeletion();
+    // Whether this device knows of a BSFChat ID to offer deleting.
+    Q_INVOKABLE bool hasIdentityAccount() const;
+
     // Does a server whose login flows name `providerUrl` use the BSFChat ID
     // this device is signed in to? If so, joining it needs no browser.
     Q_INVOKABLE bool usesSignedInIdentity(const QString& providerUrl) const;

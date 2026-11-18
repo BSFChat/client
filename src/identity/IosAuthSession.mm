@@ -58,12 +58,25 @@ namespace {
 // the session's lifetime because `presentationContextProvider` is weak.
 ASWebAuthenticationSession* g_session = nil;
 BSFChatAuthAnchorProvider* g_anchor = nil;
+// Which start() the live session belongs to. A completion is acted on only
+// if it is still the current generation: a session that was cancelled or
+// replaced can still have its completion queued (it hops to the main queue
+// below), and without this guard that stale completion released the NEWER
+// session and reported Cancelled for a sign-in that was still running.
+// A counter rather than a pointer comparison: a released session's address
+// can be reused by the next allocation.
+unsigned long long g_generation = 0;
 
 void release_session()
 {
     g_session = nil;
     g_anchor = nil;
 }
+
+// presentPage()'s sheet: separate globals so it never touches a sign-in.
+ASWebAuthenticationSession* g_pageSession = nil;
+BSFChatAuthAnchorProvider* g_pageAnchor = nil;
+unsigned long long g_pageGeneration = 0;
 
 } // namespace
 
@@ -84,6 +97,8 @@ bool start(const QUrl& authUrl, const QString& callbackHost, const QString& call
 
     g_anchor = [[BSFChatAuthAnchorProvider alloc] init];
 
+    const unsigned long long generation = ++g_generation;
+
     // Captured by value so the block owns its copy; the handler outlives this
     // stack frame by definition. Plain value, not __block: a block captures a
     // C++ object by const copy and std::function::operator() is const, so the
@@ -99,6 +114,9 @@ bool start(const QUrl& authUrl, const QString& callbackHost, const QString& call
             // signal chain this ends in (IdentityClient -> ServerConnection ->
             // QML) tolerates no ambiguity about that.
             dispatch_async(dispatch_get_main_queue(), ^{
+                // Superseded or cancelled: not ours to report, and the
+                // globals now belong to a newer session (or none).
+                if (generation != g_generation || !g_session) return;
                 release_session();
 
                 if (error) {
@@ -147,6 +165,7 @@ bool start(const QUrl& authUrl, const QString& callbackHost, const QString& call
         // settled first, like every other ending.
         release_session();
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != g_generation) return;
             done(Outcome::Failed, QUrl(),
                  QStringLiteral("Signing in needs iOS 17.4 or later. Update iOS and try again."));
         });
@@ -172,11 +191,56 @@ bool start(const QUrl& authUrl, const QString& callbackHost, const QString& call
 
 void cancel()
 {
+    // Any completion still queued for the session being dropped is stale.
+    ++g_generation;
     if (!g_session) return;
     // -cancel does not invoke the completion handler, which is what we want:
     // the attempt is already being torn down by IdentityClient.
     [g_session cancel];
     release_session();
+}
+
+bool presentPage(const QUrl& pageUrl)
+{
+    NSURL* url = [NSURL URLWithString:pageUrl.toString(QUrl::FullyEncoded).toNSString()];
+    if (!url) return false;
+    if (g_pageSession) {
+        ++g_pageGeneration;
+        [g_pageSession cancel];
+        g_pageSession = nil;
+    }
+    if (@available(iOS 17.4, *)) {
+        const unsigned long long generation = ++g_pageGeneration;
+        g_pageAnchor = [[BSFChatAuthAnchorProvider alloc] init];
+        // A callback path nothing ever redirects to: the sheet stays up until
+        // the user taps Cancel (or deletion finishes on the provider's own
+        // "account deleted" page and they close it).
+        ASWebAuthenticationSessionCallback* callback =
+            [ASWebAuthenticationSessionCallback
+                callbackWithHTTPSHost:@"bsfchat.com"
+                                 path:@"/oauth/account-page-closed"];
+        g_pageSession = [[ASWebAuthenticationSession alloc]
+                  initWithURL:url
+                     callback:callback
+            completionHandler:^(NSURL* _Nullable, NSError* _Nullable) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (generation != g_pageGeneration) return;
+                    g_pageSession = nil;
+                    g_pageAnchor = nil;
+                });
+            }];
+        g_pageSession.presentationContextProvider = g_pageAnchor;
+        // Shared cookies, like the sign-in: the user is already signed in to
+        // the provider there, so the delete form is one step away.
+        g_pageSession.prefersEphemeralWebBrowserSession = NO;
+        if (![g_pageSession start]) {
+            g_pageSession = nil;
+            g_pageAnchor = nil;
+            return false;
+        }
+        return true;
+    }
+    return false;
 }
 
 } // namespace ios_auth_session

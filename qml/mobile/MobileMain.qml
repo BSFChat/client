@@ -1055,7 +1055,9 @@ ApplicationWindow {
         reportDialogGlobal.openFor(kind, userId, displayName, roomId, eventId, preview);
     }
     function openBlockedUsers() { blockedUsersGlobal.open(); }
-    function openDeleteAccount() { deleteAccountGlobal.open(); }
+    function openDeleteAccount() { deleteAccountGlobal.openForServer(); }
+    // The BSFChat ID itself, not this server's account (M2-2).
+    function openDeleteIdentity() { deleteAccountGlobal.openForIdentity(); }
 
     // showMemberList on mobile is always "the right drawer"; shim
     // the desktop-level property for components that peek at it.

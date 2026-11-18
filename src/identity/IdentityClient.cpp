@@ -22,6 +22,7 @@
 #ifdef Q_OS_ANDROID
 #  include "core/SecretStore.h"
 #  include <QDateTime>
+#  include <QJniObject>
 #endif
 #ifndef BSFCHAT_NATIVE_OIDC_REDIRECT
 #  include <QTcpSocket>
@@ -60,7 +61,38 @@ bool sameSignInAlreadyRunning(const IdentityClient* self, const QString& provide
     return false;
 }
 
+#ifdef Q_OS_ANDROID
+// A Custom Tab over our own activity (android/.../BrowserTab.java), or the
+// plain system browser if that cannot be arranged.
+bool openInBrowserTab(const QUrl& url)
+{
+    const QJniObject context(QNativeInterface::QAndroidApplication::context());
+    if (context.isValid()) {
+        const QJniObject jurl = QJniObject::fromString(url.toString(QUrl::FullyEncoded));
+        const jboolean ok = QJniObject::callStaticMethod<jboolean>(
+            "com/bsfchat/client/BrowserTab", "open",
+            "(Landroid/content/Context;Ljava/lang/String;)Z",
+            context.object(), jurl.object<jstring>());
+        if (ok) return true;
+    }
+    qWarning() << "[IdentityClient] no Custom Tab; using the system browser";
+    return bsfchat::openExternalUrl(url);
+}
+#endif
+
 } // namespace
+
+bool IdentityClient::openProviderPage(const QUrl& url)
+{
+    if (!url.isValid() || url.scheme() != QLatin1String("https")) return false;
+#if defined(Q_OS_IOS)
+    return ios_auth_session::presentPage(url);
+#elif defined(Q_OS_ANDROID)
+    return openInBrowserTab(url);
+#else
+    return bsfchat::openExternalUrl(url);
+#endif
+}
 
 #ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
 namespace {
@@ -349,7 +381,11 @@ void IdentityClient::openAuthorizationPage()
     if (g_pagePresenter) {
         g_pagePresenter(authUrl);
     } else {
+#  ifdef Q_OS_ANDROID
+        opened = openInBrowserTab(authUrl);
+#  else
         opened = bsfchat::openExternalUrl(authUrl);
+#  endif
     }
     if (!opened) {
         // The attempt is deliberately NOT cancelled, and deliberately keeps

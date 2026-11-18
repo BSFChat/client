@@ -1209,6 +1209,38 @@ void ServerManager::onInterruptedLoginRecovered(const QString& providerUrl,
     emit identityLoginFailed(oidc::interruptedSignInMessage());
 }
 
+bool ServerManager::hasIdentityAccount() const
+{
+    if (!m_identityUrl.isEmpty() || !m_settings->identityRecord().providerUrl.isEmpty())
+        return true;
+    auto* active = activeServer();
+    return active && !active->identityProviderUrl().isEmpty();
+}
+
+QString ServerManager::identityAccountDeletionUrl() const
+{
+    QString issuer = m_identityUrl;
+    if (issuer.isEmpty()) issuer = m_settings->identityRecord().providerUrl;
+    if (issuer.isEmpty() && activeServer()) issuer = activeServer()->identityProviderUrl();
+    if (issuer.isEmpty()) issuer = QStringLiteral("https://id.bsfchat.com");
+    while (issuer.endsWith('/')) issuer.chop(1);
+    QUrl url(issuer + QStringLiteral("/profile.html"));
+    // The provider's account page, where "Delete Account" sits on the first
+    // tab. The fragment is for a section anchor the page does not have yet
+    // (identity/web/profile.html); without it the page still opens on the
+    // right tab, so it is harmless either way.
+    url.setFragment(QStringLiteral("delete"));
+    if (!url.isValid() || url.scheme() != QLatin1String("https")) return QString();
+    return url.toString(QUrl::FullyEncoded);
+}
+
+bool ServerManager::openIdentityAccountDeletion()
+{
+    const QString url = identityAccountDeletionUrl();
+    if (url.isEmpty()) return false;
+    return IdentityClient::openProviderPage(QUrl(url));
+}
+
 void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
 {
     // Normalise the identity URL. Empty means "default to the hosted
