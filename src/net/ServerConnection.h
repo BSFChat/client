@@ -628,6 +628,19 @@ public:
     // signed-in ID needs no browser; unset = the browser (loginWithOidc).
     using OidcSignIn = std::function<void(const QString& providerUrl)>;
     void setOidcSignIn(OidcSignIn signIn) { m_oidcSignIn = std::move(signIn); }
+    // I2-2: a browser sign-in's code exchange carries the device's BSFChat ID
+    // refresh token (`held`, "" if none for that provider) so the new grant
+    // keeps the old one's server consents; `grant` then receives the new
+    // refresh token and whether the held one was spent. ServerManager wires
+    // both to its IdentitySession.
+    using HeldRefreshToken = std::function<QString(const QString& providerUrl)>;
+    using BrowserGrant = std::function<void(const QString& providerUrl,
+                                            const QString& refreshToken, bool spentHeld)>;
+    void setIdentityGrantHooks(HeldRefreshToken held, BrowserGrant grant)
+    {
+        m_heldRefreshToken = std::move(held);
+        m_browserGrant = std::move(grant);
+    }
     // The account is being signed out of / removed from this device: close
     // and delete its LocalCache file (plaintext messages and room state).
     void forgetLocalData();
@@ -1398,6 +1411,8 @@ private:
     // full initial sync on every launch.
     LocalCache* m_cache;
     OidcSignIn m_oidcSignIn;
+    HeldRefreshToken m_heldRefreshToken;
+    BrowserGrant m_browserGrant;
     // True only while a cached snapshot is being replayed through
     // processSyncResponse(). Suppresses the two things in there that must
     // react to *server* syncs and not to a local replay: the first-sync

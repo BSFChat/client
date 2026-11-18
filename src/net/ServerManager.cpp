@@ -787,6 +787,13 @@ void ServerManager::wireConnection(ServerConnection* conn)
         conn->setOidcSignIn([this, guard](const QString& providerUrl) {
             if (guard) signInWithSessionOrBrowser(guard, providerUrl);
         });
+        conn->setIdentityGrantHooks(
+            [this](const QString& providerUrl) {
+                return m_identitySession->heldRefreshTokenFor(providerUrl);
+            },
+            [this](const QString& providerUrl, const QString& refreshToken, bool spentHeld) {
+                adoptBrowserGrant(providerUrl, refreshToken, spentHeld);
+            });
     }
     connect(conn, &ServerConnection::registerSucceeded, this,
             [this, conn]() { persistCredentials(conn); });
@@ -1024,6 +1031,24 @@ void ServerManager::signInWithSessionOrBrowser(ServerConnection* conn, const QSt
         });
 }
 
+// A per-server browser sign-in that was handed our refresh token (I2-2):
+// the provider moved the old grant's consents into the new grant, plus the
+// consent just given, and ended the old one. The session follows it, or the
+// next silent join to this server would hit invalid_target and open the
+// browser again, forever. A sign-in that was not handed our token leaves
+// the session alone.
+void ServerManager::adoptBrowserGrant(const QString& providerUrl, const QString& refreshToken,
+                                      bool spentHeld)
+{
+    if (!spentHeld) return;
+    if (refreshToken.isEmpty()) {
+        m_identitySession->forgetSpent();
+        return;
+    }
+    m_identitySession->adopt(providerUrl, refreshToken);
+    if (!m_identitySession->isPersisted()) noteIfNotPersisted();
+}
+
 bool ServerManager::usesSignedInIdentity(const QString& providerUrl) const
 {
     return m_identitySession->servesProvider(providerUrl);
@@ -1166,6 +1191,9 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
         m_identityClient->disconnect(this);
     }
 
+    m_identityClient->setHeldRefreshTokenSource([this](const QString& provider) {
+        return m_identitySession->heldRefreshTokenFor(provider);
+    });
     connect(m_identityClient, &IdentityClient::loginCompleted, this,
         [this](const QString& idToken, const QString& accessToken,
                const QString& refreshToken) {
@@ -1186,6 +1214,10 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
             // BEFORE the server list is fetched, so the joins that fetch
             // starts already go through it rather than opening the browser
             // once per server.
+            // The exchange carried our old refresh token (I2-2) and the
+            // provider has ended that grant; never present it again.
+            if (refreshToken.isEmpty() && m_identityClient->spentHeldRefreshToken())
+                m_identitySession->forgetSpent();
             if (!refreshToken.isEmpty()) {
                 m_identitySession->adopt(m_identityUrl, refreshToken);
                 if (!m_identitySession->isPersisted()) noteIfNotPersisted();

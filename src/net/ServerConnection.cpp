@@ -1428,8 +1428,15 @@ void ServerConnection::loginWithOidc(const QString& providerUrl)
         m_identityClient->disconnect(this);
     }
 
+    m_identityClient->setHeldRefreshTokenSource(m_heldRefreshToken);
     connect(m_identityClient, &IdentityClient::loginCompleted, this,
-        [this](const QString& idToken, const QString& /*accessToken*/, const QString& /*refreshToken*/) {
+        [this, providerUrl](const QString& idToken, const QString& /*accessToken*/,
+                            const QString& refreshToken) {
+            // The consent just given lives in the grant this exchange made;
+            // the session must move to it (I2-2).
+            if (m_browserGrant)
+                m_browserGrant(providerUrl, refreshToken,
+                               m_identityClient->spentHeldRefreshToken());
             // Use the id_token to authenticate with the Matrix server.
             awaitLoginReply();
             m_client->loginWithToken(idToken);

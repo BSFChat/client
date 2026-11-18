@@ -334,6 +334,8 @@ private:
     void restoreIdentitySession();
     void fetchIdentityServers(bool interactive);
     void signInWithSessionOrBrowser(ServerConnection* conn, const QString& providerUrl);
+    void adoptBrowserGrant(const QString& providerUrl, const QString& refreshToken,
+                           bool spentHeld);
     void revokeOnServer(const QString& homeserver, const QString& accessToken);
     void noteIfNotPersisted();
     bool m_warnedNotPersisted = false;

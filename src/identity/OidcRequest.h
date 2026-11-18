@@ -88,6 +88,32 @@ inline QUrl authorizeUrl(const QString& providerUrl, const QString& redirectUri,
     return url;
 }
 
+// The authorization_code request to /token. `heldRefreshToken` is the BSFChat
+// ID refresh token this device already holds for the SAME provider, if any
+// (I2-2): the provider then carries that grant's server consents into the new
+// grant and ends the old one, so a browser sign-in does not drop consent for
+// every server joined so far. Once the exchange succeeds the held token is
+// spent and must not be presented again.
+inline QUrlQuery codeExchangeForm(const QString& code, const QString& redirectUri,
+                                  const QString& codeVerifier, const QString& resource,
+                                  const QString& heldRefreshToken)
+{
+    QUrlQuery body;
+    body.addQueryItem("grant_type", "authorization_code");
+    body.addQueryItem("code", code);
+    body.addQueryItem("redirect_uri", redirectUri);
+    // The same client the authorization was started as (kClientId): /token
+    // refuses a code redeemed by a different client.
+    body.addQueryItem("client_id", QString::fromLatin1(kClientId));
+    body.addQueryItem("code_verifier", codeVerifier);
+    // RFC 8707 2.2: repeated at the token endpoint; the provider refuses it
+    // unless it matches the grant, so a mixed-up code cannot be redeemed for
+    // a different server's token.
+    if (!resource.isEmpty()) body.addQueryItem("resource", resource);
+    if (!heldRefreshToken.isEmpty()) body.addQueryItem("refresh_token", heldRefreshToken);
+    return body;
+}
+
 // ---- The authorization callback ----------------------------------------
 //
 // Two transports deliver it — a loopback HTTP request on desktop, an

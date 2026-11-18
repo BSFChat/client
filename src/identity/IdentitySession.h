@@ -68,6 +68,17 @@ public:
     // ID on this device). A refresh still in flight is abandoned.
     void signOut();
 
+    // I2-2: a browser sign-in to the same provider was handed our token and
+    // has ended its grant. Forget it locally; nothing to revoke, and not a
+    // signedOut() — adopt() of the new token normally follows.
+    void forgetSpent() { clearSession(false); }
+    // The token to hand a browser sign-in's code exchange (I2-2): ours, if
+    // we hold one for `providerUrl`, else "".
+    QString heldRefreshTokenFor(const QString& providerUrl) const
+    {
+        return servesProvider(providerUrl) ? m_refreshToken : QString();
+    }
+
     bool isSignedIn() const { return !m_refreshToken.isEmpty(); }
     // Whether the token is in the secure store (false = memory only).
     bool isPersisted() const { return m_persisted; }

@@ -358,6 +358,23 @@ private slots:
         QCOMPARE(calls.size(), before);
     }
 
+    // I2-2: the token handed to a browser sign-in's code exchange is only
+    // ever ours for the same provider, and once spent it is dropped locally
+    // without a revocation (the provider already ended it) or a signedOut.
+    void aBrowserSignInIsHandedOnlyOurOwnProvidersToken()
+    {
+        session->adopt("https://id.example", "rt1");
+        QCOMPARE(session->heldRefreshTokenFor("https://ID.example/"), QString("rt1"));
+        QVERIFY(session->heldRefreshTokenFor("https://other.example").isEmpty());
+        QSignalSpy out(session, &IdentitySession::signedOut);
+        session->forgetSpent();
+        QVERIFY(!session->isSignedIn());
+        QCOMPARE(store->size(), 0);
+        QCOMPARE(calls.size(), 0);
+        QCOMPARE(out.count(), 0);
+        QVERIFY(session->heldRefreshTokenFor("https://id.example").isEmpty());
+    }
+
     void aServerUsingTheSameIdIsRecognised()
     {
         session->adopt("https://id.bsfchat.com", "rt1");

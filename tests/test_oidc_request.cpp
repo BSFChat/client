@@ -80,6 +80,24 @@ private slots:
         QVERIFY(!sync.hasQueryItem("resource"));
     }
 
+    // I2-2: the code exchange hands the provider the grant it replaces, so
+    // the new grant keeps the old one's server consents.
+    void theCodeExchangeCarriesTheHeldRefreshToken()
+    {
+        const QUrlQuery q = oidc::codeExchangeForm("code1", "http://localhost:5/oauth/callback",
+                                                   "verifier1", "https://chat.example", "rt-old");
+        QCOMPARE(q.queryItemValue("grant_type"), QString("authorization_code"));
+        QCOMPARE(q.queryItemValue("code"), QString("code1"));
+        QCOMPARE(q.queryItemValue("code_verifier"), QString("verifier1"));
+        QCOMPARE(q.queryItemValue("resource", QUrl::FullyDecoded), QString("https://chat.example"));
+        QCOMPARE(q.queryItemValue("refresh_token"), QString("rt-old"));
+        QCOMPARE(q.allQueryItemValues("refresh_token").size(), 1);
+
+        const QUrlQuery none = oidc::codeExchangeForm("code1", "r", "v", {}, {});
+        QVERIFY(!none.hasQueryItem("refresh_token"));
+        QVERIFY(!none.hasQueryItem("resource"));
+    }
+
     void noncesAreFreshAndLongEnough()
     {
         QSet<QString> seen;

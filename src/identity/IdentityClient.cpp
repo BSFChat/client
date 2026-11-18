@@ -588,21 +588,17 @@ void IdentityClient::exchangeCodeForTokens(const QString& code)
     QNetworkRequest request(tokenUrl);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
 
-    QUrlQuery body;
-    body.addQueryItem("grant_type", "authorization_code");
-    body.addQueryItem("code", code);
-    body.addQueryItem("redirect_uri", redirectUri);
-    // The same client the authorization was started as (oidc::kClientId):
-    // /token refuses a code redeemed by a different client.
-    body.addQueryItem("client_id", QString::fromLatin1(oidc::kClientId));
-    body.addQueryItem("code_verifier", m_codeVerifier);
-    // RFC 8707 2.2: repeated at the token endpoint; the provider refuses it
-    // unless it matches the grant, so a mixed-up code cannot be redeemed for
-    // a different server's token.
-    if (!m_resource.isEmpty()) body.addQueryItem("resource", m_resource);
+    // I2-2: hand the provider the grant this sign-in replaces, so its
+    // server consents carry over. Asked for now, not at startLogin(): joins
+    // during the browser trip rotate it.
+    const QString held = m_heldRefreshTokenSource ? m_heldRefreshTokenSource(m_providerUrl)
+                                                  : QString();
+    m_spentHeldRefreshToken = false;
+    const QUrlQuery body =
+        oidc::codeExchangeForm(code, redirectUri, m_codeVerifier, m_resource, held);
 
     auto* reply = m_nam.post(request, body.toString(QUrl::FullyEncoded).toUtf8());
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, sentHeld = !held.isEmpty()]() {
         reply->deleteLater();
         auto data = reply->readAll();
 
@@ -659,6 +655,8 @@ void IdentityClient::exchangeCodeForTokens(const QString& code)
             }
         }
 
+        // The provider accepted the code, so it has ended the grant we sent.
+        m_spentHeldRefreshToken = sentHeld;
         emit loginCompleted(idToken, accessToken, refreshToken);
     });
 }

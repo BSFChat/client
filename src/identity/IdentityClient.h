@@ -104,6 +104,17 @@ public:
     // providerUrl() are the same sign-in, not two of them.
     QString resource() const { return m_resource; }
 
+    // I2-2: returns the BSFChat ID refresh token this device holds for
+    // `providerUrl` ("" for none / another provider). Read at the code
+    // exchange and sent along, so the new grant inherits the old one's
+    // server consents. After loginCompleted, spentHeldRefreshToken() says
+    // whether one was sent — it is then dead at the provider.
+    void setHeldRefreshTokenSource(std::function<QString(const QString& providerUrl)> source)
+    {
+        m_heldRefreshTokenSource = std::move(source);
+    }
+    bool spentHeldRefreshToken() const { return m_spentHeldRefreshToken; }
+
     // Test seam for the serialisation above.
     //
     // The alternative is a test that launches the system browser on whichever
@@ -226,4 +237,6 @@ private:
     // waiting for is not coming until this one's five minutes are up — and
     // a machine with no browser will not produce one for the waiter either.
     bool m_browserUnavailable = false;
+    std::function<QString(const QString&)> m_heldRefreshTokenSource;
+    bool m_spentHeldRefreshToken = false;
 };
