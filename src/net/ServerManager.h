@@ -288,6 +288,15 @@ private:
     // allowBrowser = false: join only if it needs no browser (launch restore).
     void addServerWithOidcResolved(const QString& url, bool allowBrowser = true);
 
+    // What a finished account-level BSFChat ID sign-in does: keep the
+    // session, name the account, fetch the server list.
+    void completeIdentityLogin(const QString& idToken, const QString& accessToken,
+                               const QString& refreshToken);
+    // IdentityRecovery::loginRecovered — see IdentityClient.h.
+    void onInterruptedLoginRecovered(const QString& providerUrl, const QString& resource,
+                                     const QString& idToken, const QString& accessToken,
+                                     const QString& refreshToken);
+
     void onLoginSuccess(ServerConnection* conn);
     // Write this connection's live credentials into its settings row,
     // updating in place when the row exists. onLoginSuccess used to APPEND

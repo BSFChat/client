@@ -12,6 +12,8 @@
 #include "identity/IdentityClient.h"
 #include "identity/IdentityApiClient.h"
 #include "identity/IdentitySession.h"
+#include "identity/OidcRequest.h"
+#include "identity/PendingOidcRequest.h"
 
 #include <QClipboard>
 #include <QPointer>
@@ -32,6 +34,12 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
     , m_settings(settings)
     , m_serverListModel(new ServerListModel(this))
 {
+    // Sign-ins finished after process death (Android; M2-5). Wired before
+    // anything can deliver a launch intent.
+    connect(IdentityClient::recovery(), &IdentityRecovery::loginRecovered,
+            this, &ServerManager::onInterruptedLoginRecovered);
+    connect(IdentityClient::recovery(), &IdentityRecovery::recoveryFailed,
+            this, &ServerManager::identityLoginFailed);
     // Everything the roster is not allowed to know about: the sidebar
     // model, QSettings, this object's signals, and ServerConnection's
     // teardown. The roster decides the *order*; these do the work.
@@ -1142,6 +1150,65 @@ void ServerManager::fetchIdentityServers(bool interactive)
     m_identityApi->fetchServers();
 }
 
+void ServerManager::completeIdentityLogin(const QString& idToken,
+                                          const QString& accessToken,
+                                          const QString& refreshToken)
+{
+    m_identityAccessToken = accessToken;
+
+    // Name the account before anything else happens. The browser
+    // may have completed this whole flow from an existing session
+    // without showing the user a thing, so this is the only
+    // opportunity to say who is being signed in — and the only one
+    // at all for an account with no servers, which never produces
+    // a ServerConnection to ask afterwards. Read-only; the token
+    // was already checked for audience and nonce upstream.
+    m_identityAccount = bsfchat::idTokenAccount(idToken);
+
+    // Auth first: keep the session. The refresh token goes to the OS
+    // keychain only (IdentitySession / SecretStore), and is what lets
+    // every later join, and the next launch, skip the browser. Adopted
+    // BEFORE the server list is fetched, so the joins that fetch
+    // starts already go through it rather than opening the browser
+    // once per server.
+    if (!refreshToken.isEmpty()) {
+        m_identitySession->adopt(m_identityUrl, refreshToken);
+        if (!m_identitySession->isPersisted()) noteIfNotPersisted();
+        m_settings->setIdentityRecord(
+            {m_identityUrl, m_identityAccount.name, m_identityAccount.subject});
+    }
+    emit identityAccountChanged();
+
+    fetchIdentityServers(/*interactive=*/true);
+}
+
+void ServerManager::onInterruptedLoginRecovered(const QString& providerUrl,
+                                                const QString& resource,
+                                                const QString& idToken,
+                                                const QString& accessToken,
+                                                const QString& refreshToken)
+{
+    // A sign-in the OS killed us in the middle of, finished from the
+    // persisted request (IdentityClient::resumeInterruptedSignIn, M2-5).
+    if (resource.isEmpty()) {
+        // The account-level sign-in: exactly what loginWithIdentityAndSync's
+        // completion does, against the provider the attempt was made at.
+        m_identityUrl = providerUrl;
+        completeIdentityLogin(idToken, accessToken, refreshToken);
+        return;
+    }
+    // A chat server's sign-in. It can only land on a connection that was
+    // restored at launch (a re-authentication); a server that was still
+    // being ADDED died with the process and has to be added again.
+    for (auto* conn : m_roster.connections()) {
+        if (conn && oidc::resourceForHomeserver(conn->homeserverUrl()) == resource) {
+            conn->loginWithIdToken(idToken);
+            return;
+        }
+    }
+    emit identityLoginFailed(oidc::interruptedSignInMessage());
+}
+
 void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
 {
     // Normalise the identity URL. Empty means "default to the hosted
@@ -1167,35 +1234,7 @@ void ServerManager::loginWithIdentityAndSync(const QString& identityUrl)
     }
 
     connect(m_identityClient, &IdentityClient::loginCompleted, this,
-        [this](const QString& idToken, const QString& accessToken,
-               const QString& refreshToken) {
-            m_identityAccessToken = accessToken;
-
-            // Name the account before anything else happens. The browser
-            // may have completed this whole flow from an existing session
-            // without showing the user a thing, so this is the only
-            // opportunity to say who is being signed in — and the only one
-            // at all for an account with no servers, which never produces
-            // a ServerConnection to ask afterwards. Read-only; the token
-            // was already checked for audience and nonce upstream.
-            m_identityAccount = bsfchat::idTokenAccount(idToken);
-
-            // Auth first: keep the session. The refresh token goes to the OS
-            // keychain only (IdentitySession / SecretStore), and is what lets
-            // every later join, and the next launch, skip the browser. Adopted
-            // BEFORE the server list is fetched, so the joins that fetch
-            // starts already go through it rather than opening the browser
-            // once per server.
-            if (!refreshToken.isEmpty()) {
-                m_identitySession->adopt(m_identityUrl, refreshToken);
-                if (!m_identitySession->isPersisted()) noteIfNotPersisted();
-                m_settings->setIdentityRecord(
-                    {m_identityUrl, m_identityAccount.name, m_identityAccount.subject});
-            }
-            emit identityAccountChanged();
-
-            fetchIdentityServers(/*interactive=*/true);
-        });
+            &ServerManager::completeIdentityLogin);
 
     connect(m_identityClient, &IdentityClient::loginFailed, this,
         [this](const QString& error) {

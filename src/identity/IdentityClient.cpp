@@ -1,8 +1,10 @@
 #include "identity/IdentityClient.h"
 #include "net/RequestTimeout.h"
 #include "identity/OidcRequest.h"
+#include "identity/PendingOidcRequest.h"
 #include "util/ExternalBrowser.h"
 
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDebug>
 #include <QJsonDocument>
@@ -16,6 +18,10 @@
 
 #ifdef Q_OS_IOS
 #  include "identity/IosAuthSession.h"
+#endif
+#ifdef Q_OS_ANDROID
+#  include "core/SecretStore.h"
+#  include <QDateTime>
 #endif
 #ifndef BSFCHAT_NATIVE_OIDC_REDIRECT
 #  include <QTcpSocket>
@@ -68,6 +74,13 @@ namespace {
 QPointer<IdentityClient> g_awaitingCallback;
 } // namespace
 #endif
+
+IdentityRecovery* IdentityClient::recovery()
+{
+    static QPointer<IdentityRecovery> hub;
+    if (!hub) hub = new IdentityRecovery(QCoreApplication::instance());
+    return hub;
+}
 
 void IdentityClient::setPagePresenterForTesting(std::function<void(const QUrl&)> presenter)
 {
@@ -283,6 +296,10 @@ void IdentityClient::openAuthorizationPage()
     g_awaitingCallback = this;
     m_sessionActive = true;
 #endif
+#ifdef Q_OS_ANDROID
+    // Survive the process being killed behind the browser (M2-5).
+    persistPendingRequest();
+#endif
 
 #ifdef Q_OS_IOS
     // Present in-process. QDesktopServices::openUrl here would hand off to
@@ -376,6 +393,9 @@ void IdentityClient::cancel()
     }
 #endif
     m_port = 0;
+#ifdef Q_OS_ANDROID
+    forgetPendingRequest();
+#endif
     // The CSRF guard for an attempt that is over. parseCallbackQuery refuses
     // an empty expected state outright, so a callback that arrives late —
     // after a timeout, a cancel, or a completed sign-in — cannot be replayed
@@ -395,13 +415,17 @@ bool IdentityClient::deliverCallbackUrl(const QString& url)
     if (!g_awaitingCallback) {
         // A sign-in reply with no sign-in waiting for it. On Android this is
         // what a cold start looks like: the process died while the browser
-        // had the foreground, so the PKCE verifier — which is deliberately
-        // memory-only — died with it and the code cannot be redeemed by
-        // anyone, us included. Consumed rather than returned: it is not a
-        // message link, and handing it to openMessageLink would send the user
-        // looking for a room called "oauth".
+        // had the foreground. The attempt's PKCE material was persisted for
+        // exactly this (M2-5), so try to finish it from there; whatever the
+        // outcome, the user is told. Consumed either way: it is not a message
+        // link, and openMessageLink would go looking for a room called
+        // "oauth".
+#ifdef Q_OS_ANDROID
+        resumeInterruptedSignIn(parsed);
+#else
         qWarning() << "[IdentityClient] a sign-in callback arrived with no "
                       "attempt in flight; ignoring it";
+#endif
         return true;
     }
 
@@ -456,6 +480,10 @@ void IdentityClient::handleCallback(const QUrl& callbackUrl)
     // the authorization request carried.
     m_timeout.stop();
     m_state.clear();
+#ifdef Q_OS_ANDROID
+    // Single use: the code is about to be spent with this verifier.
+    forgetPendingRequest();
+#endif
 #ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
     m_sessionActive = false;
     if (g_awaitingCallback == this) g_awaitingCallback = nullptr;
@@ -474,6 +502,92 @@ void IdentityClient::handleCallback(const QUrl& callbackUrl)
 
     exchangeCodeForTokens(parsed.code);
 }
+
+#ifdef Q_OS_ANDROID
+void IdentityClient::persistPendingRequest()
+{
+    oidc::PendingOidcRequest rec;
+    rec.providerUrl = m_providerUrl;
+    rec.codeVerifier = m_codeVerifier;
+    rec.state = m_state;
+    rec.nonce = m_nonce;
+    rec.resource = m_resource;
+    rec.createdAtMs = QDateTime::currentMSecsSinceEpoch();
+    // Asynchronous: this runs on the way to showing the page and must not
+    // spin a local event loop there. A failed write only costs recovery.
+    SecretStore::instance().writeLater(QString::fromLatin1(oidc::kPendingOidcKey),
+                                       rec.toJson());
+    m_persistedPending = true;
+}
+
+void IdentityClient::forgetPendingRequest()
+{
+    if (!m_persistedPending) return;
+    m_persistedPending = false;
+    SecretStore::instance().removeLater(QString::fromLatin1(oidc::kPendingOidcKey));
+}
+
+void IdentityClient::resumeInterruptedSignIn(const QUrl& callbackUrl)
+{
+    // read() spins a local loop; a second callback arriving inside it is the
+    // same reply delivered twice and has nothing to add.
+    static bool resuming = false;
+    if (resuming) return;
+    resuming = true;
+
+    SecretStore& store = SecretStore::instance();
+    const QString key = QString::fromLatin1(oidc::kPendingOidcKey);
+    const std::optional<QString> raw = store.read(key);
+    // Single use, whatever happens next: it holds the PKCE verifier.
+    store.removeLater(key);
+    resuming = false;
+
+    const auto fail = [](const QString& why) {
+        qWarning().noquote() << "[IdentityClient] interrupted sign-in not resumed:" << why;
+        emit recovery()->recoveryFailed(oidc::interruptedSignInMessage());
+    };
+
+    const std::optional<oidc::PendingOidcRequest> rec =
+        raw ? oidc::PendingOidcRequest::fromJson(*raw) : std::nullopt;
+    if (!rec) return fail(QStringLiteral("no saved request"));
+    if (!rec->isFresh(QDateTime::currentMSecsSinceEpoch()))
+        return fail(QStringLiteral("the saved request expired"));
+
+    const oidc::CallbackParse parsed =
+        oidc::parseCallbackQuery(QUrlQuery(callbackUrl.query()), rec->state);
+    if (parsed.status == oidc::CallbackStatus::ProviderError) {
+        qWarning().noquote() << "[IdentityClient] provider refused the interrupted sign-in";
+        emit recovery()->recoveryFailed(parsed.error);
+        return;
+    }
+    if (parsed.status != oidc::CallbackStatus::Code)
+        return fail(QStringLiteral("the reply is not for the saved request"));
+
+    qInfo() << "[IdentityClient] resuming a sign-in interrupted by process death";
+    // A bare client that only redeems the code. It never shows a page or
+    // takes the browser, and deletes itself when the exchange ends.
+    auto* client = new IdentityClient(recovery());
+    client->m_providerUrl = rec->providerUrl;
+    client->m_codeVerifier = rec->codeVerifier;
+    client->m_nonce = rec->nonce;
+    client->m_resource = rec->resource;
+    const QString provider = rec->providerUrl;
+    const QString resource = rec->resource;
+    connect(client, &IdentityClient::loginCompleted, recovery(),
+        [client, provider, resource](const QString& idToken, const QString& accessToken,
+                                     const QString& refreshToken) {
+            client->deleteLater();
+            emit recovery()->loginRecovered(provider, resource, idToken, accessToken,
+                                            refreshToken);
+        });
+    connect(client, &IdentityClient::loginFailed, recovery(),
+        [client](const QString& error) {
+            client->deleteLater();
+            emit recovery()->recoveryFailed(error);
+        });
+    client->exchangeCodeForTokens(parsed.code);
+}
+#endif // Q_OS_ANDROID
 
 #ifndef BSFCHAT_NATIVE_OIDC_REDIRECT
 namespace {

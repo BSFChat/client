@@ -48,6 +48,27 @@
 #  define BSFCHAT_NATIVE_OIDC_REDIRECT 1
 #endif
 
+// Process-wide outlet for a sign-in finished on behalf of an attempt that no
+// longer exists (audit M2-5): Android killed the process while the browser
+// had the page, and the redirect cold-started a new one. IdentityClient
+// redeems the code from the persisted request (identity/PendingOidcRequest.h)
+// and reports here, because the object that asked for it is gone; whoever
+// owns sign-ins (ServerManager) listens once at startup. Never emits on
+// desktop or iOS, where no request is persisted.
+class IdentityRecovery : public QObject {
+    Q_OBJECT
+public:
+    using QObject::QObject;
+signals:
+    // `resource` empty: the account-level sign-in. Otherwise the chat server
+    // the id_token is audienced to (oidc::resourceForHomeserver).
+    void loginRecovered(const QString& providerUrl, const QString& resource,
+                        const QString& idToken, const QString& accessToken,
+                        const QString& refreshToken);
+    // The callback could not be completed. `message` is user-facing.
+    void recoveryFailed(const QString& message);
+};
+
 class IdentityClient : public QObject {
     Q_OBJECT
 public:
@@ -137,6 +158,8 @@ public:
     // worth having.)
     static bool deliverCallbackUrl(const QString& url);
 #endif
+    // See IdentityRecovery. Created on first use; lives for the process.
+    static IdentityRecovery* recovery();
 
 signals:
     void loginCompleted(const QString& idToken, const QString& accessToken, const QString& refreshToken);
@@ -201,6 +224,18 @@ private:
     QString generateCodeVerifier();
     QString computeCodeChallenge(const QString& verifier);
     QString generateState();
+
+#ifdef Q_OS_ANDROID
+    // M2-5: write this attempt's PKCE/state/nonce to SecretStore while the
+    // page is shown, and drop it once the attempt ends either way.
+    void persistPendingRequest();
+    void forgetPendingRequest();
+    // A callback arrived with no live attempt: finish it from the persisted
+    // request if it is ours and fresh, otherwise say the sign-in was
+    // interrupted.
+    static void resumeInterruptedSignIn(const QUrl& callbackUrl);
+    bool m_persistedPending = false;
+#endif
 
 #ifdef BSFCHAT_NATIVE_OIDC_REDIRECT
     // What isActive() reports where there is no listening socket to ask:
