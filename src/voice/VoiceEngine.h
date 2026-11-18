@@ -84,9 +84,9 @@ public:
     // rendered as "connected" until ICE timed out on its own.
     void dropPeer(const QString& userId);
     // V-8: who is in the voice channel (users with an active
-    // m.call.member). Fed from every GET /voice/members reply for our room
-    // (wired in the constructor) and seeded by start(); callable directly
-    // too, e.g. from the sync-side m.call.member fold. Only roster members'
+    // m.call.member). Fed by ServerConnection from the sync-side
+    // m.call.member fold and from every GET /voice/members reply that is
+    // not stale, and seeded by start(). Only roster members'
     // invites are answered (see voice/VoiceRosterGate.h), and a held peer
     // that leaves it is torn down at once.
     void setVoiceRoster(const QStringList& userIds);

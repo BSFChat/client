@@ -3038,7 +3038,10 @@ void ServerConnection::setupVoiceSession()
         // left). With voice compiled out, Active is as far as it goes.
         // Not when Idle is only the gap in a switch (A left, B's join
         // still queued): the user is still on their way into B.
-        if (st == State::Idle && m_voiceSession->headingTo().isEmpty())
+        // Leaving counts too: a leave now ends the local call at once,
+        // even while a cancelled join is still on the wire.
+        if ((st == State::Idle || st == State::Leaving)
+            && m_voiceSession->headingTo().isEmpty())
             setVoiceConnecting(QString());
 #ifndef BSFCHAT_VOICE_ENABLED
         if (st == State::Active) setVoiceConnecting(QString());
