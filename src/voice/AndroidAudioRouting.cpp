@@ -54,14 +54,24 @@ void startVoiceService()
         ctx.object(), classRef.object());
     env->DeleteLocalRef(svcClass);
 
+    // The returned ComponentName is the only report we get: QJniObject
+    // clears a thrown exception (ForegroundServiceStartNotAllowedException)
+    // itself and hands back an invalid object, so checking the environment
+    // afterwards always said "fine".
+    QJniObject started;
     if (QNativeInterface::QAndroidApplication::sdkVersion() >= 26) {
-        ctx.callObjectMethod("startForegroundService",
+        started = ctx.callObjectMethod("startForegroundService",
             "(Landroid/content/Intent;)Landroid/content/ComponentName;",
             intent.object());
     } else {
-        ctx.callObjectMethod("startService",
+        started = ctx.callObjectMethod("startService",
             "(Landroid/content/Intent;)Landroid/content/ComponentName;",
             intent.object());
+    }
+    if (!started.isValid()) {
+        qWarning("[audio-routing] VoiceService start was refused; the call "
+                 "will not survive backgrounding");
+        return;
     }
     qInfo("[audio-routing] VoiceService started");
 }
@@ -181,13 +191,15 @@ void refreshVoiceService()
     if (!g_inVoiceMode) return;   // nothing to refresh
     QJniObject ctx = appContext();
     if (!ctx.isValid()) return;
-    QJniObject::callStaticMethod<void>(
+    // A boolean, not an exception check afterwards: QJniObject clears any
+    // exception itself, so that check could never fire. The Java side
+    // catches the refusal and reports it here.
+    const jboolean ok = QJniObject::callStaticMethod<jboolean>(
         "com/bsfchat/client/VoiceService",
         "refreshForegroundType",
-        "(Landroid/content/Context;)V",
+        "(Landroid/content/Context;)Z",
         ctx.object());
-    QJniEnvironment env;
-    if (env.checkAndClearExceptions()) {
+    if (!ok) {
         qWarning("[audio-routing] VoiceService type refresh threw; the "
                  "camera will not survive backgrounding this call");
         return;

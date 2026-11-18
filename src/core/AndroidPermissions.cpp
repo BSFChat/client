@@ -242,9 +242,16 @@ void AndroidPermissions::openNotificationSettings()
     intent.callObjectMethod("putExtra",
         "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
         extra.object<jstring>(), pkg.object<jstring>());
+    // Raw JNI so a thrown ActivityNotFoundException is visible here:
+    // QJniObject::callMethod clears exceptions itself and reports nothing.
     QJniEnvironment env;
-    act.callMethod<void>("startActivity", "(Landroid/content/Intent;)V", intent.object());
-    if (env.checkAndClearExceptions())
+    jclass cls = env->GetObjectClass(act.object());
+    jmethodID start = cls ? env->GetMethodID(cls, "startActivity",
+                                             "(Landroid/content/Intent;)V")
+                          : nullptr;
+    if (start) env->CallVoidMethod(act.object(), start, intent.object());
+    if (cls) env->DeleteLocalRef(cls);
+    if (!start || env.checkAndClearExceptions())
         qWarning("[permissions] could not open the notification settings");
 #endif
 }
