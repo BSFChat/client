@@ -1202,6 +1202,11 @@ Rectangle {
                     b.forceActiveFocus(Qt.TabFocusReason);
                     return true;
                 }
+                function _kbInsideList(item) {
+                    for (var p = item; p; p = p.parent)
+                        if (p === messageListView) return true;
+                    return false;
+                }
                 function _kbMove(fromIdx, delta) {
                     var target = fromIdx + delta;
                     if (target < 0) {
@@ -1246,6 +1251,18 @@ Rectangle {
                     if (mods === 0 && k === Qt.Key_Home) { _kbFocusIndex(0); return; }
                     if (mods === 0 && k === Qt.Key_End) { _kbFocusIndex(count - 1); return; }
                     if (k === Qt.Key_Escape) { messageViewRoot.focusComposer(); return; }
+                    // Shift+Tab leaves the list backwards. Left to the default
+                    // chain it lands on the list itself, whose
+                    // onActiveFocusChanged hands focus straight back to a
+                    // message: a trap (C2-7). Skip past the list instead.
+                    if (k === Qt.Key_Backtab || (k === Qt.Key_Tab && shift)) {
+                        var prev = messageListView.nextItemInFocusChain(false);
+                        if (prev && prev !== messageListView && !_kbInsideList(prev))
+                            prev.forceActiveFocus(Qt.BacktabFocusReason);
+                        else
+                            messageViewRoot.focusComposer();
+                        return;
+                    }
                     if (k === Qt.Key_Return || k === Qt.Key_Enter || k === Qt.Key_Menu
                         || (k === Qt.Key_F10 && shift)) {
                         _kbPopupPending = true;

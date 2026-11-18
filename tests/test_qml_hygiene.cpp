@@ -3628,6 +3628,24 @@ private slots:
     }
 
 
+    // C2-7: the message list takes focus on Tab and hands it straight to a
+    // message, so a Shift+Tab from a message that falls back to the list is
+    // bounced back in — keyboard users could never leave backwards. The
+    // message key handler must take Backtab itself and skip past the list.
+    void shiftTabLeavesTheMessageList()
+    {
+        const QString src = withoutComments(readAll(
+            QStringLiteral(BSFCHAT_QML_DIR) + QStringLiteral("/components/MessageView.qml")));
+        const qsizetype at = src.indexOf(QLatin1String("function _kbKey("));
+        QVERIFY2(at >= 0, "MessageView._kbKey not found");
+        const qsizetype open = src.indexOf(QLatin1Char('{'), at);
+        const QString body = src.mid(open, matchingBrace(src, open) - open);
+        QVERIFY2(body.contains(QLatin1String("Qt.Key_Backtab")),
+                 "_kbKey must handle Shift+Tab (Qt.Key_Backtab)");
+        QVERIFY2(body.contains(QLatin1String("nextItemInFocusChain(false)")),
+                 "Shift+Tab must move focus to the item before the list");
+    }
+
     // C2-4 / Q-S3: Text and Label default to AutoText, which turns any string
     // that looks like markup into rich text — a display name of
     // `<img src=… width=4000>` becomes a remote fetch from every viewer.
