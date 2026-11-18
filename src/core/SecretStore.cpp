@@ -5,6 +5,8 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QEventLoop>
+#include <QPointer>
+#include <QTimer>
 
 #ifdef BSFCHAT_HAVE_KEYCHAIN
 #  include <qtkeychain/keychain.h> // the in-tree (FetchContent) layout
@@ -17,13 +19,13 @@ class KeychainSecretStore : public SecretStore {
 public:
     bool write(const QString& key, const QString& value) override
     {
-        QKeychain::WritePasswordJob job(service());
-        job.setAutoDelete(false);
-        job.setKey(key);
-        job.setTextData(value);
-        if (!run(job)) {
+        auto* job = new QKeychain::WritePasswordJob(service());
+        job->setKey(key);
+        job->setTextData(value);
+        const Outcome out = run(job);
+        if (out.error != QKeychain::NoError) {
             qWarning().noquote() << "[SecretStore] could not store a secret in the OS keychain:"
-                                 << job.errorString();
+                                 << out.errorString;
             return false;
         }
         return true;
@@ -31,25 +33,25 @@ public:
 
     std::optional<QString> read(const QString& key) override
     {
-        QKeychain::ReadPasswordJob job(service());
-        job.setAutoDelete(false);
-        job.setKey(key);
-        if (!run(job)) {
-            if (job.error() != QKeychain::EntryNotFound) {
+        auto* job = new QKeychain::ReadPasswordJob(service());
+        job->setKey(key);
+        const Outcome out = run(job);
+        if (out.error != QKeychain::NoError) {
+            if (out.error != QKeychain::EntryNotFound) {
                 qWarning().noquote() << "[SecretStore] could not read the OS keychain:"
-                                     << job.errorString();
+                                     << out.errorString;
             }
             return std::nullopt;
         }
-        return job.textData();
+        return out.text;
     }
 
     bool remove(const QString& key) override
     {
-        QKeychain::DeletePasswordJob job(service());
-        job.setAutoDelete(false);
-        job.setKey(key);
-        return run(job) || job.error() == QKeychain::EntryNotFound;
+        auto* job = new QKeychain::DeletePasswordJob(service());
+        job->setKey(key);
+        const Outcome out = run(job);
+        return out.error == QKeychain::NoError || out.error == QKeychain::EntryNotFound;
     }
 
     void writeLater(const QString& key, const QString& value) override
@@ -100,6 +102,27 @@ public:
 private:
     mutable bool m_probed = false;
     mutable bool m_available = false;
+    // A job that outlived its deadline. QtKeychain runs jobs strictly one
+    // at a time, so everything after it would queue behind it: until it
+    // finishes (and deletes itself) synchronous calls fail at once instead
+    // of each waiting out the deadline again.
+    QPointer<QKeychain::Job> m_stuck;
+
+    // Generous: a macOS keychain prompt is answered by a human. Without a
+    // deadline a job whose completion never arrives froze the caller for
+    // good. That is what a GUI-less QCoreApplication on macOS does:
+    // QtKeychain posts completion to the main GCD queue, which only the
+    // CoreFoundation event dispatcher drains (QApplication's, not
+    // QCoreApplication's), so test_secret_store sat in initTestCase until
+    // QTest's watchdog aborted it. A Keychain call blocked behind a
+    // SecurityAgent prompt that can never be shown is the same hang.
+    static constexpr int kDeadlineMs = 30000;
+
+    struct Outcome {
+        QKeychain::Error error = QKeychain::OtherError;
+        QString errorString;
+        QString text;
+    };
 
     static QString service()
     {
@@ -108,13 +131,43 @@ private:
         return QStringLiteral("com.bsfchat.%1").arg(bsfchat::applicationName());
     }
 
-    static bool run(QKeychain::Job& job)
+    // Takes ownership of `job`. It deletes itself when it finishes, which
+    // may be after the deadline: QtKeychain's Apple completion dereferences
+    // the job's private data without a null check, so a job must never be
+    // destroyed while its request is still in flight.
+    Outcome run(QKeychain::Job* job)
     {
+        job->setAutoDelete(true);
+        Outcome out;
+        if (m_stuck) {
+            job->deleteLater();
+            out.errorString = QStringLiteral("an earlier keychain request has not completed");
+            return out;
+        }
+        bool finished = false;
         QEventLoop loop;
-        QObject::connect(&job, &QKeychain::Job::finished, &loop, &QEventLoop::quit);
-        job.start();
+        // Context `&loop`: a completion after the deadline finds the
+        // connection gone with the loop and touches nothing on this stack.
+        QObject::connect(job, &QKeychain::Job::finished, &loop, [&](QKeychain::Job* j) {
+            finished = true;
+            out.error = j->error();
+            out.errorString = j->errorString();
+            if (auto* r = qobject_cast<QKeychain::ReadPasswordJob*>(j)) out.text = r->textData();
+            loop.quit();
+        });
+        QTimer deadline;
+        deadline.setSingleShot(true);
+        QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
+        deadline.start(kDeadlineMs);
+        job->start();
         loop.exec(QEventLoop::ExcludeUserInputEvents);
-        return job.error() == QKeychain::NoError;
+        if (!finished) {
+            m_stuck = job;
+            out.error = QKeychain::OtherError;
+            out.errorString = QStringLiteral("the OS keychain did not answer within %1 s")
+                                  .arg(kDeadlineMs / 1000);
+        }
+        return out;
     }
 };
 #else

@@ -24,7 +24,8 @@
 // a point where it needs the answer before it can continue (startup restore,
 // persisting a rotated token BEFORE using what it bought). The keychain
 // backend runs a local event loop around QtKeychain's job; reads and writes
-// are small and local.
+// are small and local. That loop has a deadline: a store that does not
+// answer is treated as unavailable (the call fails), never waited on forever.
 
 #include <QList>
 #include <QString>
