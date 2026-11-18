@@ -14,9 +14,13 @@
 // is Android. Compiles to an empty translation unit otherwise.
 #pragma once
 
+#include <QList>
+#include <QMetaObject>
 #include <QObject>
+#include <QPointer>
 #include <QString>
 
+class ServerConnection;
 class ServerManager;
 class Settings;
 
@@ -31,7 +35,10 @@ public:
     bool active() const { return m_active; }
     QString lastError() const { return m_lastError; }
 
-    void setServerManager(ServerManager* m) { m_serverManager = m; }
+    // Also wires the leave hook: the share stops the moment no
+    // connection is in voice (or voice moves to another server), the
+    // same rule the desktop ScreenShareController applies.
+    void setServerManager(ServerManager* m);
     // Settings drive the same fps / maxWidth / jpegQuality knobs the
     // desktop controller honours; we forward the resolved values to
     // ScreenCaptureHelper.configure() over JNI before the projection
@@ -77,6 +84,8 @@ private:
     void setActive(bool a);
     void setLastError(const QString& e);
     void broadcast(const QByteArray& jpeg);
+    void rewireVoiceLeaveWatch();
+    void checkVoiceStillActive();
 
     bool m_active = false;
     QString m_lastError;
@@ -84,5 +93,10 @@ private:
     int m_height = 0;
     ServerManager* m_serverManager = nullptr;
     Settings* m_settings = nullptr;
+    // The connection whose voice call the share is feeding, captured
+    // when capture starts. Frames go only there; if voice ends or moves
+    // to a different server, the share stops instead of following.
+    QPointer<ServerConnection> m_shareServer;
+    QList<QMetaObject::Connection> m_voiceRoomConns;
     void pushConfigToHelper();
 };

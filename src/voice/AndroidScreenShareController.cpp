@@ -152,9 +152,60 @@ AndroidScreenShareController::AndroidScreenShareController(QObject* parent)
     registerNatives();
 }
 
+void AndroidScreenShareController::setServerManager(ServerManager* m)
+{
+    if (m_serverManager == m) return;
+    if (m_serverManager) disconnect(m_serverManager, nullptr, this, nullptr);
+    m_serverManager = m;
+    if (m) {
+        connect(m, &ServerManager::activeServerChanged,
+                this, &AndroidScreenShareController::rewireVoiceLeaveWatch);
+        connect(m, &ServerManager::serverAdded,
+                this, &AndroidScreenShareController::rewireVoiceLeaveWatch);
+        connect(m, &ServerManager::serverRemoved,
+                this, &AndroidScreenShareController::rewireVoiceLeaveWatch);
+    }
+    rewireVoiceLeaveWatch();
+}
+
+void AndroidScreenShareController::rewireVoiceLeaveWatch()
+{
+    for (const auto& c : m_voiceRoomConns) disconnect(c);
+    m_voiceRoomConns.clear();
+    if (!m_serverManager) return;
+    // Every connection, not only the active one: the user can be in
+    // voice on server A while browsing server B.
+    for (int i = 0; i < m_serverManager->connectionCount(); ++i) {
+        auto* sc = m_serverManager->connectionAt(i);
+        if (!sc) continue;
+        m_voiceRoomConns.append(
+            connect(sc, &ServerConnection::activeVoiceRoomIdChanged,
+                    this, &AndroidScreenShareController::checkVoiceStillActive));
+    }
+    // A removed server may have been the one we were sharing into.
+    checkVoiceStillActive();
+}
+
+void AndroidScreenShareController::checkVoiceStillActive()
+{
+    if (!m_active || !m_serverManager) return;
+    ServerConnection* vs = m_serverManager->voiceServer();
+    // Left voice, or voice is now on a different server than the one
+    // the share started in: stop, so a later join never silently
+    // resumes streaming the screen.
+    if (!vs || (m_shareServer && vs != m_shareServer.data())) {
+        qCInfo(logScreenShare, "voice ended; stopping screen share");
+        stop();
+    }
+}
+
 void AndroidScreenShareController::showPicker()
 {
     setLastError(QString());
+    if (!m_serverManager || !m_serverManager->voiceServer()) {
+        setLastError(QStringLiteral("Join a voice channel to share your screen"));
+        return;
+    }
     // Push the latest user/server-resolved config into the Java
     // helper before we ask for projection consent — the helper
     // bakes those values into the VirtualDisplay it creates,
@@ -196,7 +247,10 @@ void AndroidScreenShareController::pushConfigToHelper()
 
     int srvFps = -1, srvW = -1, srvJ = -1;
     if (m_serverManager) {
-        ServerConnection* conn = m_serverManager->activeServer();
+        // The server we are (or will be) streaming into, not whichever
+        // one the user happens to be browsing.
+        ServerConnection* conn = m_shareServer
+            ? m_shareServer.data() : m_serverManager->voiceServer();
         if (conn) {
             srvFps = conn->maxScreenShareFps();
             srvW   = conn->maxScreenShareWidth();
@@ -223,6 +277,7 @@ void AndroidScreenShareController::stop()
     QJniObject h = helper();
     if (!h.isValid()) return;
     h.callMethod<void>("stopCapture", "()V");
+    m_shareServer.clear();
     // The helper's callback fires onStopped() via JNI; we clear
     // active there. But if stop was invoked before any callback
     // ever ran, clear now so the UI snaps back immediately.
@@ -234,12 +289,24 @@ void AndroidScreenShareController::onStarted(int w, int h)
     m_width = w;
     m_height = h;
     qCInfo(logScreenShare, "capture started %dx%d", w, h);
+    ServerConnection* vs =
+        m_serverManager ? m_serverManager->voiceServer() : nullptr;
+    if (!vs) {
+        // Voice ended while the consent dialog was up.
+        qCInfo(logScreenShare, "not in voice any more; stopping");
+        stop();
+        return;
+    }
+    m_shareServer = vs;
     setActive(true);
+    // Re-clamp against the server we are actually streaming into.
+    pushConfigToHelper();
 }
 
 void AndroidScreenShareController::onStopped()
 {
     qCInfo(logScreenShare, "capture stopped");
+    m_shareServer.clear();
     setActive(false);
 }
 
@@ -247,6 +314,7 @@ void AndroidScreenShareController::onPermissionDenied()
 {
     qCInfo(logScreenShare, "user denied projection consent");
     setLastError(QStringLiteral("Screen share permission denied"));
+    m_shareServer.clear();
     setActive(false);
 }
 
@@ -268,9 +336,11 @@ void AndroidScreenShareController::onFrame(const QByteArray& jpeg)
 
 void AndroidScreenShareController::broadcast(const QByteArray& jpeg)
 {
-    if (!m_serverManager) return;
-    ServerConnection* conn = m_serverManager->activeServer();
-    if (!conn) return;
+    // Only into the call the share was started for; never the active
+    // (browsed) server, and never a call joined after this one ended.
+    ServerConnection* conn = m_shareServer.data();
+    if (!conn || !m_serverManager
+        || m_serverManager->voiceServer() != conn) return;
     // Android is mesh-only (no LiveKit SDK for mobile) but this only
     // uses the transport-neutral JPEG sink, so it takes the interface.
     IVoiceTransport* eng = conn->voiceEngine();
@@ -297,6 +367,9 @@ void AndroidScreenShareController::setLastError(const QString& e)
 
 AndroidScreenShareController::AndroidScreenShareController(QObject* parent)
     : QObject(parent) {}
+void AndroidScreenShareController::setServerManager(ServerManager* m) { m_serverManager = m; }
+void AndroidScreenShareController::rewireVoiceLeaveWatch() {}
+void AndroidScreenShareController::checkVoiceStillActive() {}
 void AndroidScreenShareController::showPicker() {}
 void AndroidScreenShareController::stop() {}
 void AndroidScreenShareController::onStarted(int, int) {}

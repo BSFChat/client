@@ -346,15 +346,34 @@ public final class ScreenCaptureHelper {
     // Everything except the foreground service, so a restart can reuse
     // the already-running service rather than racing a stop against a
     // start.
+    //
+    // Runs on the main looper, but the ImageReader is only ever touched
+    // on the capture thread: closing it here while handleFrame() is
+    // mid-copy on that thread would free the Image planes under it. So
+    // the close is posted to the capture handler, the thread is asked to
+    // quit once that (and any frame already queued) has run, and we join
+    // it so the next session cannot overlap the old one.
     private void releasePipeline() {
         if (mVirtualDisplay != null) {
             mVirtualDisplay.release();
             mVirtualDisplay = null;
         }
-        if (mImageReader != null) {
-            mImageReader.setOnImageAvailableListener(null, null);
-            mImageReader.close();
-            mImageReader = null;
+        final ImageReader reader = mImageReader;
+        final HandlerThread thread = mThread;
+        final Handler handler = mHandler;
+        mImageReader = null;
+        mThread = null;
+        mHandler = null;
+        if (reader != null) {
+            Runnable closeReader = new Runnable() {
+                @Override public void run() {
+                    reader.setOnImageAvailableListener(null, null);
+                    reader.close();
+                }
+            };
+            // post() fails only if the looper has already quit, in which
+            // case nothing can be running on it and closing here is safe.
+            if (handler == null || !handler.post(closeReader)) closeReader.run();
         }
         if (mProjection != null) {
             MediaProjection p = mProjection;
@@ -363,10 +382,15 @@ public final class ScreenCaptureHelper {
             mProjection = null;
             try { p.stop(); } catch (Throwable ignored) { }
         }
-        if (mThread != null) {
-            mThread.quitSafely();
-            mThread = null;
-            mHandler = null;
+        if (thread != null) {
+            thread.quitSafely();
+            try {
+                // One JPEG encode at most; bounded so a wedged encoder
+                // cannot hang the UI thread.
+                thread.join(1000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
         mLastFrameMs = 0;
     }
