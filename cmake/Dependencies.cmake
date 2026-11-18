@@ -31,8 +31,17 @@ if(BSFCHAT_ENABLE_KEYCHAIN)
         GIT_SHALLOW    TRUE
     )
     set(BUILD_WITH_QT6 ON CACHE BOOL "" FORCE)
-    # Static by default here (BUILD_SHARED_LIBS is OFF); QtKeychain's own
-    # QTKEYCHAIN_STATIC switch is deprecated in favour of that.
+    # Static, explicitly. QtKeychain declares option(BUILD_SHARED_LIBS ON),
+    # and on a FRESH configure nothing has set BUILD_SHARED_LIBS yet (the
+    # voice block below forces it OFF only afterwards), so CI built it
+    # shared while a reconfigured local tree built it static. Shared broke
+    # three platforms in v0.0.49-rc.1: Windows put qt6keychain.dll in
+    # build/bin/ where no test (or windeployqt) finds it, and the loader's
+    # "DLL not found" dialog hung ctest until the 6 h job timeout; the iOS
+    # Xcode project made it a dylib target with no bundle identifier; and
+    # no packaging step copies it next to the app. A plain (non-cache) OFF
+    # is what option() honours under CMP0077 NEW, set just below.
+    set(BUILD_SHARED_LIBS OFF)
     set(BUILD_TEST_APPLICATION OFF CACHE BOOL "" FORCE)
     set(BUILD_TRANSLATIONS OFF CACHE BOOL "" FORCE)
     # Its own autotests need a live keyring and are not ours to run. Its
@@ -45,6 +54,10 @@ if(BSFCHAT_ENABLE_KEYCHAIN)
     set(BUILD_TESTING OFF)
     FetchContent_MakeAvailable(qtkeychain)
     unset(CMAKE_POLICY_DEFAULT_CMP0077)
+    unset(BUILD_SHARED_LIBS)
+    # generate_export_header() leaves QKEYCHAIN_EXPORT as dllimport for
+    # consumers unless this is defined; QtKeychain itself never sets it.
+    target_compile_definitions(qt6keychain PUBLIC QT6KEYCHAIN_STATIC_DEFINE)
 endif()
 
 # Voice chat dependencies (libdatachannel + opus)
