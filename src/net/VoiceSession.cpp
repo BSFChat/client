@@ -1,5 +1,7 @@
 #include "net/VoiceSession.h"
 
+#include "voice/TurnCredentials.h"
+
 #include <QDateTime>
 #include <QLoggingCategory>
 
@@ -24,15 +26,43 @@ const char* VoiceSession::stateName(State s)
 VoiceSession::VoiceSession(QObject* parent)
     : QObject(parent)
 {
+    m_monotonic.start();
+
+    // TURN refresh: a short wall-clock check, re-armed each time, rather
+    // than one long monotonic timer that sleep can stretch (V2-7).
     m_turnRefreshTimer = new QTimer(this);
     m_turnRefreshTimer->setSingleShot(true);
-    connect(m_turnRefreshTimer, &QTimer::timeout, this, [this]() {
-        // Only meaningful while a session is live: the refreshed config
-        // is for peer connections built from here on (V-M3).
-        if (m_state != State::Active) return;
-        qCInfo(logVoiceSession, "TURN credentials at half-life — refetching");
-        emit turnConfigRequested();
+    connect(m_turnRefreshTimer, &QTimer::timeout, this,
+            &VoiceSession::checkTurnRefresh);
+
+    m_stateRetryTimer = new QTimer(this);
+    m_stateRetryTimer->setSingleShot(true);
+    connect(m_stateRetryTimer, &QTimer::timeout, this,
+            &VoiceSession::maybeSendState);
+    m_stateSpacingTimer = new QTimer(this);
+    m_stateSpacingTimer->setSingleShot(true);
+    connect(m_stateSpacingTimer, &QTimer::timeout, this,
+            &VoiceSession::maybeSendState);
+
+    m_rejoinGraceTimer = new QTimer(this);
+    m_rejoinGraceTimer->setSingleShot(true);
+    connect(m_rejoinGraceTimer, &QTimer::timeout, this, [this]() {
+        const QString room = m_pendingRejoinRoom;
+        m_pendingRejoinRoom.clear();
+        if (room.isEmpty() || m_state != State::Active || room != m_roomId)
+            return;
+        enqueue(makeOp(OpKind::Rejoin, room));
     });
+}
+
+QString VoiceSession::takenOverMessage()
+{
+    return QStringLiteral("You joined this call from another device");
+}
+
+qint64 VoiceSession::nowMs() const
+{
+    return m_clock ? m_clock() : QDateTime::currentMSecsSinceEpoch();
 }
 
 void VoiceSession::setState(State s)
@@ -64,8 +94,15 @@ void VoiceSession::applyDeafenGate()
     if (m_deafenGate) m_deafenGate(m_deafened);
 }
 
+void VoiceSession::stopEngineOnce()
+{
+    if (!m_localLive) return;
+    m_localLive = false;
+    if (m_stopEngine) m_stopEngine();
+}
+
 // ---------------------------------------------------------------------
-// Request queue
+// Request queue (join / leave)
 // ---------------------------------------------------------------------
 
 VoiceSession::Op VoiceSession::makeOp(OpKind kind, const QString& roomId) const
@@ -73,19 +110,9 @@ VoiceSession::Op VoiceSession::makeOp(OpKind kind, const QString& roomId) const
     Op op;
     op.kind = kind;
     op.roomId = roomId;
-    // A leave or a state PUT must carry the token of the membership it is
-    // about. A JOIN cannot: it is the request that mints the next one.
-    if (kind != OpKind::Join && kind != OpKind::Rejoin) op.sessionId = m_sessionId;
-    return op;
-}
-
-VoiceSession::Op VoiceSession::stateOp(const QString& roomId) const
-{
-    Op op = makeOp(OpKind::StateUpdate, roomId);
-    // V-M7: what we announce is the gate we actually apply, never the raw
-    // mute toggle.
-    op.muted = effectiveMuted();
-    op.deafened = m_deafened;
+    // A leave must carry the token of the membership it is about. A JOIN
+    // cannot: it is the request that mints the next one.
+    if (kind == OpKind::Leave) op.sessionId = m_sessionId;
     return op;
 }
 
@@ -103,13 +130,15 @@ bool VoiceSession::inFlightIs(OpKind kind, const QString& roomId) const
 
 void VoiceSession::pump()
 {
-    // Strictly one server-mutating voice request outstanding at a time.
-    // This is the whole of the V-H1 fix: a join queued behind a leave
-    // cannot reach the server until the leave has been answered, so the
-    // server can never apply them out of order.
+    // Strictly one membership request outstanding at a time. This is the
+    // whole of the V-H1 fix: a join queued behind a leave cannot reach the
+    // server until the leave has been answered, so the server can never
+    // apply them out of order.
     if (m_inFlight) return;
     if (m_queue.isEmpty()) {
         if (m_state == State::Idle) emit settled();
+        // A join/rejoin that just completed may have unblocked a state PUT.
+        maybeSendState();
         return;
     }
 
@@ -121,14 +150,16 @@ void VoiceSession::pump()
         m_roomId = op.roomId;
         m_members = QJsonArray();
         m_rejoinAttempted = false;
+        m_pendingRejoinRoom.clear();
+        m_rejoinGraceTimer->stop();
         m_buffered.clear();
+        m_localLive = true;
         // The server writes a FRESH m.call.member row on join, with
         // muted/deafened false. Our own preference is deliberately not
         // reset (V-M7: mute must survive a channel switch) — instead the
         // acknowledged state goes back to the server's default so the
         // difference is noticed and announced once we are active.
-        m_ackedMuted = false;
-        m_ackedDeafened = false;
+        resetStateChannel();
         // Everything stamped before this instant belongs to a previous
         // session (V-M1). Recorded at the moment the request goes out
         // rather than when it is queued, so a join that waited behind a
@@ -140,15 +171,14 @@ void VoiceSession::pump()
     case OpKind::Rejoin:
         // V-H2 re-POST. State stays Active: the engine is running and
         // the peers are fine; it is the server's row that went away.
-        m_ackedMuted = false;
-        m_ackedDeafened = false;
+        resetStateChannel();
         emit joinRequested(op.roomId);
         break;
     case OpKind::Leave:
-        // Local teardown happens when the leave goes OUT, never on its
-        // reply: the reply must not be load-bearing for engine cleanup
-        // (a lost reply would otherwise leave the mic live forever).
-        if (m_stopEngine) m_stopEngine();
+        // Local teardown happens before the leave goes out (normally in
+        // requestLeave already), never on its reply: the reply must not
+        // be load-bearing for engine cleanup.
+        stopEngineOnce();
         m_turnRefreshTimer->stop();
         m_buffered.clear();
         setState(State::Leaving);
@@ -157,13 +187,6 @@ void VoiceSession::pump()
         emit leaveRequested(op.roomId, op.sessionId);
         m_sessionId.clear();
         break;
-    case OpKind::StateUpdate:
-        emit stateUpdateRequested(op.roomId, op.muted, op.deafened, op.sessionId);
-        break;
-    case OpKind::MediaUpdate:
-        emit mediaStateUpdateRequested(op.roomId, op.screenSharing, op.cameraOn,
-                                       op.sessionId);
-        break;
     }
 }
 
@@ -171,6 +194,130 @@ void VoiceSession::completeOp()
 {
     m_inFlight.reset();
     pump();
+}
+
+// ---------------------------------------------------------------------
+// State channel (mute / deafen) — V2-1
+// ---------------------------------------------------------------------
+
+void VoiceSession::resetStateChannel()
+{
+    // A new membership: the server's row starts at muted=false,
+    // deafened=false. Any PUT still in flight belongs to the old row.
+    if (m_statePut) {
+        ++m_orphanedStateReplies[m_statePut->roomId];
+        m_statePut.reset();
+    }
+    m_ackedMuted = false;
+    m_ackedDeafened = false;
+    m_ackedManualMuted = false;
+    m_stateGaveUp = false;
+    m_stateRetryMs = 0;
+    m_stateRetryTimer->stop();
+    m_stateSpacingTimer->stop();
+}
+
+void VoiceSession::maybeSendState()
+{
+    // Only a live, acknowledged membership can take a state PUT, and never
+    // while a join/rejoin for it is unanswered (it would be refused as a
+    // non-member, or land on the row the re-join is about to replace).
+    if (m_state != State::Active) return;
+    if (m_inFlight) return;   // a re-join: wait for its fresh row
+    if (m_statePut) return;               // one at a time; reply re-runs this
+    if (m_stateRetryTimer->isActive()) return;
+    const bool wantMuted = effectiveMuted();
+    if (wantMuted == m_ackedMuted && m_deafened == m_ackedDeafened) {
+        m_stateRetryMs = 0;
+        return;
+    }
+    if (m_stateGaveUp) return;
+
+    const qint64 now = m_monotonic.elapsed();
+    if (m_lastStatePutMs > 0 && m_minStatePutIntervalMs > 0) {
+        const qint64 due = m_lastStatePutMs + m_minStatePutIntervalMs;
+        if (now < due) {
+            if (!m_stateSpacingTimer->isActive())
+                m_stateSpacingTimer->start(int(due - now));
+            return;
+        }
+    }
+
+    StatePut put;
+    put.roomId = m_roomId;
+    put.muted = wantMuted;
+    put.deafened = m_deafened;
+    put.manualMuted = m_muted;
+    put.actionSeq = m_userActionSeq;
+    m_statePut = put;
+    m_lastStatePutMs = qMax<qint64>(1, now);
+    emit stateUpdateRequested(put.roomId, put.muted, put.deafened, m_sessionId);
+}
+
+void VoiceSession::onStateUpdateSucceeded(const QString& roomId)
+{
+    if (int& owed = m_orphanedStateReplies[roomId]; owed > 0) {
+        if (--owed == 0) m_orphanedStateReplies.remove(roomId);
+        return;
+    } else {
+        m_orphanedStateReplies.remove(roomId);
+    }
+    if (!m_statePut || m_statePut->roomId != roomId) return;
+    m_ackedMuted = m_statePut->muted;
+    m_ackedDeafened = m_statePut->deafened;
+    m_ackedManualMuted = m_statePut->manualMuted;
+    m_statePut.reset();
+    m_stateRetryMs = 0;
+    // Whatever the user did while it was in flight goes out now.
+    maybeSendState();
+}
+
+void VoiceSession::onStateUpdateFailed(const QString& roomId,
+                                       const QString& error, bool transient)
+{
+    if (int& owed = m_orphanedStateReplies[roomId]; owed > 0) {
+        if (--owed == 0) m_orphanedStateReplies.remove(roomId);
+        return;
+    } else {
+        m_orphanedStateReplies.remove(roomId);
+    }
+    if (!m_statePut || m_statePut->roomId != roomId) return;
+    const StatePut failed = *m_statePut;
+    m_statePut.reset();
+
+    if (transient) {
+        // The local toggle is right; the server just did not hear it yet.
+        m_stateRetryMs = m_stateRetryMs <= 0
+            ? m_stateRetryBaseMs : qMin(m_stateRetryMs * 2, kMaxStateRetryMs);
+        qCInfo(logVoiceSession, "voice/state failed transiently — retrying "
+               "in %d ms", m_stateRetryMs);
+        m_stateRetryTimer->start(m_stateRetryMs);
+        return;
+    }
+
+    // Permanent. Resending the same thing would fail the same way, so stop
+    // until the user does something new or the membership changes.
+    m_stateGaveUp = true;
+    const bool newerAction = failed.actionSeq != m_userActionSeq;
+    if (!newerAction) {
+        // Roll back only towards privacy. Putting the UI back where the
+        // server thinks we are is honest for an UNmute or UNdeafen the
+        // server refused; for a refused mute it would reopen the
+        // microphone while the user believes they are muted (V2-1).
+        bool changedMute = false;
+        bool changedDeafen = false;
+        if (!m_muted && m_ackedManualMuted) { m_muted = true; changedMute = true; }
+        if (!m_deafened && m_ackedDeafened) { m_deafened = true; changedDeafen = true; }
+        if (changedMute) emit mutedChanged();
+        if (changedDeafen) emit deafenedChanged();
+        // BOTH gates, every time: the transport must match the toggles
+        // whatever moved.
+        applyMicGate();
+        applyDeafenGate();
+    }
+    emit errorOccurred(error.isEmpty()
+        ? QStringLiteral("Could not update your voice state")
+        : error);
 }
 
 // ---------------------------------------------------------------------
@@ -191,6 +338,61 @@ QString VoiceSession::destinationRoom() const
     return dest;
 }
 
+QString VoiceSession::leaveLocally()
+{
+    // Drop anything queued that only makes sense inside the session we
+    // are abandoning. Queued leaves stay: the server must still hear them.
+    QQueue<Op> keep;
+    while (!m_queue.isEmpty()) {
+        Op op = m_queue.dequeue();
+        if (op.kind == OpKind::Leave) keep.enqueue(op);
+    }
+    m_queue = keep;
+    m_pendingRejoinRoom.clear();
+    m_rejoinGraceTimer->stop();
+
+    // The room the server holds (or may be about to hold) us in.
+    QString serverRoom;
+    if (m_inFlight && (m_inFlight->kind == OpKind::Join
+                       || m_inFlight->kind == OpKind::Rejoin)) {
+        serverRoom = m_inFlight->roomId;
+    } else if (m_state == State::Joining || m_state == State::FetchingTurn
+               || m_state == State::Active) {
+        serverRoom = m_roomId;
+    }
+    if (serverRoom.isEmpty()) return QString();
+
+    // Local teardown NOW, whatever is on the wire: mic gate closed with
+    // the transport, peers hung up. Leave used to wait for an in-flight
+    // join (up to its timeout) with the microphone still live.
+    stopEngineOnce();
+    m_turnRefreshTimer->stop();
+    m_turnRefreshInFlight = false;
+    m_buffered.clear();
+
+    if (m_inFlight && m_inFlight->kind == OpKind::Join
+        && m_state == State::FetchingTurn) {
+        // The join itself was answered (we have its token); only the TURN
+        // GET is outstanding, and nothing waits for a GET.
+        m_inFlight.reset();
+    } else if (m_inFlight && (m_inFlight->kind == OpKind::Join
+                              || m_inFlight->kind == OpKind::Rejoin)) {
+        // Unanswered: the reply decides nothing any more except the token
+        // the leave below should carry.
+        m_inFlight->cancelled = true;
+    }
+    // A mute PUT in flight is not worth waiting for either.
+    if (m_statePut) {
+        ++m_orphanedStateReplies[m_statePut->roomId];
+        m_statePut.reset();
+    }
+    m_stateRetryTimer->stop();
+    m_stateSpacingTimer->stop();
+
+    setState(State::Leaving);
+    return serverRoom;
+}
+
 void VoiceSession::requestJoin(const QString& roomId)
 {
     if (roomId.isEmpty()) return;
@@ -199,84 +401,79 @@ void VoiceSession::requestJoin(const QString& roomId)
     if (dest == roomId) return;  // already there, or already on the way
 
     // Channel switch: the leave goes in FRONT of the join and the local
-    // engine dies when the leave is ISSUED, not when its reply lands. The
-    // queue then holds the join back until the server has answered the
-    // leave — which is the V-H1 fix. Sending both at once let the server
-    // apply join-then-leave and leave the user a ghost.
-    if (!dest.isEmpty())
-        m_queue.enqueue(makeOp(OpKind::Leave, dest));
-
+    // engine dies NOW, not when the leave's reply lands. The queue then
+    // holds the join back until the server has answered the leave — which
+    // is the V-H1 fix. Sending both at once let the server apply
+    // join-then-leave and leave the user a ghost.
+    if (!dest.isEmpty()) {
+        const QString serverRoom = leaveLocally();
+        if (!serverRoom.isEmpty())
+            m_queue.enqueue(makeOp(OpKind::Leave, serverRoom));
+    }
     enqueue(makeOp(OpKind::Join, roomId));
 }
 
 void VoiceSession::requestLeave()
 {
-    const QString dest = destinationRoom();
-    // Drop anything queued that only makes sense inside the session we
-    // are about to abandon.
-    QQueue<Op> keep;
-    while (!m_queue.isEmpty()) {
-        Op op = m_queue.dequeue();
-        if (op.kind == OpKind::Leave) keep.enqueue(op);
+    const QString serverRoom = leaveLocally();
+    if (serverRoom.isEmpty()) {
+        // Nothing held server-side (e.g. Idle with only a queued join,
+        // which leaveLocally just dropped).
+        if (m_state == State::Leaving && !m_inFlight && m_queue.isEmpty()) {
+            m_roomId.clear();
+            setState(State::Idle);
+        }
+        pump();
+        return;
     }
-    m_queue = keep;
-    if (dest.isEmpty()) { pump(); return; }
-    enqueue(makeOp(OpKind::Leave, dest));
+    enqueue(makeOp(OpKind::Leave, serverRoom));
 }
 
 void VoiceSession::toggleMute()
 {
     m_muted = !m_muted;
+    ++m_userActionSeq;
+    m_stateGaveUp = false;
     emit mutedChanged();
     applyMicGate();
-    if (m_state == State::Active || m_state == State::FetchingTurn) {
-        // Announce the EFFECTIVE gate, not the raw toggle (V-M7).
-        enqueue(stateOp(m_roomId));
-    }
+    maybeSendState();
 }
 
 void VoiceSession::toggleDeafen()
 {
     m_deafened = !m_deafened;
+    ++m_userActionSeq;
+    m_stateGaveUp = false;
     emit deafenedChanged();
     applyDeafenGate();
-    if (m_state == State::Active || m_state == State::FetchingTurn) {
-        enqueue(stateOp(m_roomId));
-    }
+    maybeSendState();
 }
 
 void VoiceSession::setPttMode(bool ptt)
 {
     if (m_pttMode == ptt) return;
     m_pttMode = ptt;
-    const bool before = m_appliedGate.value_or(false);
     applyMicGate();
-    if (m_state == State::Active && before != effectiveMuted()) {
-        enqueue(stateOp(m_roomId));
-    }
+    maybeSendState();
 }
 
 void VoiceSession::setPttPressed(bool pressed)
 {
     if (m_pttPressed == pressed) return;
     m_pttPressed = pressed;
-    const bool before = m_appliedGate.value_or(false);
+    // The gate is local and immediate — that is what decides whether a
+    // word is clipped. The roster follows through the coalesced, spaced
+    // state channel, so a burst of presses costs at most one PUT per
+    // m_minStatePutIntervalMs and the final one always carries the truth.
     applyMicGate();
-    // Announce the gate change so the roster's mute pip matches what is
-    // actually being transmitted. Only in PTT mode does the press move
-    // the gate at all.
-    if (m_pttMode && m_state == State::Active && before != effectiveMuted()) {
-        enqueue(stateOp(m_roomId));
-    }
+    if (m_pttMode) maybeSendState();
 }
 
 void VoiceSession::announceMedia(bool screenSharing, bool cameraOn)
 {
     if (m_state != State::Active) return;
-    Op op = makeOp(OpKind::MediaUpdate, m_roomId);
-    op.screenSharing = screenSharing;
-    op.cameraOn = cameraOn;
-    enqueue(op);
+    emit mediaStateUpdateRequested(m_roomId, screenSharing, cameraOn,
+                                   m_sessionId);
 }
 
 // ---------------------------------------------------------------------
@@ -287,6 +484,22 @@ void VoiceSession::onJoinSucceeded(const QString& roomId,
                                    const QJsonArray& members,
                                    const QString& sessionId)
 {
+    if ((inFlightIs(OpKind::Join, roomId) || inFlightIs(OpKind::Rejoin, roomId))
+        && m_inFlight->cancelled) {
+        // The user left while this was on the wire. Start nothing; the
+        // queued leave must name the membership the server just created,
+        // or it would be refused as stale and leave a ghost.
+        for (Op& op : m_queue) {
+            if (op.kind == OpKind::Leave && op.roomId == roomId) {
+                if (!sessionId.isEmpty()) op.sessionId = sessionId;
+                break;
+            }
+        }
+        qCInfo(logVoiceSession, "join reply for %s arrived after leave — "
+               "not starting", qPrintable(roomId));
+        completeOp();
+        return;
+    }
     if (inFlightIs(OpKind::Rejoin, roomId)) {
         m_sessionId = sessionId;
         // V-H2 recovery landed: our row is back, the engine never
@@ -294,12 +507,12 @@ void VoiceSession::onJoinSucceeded(const QString& roomId,
         m_members = members;
         qCInfo(logVoiceSession, "re-join accepted for %s", qPrintable(roomId));
         completeOp();
-        if (effectiveMuted() != m_ackedMuted || m_deafened != m_ackedDeafened) {
-            enqueue(stateOp(roomId));
-        }
         // New membership, so the server's media flags are back to false.
         // Whoever knows what we are actually capturing has to say so again.
         emit membershipRenewed(roomId);
+        // A re-join is typically what follows a sleep: the credentials the
+        // engine holds may well have expired with it (V2-7).
+        requestTurnRefresh("re-join");
         return;
     }
     if (!inFlightIs(OpKind::Join, roomId)) {
@@ -310,31 +523,54 @@ void VoiceSession::onJoinSucceeded(const QString& roomId,
     m_members = members;
     m_sessionId = sessionId;
     setState(State::FetchingTurn);
-    // TURN is fetched with the join op still in flight, so a leave or a
-    // state PUT queued during the round trip cannot overtake it.
+    // TURN is fetched with the join op still in flight, so a leave
+    // queued during the round trip cannot overtake it.
     emit turnConfigRequested();
+}
+
+void VoiceSession::endSession(const QString& message)
+{
+    stopEngineOnce();
+    m_roomId.clear();
+    m_sessionId.clear();
+    m_members = QJsonArray();
+    m_buffered.clear();
+    m_turnRefreshTimer->stop();
+    m_turnRefreshInFlight = false;
+    m_pendingRejoinRoom.clear();
+    m_rejoinGraceTimer->stop();
+    if (m_statePut) {
+        ++m_orphanedStateReplies[m_statePut->roomId];
+        m_statePut.reset();
+    }
+    m_stateRetryTimer->stop();
+    m_stateSpacingTimer->stop();
+    setState(State::Idle);
+    if (!message.isEmpty()) emit errorOccurred(message);
 }
 
 void VoiceSession::onJoinFailed(const QString& roomId, const QString& error)
 {
+    if ((inFlightIs(OpKind::Join, roomId) || inFlightIs(OpKind::Rejoin, roomId))
+        && m_inFlight->cancelled) {
+        // Already left locally; the queued leave still goes out (the
+        // server accepts a leave from a non-member, and a timed-out join
+        // may have landed after all).
+        completeOp();
+        return;
+    }
     if (inFlightIs(OpKind::Rejoin, roomId)) {
         // The server refused to reinstate us: we really are out.
         qCWarning(logVoiceSession, "re-join refused for %s — tearing down",
                   qPrintable(roomId));
-        if (m_stopEngine) m_stopEngine();
-        m_roomId.clear();
-        m_sessionId.clear();
-        m_members = QJsonArray();
-        m_buffered.clear();
-        m_turnRefreshTimer->stop();
-        setState(State::Idle);
-        emit errorOccurred(error.isEmpty()
+        endSession(error.isEmpty()
             ? QStringLiteral("You were removed from the voice channel")
             : error);
         completeOp();
         return;
     }
     if (!inFlightIs(OpKind::Join, roomId)) return;
+    m_localLive = false;   // nothing was started for a refused join
     m_roomId.clear();
     m_sessionId.clear();
     m_buffered.clear();
@@ -371,14 +607,16 @@ void VoiceSession::onLeaveFailed(const QString& roomId, const QString& error)
 void VoiceSession::onTurnConfig(const QJsonObject& config)
 {
     if (m_state == State::Active) {
-        // A half-life refresh (V-M3): hand the new credentials to the
+        // A scheduled/wake refresh: hand the new credentials to the
         // running transport and re-arm.
+        m_turnRefreshInFlight = false;
         m_turnConfig = config;
         if (m_turnUpdater) m_turnUpdater(config);
         scheduleTurnRefresh(config);
         return;
     }
-    if (m_state != State::FetchingTurn) return;
+    if (m_state != State::FetchingTurn || !inFlightIs(OpKind::Join, m_roomId))
+        return;
 
     m_turnConfig = config;
     const QString roomId = m_roomId;
@@ -402,27 +640,22 @@ void VoiceSession::onTurnConfig(const QJsonObject& config)
     m_appliedGate.reset();
     applyMicGate();
     // Same for deafening, and for the same reason: this is a BRAND NEW
-    // engine at the AudioEngine default. Without the reset+apply a user
-    // who was already deafened before joining — or who deafened in the
-    // previous channel and switched — would hear everyone, because the
-    // only thing that ever pushed deafen into the engine was a CHANGE in
-    // its value, and nothing changed.
+    // engine at the AudioEngine default.
     m_appliedDeafen.reset();
     applyDeafenGate();
-    completeOp();
-    if (effectiveMuted() != m_ackedMuted || m_deafened != m_ackedDeafened) {
-        enqueue(stateOp(roomId));
-    }
+    completeOp();   // pump() → maybeSendState() announces any difference
 }
 
 void VoiceSession::onTurnConfigFailed(const QString& error)
 {
     if (m_state == State::Active) {
-        // A failed half-life refresh is not fatal: the existing peers
-        // keep their credentials and the next attempt is one ttl/2 away.
+        // A failed refresh is not fatal: the existing peers keep their
+        // allocations. Try again on the next check.
+        m_turnRefreshInFlight = false;
         qCWarning(logVoiceSession, "TURN refresh failed — keeping existing "
                   "credentials");
-        scheduleTurnRefresh(m_turnConfig);
+        m_turnRefreshAtMs = nowMs() + 60'000;
+        m_turnRefreshTimer->start(qMin(60'000, voice::turn::kCheckIntervalMs));
         return;
     }
     if (m_state != State::FetchingTurn) return;
@@ -436,7 +669,10 @@ void VoiceSession::onTurnConfigFailed(const QString& error)
 
 void VoiceSession::unwind(QString roomId, QString reason)
 {
-    if (m_stopEngine) m_stopEngine();
+    // The join that brought us here was answered; its token is what the
+    // server-side leave must name.
+    const QString sessionId = m_sessionId;
+    stopEngineOnce();
     m_buffered.clear();
     m_members = QJsonArray();
     m_turnRefreshTimer->stop();
@@ -446,21 +682,14 @@ void VoiceSession::unwind(QString roomId, QString reason)
     if (!reason.isEmpty()) emit errorOccurred(reason);
     // Tell the server to drop the membership. Pushed to the FRONT of the
     // queue: it must precede a join the user has already asked for, or
-    // the two race exactly as V-H1 did.
-    if (!roomId.isEmpty())
-        m_queue.prepend(makeOp(OpKind::Leave, roomId));
-    completeOp();
-}
-
-void VoiceSession::onStateUpdateSucceeded(const QString& roomId)
-{
-    if (!inFlightIs(OpKind::StateUpdate, roomId)
-        && !inFlightIs(OpKind::MediaUpdate, roomId)) {
-        return;
-    }
-    if (m_inFlight->kind == OpKind::StateUpdate) {
-        m_ackedMuted = m_inFlight->muted;
-        m_ackedDeafened = m_inFlight->deafened;
+    // the two race exactly as V-H1 did. The join op that brought us here
+    // already has its token in hand.
+    if (!roomId.isEmpty()) {
+        Op leave;
+        leave.kind = OpKind::Leave;
+        leave.roomId = roomId;
+        leave.sessionId = sessionId;
+        m_queue.prepend(leave);
     }
     completeOp();
 }
@@ -473,38 +702,13 @@ void VoiceSession::onStateSuperseded(const QString& roomId)
     if (m_state != State::Active || roomId != m_roomId) return;
     qCWarning(logVoiceSession, "voice/state refused — our session was "
               "superseded in %s", qPrintable(roomId));
+    // The PUT that drew the 403 is dead; its error reply (which follows)
+    // must not count as a permanent refusal of the mute itself.
+    if (m_statePut && m_statePut->roomId == roomId) {
+        ++m_orphanedStateReplies[roomId];
+        m_statePut.reset();
+    }
     onSelfMembership(roomId, false, m_sessionId);
-}
-
-void VoiceSession::onStateUpdateFailed(const QString& roomId,
-                                       const QString& error)
-{
-    if (!inFlightIs(OpKind::StateUpdate, roomId)
-        && !inFlightIs(OpKind::MediaUpdate, roomId)) {
-        return;
-    }
-    const bool wasMuteUpdate = m_inFlight->kind == OpKind::StateUpdate;
-    completeOp();
-    if (!wasMuteUpdate) {
-        if (!error.isEmpty()) emit errorOccurred(error);
-        return;
-    }
-    // V-M7: the local toggle was optimistic. The server did not take it,
-    // so put the UI back where the server thinks we are rather than
-    // leaving a mute pip that lies.
-    bool changedMute = false;
-    bool changedDeafen = false;
-    if (m_muted != m_ackedMuted) { m_muted = m_ackedMuted; changedMute = true; }
-    if (m_deafened != m_ackedDeafened) {
-        m_deafened = m_ackedDeafened;
-        changedDeafen = true;
-    }
-    if (changedMute) emit mutedChanged();
-    if (changedDeafen) emit deafenedChanged();
-    if (changedMute || changedDeafen) applyMicGate();
-    emit errorOccurred(error.isEmpty()
-        ? QStringLiteral("Could not update your voice state")
-        : error);
 }
 
 void VoiceSession::onMembersPolled(const QString& roomId,
@@ -514,10 +718,65 @@ void VoiceSession::onMembersPolled(const QString& roomId,
     m_members = members;
 }
 
-void VoiceSession::onSelfMembership(const QString& roomId, bool active,
-                                    const QString& sessionId)
+void VoiceSession::scheduleRejoin(const QString& roomId)
 {
-    if (!active && !sessionId.isEmpty() && !m_sessionId.isEmpty()
+    m_rejoinAttempted = true;
+    qCWarning(logVoiceSession, "server retired our voice row in %s — "
+              "re-joining once%s", qPrintable(roomId),
+              m_rejoinGraceMs > 0 ? " unless another device took it" : "");
+    if (m_rejoinGraceMs <= 0) {
+        enqueue(makeOp(OpKind::Rejoin, roomId));
+        return;
+    }
+    m_pendingRejoinRoom = roomId;
+    m_rejoinGraceTimer->start(m_rejoinGraceMs);
+}
+
+void VoiceSession::onSelfMembership(const QString& roomId, bool active,
+                                    const QString& sessionId,
+                                    const QString& deviceId)
+{
+    if (active) {
+        if (roomId != m_roomId) return;
+        const bool ourSession = !sessionId.isEmpty() && sessionId == m_sessionId;
+        if (ourSession) {
+            // Our row is healthy again; a later retirement gets a fresh
+            // recovery attempt. ONLY for our own session: resetting on any
+            // active row of ours is what let two devices evict each other
+            // forever (V2-3).
+            m_rejoinAttempted = false;
+            return;
+        }
+        if (sessionId.isEmpty() && m_sessionId.isEmpty()) {
+            // Legacy server, no tokens at all: the old behaviour.
+            if (deviceId.isEmpty() || m_localDeviceId.isEmpty()
+                || deviceId == m_localDeviceId) {
+                m_rejoinAttempted = false;
+                return;
+            }
+        }
+        if (m_state != State::Active) return;
+        // Our own re-join's row can arrive before its reply hands us the
+        // token; that is not a takeover.
+        if (inFlightIs(OpKind::Rejoin, roomId)) return;
+        const bool devicesKnown = !deviceId.isEmpty() && !m_localDeviceId.isEmpty();
+        // Same device, different session: an older row of ours replayed
+        // (sync resume), not another device.
+        if (devicesKnown && deviceId == m_localDeviceId) return;
+        const bool otherDevice = devicesKnown && deviceId != m_localDeviceId;
+        const bool otherSession = !sessionId.isEmpty() && !m_sessionId.isEmpty()
+            && sessionId != m_sessionId;
+        if (!otherDevice && !otherSession) return;   // nothing to go on
+        qCWarning(logVoiceSession, "our account joined %s from another device "
+                  "(session %s) — ending the call here", qPrintable(roomId),
+                  qPrintable(sessionId));
+        // The server has already retired our row; no leave to send.
+        endSession(takenOverMessage());
+        emit takenOverByOtherDevice(roomId);
+        return;
+    }
+
+    if (!sessionId.isEmpty() && !m_sessionId.isEmpty()
         && sessionId != m_sessionId) {
         // A retraction naming a DIFFERENT membership of ours: the server
         // echoes the retracted session on every leave, rejoin-reset and
@@ -529,31 +788,16 @@ void VoiceSession::onSelfMembership(const QString& roomId, bool active,
                qPrintable(sessionId));
         return;
     }
-    if (active) {
-        // Our row is healthy again; a later retirement gets a fresh
-        // recovery attempt.
-        if (roomId == m_roomId) m_rejoinAttempted = false;
-        return;
-    }
     if (m_state != State::Active || roomId != m_roomId) return;
+    if (!m_pendingRejoinRoom.isEmpty() || inFlightIs(OpKind::Rejoin, roomId))
+        return;   // recovery already under way
     if (m_rejoinAttempted) {
         qCWarning(logVoiceSession, "retired from %s again after a re-join — "
                   "tearing down", qPrintable(roomId));
-        if (m_stopEngine) m_stopEngine();
-        m_roomId.clear();
-        m_sessionId.clear();
-        m_members = QJsonArray();
-        m_buffered.clear();
-        m_turnRefreshTimer->stop();
-        setState(State::Idle);
-        emit errorOccurred(
-            QStringLiteral("You were disconnected from the voice channel"));
+        endSession(QStringLiteral("You were disconnected from the voice channel"));
         return;
     }
-    m_rejoinAttempted = true;
-    qCWarning(logVoiceSession, "server retired our voice row in %s — "
-              "re-joining once", qPrintable(roomId));
-    enqueue(makeOp(OpKind::Rejoin, roomId));
+    scheduleRejoin(roomId);
 }
 
 // ---------------------------------------------------------------------
@@ -610,13 +854,49 @@ void VoiceSession::replayBufferedSignals()
 
 void VoiceSession::scheduleTurnRefresh(const QJsonObject& config)
 {
-    // V-M3. The reconciler re-offers minutes into a call and builds fresh
-    // peer connections from these credentials; a TURN username/password
-    // pair is only valid for `ttl` seconds.
-    int ttl = config.value(QStringLiteral("ttl")).toInt(kDefaultTurnTtlSeconds);
-    if (ttl <= 0) ttl = kDefaultTurnTtlSeconds;
-    const int halfLifeMs = (ttl / 2) * 1000;
-    m_turnRefreshTimer->start(halfLifeMs > 1000 ? halfLifeMs : 1000);
+    // V-M3 / V2-6 / V2-7. A TURN username/password pair is only valid
+    // until its expiry; the refresh is an absolute wall-clock instant,
+    // checked by a short tick so a sleep cannot carry us past it.
+    const qint64 now = nowMs();
+    m_turnExpiresAtMs = voice::turn::expiresAtMs(config, now);
+    m_turnRefreshAtMs = voice::turn::refreshAtMs(config, now);
+    checkTurnRefresh();
+}
+
+void VoiceSession::checkTurnRefresh()
+{
+    if (m_state != State::Active || m_turnRefreshAtMs <= 0) return;
+    const qint64 now = nowMs();
+    if (now >= m_turnRefreshAtMs) {
+        requestTurnRefresh("credentials due for refresh");
+        return;
+    }
+    const qint64 wait = qMin<qint64>(m_turnRefreshAtMs - now,
+                                      voice::turn::kCheckIntervalMs);
+    m_turnRefreshTimer->start(int(qMax<qint64>(1, wait)));
+}
+
+void VoiceSession::requestTurnRefresh(const char* why)
+{
+    if (m_state != State::Active || m_turnRefreshInFlight) return;
+    qCInfo(logVoiceSession, "refetching TURN credentials (%s)", why);
+    m_turnRefreshInFlight = true;
+    m_turnRefreshTimer->stop();
+    emit turnConfigRequested();
+}
+
+void VoiceSession::onWakeOrNetworkChange()
+{
+    if (m_state != State::Active) return;
+    // Refetch when the credentials are expired or about to be — a peer
+    // rebuilt for the new network must not allocate with dead ones.
+    if (m_turnExpiresAtMs <= 0
+        || voice::turn::unusableForNewPeer(m_turnExpiresAtMs, nowMs())
+        || nowMs() >= m_turnRefreshAtMs) {
+        requestTurnRefresh("wake / network change");
+    } else {
+        checkTurnRefresh();
+    }
 }
 
 void VoiceSession::abandon()
@@ -626,7 +906,14 @@ void VoiceSession::abandon()
     m_buffered.clear();
     m_members = QJsonArray();
     m_turnRefreshTimer->stop();
-    if (m_state != State::Idle && m_stopEngine) m_stopEngine();
+    m_turnRefreshInFlight = false;
+    m_pendingRejoinRoom.clear();
+    m_rejoinGraceTimer->stop();
+    m_statePut.reset();
+    m_orphanedStateReplies.clear();
+    m_stateRetryTimer->stop();
+    m_stateSpacingTimer->stop();
+    stopEngineOnce();
     m_roomId.clear();
     m_sessionId.clear();
     setState(State::Idle);

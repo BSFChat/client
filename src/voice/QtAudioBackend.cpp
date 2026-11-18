@@ -2,11 +2,57 @@
 
 #include <QAudioSink>
 #include <QAudioSource>
+#include <QElapsedTimer>
 #include <QIODevice>
 
 namespace bsfchat::voice {
 
 QtAudioBackend::QtAudioBackend(QObject* parent) : QObject(parent) {}
+
+qint64 QtAudioBackend::monoMs()
+{
+    static QElapsedTimer clock = [] { QElapsedTimer t; t.start(); return t; }();
+    return clock.elapsed();
+}
+
+bool QtAudioBackend::healthy() const
+{
+    // The demotion check (AudioWorker::checkBackendHealth) answers this
+    // per direction for the Qt backend; the aggregate is for diagnostics.
+    // Render's check updates its progress watermark, so it is not const;
+    // this aggregate is only a summary for diagnostics.
+    return captureHealthy()
+        && const_cast<QtAudioBackend*>(this)->renderHealthy();
+}
+
+bool QtAudioBackend::captureHealthy() const
+{
+    const qint64 nowMs = monoMs();
+    if (!m_source || !m_captureDevice) return true;   // nothing open to fail
+    if (m_source->state() == QAudio::StoppedState
+        && m_source->error() != QAudio::NoError) {
+        return false;
+    }
+    return nowMs - m_captureProgressMs <= kStallMs;
+}
+
+bool QtAudioBackend::renderHealthy()
+{
+    const qint64 nowMs = monoMs();
+    if (!m_sink || !m_playbackDevice) return true;
+    if (m_sink->state() == QAudio::StoppedState
+        && m_sink->error() != QAudio::NoError) {
+        return false;
+    }
+    // The pump writes a frame (silence when nobody talks) every period,
+    // so a healthy sink's processed time always advances.
+    const qint64 processed = m_sink->processedUSecs();
+    if (processed != m_lastProcessedUs) {
+        m_lastProcessedUs = processed;
+        m_renderProgressMs = nowMs;
+    }
+    return nowMs - m_renderProgressMs <= kStallMs;
+}
 
 QtAudioBackend::~QtAudioBackend()
 {
@@ -25,6 +71,7 @@ bool QtAudioBackend::openCapture(const QAudioDevice& device,
     // are both affine to the thread that will drive them.
     m_source = new QAudioSource(device, format, this);
     m_captureDevice = m_source->start();
+    m_captureProgressMs = monoMs();
     if (m_captureDevice) {
         // Both ends are audio-thread objects, so this is a direct
         // connection and the encode happens inline on the device
@@ -58,6 +105,7 @@ qint64 QtAudioBackend::readCapture(char* dst, qint64 maxBytes)
 
 void QtAudioBackend::onReadyRead()
 {
+    m_captureProgressMs = monoMs();
     notifyCaptureReady();
 }
 
@@ -72,6 +120,8 @@ bool QtAudioBackend::openRender(const QAudioDevice& device,
     // holds, and therefore the floor on output latency.
     if (bufferBytes > 0) m_sink->setBufferSize(bufferBytes);
     m_playbackDevice = m_sink->start();
+    m_renderProgressMs = monoMs();
+    m_lastProcessedUs = -1;
     if (!m_playbackDevice) {
         qWarning("[voice] QAudioSink::start() returned null — no playback");
     }

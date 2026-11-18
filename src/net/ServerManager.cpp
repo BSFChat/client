@@ -1,4 +1,5 @@
 #include "net/ServerManager.h"
+#include "net/PttKeyFilter.h"
 #include "util/ExternalBrowser.h"
 #include "net/HttpFetch.h"
 #include "net/VoiceQuit.h"
@@ -32,6 +33,12 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
     , m_settings(settings)
     , m_serverListModel(new ServerListModel(this))
 {
+    m_pttKeys = new PttKeyFilter(this);
+    m_pttKeys->install();
+    connect(m_pttKeys, &PttKeyFilter::pressedChanged,
+            this, &ServerManager::setPttPressed);
+    connect(this, &ServerManager::serverRemoved,
+            this, &ServerManager::voiceServerChanged);
     // Everything the roster is not allowed to know about: the sidebar
     // model, QSettings, this object's signals, and ServerConnection's
     // teardown. The roster decides the *order*; these do the work.
@@ -625,6 +632,23 @@ ServerConnection* ServerManager::voiceServer() const
     return nullptr;
 }
 
+void ServerManager::configurePushToTalk(bool enabled, const QString& sequence)
+{
+    m_pttKeys->configure(enabled, sequence);
+}
+
+void ServerManager::setPttPressed(bool pressed)
+{
+    auto* vs = voiceServer();
+    if (vs) vs->setPttPressed(pressed);
+    // A release reaches every connection, so a key held across a server
+    // switch or a leave can never leave some session's PTT stuck open.
+    if (!pressed) {
+        for (auto* conn : m_roster.connections())
+            if (conn && conn != vs) conn->setPttPressed(false);
+    }
+}
+
 void ServerManager::setViewingDms(bool v)
 {
     if (m_viewingDms == v) return;
@@ -730,6 +754,22 @@ void ServerManager::wireConnection(ServerConnection* conn)
     };
     connect(conn, &ServerConnection::hasUnreadChanged, this, pushUnread);
     pushUnread();
+
+    connect(conn, &ServerConnection::activeVoiceRoomIdChanged,
+            this, &ServerManager::voiceServerChanged);
+
+    // One call at a time, app-wide (V2-4). Joining voice on server B used
+    // to leave server A's call running: two VoiceEngines, two microphones
+    // and, on macOS, two VoiceProcessingIO units fighting over the same
+    // hardware. Direct connection, so A's local teardown (which is now
+    // synchronous and cheap) is done before B's join is even queued.
+    connect(conn, &ServerConnection::aboutToJoinVoice, this, [this, conn]() {
+        for (auto* other : m_roster.connections()) {
+            // leaveVoiceChannel() is a no-op on a connection with nothing
+            // held, queued or in flight.
+            if (other && other != conn) other->leaveVoiceChannel();
+        }
+    }, Qt::DirectConnection);
 
     // whoami reconciliation found a stale/corrupt persisted user id and
     // fixed it in memory — rewrite the stored entry so the correction

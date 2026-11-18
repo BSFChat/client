@@ -66,8 +66,25 @@ public:
 
     QString describe() const override;
 
+    // V2-5. The Qt path had no health signal at all, so a stream that
+    // died (sound server restart, device taken exclusive, privacy toggle)
+    // stayed dead: permanent silence and no warning. A direction is
+    // unhealthy when Qt has stopped it with an error, or when it has been
+    // open for kStallMs without capture data arriving / without the sink
+    // consuming anything.
+    bool healthy() const override;
+    bool captureHealthy() const override;
+    bool renderHealthy() override;
+    static constexpr qint64 kStallMs = 1500;
+
 private:
     void onReadyRead();
+    static qint64 monoMs();
+    // Last time capture data arrived (or the source opened), and the last
+    // time the sink's processed-time moved (or it opened). Monotonic ms.
+    qint64 m_captureProgressMs = 0;
+    qint64 m_renderProgressMs = 0;
+    qint64 m_lastProcessedUs = -1;
 
     QAudioSource* m_source = nullptr;
     QIODevice* m_captureDevice = nullptr;

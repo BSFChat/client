@@ -8,6 +8,8 @@
 #include "net/ServerDiscovery.h"
 #include "net/ServerRoster.h"
 
+class PttKeyFilter;
+
 class ServerConnection;
 class ServerListModel;
 class Settings;
@@ -20,6 +22,11 @@ class ServerManager : public QObject {
     Q_OBJECT
     Q_PROPERTY(ServerListModel* servers READ servers CONSTANT)
     Q_PROPERTY(ServerConnection* activeServer READ activeServer NOTIFY activeServerChanged)
+    // The connection that holds the call (see voiceServer() below).
+    // Push-to-talk, the voice dock and anything else about "the call"
+    // must use this, not activeServer — they differ whenever the user
+    // browses another server mid-call.
+    Q_PROPERTY(ServerConnection* voiceServer READ voiceServer NOTIFY voiceServerChanged)
     Q_PROPERTY(int activeServerIndex READ activeServerIndex WRITE setActiveServer NOTIFY activeServerChanged)
     // "Direct Messages" sits at the top of the server rail as a
     // server-shaped destination, even though DMs are hosted per-
@@ -69,6 +76,13 @@ public:
     // pushing frames to A's engine regardless of which server has
     // sidebar focus.
     ServerConnection* voiceServer() const;
+
+    // Push-to-talk (V2-2). QML calls configurePushToTalk with the voice
+    // mode and key; the key's real press/release edges (PttKeyFilter)
+    // and setPttPressed (e.g. a hold-to-talk button) both reach the VOICE
+    // server — never activeServer, which is just the one being browsed.
+    Q_INVOKABLE void configurePushToTalk(bool enabled, const QString& sequence);
+    Q_INVOKABLE void setPttPressed(bool pressed);
 
     // All four take whatever the user typed. Each resolves it first (see
     // ServerDiscovery: normalisation + .well-known), so a server entry is
@@ -219,6 +233,7 @@ public:
 
 signals:
     void activeServerChanged();
+    void voiceServerChanged();
     void serverAdded(int index);
     void serverRemoved(int index);
     void loginError(const QString& serverUrl, const QString& error);
@@ -278,6 +293,7 @@ signals:
     void viewingDmsChanged();
 
 private:
+    PttKeyFilter* m_pttKeys = nullptr;
     // The bodies of addServer / registerServer / addServerWithOidc, once a
     // homeserver URL has been settled on. Separated so the identity-sync
     // path — which already holds canonical URLs from /api/servers — can add

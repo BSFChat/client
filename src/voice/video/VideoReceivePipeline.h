@@ -54,6 +54,19 @@ public:
 
     VideoCodecKind codec() const { return m_codec; }
 
+    // Retire WITHOUT blocking the calling (GUI) thread. Detaches from the
+    // parent, cuts every outgoing signal, drops the queued backlog and
+    // the held playout frames, then posts "destroy the decoder, quit" to
+    // the worker in ONE queued call; the object deletes itself once the
+    // worker thread has finished. The destructor used to do a blocking
+    // queued call plus m_thread.wait() — per stream, serially, on the GUI
+    // thread — which is most of why leaving a call with video froze the
+    // window. Plain deletion still blocks (as before) for callers that
+    // need the thread gone, e.g. tests and application exit. GUI thread
+    // only; a second call is a no-op.
+    void retire();
+    bool isRetired() const { return m_retired; }
+
     // Thread-safe. `keyframeHint` marks the AU as a keyframe when the
     // transport knows (lossless framing carries a flag; H.264 AUs are
     // scanned for IDR NALs instead and can pass false).
@@ -179,6 +192,9 @@ private:
     };
     QList<QueuedAu> m_queue;
     std::atomic<bool> m_drainQueued{false};
+    // Set by retire(); drainQueue() stops at the next unit boundary.
+    std::atomic<bool> m_stopping{false};
+    bool m_retired = false;
     std::atomic<quint64> m_rxFrames{0};
     std::atomic<quint64> m_rxBytes{0};
     std::atomic<quint64> m_decodedFrames{0};

@@ -1,6 +1,8 @@
 #include "voice/IpPrivacy.h"
 #include "voice/CameraController.h"
 
+#include <QPointer>
+
 #include "voice/video/VideoCodecPreference.h"
 #include "voice/IVoiceTransport.h"
 #include "voice/VoiceEngine.h"
@@ -87,6 +89,14 @@ CameraController::CameraController(QObject* parent)
         [this](const QString& desc) {
             m_lastError = desc;
             emit lastErrorChanged();
+        });
+    // Unplugged, runtime error or interruption: capture has already
+    // stopped. Stop the controller too, so camera_on goes false for
+    // everyone and the tile stops claiming to be live, and say why.
+    connect(m_mac, &MacCameraCapturer::cameraLost, this,
+        [this](const QString& reason) {
+            stop();
+            failWith(reason);
         });
 #else
     // A QVideoSink is a frame destination and owns no device, so wiring
@@ -383,6 +393,20 @@ void CameraController::rewireVoiceLeaveWatch()
 
 void CameraController::start() { startForCamera(-1); }
 
+void CameraController::onPermissionAnswered(bool granted, int index)
+{
+    if (!granted) {
+        // Deliberately re-read the status rather than assuming
+        // Denied: on iOS a prompt can also be dismissed by a
+        // restriction profile, and the two need different words.
+        failWith(camperm::refusalMessage(cameraPermission()));
+        return;
+    }
+    // Re-enter with the decision on record; the status is now
+    // Granted, so this lands on Proceed.
+    startForCamera(index);
+}
+
 void CameraController::startForCamera(int index)
 {
     // "Hide my IP while sharing", checked BEFORE anything starts. A share that
@@ -415,18 +439,30 @@ void CameraController::startForCamera(int index)
         return;
     case camperm::Action::RequestThenStart:
         qInfo("[camera] requesting camera permission at first video use");
-        requestCameraPermission([this, index](bool granted) {
-            if (!granted) {
-                // Deliberately re-read the status rather than assuming
-                // Denied: on iOS a prompt can also be dismissed by a
-                // restriction profile, and the two need different words.
-                failWith(camperm::refusalMessage(cameraPermission()));
+        {
+        // V-10: the answer can arrive long after the click. By then the
+        // user may have left the call or cancelled (stop()), and starting
+        // the camera regardless would broadcast into nothing — or into the
+        // NEXT call. Both are checked when the answer lands.
+        const quint64 ticket = ++m_startTicket;
+        const bool askedInCall = m_servers && m_servers->voiceServer();
+        QPointer<CameraController> self(this);
+        requestCameraPermission([self, ticket, askedInCall, index](bool granted) {
+            if (!self) return;
+            CameraController* const that = self.data();
+            if (ticket != that->m_startTicket) {
+                qInfo("[camera] permission answered after the start was "
+                      "cancelled — not starting");
                 return;
             }
-            // Re-enter with the decision on record; the status is now
-            // Granted, so this lands on Proceed.
-            startForCamera(index);
+            if (askedInCall && !(that->m_servers && that->m_servers->voiceServer())) {
+                qInfo("[camera] permission answered after leaving the call — "
+                      "not starting");
+                return;
+            }
+            that->onPermissionAnswered(granted, index);
         });
+        }
         return;
     case camperm::Action::Proceed:
         break;
@@ -472,6 +508,8 @@ void CameraController::startForCamera(int index)
 
 void CameraController::stop()
 {
+    // Cancels a start still waiting for the permission answer (V-10).
+    ++m_startTicket;
     m_throttle->stop();
     m_pendingFrame = {};
     setTransmitting(false);

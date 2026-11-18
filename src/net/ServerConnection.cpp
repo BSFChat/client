@@ -896,7 +896,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     m_voicePollTimer->setInterval(5000);
     connect(m_voicePollTimer, &QTimer::timeout, this, [this]() {
         if (!m_activeVoiceRoomId.isEmpty()) {
-            m_client->getVoiceMembers(m_activeVoiceRoomId);
+            m_client->getVoiceMembers(m_activeVoiceRoomId, m_voiceRosterEpoch);
         }
     });
 
@@ -931,7 +931,18 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         Q_UNUSED(roomId);
     });
 
-    connect(m_client, &MatrixClient::voiceMembersResult, this, [this](const QString& roomId, const QJsonArray& members) {
+    connect(m_client, &MatrixClient::voiceMembersResult, this,
+            [this](const QString& roomId, const QJsonArray& members, quint64 seq) {
+        // Issued before the latest sync-side m.call.member fold for this
+        // room: the roster it describes is older than the one we hold, and
+        // acting on it would drop a peer who has just joined (or re-offer
+        // to one who has just left). A fresh poll is already on its way.
+        if (roomId == m_activeVoiceRoomId && seq < m_voiceRosterEpoch) {
+            qInfo("[voice] ignoring stale member poll (seq %llu < %llu)",
+                  static_cast<unsigned long long>(seq),
+                  static_cast<unsigned long long>(m_voiceRosterEpoch));
+            return;
+        }
         m_voiceSession->onMembersPolled(roomId, members);
         if (roomId == m_activeVoiceRoomId) {
             m_voiceMembers = members;
@@ -946,6 +957,14 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             // whose id is greater than ours, so both sides can't
             // re-offer into a fresh glare.
             if (m_voiceEngine) {
+                // V-8 invite gate, from the same (fresh) reply.
+                QStringList ids;
+                for (const auto& v : members) {
+                    const QJsonObject row = v.toObject();
+                    if (!row.value(QStringLiteral("active")).toBool(true)) continue;
+                    ids.append(row.value(QStringLiteral("user_id")).toString());
+                }
+                m_voiceEngine->setVoiceRoster(ids);
                 // Both directions of the comparison, computed together in
                 // voice::reconcileRoster: offer to roster members we hold
                 // no peer for (and whose id outranks ours, so only one
@@ -2556,6 +2575,9 @@ void ServerConnection::joinVoiceChannel(const QString& roomId)
     // for its own echo.
     m_voiceSession->setLocalUserId(m_userId);
 
+    // One call at a time across every server (V2-4).
+    emit aboutToJoinVoice();
+
     // Acknowledge the click now: the server round trip, the TURN fetch and
     // opening the audio devices can together take a couple of seconds.
     setVoiceConnecting(roomId);
@@ -2569,6 +2591,19 @@ void ServerConnection::joinVoiceChannel(const QString& roomId)
         m_viewingVoiceRoom = true;
         emit viewingVoiceRoomChanged();
     }
+}
+
+void ServerConnection::setVoiceReconnecting(bool on)
+{
+    if (m_voiceReconnecting == on) return;
+    m_voiceReconnecting = on;
+    // Until a dedicated indicator exists everywhere, the existing
+    // "Connecting…" affordance carries it: same room, same meaning to the
+    // user — audio is not flowing yet.
+    if (on && !m_activeVoiceRoomId.isEmpty()) setVoiceConnecting(m_activeVoiceRoomId);
+    else if (!on && m_voiceConnectingRoomId == m_activeVoiceRoomId)
+        setVoiceConnecting(QString());
+    emit voiceReconnectingChanged();
 }
 
 void ServerConnection::setVoiceConnecting(const QString& roomId)
@@ -2764,7 +2799,11 @@ QVariantMap ServerConnection::videoReceiveStats(const QString& userId,
 
 void ServerConnection::leaveVoiceChannel()
 {
-    if (!m_voiceSession || m_voiceSession->state() == VoiceSession::State::Idle)
+    if (!m_voiceSession) return;
+    // Idle is "nothing to leave" only when no join is queued either (the
+    // gap in a channel switch is Idle with the next join still pending).
+    if (m_voiceSession->state() == VoiceSession::State::Idle
+        && m_voiceSession->headingTo().isEmpty())
         return;
     // Once the user leaves voice the VoiceRoom view has nothing to
     // show — flip back to text so they land on the active channel.
@@ -2814,8 +2853,10 @@ void ServerConnection::applyCallMemberEvent(const QString& roomId,
         // membership, then active=true) cannot be mistaken for our
         // current one being reaped.
         const std::string sid = js::str(event.content.data, "session_id");
+        const std::string dev = js::str(event.content.data, "device_id");
         m_voiceSession->onSelfMembership(roomId, active,
-                                         QString::fromStdString(sid));
+                                         QString::fromStdString(sid),
+                                         QString::fromStdString(dev));
     }
 
     // Only the room we're actually in needs the HTTP round trip: its reply
@@ -2834,7 +2875,11 @@ void ServerConnection::applyCallMemberEvent(const QString& roomId,
             m_voiceEngine->setVoiceRoster(ids);
         }
 #endif
-        m_client->getVoiceMembers(roomId);
+        // Newer than any poll already on the wire: a reply to one of those
+        // must not undo what this event just told us (a stale poll used to
+        // drop a peer who had just joined).
+        ++m_voiceRosterEpoch;
+        m_client->getVoiceMembers(roomId, m_voiceRosterEpoch);
     }
 }
 
@@ -2863,7 +2908,13 @@ void ServerConnection::setupVoiceSession()
     vs->setLocalUserId(m_userId);
 
     // ---- outbound: session → server -------------------------------
-    connect(vs, &VoiceSession::joinRequested, m_client, &MatrixClient::joinVoice);
+    connect(vs, &VoiceSession::joinRequested, m_client,
+            [this](const QString& roomId) {
+                // The device id lands in our m.call.member row, which is how
+                // another device of ours taking the seat is recognised.
+                m_voiceSession->setLocalDeviceId(m_deviceId);
+                m_client->joinVoice(roomId, m_deviceId);
+            });
     connect(vs, &VoiceSession::leaveRequested, m_client,
             [this](const QString& roomId, const QString& sessionId) {
                 m_client->leaveVoice(roomId, sessionId);
@@ -2894,6 +2945,9 @@ void ServerConnection::setupVoiceSession()
             emitVoiceMembersIfChanged(/*force=*/true);
             m_voiceSession->onJoinSucceeded(roomId, members, sessionId);
         });
+    // The join was refused because the channel is at its participant cap
+    // (or for any other reason): VoiceSession reports it via errorOccurred
+    // with the sentence MatrixClient::voiceJoinRefusalText produced.
     connect(m_client, &MatrixClient::voiceJoinError, m_voiceSession,
             &VoiceSession::onJoinFailed);
     connect(m_client, &MatrixClient::voiceLeft, m_voiceSession,
@@ -3001,7 +3055,10 @@ void ServerConnection::setupVoiceSession()
         // left). With voice compiled out, Active is as far as it goes.
         // Not when Idle is only the gap in a switch (A left, B's join
         // still queued): the user is still on their way into B.
-        if (st == State::Idle && m_voiceSession->headingTo().isEmpty())
+        // Leaving counts too: a leave now ends the local call at once,
+        // even while a cancelled join is still on the wire.
+        if ((st == State::Idle || st == State::Leaving)
+            && m_voiceSession->headingTo().isEmpty())
             setVoiceConnecting(QString());
 #ifndef BSFCHAT_VOICE_ENABLED
         if (st == State::Active) setVoiceConnecting(QString());
@@ -3137,6 +3194,29 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
 
     connect(m_voiceEngine, &VoiceEngine::error,
             this, [this](const QString& message) { setVoiceError(message); });
+    // Network change / wake: TURN may need refetching (VoiceSession
+    // decides from the credentials' expiry), and the UI says
+    // "Reconnecting…" until a peer is connected again.
+    connect(m_voiceEngine, &VoiceEngine::networkPathChanged, this, [this]() {
+        if (m_voiceSession) m_voiceSession->onWakeOrNetworkChange();
+    });
+    connect(m_voiceEngine, &VoiceEngine::turnRefreshWanted, this, [this]() {
+        if (m_voiceSession) m_voiceSession->onWakeOrNetworkChange();
+    });
+    connect(m_voiceEngine, &VoiceEngine::reconnectingChanged, this,
+            [this](bool on) { setVoiceReconnecting(on); });
+    // V2-5: a microphone that delivers nothing at all (dead stream, OS
+    // privacy switch, no input device) used to be silent in both senses.
+    connect(m_voiceEngine, &VoiceEngine::micCaptureStalled,
+            this, [this](bool stalled) {
+        if (stalled) {
+            setVoiceError(QStringLiteral("Your microphone isn't sending audio"));
+        }
+        if (m_micSilent != stalled) {
+            m_micSilent = stalled;
+            emit micSilentChanged();
+        }
+    });
     // The async half of start()'s refusal: the devices failed to open
     // after the join went ahead. Leave, which unwinds the server-side
     // membership exactly as a refused start used to.
@@ -3252,6 +3332,7 @@ void ServerConnection::dispatchCallSignal(const CallSignal& signal)
 
 void ServerConnection::teardownVoiceSession()
 {
+    setVoiceReconnecting(false);
     // First thing, and outside the voice #ifdef: the badge must not
     // survive the session by even one event loop turn. Every leave /
     // switch / kick / failed-start path funnels through here.
@@ -3402,7 +3483,9 @@ void ServerConnection::reconcileAnnouncedMedia()
 void ServerConnection::setLocalMediaState(bool screenSharing, bool cameraOn)
 {
     if (m_activeVoiceRoomId.isEmpty()) return;
-    m_client->updateVoiceMediaState(m_activeVoiceRoomId, screenSharing, cameraOn);
+    m_client->updateVoiceMediaState(m_activeVoiceRoomId, screenSharing, cameraOn,
+                                    m_voiceSession ? m_voiceSession->sessionId()
+                                                   : QString());
 }
 
 void ServerConnection::setVoiceError(const QString& message)

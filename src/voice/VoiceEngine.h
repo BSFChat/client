@@ -24,6 +24,7 @@
 #include <QObject>
 #include <QMap>
 #include <QSet>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QString>
 #include <QJsonArray>
@@ -83,9 +84,9 @@ public:
     // rendered as "connected" until ICE timed out on its own.
     void dropPeer(const QString& userId);
     // V-8: who is in the voice channel (users with an active
-    // m.call.member). Fed from every GET /voice/members reply for our room
-    // (wired in the constructor) and seeded by start(); callable directly
-    // too, e.g. from the sync-side m.call.member fold. Only roster members'
+    // m.call.member). Fed by ServerConnection from the sync-side
+    // m.call.member fold and from every GET /voice/members reply that is
+    // not stale, and seeded by start(). Only roster members'
     // invites are answered (see voice/VoiceRosterGate.h), and a held peer
     // that leaves it is torn down at once.
     void setVoiceRoster(const QStringList& userIds);
@@ -94,6 +95,12 @@ public:
     // server's `ttl`, and this call is mid-session: existing peers keep
     // their established transports, new ones get live credentials (V-M3).
     void updateTurnConfig(const QJsonObject& turnConfig);
+    // True from a network change / wake until a peer connection is up
+    // again (or there is nobody to connect to).
+    bool isReconnecting() const { return m_reconnecting; }
+    // Entry point for the network-change / wake handling below; public so
+    // the owner can also call it (e.g. on returning to the foreground).
+    void handleNetworkChange(const char* why);
     // True when at least one peer's data channel is open — i.e.
     // broadcast frames are actually reaching someone.
     bool hasOpenPeers() const override;
@@ -193,6 +200,16 @@ public:
     // stop so a share restart costs no renegotiation.
     void prepareVideoSend() override;
     // Fan an encoded access unit out to every peer with an open track.
+    //
+    // Still on the GUI thread, deliberately (audit 2 V2-7 asked whether
+    // it could move to a send thread). Not done: PeerConnectionManager's
+    // send paths read m_dc/track handles and per-peer counters and pacer
+    // state that the GUI thread mutates on renegotiation, glare and
+    // teardown, and m_peers itself changes under the reconciler. Moving
+    // the fan-out means a per-peer send lock across PeerConnectionManager
+    // and an audit of libdatachannel's per-track thread-safety, which
+    // cannot be validated without running real calls. The server-side
+    // participant cap (default 10) bounds the fan-out meanwhile.
     void broadcastEncodedVideo(VideoStreamId stream, const EncodedFrame& frame) override;
     // Fan an AV1 lossless temporal unit out over the reliable
     // "video-lossless" channels.
@@ -281,6 +298,18 @@ private:
     // theirs to collide with. Waiting for their 5 s reconciler instead would
     // make half of all pairs take five times as long to come back.
     void reestablishAllPeers(const char* why);
+    // Tear down and re-offer ONE peer (hangup first), whatever the offer
+    // direction rule says — see reestablishAllPeers.
+    void reestablishPeer(const QString& userId, const char* why);
+    // V2-6: after a TURN refresh, peers whose OUR-side relay allocation
+    // (or unfinished setup) used the old credentials are rebuilt one at a
+    // time, kPeerRebuildSpacingMs apart, so the call never drops everyone
+    // at once. libdatachannel has no API to hand new credentials to a
+    // live PeerConnection (the ICE agent reads them at construction).
+    void rebuildNextStalePeer();
+    void setReconnecting(bool on);
+    void onNetworkInformationChanged();
+    void checkWallClockJump();
     QString generateCallId() const;
     // This client's media capabilities, advertised in every
     // invite/answer we send. Codec/profile lists come from the video
@@ -332,6 +361,28 @@ private:
     // Per-peer single-shot watchdogs for the initial setup phase.
     QMap<QString, QTimer*> m_connectWatchdogs;
     QJsonObject m_turnConfig;
+    // TURN credential bookkeeping (V2-6). Every refresh bumps the
+    // generation; each peer remembers the generation it was built with.
+    quint64 m_turnGeneration = 0;
+    qint64 m_turnExpiresAtMs = 0;
+    bool m_turnRefreshAsked = false;
+    QMap<QString, quint64> m_peerTurnGeneration;
+    QStringList m_staleRebuildQueue;
+    QTimer m_staleRebuildTimer;
+    static constexpr int kPeerRebuildSpacingMs = 4000;
+    // Network change / wake (audit 2): debounced, then every peer is
+    // rebuilt at once and the call shows "Reconnecting…" until one is up.
+    QTimer m_networkChangeDebounce;
+    QTimer m_reconnectTimeout;
+    QTimer m_wakeProbe;
+    qint64 m_wakeProbeWallMs = 0;
+    qint64 m_wakeProbeMonoMs = 0;
+    QElapsedTimer m_mono;
+    bool m_reconnecting = false;
+    static constexpr int kNetworkChangeDebounceMs = 1000;
+    static constexpr int kReconnectTimeoutMs = 30000;
+    static constexpr int kWakeProbeMs = 5000;
+    static constexpr qint64 kWakeJumpMs = 20000;
     bool m_running = false;
     // True only for the duration of stop(). The outbox flush gate reads
     // it so the hangups stop() enqueues can still leave, even though

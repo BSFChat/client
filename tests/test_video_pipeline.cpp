@@ -483,6 +483,30 @@ private slots:
 
     // ---- S-2: keyframe recovery ------------------------------------
 
+    // Leaving a call used to delete every receive pipeline on the GUI
+    // thread, each one a blocking queued call plus a thread join. retire()
+    // must return without waiting for the worker, emit nothing after it
+    // returns, and still delete the object once the worker has exited.
+    void retireDoesNotBlockAndSelfDeletes() {
+        QObject owner;
+        auto* pipe = new VideoReceivePipeline(QStringLiteral("@bob:example.org"),
+                                              VideoStreamId::Screen,
+                                              VideoCodecKind::H264, &owner);
+        QSignalSpy gone(pipe, &QObject::destroyed);
+        // Keep the worker busy with a backlog it must abandon.
+        for (int i = 0; i < 8; ++i) pipe->submitAccessUnit(annexB(/*nalType=*/1));
+
+        QElapsedTimer t;
+        t.start();
+        pipe->retire();
+        QVERIFY(t.elapsed() < 50);
+        QVERIFY(pipe->parent() == nullptr);    // the owner no longer deletes it
+        pipe->retire();                         // idempotent
+        pipe->submitAccessUnit(annexB(/*nalType=*/5));   // ignored
+
+        QTRY_COMPARE_WITH_TIMEOUT(gone.count(), 1, kLivenessMs);
+    }
+
     // A keyframe request can be lost (it used to ride a channel with
     // maxRetransmits=0). Nothing re-fired it, so the viewer stayed
     // frozen until the sender's periodic IDR, 10-30 s later. Every

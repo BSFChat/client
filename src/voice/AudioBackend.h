@@ -149,6 +149,13 @@ public:
     // directions marked in-use, and nothing flowing in either. Silence
     // with no error and no way back short of rejoining.
     virtual bool healthy() const { return true; }
+    // Per-direction health, for a backend whose two directions fail and
+    // recover independently (the Qt one: a PulseAudio/PipeWire restart, a
+    // WASAPI device taken exclusive, the OS privacy toggle). AudioWorker
+    // reopens just the failed direction instead of demoting anything.
+    // Default: both follow healthy(). Polled from the pump.
+    virtual bool captureHealthy() const { return healthy(); }
+    virtual bool renderHealthy() { return healthy(); }
 
     // Counters worth putting in the end-of-session log line: how much
     // was actually captured and rendered, and how often anything had to

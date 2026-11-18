@@ -49,6 +49,14 @@ std::vector<std::function<void()>>& retireWaiters()
 }
 } // namespace
 
+static void releaseRetireWaitersIfIdle()
+{
+    if (!retiringThreads().isEmpty()) return;
+    auto waiters = std::move(retireWaiters());
+    retireWaiters().clear();
+    for (auto& w : waiters) w();
+}
+
 bool AudioEngine::retiringInProgress()
 {
     return !retiringThreads().isEmpty();
@@ -217,6 +225,8 @@ void AudioEngine::prepareThread() {
             this, &AudioEngine::peerLevelChanged, Qt::QueuedConnection);
     // Queued for the same reason as the rest: AudioDeviceStatus is read
     // by a QML binding and must only ever be touched from here.
+    connect(m_worker, &AudioWorker::captureStalledChanged,
+            this, &AudioEngine::captureStalledChanged, Qt::QueuedConnection);
     connect(m_worker, &AudioWorker::deviceInUseChanged, this,
             [](bool input, const QString& description) {
                 auto& status = bsfchat::AudioDeviceStatus::instance();
@@ -321,7 +331,12 @@ void AudioEngine::startAsync() {
             [this, generation](bool ok) {
         if (generation != m_startGeneration || !m_thread) return;
         if (!ok) {
-            teardownThread();
+            // Retired, not joined: the failed worker closes whatever it
+            // half-opened on its own thread. This used to be
+            // teardownThread() — a blocking stop, a wait of up to
+            // kThreadJoinTimeoutMs on the GUI thread and then
+            // terminate() on a thread that might be inside a driver.
+            retireThread();
             emit startFinished(false);
             return;
         }
@@ -363,16 +378,23 @@ void AudioEngine::retireThread() {
     QThread* thread = m_thread;
     AudioWorker* worker = m_worker;
     retiringThreads().insert(thread);
+    // A shutdown wedged in a driver must not block every future join
+    // (startAsync defers until this set is empty). Past the deadline the
+    // thread is abandoned — left to finish or not on its own — and
+    // whoever was waiting goes ahead.
+    QTimer::singleShot(kRetireTimeoutMs, thread, [thread]() {
+        if (!retiringThreads().remove(thread)) return;
+        qCritical("[voice] audio thread still closing its devices after "
+                  "%d ms — abandoning it so the next call can start",
+                  kRetireTimeoutMs);
+        releaseRetireWaitersIfIdle();
+    });
     // Context = the QThread object, which lives on the GUI thread, so this
     // runs there (queued) once the audio thread has exited.
     connect(thread, &QThread::finished, thread, [thread]() {
-        retiringThreads().remove(thread);
+        const bool wasWaitedOn = retiringThreads().remove(thread);
         thread->deleteLater();
-        if (retiringThreads().isEmpty()) {
-            auto waiters = std::move(retireWaiters());
-            retireWaiters().clear();
-            for (auto& w : waiters) w();
-        }
+        if (wasWaitedOn) releaseRetireWaitersIfIdle();
     });
     // stopDevices() then quit, in ONE queued call on the audio thread:
     // posting quit() separately could end the loop before the stop ran.
@@ -428,16 +450,23 @@ void AudioEngine::teardownThread() {
 
     m_thread->quit();
     if (!m_thread->wait(kThreadJoinTimeoutMs)) {
-        qWarning("[voice] audio thread did not exit within %dms — terminating",
-                 kThreadJoinTimeoutMs);
-        m_thread->terminate();
-        m_thread->wait();
+        // Never terminate(): killing a thread inside a CoreAudio/WASAPI
+        // call can leave the driver's locks held for the whole process.
+        // Abandon it instead; it finishes (and frees itself) on its own,
+        // or the process exits around it.
+        qCritical("[voice] audio thread did not exit within %dms — "
+                  "abandoning it", kThreadJoinTimeoutMs);
+        QThread* wedged = m_thread;
+        QObject::connect(wedged, &QThread::finished, wedged, &QObject::deleteLater);
+        m_worker = nullptr;
+        m_thread = nullptr;
+    } else {
+        // The worker deleted itself via the finished() -> deleteLater
+        // connection, which QThread flushes before wait() returns.
+        m_worker = nullptr;
+        delete m_thread;
+        m_thread = nullptr;
     }
-    // The worker deleted itself via the finished() -> deleteLater
-    // connection, which QThread flushes before wait() returns.
-    m_worker = nullptr;
-    delete m_thread;
-    m_thread = nullptr;
 
     // Anything the network pushed while we were shutting down.
     if (m_queue) m_queue->clear();

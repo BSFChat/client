@@ -177,10 +177,13 @@ signals:
     // peer's participant tile. Rate-limited to ~12.5Hz — see
     // AudioWorker::kPeerLevelEmitFrames.
     void peerLevelChanged(const QString& peerId, float level);
+    // AudioWorker::captureStalledChanged, forwarded to the GUI thread.
+    void captureStalledChanged(bool stalled);
 
 private:
-    // Joins the audio thread and disposes of the worker. Used by both
-    // stop() and the failure path in start().
+    // Joins the audio thread (bounded, never terminate()) and disposes of
+    // the worker. Only for the blocking start() and destruction without a
+    // stop(); the join path's failure and stop() both use retireThread().
     void teardownThread();
     // start()/startAsync() share these: the thread and worker before the
     // devices open, and the bookkeeping after they did.
@@ -230,6 +233,10 @@ private:
     // in a driver, and hanging the GUI on a leave-call is worse than
     // leaking the thread.
     static constexpr int kThreadJoinTimeoutMs = 2000;
+    // How long a retiring pipeline may hold up the next start before it
+    // is abandoned (V2-7: a wedged shutdown used to block every later
+    // join for the life of the process).
+    static constexpr int kRetireTimeoutMs = 3000;
 
     QThread* m_thread = nullptr;
     AudioWorker* m_worker = nullptr;
