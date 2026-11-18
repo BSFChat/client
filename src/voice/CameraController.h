@@ -149,6 +149,11 @@ private:
     // Prompt. `done` runs on the main thread with the user's answer.
     // Only called when cameraPermission() said Undetermined.
     void requestCameraPermission(std::function<void(bool granted)> done);
+    // The permission prompt's answer, once it is known to still be wanted.
+    void onPermissionAnswered(bool granted, int index);
+    // Bumped by every permission request and every stop(); an answer for
+    // an older ticket is stale (V-10).
+    quint64 m_startTicket = 0;
     // Set m_lastError and notify. One place so the refusal paths cannot
     // forget the signal.
     void failWith(const QString& message);

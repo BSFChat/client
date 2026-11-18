@@ -1719,8 +1719,7 @@ QString MatrixClient::voiceJoinRefusalText(const QByteArray& body)
     }
     const int cap = err.value(QStringLiteral("max_participants")).toInt(0);
     return cap > 0
-        ? QStringLiteral("This voice channel is full — calls here are limited "
-                         "to %1 people.").arg(cap)
+        ? QStringLiteral("This voice channel is full (%1 people)").arg(cap)
         : QStringLiteral("This voice channel is full.");
 }
 

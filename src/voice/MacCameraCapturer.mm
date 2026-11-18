@@ -2,18 +2,22 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreVideo/CoreVideo.h>
+#include <QCoreApplication>
 #include <QDebug>
 #include <QVariantMap>
 
-@interface MacCameraDelegate : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
-@property (nonatomic, assign) MacCameraCapturer *owner;
+@interface MacCameraDelegate : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate> {
+@public
+    std::shared_ptr<MacCameraCapturer::Link> link;
+}
 @end
 
 @implementation MacCameraDelegate
 - (void)captureOutput:(AVCaptureOutput *)output
 didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
        fromConnection:(AVCaptureConnection *)connection {
-    if (!_owner) return;
+    // Cheap early-out only; the authoritative check is on the GUI thread.
+    if (!link || !link->owner.load(std::memory_order_relaxed)) return;
     CVImageBufferRef pixel = CMSampleBufferGetImageBuffer(sampleBuffer);
     if (!pixel) return;
     CVPixelBufferLockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly);
@@ -39,17 +43,31 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     CVPixelBufferUnlockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly);
     if (!img.isNull()) {
-        // Delegate call runs on the capture queue — hop to Qt main.
-        QMetaObject::invokeMethod(_owner, [owner = _owner, img]() {
-            owner->_onFrame(img);
+        // Delegate call runs on the capture queue — hop to Qt main. The
+        // context is the application object (always alive); the owner is
+        // re-read there, where stop() clears it.
+        std::shared_ptr<MacCameraCapturer::Link> l = link;
+        QMetaObject::invokeMethod(qApp, [l, img]() {
+            if (auto* o = l->owner.load()) o->_onFrame(img);
         }, Qt::QueuedConnection);
     }
 }
 @end
 
-MacCameraCapturer::MacCameraCapturer(QObject* parent) : QObject(parent) {}
+MacCameraCapturer::MacCameraCapturer(QObject* parent)
+    : QObject(parent)
+{
+    m_sessionQueue = dispatch_queue_create("com.bsfchat.cam.session",
+                                           DISPATCH_QUEUE_SERIAL);
+}
 
-MacCameraCapturer::~MacCameraCapturer() { stop(); }
+MacCameraCapturer::~MacCameraCapturer()
+{
+    stop();
+    // Pending start/stop blocks hold their own references to what they
+    // touch; releasing our reference to the queue does not cancel them.
+    if (m_sessionQueue) dispatch_release((dispatch_queue_t)m_sessionQueue);
+}
 
 QVariantList MacCameraCapturer::availableCameras() const
 {
@@ -116,14 +134,55 @@ void MacCameraCapturer::start(int index)
             @(kCVPixelFormatType_32BGRA)
     };
 
+    m_link = std::make_shared<Link>();
+    m_link->owner.store(this);
     MacCameraDelegate* del = [[MacCameraDelegate alloc] init];
-    del.owner = this;
+    del->link = m_link;
     dispatch_queue_t q = dispatch_queue_create(
         "com.bsfchat.cam.frames", DISPATCH_QUEUE_SERIAL);
     [output setSampleBufferDelegate:del queue:q];
+    dispatch_release(q);   // the output retains it
     if ([session canAddOutput:output]) [session addOutput:output];
+    [output release];      // the session retains it
     [session commitConfiguration];
-    [session startRunning];
+
+    // Off the main thread: startRunning blocks while the device spins up.
+    // The block retains `session` until it has run.
+    dispatch_async((dispatch_queue_t)m_sessionQueue, ^{
+        [session startRunning];
+    });
+
+    // The camera going away by itself. Delivered on the main queue, and
+    // through the shared link so a stopped capturer ignores them.
+    std::shared_ptr<Link> link = m_link;
+    NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
+    NSOperationQueue* main = [NSOperationQueue mainQueue];
+    id obs0 = [nc addObserverForName:AVCaptureDeviceWasDisconnectedNotification
+                              object:device queue:main
+                          usingBlock:^(NSNotification* note) {
+        (void)note;
+        if (auto* o = link->owner.load()) o->_onLost(QStringLiteral("Your camera was disconnected."));
+    }];
+    id obs1 = [nc addObserverForName:AVCaptureSessionRuntimeErrorNotification
+                              object:session queue:main
+                          usingBlock:^(NSNotification* n) {
+        NSError* e = n.userInfo[AVCaptureSessionErrorKey];
+        const QString why = e ? QString::fromNSString(e.localizedDescription)
+                              : QStringLiteral("unknown error");
+        if (auto* o = link->owner.load())
+            o->_onLost(QStringLiteral("The camera stopped: %1").arg(why));
+    }];
+    id obs2 = [nc addObserverForName:AVCaptureSessionWasInterruptedNotification
+                              object:session queue:main
+                          usingBlock:^(NSNotification* note) {
+        (void)note;
+        if (auto* o = link->owner.load())
+            o->_onLost(QStringLiteral("The camera was taken by another "
+                                      "app or the system."));
+    }];
+    m_observers[0] = [obs0 retain];
+    m_observers[1] = [obs1 retain];
+    m_observers[2] = [obs2 retain];
 
     m_session = session;
     m_delegate = del;
@@ -132,21 +191,48 @@ void MacCameraCapturer::start(int index)
     qInfo("[mac-camera] start '%s'", qUtf8Printable(m_currentDescription));
 }
 
+void MacCameraCapturer::removeObservers()
+{
+    NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
+    for (void*& o : m_observers) {
+        if (!o) continue;
+        [nc removeObserver:(id)o];
+        [(id)o release];
+        o = nullptr;
+    }
+}
+
 void MacCameraCapturer::stop()
 {
     if (!m_active) return;
+    // Nothing more reaches us from here on: frames already queued to the
+    // main thread and notifications both re-check this.
+    if (m_link) m_link->owner.store(nullptr);
+    m_link.reset();
+    removeObservers();
     AVCaptureSession* session = m_session;
-    if (session) {
-        [session stopRunning];
-        [session release];
-        m_session = nullptr;
-    }
-    if (m_delegate) {
-        [(id)m_delegate release];
-        m_delegate = nullptr;
-    }
+    MacCameraDelegate* del = m_delegate;
+    m_session = nullptr;
+    m_delegate = nullptr;
     m_active = false;
+    // stopRunning blocks until the device has stopped; do it on the
+    // session queue (after any pending startRunning), then let go.
+    dispatch_async((dispatch_queue_t)m_sessionQueue, ^{
+        if (session) {
+            [session stopRunning];
+            [session release];
+        }
+        if (del) [(id)del release];
+    });
     qInfo("[mac-camera] stop");
+}
+
+void MacCameraCapturer::_onLost(const QString& reason)
+{
+    if (!m_active) return;
+    qWarning("[mac-camera] %s", qUtf8Printable(reason));
+    stop();
+    emit cameraLost(reason);
 }
 
 void MacCameraCapturer::_onFrame(const QImage& img)
