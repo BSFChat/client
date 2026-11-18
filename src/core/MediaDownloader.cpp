@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QStandardPaths>
@@ -68,13 +69,38 @@ MediaDownloader::MediaDownloader(QObject* parent) : QObject(parent)
     enforceCacheBudget();
 }
 
+QString MediaDownloader::defaultCacheRoot()
+{
+    return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/media";
+}
+
 QString MediaDownloader::cacheDirPath() const
 {
-    QString base = QStandardPaths::writableLocation(
-        QStandardPaths::CacheLocation);
-    QString dir = base + "/media";
+    const QString dir = m_cacheRootOverride.isEmpty() ? defaultCacheRoot() : m_cacheRootOverride;
     QDir().mkpath(dir);
     return dir;
+}
+
+QString MediaDownloader::cacheBucketFor(const QString& url)
+{
+    const QUrl u(url);
+    const QString host = u.host(QUrl::EncodeUnicode).toLower();
+    if (host.isEmpty()) return QStringLiteral("local");
+    const QString scheme = u.scheme().toLower();
+    const int port = u.port(scheme == QLatin1String("http") ? 80 : 443);
+    const QString origin = scheme + QStringLiteral("://") + host + QLatin1Char(':')
+                         + QString::number(port);
+    return QString::fromLatin1(
+        QCryptographicHash::hash(origin.toUtf8(), QCryptographicHash::Sha1).toHex().left(16));
+}
+
+bool MediaDownloader::removeCacheForServer(const QString& serverUrl, const QString& cacheRoot)
+{
+    if (QUrl(serverUrl).host().isEmpty()) return true;
+    const QString root = cacheRoot.isEmpty() ? defaultCacheRoot() : cacheRoot;
+    QDir bucket(root + QLatin1Char('/') + cacheBucketFor(serverUrl));
+    if (!bucket.exists()) return true;
+    return bucket.removeRecursively();
 }
 
 QString MediaDownloader::cacheKeyForUrl(const QString& url)
@@ -123,7 +149,12 @@ QString MediaDownloader::cachePathFor(const QString& url) const
     if (!ext.isEmpty()
         && !bsfchat::client::attachment::safeTypeForExtension(ext.mid(1)))
         ext.clear();
-    return cacheDirPath() + "/" + QString::fromLatin1(h) + ext;
+    // One directory per server origin, so removing a server can delete what
+    // it served (C2-7). Files from before the split sit at the top level and
+    // age out through the budget.
+    const QString bucket = cacheDirPath() + "/" + cacheBucketFor(key);
+    QDir().mkpath(bucket);
+    return bucket + "/" + QString::fromLatin1(h) + ext;
 }
 
 void MediaDownloader::request(const QString& remoteUrl)
@@ -280,9 +311,17 @@ void MediaDownloader::enforceCacheBudget()
     QDir dir(cacheDirPath());
     if (!dir.exists()) return;
 
-    auto entries = dir.entryInfoList(
-        QDir::Files | QDir::NoSymLinks,
-        QDir::Time | QDir::Reversed); // oldest first by mtime
+    // The top level (files from before per-server buckets) and every bucket.
+    QFileInfoList entries;
+    QDirIterator walk(dir.path(), QDir::Files | QDir::NoSymLinks,
+                      QDirIterator::Subdirectories);
+    while (walk.hasNext()) {
+        walk.next();
+        entries.append(walk.fileInfo());
+    }
+    std::sort(entries.begin(), entries.end(), [](const QFileInfo& a, const QFileInfo& b) {
+        return a.lastModified() < b.lastModified(); // oldest first by mtime
+    });
 
     qint64 total = 0;
     for (const auto& info : entries) total += info.size();

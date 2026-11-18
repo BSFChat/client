@@ -1361,6 +1361,14 @@ void ServerConnection::forgetLocalData()
     m_cache->close();
     m_cacheWired = false;
     LocalCache::removeFilesFor(m_userId, m_serverUrl);
+    // And the media it served: downloaded attachments and videos are cached
+    // per server origin (C2-7). Both the saved address and the homeserver
+    // .well-known pointed at, since media URLs are built from either.
+    MediaDownloader::removeCacheForServer(m_serverUrl);
+    const QString homeserver = homeserverUrl();
+    if (!homeserver.isEmpty()
+        && MediaDownloader::cacheBucketFor(homeserver) != MediaDownloader::cacheBucketFor(m_serverUrl))
+        MediaDownloader::removeCacheForServer(homeserver);
 }
 
 QString ServerConnection::signInResource() const

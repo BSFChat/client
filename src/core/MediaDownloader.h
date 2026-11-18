@@ -69,6 +69,17 @@ public:
     // static so the property can be tested without a cache directory.
     static QString cacheKeyForUrl(const QString& url);
 
+    // Cached files live under media/<bucket>/, one bucket per server origin
+    // (scheme, host, port of the URL), so a server's files can be found and
+    // deleted when it is removed. Static and pure for the tests.
+    static QString cacheBucketFor(const QString& url);
+    // Delete every cached media file fetched from `serverUrl`'s origin.
+    // Returns false if a bucket existed and could not be removed entirely.
+    // `cacheRoot` defaults to the real cache directory; tests pass their own.
+    static bool removeCacheForServer(const QString& serverUrl,
+                                     const QString& cacheRoot = QString());
+    static QString defaultCacheRoot();
+
 signals:
     void completed(QString remoteUrl, QString localFileUrl);
     void failed(QString remoteUrl, QString error);
@@ -97,6 +108,12 @@ private:
 
     QString cacheDirPath() const;
     QString cachePathFor(const QString& url) const;
+public:
+    // Tests point a downloader at a scratch directory.
+    void setCacheRootForTesting(const QString& root) { m_cacheRootOverride = root; }
+    QString cachePathForTesting(const QString& url) const { return cachePathFor(url); }
+private:
+    QString m_cacheRootOverride;
     // Sweep: tally every file in the cache dir, if total > limit
     // delete oldest-modified until under. Cheap — bounded by the
     // number of cached files, which is capped by the size limit.

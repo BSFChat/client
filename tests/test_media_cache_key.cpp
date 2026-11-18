@@ -15,6 +15,8 @@
 #include "core/MediaDownloader.h"
 
 #include <QTest>
+#include <QFile>
+#include <QTemporaryDir>
 
 class TestMediaCacheKey : public QObject
 {
@@ -100,6 +102,48 @@ private slots:
             "https://bsfchat.com/_matrix/media/v3/download/bsfchat.com/0123abcd");
         QCOMPARE(MediaDownloader::cacheKeyForUrl(base + QStringLiteral("#.exe")), base);
         QCOMPARE(MediaDownloader::cacheKeyForUrl(base + QStringLiteral("#x?y")), base);
+    }
+
+    // C2-7: removing a server deletes the media it served. Files are cached
+    // per server origin, so its bucket can be found and removed.
+    void filesAreBucketedPerServerOrigin()
+    {
+        const QString a = QStringLiteral("https://chat.example/_matrix/media/v3/download/s/1");
+        QCOMPARE(MediaDownloader::cacheBucketFor(a),
+                 MediaDownloader::cacheBucketFor(QStringLiteral("https://CHAT.example:443/x")));
+        QVERIFY(MediaDownloader::cacheBucketFor(a)
+                != MediaDownloader::cacheBucketFor(QStringLiteral("https://other.example/x")));
+        QVERIFY(MediaDownloader::cacheBucketFor(a)
+                != MediaDownloader::cacheBucketFor(QStringLiteral("https://chat.example:8448/x")));
+        QVERIFY(MediaDownloader::cacheBucketFor(a)
+                != MediaDownloader::cacheBucketFor(QStringLiteral("http://chat.example/x")));
+    }
+
+    void removingAServerDeletesOnlyItsMedia()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        MediaDownloader dl;
+        dl.setCacheRootForTesting(root.path());
+        const QString mine = dl.cachePathForTesting(
+            QStringLiteral("https://chat.example/_matrix/media/v3/download/s/1?ticket=x"));
+        const QString theirs = dl.cachePathForTesting(
+            QStringLiteral("https://other.example/_matrix/media/v3/download/s/2"));
+        QVERIFY(mine.startsWith(root.path() + QLatin1Char('/')));
+        for (const QString& path : {mine, theirs}) {
+            QFile f(path);
+            QVERIFY2(f.open(QIODevice::WriteOnly), qPrintable(path));
+            f.write("x");
+        }
+        QVERIFY(MediaDownloader::removeCacheForServer(QStringLiteral("https://chat.example"),
+                                                      root.path()));
+        QVERIFY(!QFile::exists(mine));
+        QVERIFY(QFile::exists(theirs));
+        // Nothing cached, or not a URL: nothing to do, not a failure.
+        QVERIFY(MediaDownloader::removeCacheForServer(QStringLiteral("https://none.example"),
+                                                      root.path()));
+        QVERIFY(MediaDownloader::removeCacheForServer(QString(), root.path()));
+        QVERIFY(QFile::exists(theirs));
     }
 };
 
