@@ -544,15 +544,12 @@ Rectangle {
 
                 MouseArea {
                     anchors.fill: parent
-                    onPressed: if (serverManager.activeServer)
-                                   serverManager.activeServer.setPttPressed(true)
-                    onReleased: if (serverManager.activeServer)
-                                    serverManager.activeServer.setPttPressed(false)
+                    onPressed: serverManager.setPttPressed(true)
+                    onReleased: serverManager.setPttPressed(false)
                     // If the finger leaves the button entirely we
                     // also release — prevents a stuck-open PTT
                     // from dragging off the widget.
-                    onCanceled: if (serverManager.activeServer)
-                                    serverManager.activeServer.setPttPressed(false)
+                    onCanceled: serverManager.setPttPressed(false)
                 }
             }
 
