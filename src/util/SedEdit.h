@@ -22,10 +22,14 @@
 //     sed user expects `.` and `\d` to mean. It is capped at 200 characters,
 //     and the body it runs on at kMaxBodyChars, so a catastrophic pattern is
 //     bounded by PCRE2's own match limit on a bounded input. A pattern that
-//     hits that limit simply reports no match.
+//     hits that limit simply reports no match. That bounds ONE match; with
+//     `g` the whole run is also bounded (C2-7: it took 48 s on a 64 K body):
+//     at most kMaxMatches matches, kMaxOutputChars of output and kMaxApplyMs
+//     of wall time, checked between matches, else it aborts with an error.
 //   * REPLACEMENT: `&` is the whole match, `\0`..`\9` a capture group, `\&`
 //     and `\\` literal, any other `\c` is `c`.
 
+#include <QElapsedTimer>
 #include <QRegularExpression>
 #include <QString>
 
@@ -35,6 +39,9 @@ namespace bsfchat::client::sed {
 
 inline constexpr int kMaxPatternChars = 200;
 inline constexpr int kMaxBodyChars = 64 * 1024;
+inline constexpr int kMaxMatches = 10000;
+inline constexpr int kMaxOutputChars = 2 * kMaxBodyChars;
+inline constexpr qint64 kMaxApplyMs = 50;
 
 struct Command {
     QString pattern;      // regex source, `\/` already turned into `/`
@@ -156,29 +163,45 @@ inline QString expandReplacement(const QString& repl, const QRegularExpressionMa
 }
 
 // Apply `cmd` to `body`. nullopt when nothing matched (or the body is too
-// large to run a user regex over).
-inline std::optional<QString> apply(const Command& cmd, const QString& body)
+// large to run a user regex over), or when the run was aborted for taking too
+// much work — then `error` (if given) says so.
+inline std::optional<QString> apply(const Command& cmd, const QString& body,
+                                    QString* error = nullptr, qint64 maxMs = kMaxApplyMs)
 {
+    if (error) error->clear();
     if (body.size() > kMaxBodyChars) return std::nullopt;
     QRegularExpression::PatternOptions opts = QRegularExpression::NoPatternOption;
     if (cmd.caseInsensitive) opts |= QRegularExpression::CaseInsensitiveOption;
     const QRegularExpression re(cmd.pattern, opts);
     if (!re.isValid()) return std::nullopt;
 
+    QElapsedTimer clock;
+    clock.start();
+    auto abort = [error](const QString& why) -> std::optional<QString> {
+        if (error) *error = why;
+        return std::nullopt;
+    };
+
     QString out;
     qsizetype last = 0;
-    bool matched = false;
+    int matches = 0;
     auto it = re.globalMatch(body);
     while (it.hasNext()) {
         const QRegularExpressionMatch m = it.next();
-        matched = true;
-        out += body.mid(last, m.capturedStart(0) - last);
+        ++matches;
+        out += QStringView(body).mid(last, m.capturedStart(0) - last);
         out += expandReplacement(cmd.replacement, m);
         last = m.capturedEnd(0);
         if (!cmd.global) break;
+        if (matches >= kMaxMatches)
+            return abort(QStringLiteral("That pattern matches too many times."));
+        if (out.size() > kMaxOutputChars)
+            return abort(QStringLiteral("That would make your message far too long."));
+        if (clock.elapsed() > maxMs)
+            return abort(QStringLiteral("That pattern takes too long to run."));
     }
-    if (!matched) return std::nullopt;
-    out += body.mid(last);
+    if (matches == 0) return std::nullopt;
+    out += QStringView(body).mid(last);
     return out;
 }
 

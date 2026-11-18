@@ -7,6 +7,7 @@
 
 #include "util/SedEdit.h"
 
+#include <QElapsedTimer>
 #include <QTest>
 
 namespace sed = bsfchat::client::sed;
@@ -116,6 +117,35 @@ private slots:
         const QString body = QString(40, u'a') + u'!';
         (void)sed::apply(p.command, body);
         QVERIFY(true);
+    }
+
+    // C2-7: `g` over a 64 K body used to run for 48 s. The whole run is now
+    // bounded and reports why it stopped.
+    void aGlobalRunIsBounded()
+    {
+        QString err;
+        // Too many matches.
+        const auto many = sed::parse(QStringLiteral("s/a/b/g"));
+        QVERIFY(!sed::apply(many.command, QString(sed::kMaxBodyChars, u'a'), &err).has_value());
+        QVERIFY(!err.isEmpty());
+        // Output blow-up.
+        const auto grow = sed::parse(QStringLiteral("s/a/") + QString(30, u'&') + QStringLiteral("/g"));
+        QVERIFY(!sed::apply(grow.command, QString(5000, u'a'), &err).has_value());
+        QVERIFY(err.contains(QStringLiteral("long")));
+        // Slow per match: abandoned by the clock, quickly.
+        const auto slow = sed::parse(QStringLiteral("s/(a|aa)+b|x/y/g"));
+        QString body;
+        for (int i = 0; i < 2000; ++i) body += QString(24, u'a') + u'x';
+        QElapsedTimer t;
+        t.start();
+        const auto r = sed::apply(slow.command, body, &err, 20);
+        QVERIFY2(t.elapsed() < 5000, qPrintable(QString::number(t.elapsed())));
+        if (!r) QVERIFY(!err.isEmpty());
+        // An ordinary g still works and reports no error.
+        const auto ok = sed::parse(QStringLiteral("s/o/0/g"));
+        QCOMPARE(sed::apply(ok.command, QStringLiteral("foo boo"), &err).value_or(QString()),
+                 QStringLiteral("f00 b00"));
+        QVERIFY(err.isEmpty());
     }
 };
 

@@ -2131,7 +2131,9 @@ QVariantMap ServerConnection::editLastMessageWithSed(const QString& text)
 
     const QString eventId = m_messageModel->data(mi, MessageModel::EventIdRole).toString();
     const QString body = m_messageModel->data(mi, MessageModel::BodyRole).toString();
-    const auto edited = sed::apply(parsed.command, body);
+    QString sedError;
+    const auto edited = sed::apply(parsed.command, body, &sedError);
+    if (!edited && !sedError.isEmpty()) return fail(sedError);
     if (!edited) return fail(QStringLiteral("Nothing in your last message matches that."));
     if (*edited == body) return fail(QStringLiteral("That wouldn't change your last message."));
     if (edited->trimmed().isEmpty())
