@@ -18,8 +18,10 @@
 #define BSFCHAT_PUSH_IOS 1
 // src/core/PushBridgeIos.mm
 namespace bsfchat::push::ios {
-void attach();                  // flushes what arrived before Qt was up
+void attach(PushBridge* bridge); // flushes what arrived before Qt was up
 void requestAuthorizationAndRegister();
+QString deviceModel();          // UIDevice.model, e.g. "iPhone"
+
 }
 #endif
 
@@ -103,10 +105,16 @@ PushBridge::PushBridge(QObject* parent) : QObject(parent)
 {
     m_deviceName = QSysInfo::prettyProductName();
 #ifdef BSFCHAT_PUSH_ANDROID
+    // Build.MANUFACTURER + MODEL: what the server's device list shows.
+    const QString model = QJniObject::callStaticObjectMethod(
+        kJavaBridge, "deviceName", "()Ljava/lang/String;").toString();
+    if (!model.isEmpty()) m_deviceName = model;
     registerNatives();
 #endif
 #ifdef BSFCHAT_PUSH_IOS
-    bsfchat::push::ios::attach();
+    const QString model = bsfchat::push::ios::deviceModel();
+    if (!model.isEmpty()) m_deviceName = model;
+    bsfchat::push::ios::attach(this);
 #endif
     if (!bsfchat::push::kCompiledIn) setUnavailable(QStringLiteral("not-built"));
 }

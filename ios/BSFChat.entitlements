@@ -18,6 +18,20 @@
 	  Apple Developer portal, and the provisioning profile regenerated, or
 	  signing fails. See docs/ios-release.md.
 	-->
+	<!--
+	  APNs, for push notifications (docs/push-notifications.md). "production"
+	  is what App Store and TestFlight builds must carry and what an App Store
+	  provisioning profile grants. CMakeLists.txt substitutes "development"
+	  for the Debug configuration (a development profile grants only that),
+	  and removes the key entirely with -DBSFCHAT_IOS_PUSH=OFF. Keep the
+	  string on one line: the substitution matches it literally.
+
+	  The App ID needs the Push Notifications capability enabled in the
+	  Apple Developer portal, and the profile regenerated, or signing fails;
+	  CI's scripts/asc-provisioning.py check says so by name.
+	-->
+	<key>aps-environment</key>
+	<string>production</string>
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>webcredentials:bsfchat.com</string>

@@ -233,6 +233,13 @@ if(Qt6_VERSION VERSION_GREATER_EQUAL "6.6")
     qt_policy(SET QTP0004 OLD)
 endif()
 
+# iOS push (APNs; docs/push-notifications.md). ON by default. It adds
+# aps-environment to the entitlements, which the App ID must have the Push
+# Notifications capability for (CI's scripts/asc-provisioning.py
+# --require-entitlements says so by name). Declared here because the source
+# list below depends on it.
+option(BSFCHAT_IOS_PUSH "APNs push notifications on iOS" ON)
+
 qt_add_library(bsfchat-lib STATIC
     src/core/App.cpp
     src/core/AppProfile.cpp
@@ -243,6 +250,7 @@ qt_add_library(bsfchat-lib STATIC
     # (JNI on Android, PushBridgeIos.mm on iOS). docs/push-notifications.md.
     src/core/PushManager.cpp
     src/core/PushBridge.cpp
+    $<$<AND:$<BOOL:${IOS}>,$<BOOL:${BSFCHAT_IOS_PUSH}>>:src/core/PushBridgeIos.mm>
     src/core/Settings.cpp
     src/core/TintedIconProvider.cpp
     src/core/MediaDownloader.cpp
@@ -756,11 +764,7 @@ endif()
 #   iOS      com.bsfchat.app.ios   (debug: com.bsfchat.app.ios.dev)
 # The gateway's iOS entry is separate because APNs needs its own pushkin;
 # its APNs topic is still the bundle id, com.bsfchat.app.
-#
-# iOS: ON by default. It adds aps-environment to the entitlements, which
-# the App ID must have the Push Notifications capability for (CI's
-# scripts/asc-provisioning.py --require-entitlements says so by name).
-option(BSFCHAT_IOS_PUSH "APNs push notifications on iOS" ON)
+# (BSFCHAT_IOS_PUSH is declared above bsfchat-lib.)
 set(BSFCHAT_PUSH_ENABLED OFF)
 if(ANDROID AND BSFCHAT_ANDROID_FCM)
     set(BSFCHAT_PUSH_ENABLED ON)
@@ -886,8 +890,10 @@ if(IOS)
     #                       first submitted build is in.
     #
     # "voip" is deliberately never emitted here: it requires a real
-    # PKPushRegistry + CallKit integration, and there is no PushKit, no
-    # CallKit and no APNs anywhere in this client.
+    # PKPushRegistry + CallKit integration, and there is no PushKit and no
+    # CallKit in this client. APNs is used (src/core/PushBridgeIos.mm), but
+    # only for ALERT pushes the system displays itself, which need no
+    # background mode — so "remote-notification" is not emitted either.
     if(BSFCHAT_ENABLE_VOICE)
         set(BSFCHAT_IOS_BACKGROUND_MODES
 "\t<key>UIBackgroundModes</key>
@@ -925,10 +931,44 @@ if(IOS)
     set_target_properties(bsfchat-app PROPERTIES
         XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1")
 
-    # Associated domains for the sign-in's claimed https callback. See the
-    # comment in the file, and oidc::kNativeRedirectUri.
-    set_target_properties(bsfchat-app PROPERTIES
-        XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/ios/BSFChat.entitlements")
+    # Entitlements: associated domains for the sign-in's claimed https
+    # callback (see the comment in the file, and oidc::kNativeRedirectUri),
+    # and aps-environment for push. The checked-in file is the App Store one
+    # ("production") and is what CI's provisioning check reads. Debug gets a
+    # generated copy saying "development", because the development profiles
+    # Xcode signs local device builds with grant only that; with
+    # BSFCHAT_IOS_PUSH=OFF every configuration gets a copy without the key,
+    # so a build works before the Push Notifications capability is enabled.
+    set(_ent_src "${CMAKE_CURRENT_SOURCE_DIR}/ios/BSFChat.entitlements")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ent_src}")
+    file(READ "${_ent_src}" _ent)
+    string(REGEX MATCH "<key>aps-environment</key>[ \t\r\n]*<string>production</string>"
+           _aps_found "${_ent}")
+    if(NOT _aps_found)
+        message(FATAL_ERROR "ios/BSFChat.entitlements: aps-environment/production not found")
+    endif()
+    if(BSFCHAT_IOS_PUSH)
+        string(REPLACE "${_aps_found}"
+               "<key>aps-environment</key>\n\t<string>development</string>" _ent_dev "${_ent}")
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/BSFChat-Debug.entitlements" "${_ent_dev}")
+        set_target_properties(bsfchat-app PROPERTIES
+            XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${_ent_src}"
+            "XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS[variant=Debug]"
+                "${CMAKE_CURRENT_BINARY_DIR}/BSFChat-Debug.entitlements")
+        # Sygnal's full (names-tier) APNs path sends loc-key alerts; these
+        # are the strings it names. ios/en.lproj/Localizable.strings.
+        set(BSFCHAT_IOS_STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/ios/en.lproj/Localizable.strings")
+        target_sources(bsfchat-app PRIVATE "${BSFCHAT_IOS_STRINGS}")
+        set_source_files_properties("${BSFCHAT_IOS_STRINGS}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION Resources/en.lproj)
+        target_link_libraries(bsfchat-lib PUBLIC "-framework UserNotifications")
+    else()
+        string(REPLACE "${_aps_found}" "" _ent_nopush "${_ent}")
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/BSFChat-NoPush.entitlements" "${_ent_nopush}")
+        set_target_properties(bsfchat-app PROPERTIES
+            XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS
+                "${CMAKE_CURRENT_BINARY_DIR}/BSFChat-NoPush.entitlements")
+    endif()
 
     # Launch screen. Committed rather than left to Qt's generated
     # default so that UILaunchStoryboardName in ios/Info.plist.in
@@ -1000,6 +1040,9 @@ if(IOS)
     # releases them with `g = nil`, which only releases under ARC. Without
     # it every sign-in leaked its session and anchor.
     set_source_files_properties(src/identity/IosAuthSession.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+    # Same idiom (strong globals released with `= nil`) in the push bridge.
+    set_source_files_properties(src/core/PushBridgeIos.mm PROPERTIES
         COMPILE_OPTIONS "-fobjc-arc")
 
     # Apple privacy manifest (ITMS-91053 without it): required-reason API

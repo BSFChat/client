@@ -1,0 +1,20 @@
+/*
+  Alert texts for pushes that carry names (Settings > Notifications > "Show
+  sender and room names", the server's "names" payload tier).
+
+  The Sygnal gateway's APNs pushkin builds those alerts as loc-key +
+  loc-args, and iOS looks the key up here; a key missing from this file is
+  shown to the user verbatim. The keys and argument order are Sygnal's
+  (sygnal/apnspushkin.py, _get_payload_full). Only the content-free ones
+  are listed: BSFChat never asks a server for a payload with message text,
+  so Sygnal never picks the *_WITH_CONTENT / IMAGE_* keys for it.
+
+  The default, private tier does not use this file: its alert is the fixed
+  "BSFChat / New message" the pusher's default_payload carries.
+*/
+"MSG_FROM_USER" = "New message from %@";
+"MSG_FROM_USER_IN_ROOM" = "%1$@ in %2$@";
+"VOICE_CALL_FROM_USER" = "Call from %@";
+"VIDEO_CALL_FROM_USER" = "Video call from %@";
+"USER_INVITE_TO_NAMED_ROOM" = "%1$@ invited you to %2$@";
+"USER_INVITE_TO_CHAT" = "%@ invited you to chat";

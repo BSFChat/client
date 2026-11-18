@@ -296,9 +296,13 @@
 
 	     "voip" is never emitted. It requires a real PKPushRegistry +
 	     CallKit integration and is rejected on sight without one; there
-	     is no PushKit, no CallKit and no APNs anywhere in this client,
-	     and notifications are local-only
-	     (src/core/NotificationManager.h). -->
+	     is no PushKit and no CallKit in this client.
+
+	     "remote-notification" is not emitted either. Push notifications
+	     (APNs via the Sygnal gateway, docs/push-notifications.md) are
+	     ALERT pushes the system displays on its own; a background mode is
+	     only needed for silent/content-available pushes that wake the app,
+	     which this client does not use. -->
 @BSFCHAT_IOS_BACKGROUND_MODES@
 	<!-- ===== Deliberately absent, with reasons =====
 
