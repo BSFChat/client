@@ -729,6 +729,21 @@ endif()
 target_compile_definitions(bsfchat-lib PUBLIC
     BSFCHAT_VERSION="${BSFCHAT_VERSION}")
 
+# The Apple Team ID the macOS updater requires of a new bundle (C2-3). Release
+# CI sets it from the APPLE_TEAM_ID secret (or the MACOS_TEAM_ID repository
+# variable); see docs/release-signing.md. Empty = a local build: an update is
+# then only installed if it matches the running bundle's own team, and never
+# when the running bundle is ad-hoc signed.
+set(BSFCHAT_MACOS_TEAM_ID "" CACHE STRING "Apple Team ID macOS updates must be signed by")
+if(BSFCHAT_MACOS_TEAM_ID)
+    if(NOT BSFCHAT_MACOS_TEAM_ID MATCHES "^[A-Z0-9]+$")
+        message(FATAL_ERROR "BSFCHAT_MACOS_TEAM_ID must be an Apple Team ID (A-Z, 0-9), "
+                            "got '${BSFCHAT_MACOS_TEAM_ID}'")
+    endif()
+    target_compile_definitions(bsfchat-lib PRIVATE
+        BSFCHAT_MACOS_TEAM_ID="${BSFCHAT_MACOS_TEAM_ID}")
+endif()
+
 # Ensure macOS .app bundle is created.
 set_target_properties(bsfchat-app PROPERTIES
     MACOSX_BUNDLE TRUE

@@ -354,6 +354,95 @@ private slots:
         QVERIFY(QDir(dir.path()).entryList(QDir::Files).isEmpty());
     }
 
+    // ── C2-3: re-hash at launch ──────────────────────────────────────
+
+    static bool writeFile(const QString& path, const QByteArray& data)
+    {
+        QFile f(path);
+        return f.open(QIODevice::WriteOnly) && f.write(data) == data.size();
+    }
+
+    void aLockIsOnlyHeldOverTheVerifiedBytes()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("BSFChat-Setup.exe");
+        QVERIFY(writeFile(path, "installer"));
+        InstallerLock lock;
+        QString why;
+        QVERIFY2(lock.acquire(path, sha256Hex("installer").toUpper(), &why), qPrintable(why));
+        QVERIFY(lock.held());
+        lock.release();
+        QVERIFY(!lock.held());
+
+        // Swapped in the cache after the download was verified.
+        QVERIFY(writeFile(path, "installer, but evil"));
+        QVERIFY(!lock.acquire(path, sha256Hex("installer"), &why));
+        QVERIFY(!lock.held());
+        QVERIFY(why.contains("changed"));
+        QVERIFY(!lock.acquire(dir.filePath("missing.exe"), sha256Hex("installer")));
+        QVERIFY(!lock.acquire(path, QByteArray()));
+    }
+
+#ifdef Q_OS_WIN
+    // While held, nobody can rewrite, rename or delete the installer.
+    void aHeldLockKeepsTheInstallerFromChanging()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("BSFChat-Setup.exe");
+        QVERIFY(writeFile(path, "installer"));
+        InstallerLock lock;
+        QVERIFY(lock.acquire(path, sha256Hex("installer")));
+        QFile w(path);
+        QVERIFY(!w.open(QIODevice::WriteOnly | QIODevice::Append));
+        QVERIFY(!QFile::rename(path, dir.filePath("moved.exe")));
+        QVERIFY(!QFile::remove(path));
+        // ...but it can still be read (the installer reads itself).
+        QFile r(path);
+        QVERIFY(r.open(QIODevice::ReadOnly));
+        QCOMPARE(r.readAll(), QByteArray("installer"));
+        r.close();
+        lock.release();
+        QVERIFY(QFile::remove(path));
+    }
+#endif
+
+    void aVerifiedCopyIsMadeOnlyOfTheVerifiedBytes()
+    {
+        QTemporaryDir dir;
+        const QString src = dir.filePath("BSFChat-macOS.dmg");
+        const QString dst = dir.filePath("private/BSFChat-macOS.dmg");
+        QVERIFY(QDir(dir.path()).mkdir("private"));
+        QByteArray big(300 * 1024, 'x'); // several chunks
+        QVERIFY(writeFile(src, big));
+        QString why;
+        QVERIFY2(copyVerified(src, dst, sha256Hex(big), &why), qPrintable(why));
+        QFile f(dst);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll(), big);
+        f.close();
+        QVERIFY(QFile::remove(dst));
+
+        QVERIFY(writeFile(src, "tampered"));
+        QVERIFY(!copyVerified(src, dst, sha256Hex(big), &why));
+        QVERIFY(!QFile::exists(dst));
+        QVERIFY(why.contains("changed"));
+    }
+
+    void macTeamIdRules()
+    {
+        // Pinned at build time: exactly that team.
+        QVERIFY(macTeamMismatch("AB12CD34EF", "AB12CD34EF", {}).isEmpty());
+        QVERIFY(!macTeamMismatch("ZZ99ZZ99ZZ", "AB12CD34EF", "ZZ99ZZ99ZZ").isEmpty());
+        // Not pinned: the running bundle's own team.
+        QVERIFY(macTeamMismatch("AB12CD34EF", {}, "AB12CD34EF").isEmpty());
+        QVERIFY(!macTeamMismatch("ZZ99ZZ99ZZ", {}, "AB12CD34EF").isEmpty());
+        // Neither: nothing to check against, refused.
+        QVERIFY(!macTeamMismatch("AB12CD34EF", {}, {}).isEmpty());
+        // An ad-hoc update bundle is never accepted.
+        QVERIFY(!macTeamMismatch({}, "AB12CD34EF", {}).isEmpty());
+        QVERIFY(!macTeamMismatch({}, {}, {}).isEmpty());
+    }
+
     // ── macOS codesign output ────────────────────────────────────────
 
     void parsesCodesignTeamId()

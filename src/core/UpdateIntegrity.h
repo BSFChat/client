@@ -21,6 +21,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QFile>
 #include <QCryptographicHash>
 #include <QHash>
 #include <QList>
@@ -87,6 +88,17 @@ std::optional<QByteArray> expectedAssetDigest(
 // stderr. Returns the team id, or "" if absent / not set / malformed.
 QString parseCodesignTeamId(const QString& codesignOutput);
 
+// The Apple Team ID release builds are pinned to (-DBSFCHAT_MACOS_TEAM_ID,
+// set by CI), or "" for a build without one.
+QString pinnedMacTeamId();
+
+// Why a macOS update bundle signed by `newTeam` must NOT be installed, or ""
+// if it may. `pinned` (the build-time Team ID) wins when set; otherwise the
+// running bundle's own `selfTeam` is the reference, and with neither there
+// is nothing to check the update against, so it is refused (C2-3).
+QString macTeamMismatch(const QString& newTeam, const QString& pinned,
+                        const QString& selfTeam);
+
 // Streams a download to `finalPath` while hashing it. Nothing appears at
 // `finalPath` unless finish() saw the expected digest; on any failure the
 // partial file is discarded.
@@ -106,5 +118,46 @@ private:
     qint64 m_bytes = 0;
     bool m_writeFailed = false;
 };
+
+// ---- Time of check vs time of use (C2-3) -------------------------------
+//
+// The verified installer sits in a user-writable cache between the download
+// and "Restart to install" — minutes or days — and on Windows it then runs
+// ELEVATED, unsigned, so UAC cannot show that it changed. So it is hashed
+// again at the last moment, through the handle that pins it.
+
+// Holds a file open so that it cannot change between its last hash and its
+// launch. On Windows the handle is opened with FILE_SHARE_READ only: while it
+// is held no other process can open the file for writing, rename it or
+// delete it (and its directory cannot be renamed), but the installer can
+// still be started and can read itself. POSIX has no mandatory share modes;
+// there the lock only re-hashes (use copyVerified for a private copy).
+class InstallerLock {
+public:
+    InstallerLock() = default;
+    ~InstallerLock();
+    InstallerLock(const InstallerLock&) = delete;
+    InstallerLock& operator=(const InstallerLock&) = delete;
+
+    // Opens `path`, hashes it through that handle and keeps it open only if
+    // the digest matches `expectedHex` (case-insensitive).
+    bool acquire(const QString& path, const QByteArray& expectedHex,
+                 QString* error = nullptr);
+    void release();
+    bool held() const;
+
+private:
+#ifdef Q_OS_WIN
+    void* m_handle = nullptr; // HANDLE
+#else
+    std::unique_ptr<QFile> m_file;
+#endif
+};
+
+// Copy `src` to `destPath` hashing exactly the bytes written; `destPath` only
+// appears if they match `expectedHex`. For a private, freshly verified copy
+// (macOS attaches the DMG from one in a 0700 temp directory).
+bool copyVerified(const QString& src, const QString& destPath,
+                  const QByteArray& expectedHex, QString* error = nullptr);
 
 } // namespace bsfchat::updates

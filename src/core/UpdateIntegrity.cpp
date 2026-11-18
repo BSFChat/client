@@ -2,8 +2,16 @@
 
 #include "ReleaseSigningKey.h"
 
+#include <QDir>
 #include <QFile>
 #include <QRegularExpression>
+
+#ifdef Q_OS_WIN
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#endif
 
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -267,6 +275,164 @@ void Sha256FileSink::abort()
 QString Sha256FileSink::errorString() const
 {
     return m_file ? m_file->errorString() : QString();
+}
+
+QString pinnedMacTeamId()
+{
+#ifdef BSFCHAT_MACOS_TEAM_ID
+    return QStringLiteral(BSFCHAT_MACOS_TEAM_ID).trimmed();
+#else
+    return QString();
+#endif
+}
+
+QString macTeamMismatch(const QString& newTeam, const QString& pinned,
+                        const QString& selfTeam)
+{
+    if (newTeam.isEmpty())
+        return QStringLiteral("it is not signed by any developer team");
+    if (!pinned.isEmpty()) {
+        return newTeam == pinned
+            ? QString()
+            : QStringLiteral("it is signed by team \"%1\", expected %2").arg(newTeam, pinned);
+    }
+    if (selfTeam.isEmpty())
+        return QStringLiteral("this build has no Team ID to check the update "
+                              "against, so it cannot update itself");
+    return newTeam == selfTeam
+        ? QString()
+        : QStringLiteral("it is signed by team \"%1\", not %2 like this build")
+              .arg(newTeam, selfTeam);
+}
+
+// ---- InstallerLock / copyVerified (C2-3) --------------------------------
+
+namespace {
+bool digestMatches(const QByteArray& actualHex, const QByteArray& expectedHex,
+                   QString* error)
+{
+    if (isHexDigest(expectedHex) && actualHex == expectedHex.toLower()) return true;
+    setErr(error, QStringLiteral("the installer changed after it was verified "
+                                 "(SHA-256 %1, expected %2)")
+                      .arg(QString::fromLatin1(actualHex),
+                           QString::fromLatin1(expectedHex.toLower())));
+    return false;
+}
+} // namespace
+
+InstallerLock::~InstallerLock()
+{
+    release();
+}
+
+#ifdef Q_OS_WIN
+bool InstallerLock::acquire(const QString& path, const QByteArray& expectedHex,
+                            QString* error)
+{
+    release();
+    // No FILE_SHARE_WRITE, no FILE_SHARE_DELETE: from here until release()
+    // the bytes hashed below are the bytes CreateProcess will map.
+    const QString native = QDir::toNativeSeparators(path);
+    HANDLE h = CreateFileW(reinterpret_cast<const wchar_t*>(native.utf16()), GENERIC_READ,
+                           FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        setErr(error, QStringLiteral("couldn't lock the installer (error %1)")
+                          .arg(static_cast<qulonglong>(GetLastError())));
+        return false;
+    }
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    QByteArray buf(1 << 16, Qt::Uninitialized);
+    for (;;) {
+        DWORD got = 0;
+        if (!ReadFile(h, buf.data(), static_cast<DWORD>(buf.size()), &got, nullptr)) {
+            setErr(error, QStringLiteral("couldn't read the installer (error %1)")
+                              .arg(static_cast<qulonglong>(GetLastError())));
+            CloseHandle(h);
+            return false;
+        }
+        if (got == 0) break;
+        hash.addData(QByteArrayView(buf.constData(), static_cast<qsizetype>(got)));
+    }
+    if (!digestMatches(hash.result().toHex(), expectedHex, error)) {
+        CloseHandle(h);
+        return false;
+    }
+    m_handle = h;
+    return true;
+}
+
+void InstallerLock::release()
+{
+    if (m_handle) CloseHandle(static_cast<HANDLE>(m_handle));
+    m_handle = nullptr;
+}
+
+bool InstallerLock::held() const
+{
+    return m_handle != nullptr;
+}
+#else
+bool InstallerLock::acquire(const QString& path, const QByteArray& expectedHex,
+                            QString* error)
+{
+    release();
+    auto f = std::make_unique<QFile>(path);
+    if (!f->open(QIODevice::ReadOnly)) {
+        setErr(error, f->errorString());
+        return false;
+    }
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    if (!hash.addData(f.get())) {
+        setErr(error, QStringLiteral("couldn't read the installer"));
+        return false;
+    }
+    if (!digestMatches(hash.result().toHex(), expectedHex, error)) return false;
+    m_file = std::move(f);
+    return true;
+}
+
+void InstallerLock::release()
+{
+    m_file.reset();
+}
+
+bool InstallerLock::held() const
+{
+    return m_file != nullptr;
+}
+#endif
+
+bool copyVerified(const QString& src, const QString& destPath,
+                  const QByteArray& expectedHex, QString* error)
+{
+    QFile in(src);
+    if (!in.open(QIODevice::ReadOnly)) {
+        setErr(error, in.errorString());
+        return false;
+    }
+    Sha256FileSink sink;
+    if (!sink.open(destPath, error)) return false;
+    while (!in.atEnd()) {
+        const QByteArray chunk = in.read(1 << 16);
+        if (chunk.isEmpty() && in.error() != QFileDevice::NoError) {
+            setErr(error, in.errorString());
+            sink.abort();
+            return false;
+        }
+        if (!sink.write(chunk)) {
+            setErr(error, sink.errorString());
+            sink.abort();
+            return false;
+        }
+    }
+    QString why;
+    if (!sink.finish(expectedHex, &why)) {
+        setErr(error, QStringLiteral("the installer changed after it was verified (%1)")
+                          .arg(why));
+        return false;
+    }
+    return true;
 }
 
 } // namespace bsfchat::updates

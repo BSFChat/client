@@ -44,10 +44,28 @@ All of these must pass before anything runs:
    `# release:` tag must equal the tag being installed.
 3. The installer is hashed while it streams to disk. It only reaches its final
    path in the cache if the hash matches the entry in `SHA256SUMS`.
-4. On macOS, the `.app` inside the mounted DMG must pass
-   `codesign --verify --deep --strict`. It must also have the same Team ID as
-   the running build, or `BSFCHAT_MACOS_TEAM_ID` if that is defined at build
-   time. These checks happen before the old app quits.
+4. At install time the cached file is hashed again (C2-3). On Windows this
+   is done through a handle opened with `FILE_SHARE_READ` only and held until
+   the app exits, so nothing can rewrite, rename or delete the installer
+   between that hash and the elevated launch. On macOS the DMG is copied into
+   a fresh 0700 temp directory, hashing the bytes written, and that copy is
+   attached.
+5. On macOS, the `.app` inside the mounted DMG must pass
+   `codesign --verify --deep --strict` and carry the Team ID pinned at build
+   time (`BSFCHAT_MACOS_TEAM_ID`). A build without a pin requires the running
+   bundle's own Team ID instead, and an ad-hoc signed build (no Team ID)
+   refuses to update itself. These checks happen before the old app quits.
+
+### The macOS Team ID pin
+
+CI passes `-DBSFCHAT_MACOS_TEAM_ID` from the repository variable
+**`MACOS_TEAM_ID`** if set, else the **`APPLE_TEAM_ID`** secret the iOS job
+already uses (same Apple team as the Developer ID certificate). The packaging
+step checks that the signed bundle's `TeamIdentifier` equals the pin, and a
+tagged build that is Developer-ID signed but has no pin fails. If the
+Developer ID certificate ever belongs to a different team than
+`APPLE_TEAM_ID`, set `MACOS_TEAM_ID` (Settings → Secrets and variables →
+Actions → Variables) to the Developer ID team.
 
 If a release has no `SHA256SUMS` + `SHA256SUMS.sig`, the client treats that as
 an integrity failure ("could not be verified and was not offered") and points

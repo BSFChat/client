@@ -60,8 +60,12 @@
 //     integrity failure (Failed), unless it is a prerelease that predates
 //     release signing (unsignedReleaseVerdict): then the state is
 //     UpdateUnsigned and the UI offers its GitHub release page (C2-2).
+//   * The cached artefact is re-hashed at the last moment (C2-3): Windows
+//     through a share-read-only handle held until exit (InstallerLock),
+//     macOS by attaching a freshly verified private copy (copyVerified).
 //   * macOS additionally requires `codesign --verify --deep --strict` on the
-//     .app inside the DMG, and the same Team ID as the running build,
+//     .app inside the DMG, and the build-time BSFCHAT_MACOS_TEAM_ID (else the
+//     running build's own Team ID; an ad-hoc build cannot self-update),
 //     before the bundle is swapped. Windows Authenticode is not checked:
 //     installers are not code-signed today (docs/release-signing.md).
 //   * Downloads land in CacheLocation — a per-user dir the OS will
@@ -223,6 +227,7 @@ private:
     QByteArray m_manifest;    // SHA256SUMS body, unverified until the sig is
     QByteArray m_expectedDigest; // hex SHA-256 of the asset, from a verified manifest
     bsfchat::updates::Sha256FileSink m_sink;
+    bsfchat::updates::InstallerLock m_installerLock; // held from re-hash to exit (C2-3)
     QString m_assetLocalPath; // where the downloaded asset lives
     qint64  m_downloadedBytes = 0;
     qint64  m_totalBytes = 0;

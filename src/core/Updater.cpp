@@ -18,6 +18,7 @@
 #include <QProcess>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QTemporaryDir>
 #include <QUrl>
 #include <QtGlobal>
 
@@ -494,13 +495,14 @@ void Updater::openReleasePage()
 #if defined(Q_OS_MACOS)
 // $1 pid to wait for, $2 mount point (already attached and verified by
 // applyMac), $3 the verified .app inside it, $4 installed bundle, $5 its
-// parent directory. See applyMac for why these are arguments, not text.
+// parent directory, $6 the private directory holding the verified DMG copy
+// (removed at the end). See applyMac for why these are arguments, not text.
 static const char kMacUpdateScript[] = R"SH(
 LOG="$HOME/Library/Logs/BSFChat/update.log"
 mkdir -p "$(dirname "$LOG")"
 exec >>"$LOG" 2>&1
 echo; echo "=== Update started $(date) ==="
-echo "  pid_to_wait=$1 mount=$2 src=$3 dest=$4 parent=$5"
+echo "  pid_to_wait=$1 mount=$2 src=$3 dest=$4 parent=$5 copy=$6"
 while kill -0 "$1" 2>/dev/null; do sleep 0.2; done
 echo "  old process exited"
 # Finder is on Apple's permanent App Management allowlist; routing the
@@ -513,6 +515,7 @@ osascript -e 'on run argv' \
   && echo "  Finder duplicate OK" \
   || echo "ERROR: Finder duplicate failed (TCC denied?)"
 hdiutil detach "$2" -force
+rm -rf "$6"
 echo "  relaunching $4"
 open "$4"
 echo "=== Update done $(date) ==="
@@ -560,10 +563,11 @@ QString lastLine(const QString& out)
 void Updater::applyMac(const QString& dmgPath)
 {
     // Before the running app quits, in this process:
-    //   1. attach the (hash-verified) .dmg read-only at a unique mountpoint
+    //   0. copy the cached .dmg into a private directory, re-hashing it
+    //   1. attach that verified copy read-only at a unique mountpoint
     //   2. find the one .app at its top level
-    //   3. `codesign --verify --deep --strict` it, and require the same
-    //      Team ID as the build that is running (or BSFCHAT_MACOS_TEAM_ID)
+    //   3. `codesign --verify --deep --strict` it, and require the
+    //      BSFCHAT_MACOS_TEAM_ID Team ID (or, unpinned, the running build's)
     // Any failure detaches the image and reports in the update UI, with the
     // current app still running. Only then is a detached shell helper
     // spawned that:
@@ -596,16 +600,39 @@ void Updater::applyMac(const QString& dmgPath)
     const QString mountPt = QStringLiteral("/Volumes/BSFChatUpdate-%1")
         .arg(QCoreApplication::applicationPid());
 
-    const auto fail = [this, mountPt](const QString& why) {
+    // C2-3: the cached DMG is user-writable and was hashed at download time.
+    // Copy it into a fresh 0700 directory, hashing exactly the bytes written,
+    // and attach THAT copy; the cache file is not read again.
+    QTemporaryDir privateDir(QDir::tempPath() + QStringLiteral("/bsfchat-update-XXXXXX"));
+    if (!privateDir.isValid()) {
+        setError(QStringLiteral("The update was not installed: couldn't create a "
+                                "private directory (%1)").arg(privateDir.errorString()));
+        return;
+    }
+    privateDir.setAutoRemove(false); // the installer helper removes it ($6)
+    const QString copyDir = privateDir.path();
+    const QString verifiedDmg = copyDir + QStringLiteral("/BSFChat-macOS.dmg");
+    {
+        QString why;
+        if (!copyVerified(dmgPath, verifiedDmg, m_expectedDigest, &why)) {
+            QDir(copyDir).removeRecursively();
+            failIntegrity(why);
+            return;
+        }
+    }
+
+    const auto fail = [this, mountPt, copyDir](const QString& why) {
         QProcess::startDetached(QStringLiteral("/usr/bin/hdiutil"),
                                 {QStringLiteral("detach"), mountPt,
                                  QStringLiteral("-force")});
+        QDir(copyDir).removeRecursively();
         setError(QStringLiteral("The update was not installed: %1").arg(why));
     };
 
     const QString codesign = QStringLiteral("/usr/bin/codesign");
-    const auto spawnInstaller = [this, mountPt, bundlePath, installParent](const QString& src) {
-        // The paths are passed as POSITIONAL ARGUMENTS ($1..$5) and quoted
+    const auto spawnInstaller = [this, mountPt, bundlePath, installParent,
+                                 copyDir](const QString& src) {
+        // The paths are passed as POSITIONAL ARGUMENTS ($1..$6) and quoted
         // at every use, never spliced into the script text. They used to be
         // interpolated with chained .arg() — unquoted into hdiutil/open, and
         // inside an AppleScript string literal — so an app at
@@ -619,58 +646,59 @@ void Updater::applyMac(const QString& dmgPath)
             {QStringLiteral("-c"), QString::fromUtf8(kMacUpdateScript),
              QStringLiteral("bsfchat-update"),
              QString::number(QCoreApplication::applicationPid()), mountPt,
-             src, bundlePath, installParent});
+             src, bundlePath, installParent, copyDir});
         if (!started) {
             QProcess::startDetached(QStringLiteral("/usr/bin/hdiutil"),
                                     {QStringLiteral("detach"), mountPt,
                                      QStringLiteral("-force")});
+            QDir(copyDir).removeRecursively();
             setError(QStringLiteral("Couldn't start the installer helper."));
             return;
         }
         QCoreApplication::quit();
     };
 
-    // 3b. Team ID: the new bundle must be signed by the same team as the
-    // running one. A build-time BSFCHAT_MACOS_TEAM_ID overrides; with
-    // neither (an ad-hoc local build), strict verification alone applies.
+    // 3b. Team ID (C2-3). With BSFCHAT_MACOS_TEAM_ID (release CI defines it
+    // from the APPLE_TEAM_ID secret / MACOS_TEAM_ID variable) the new bundle
+    // must carry exactly that team. Without it (a local build) it must carry
+    // the running bundle's team — and if the running bundle has none (ad-hoc
+    // signed) there is nothing to compare against: `codesign --verify` on an
+    // ad-hoc bundle proves nothing about who made it, so the update is
+    // refused rather than installed on that alone.
     const auto checkTeam = [this, fail, codesign, bundlePath, spawnInstaller](
                                const QString& src, const QString& newTeam) {
-#ifdef BSFCHAT_MACOS_TEAM_ID
-        Q_UNUSED(codesign);
-        Q_UNUSED(bundlePath);
-        const QString pinned = QStringLiteral(BSFCHAT_MACOS_TEAM_ID);
-        if (newTeam != pinned) {
-            fail(QStringLiteral("it is signed by team \"%1\", expected %2")
-                 .arg(newTeam, pinned));
+        const QString pinned = bsfchat::updates::pinnedMacTeamId();
+        if (!pinned.isEmpty()) {
+            const QString why = bsfchat::updates::macTeamMismatch(newTeam, pinned, QString());
+            if (!why.isEmpty()) {
+                fail(why);
+                return;
+            }
+            spawnInstaller(src);
             return;
         }
-        spawnInstaller(src);
-#else
         runTool(this, codesign,
                 {QStringLiteral("-d"), QStringLiteral("--verbose=2"), bundlePath},
                 30 * 1000,
                 [fail, src, newTeam, spawnInstaller](bool, const QString& out) {
             const QString selfTeam = bsfchat::updates::parseCodesignTeamId(out);
-            if (!selfTeam.isEmpty() && newTeam != selfTeam) {
-                fail(QStringLiteral("it is signed by team \"%1\", not %2 like "
-                                    "this build").arg(newTeam, selfTeam));
+            const QString why = bsfchat::updates::macTeamMismatch(newTeam, QString(), selfTeam);
+            if (!why.isEmpty()) {
+                fail(why);
                 return;
             }
-            if (selfTeam.isEmpty())
-                qWarning("Updater: running build has no Team ID; "
-                         "relying on codesign --verify only");
             spawnInstaller(src);
         });
-#endif
     };
 
     runTool(this, QStringLiteral("/usr/bin/hdiutil"),
             {QStringLiteral("attach"), QStringLiteral("-nobrowse"),
              QStringLiteral("-noautoopen"), QStringLiteral("-readonly"),
-             QStringLiteral("-mountpoint"), mountPt, dmgPath},
+             QStringLiteral("-mountpoint"), mountPt, verifiedDmg},
             120 * 1000,
-            [this, fail, codesign, mountPt, checkTeam](bool ok, const QString& out) {
+            [this, fail, codesign, mountPt, checkTeam, copyDir](bool ok, const QString& out) {
         if (!ok) {
+            QDir(copyDir).removeRecursively();
             setError(QStringLiteral("Couldn't open the update disk image: %1")
                      .arg(lastLine(out)));
             return;
@@ -722,11 +750,25 @@ void Updater::applyWindows(const QString& exePath)
     // the silent install can begin.
     //
     // Integrity: exePath only exists once its SHA-256 matched the signed
-    // SHA256SUMS (see startAssetDownload). Authenticode is NOT checked
-    // here: the installers are not code-signed today (the CI signing step
-    // is skipped without WINDOWS_CERT_PFX_BASE64; v0.0.48-rc.19's .exe has
-    // no certificate table). Add a WinVerifyTrust check once they are.
-    QProcess::startDetached(exePath, {"/S"});
+    // SHA256SUMS (see startAssetDownload) — but that was at download time,
+    // and the cache is user-writable while this runs elevated (C2-3). So it
+    // is hashed again now through a share-read-only handle that stays open
+    // until this process exits: from the hash to the launch nothing can
+    // write, rename or delete it. Authenticode is NOT checked: the
+    // installers are not code-signed today (the CI signing step is skipped
+    // without WINDOWS_CERT_PFX_BASE64). Add a WinVerifyTrust check once
+    // they are.
+    QString why;
+    if (!m_installerLock.acquire(exePath, m_expectedDigest, &why)) {
+        failIntegrity(why);
+        return;
+    }
+    if (!QProcess::startDetached(exePath, {"/S"})) {
+        m_installerLock.release();
+        setError(QStringLiteral("Couldn't start the installer."));
+        return;
+    }
+    // m_installerLock is released when the Updater is destroyed at exit.
     QCoreApplication::quit();
 }
 #else
@@ -743,6 +785,12 @@ void Updater::applyLinux(const QString& tarPath)
     // SHA256SUMS: its folder is opened. It used to open the release page,
     // i.e. send the user to re-download an UNverified copy (C2-7).
     // The app keeps running; nothing has been replaced.
+    QString why;
+    if (!m_installerLock.acquire(tarPath, m_expectedDigest, &why)) {
+        failIntegrity(why);
+        return;
+    }
+    m_installerLock.release();
     const QString dir = QFileInfo(tarPath).absolutePath();
     setState(ReadyToApply);
     if (!bsfchat::openExternalUrl(QUrl::fromLocalFile(dir))) {
