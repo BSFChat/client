@@ -77,7 +77,7 @@ Rectangle {
         if (_state === UF.UpdateAvailable) return "Download";
         if (_state === UF.ReadyToApply)    return UF.applyLabel(_osName);
         if (_state === UF.Failed)          return "Try again";
-        if (_state === UF.UpdateUnsigned)  return "Open download page";
+        if (_state === UF.UpdateUnsigned)  return "Open release page";
         return "";
     }
 

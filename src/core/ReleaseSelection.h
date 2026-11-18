@@ -394,6 +394,42 @@ inline Selection selectRelease(const QVector<Release>& releases,
     return sel;
 }
 
+// Does this release carry the signed manifest (SHA256SUMS + .sig)?
+inline bool hasSignedManifest(const Release& r)
+{
+    return !assetUrlNamed(r, QStringLiteral("SHA256SUMS")).isEmpty()
+        && !assetUrlNamed(r, QStringLiteral("SHA256SUMS.sig")).isEmpty();
+}
+
+// What to do with a newer release that has NO signed manifest (C2-2).
+//
+// Stripping SHA256SUMS.sig off a release is something an attacker with
+// write access to release assets can do as easily as swapping the
+// installer, so "unsigned" must not become "go and download it from the
+// website" — that steers the user straight to the swapped file. A missing
+// signature is an integrity failure (Refuse) unless the release could
+// genuinely predate signing: a prerelease older than `signedFrom` (the
+// first version the release CI signs) and older than any release we can
+// see that IS signed. Only those keep the old "not installable here, see
+// the release page" offer (OfferReleasePage).
+enum class UnsignedVerdict { OfferReleasePage, Refuse };
+
+inline UnsignedVerdict unsignedReleaseVerdict(const Release& candidate,
+                                              const QVector<Release>& all,
+                                              const QString& signedFrom)
+{
+    if (!candidate.prerelease || !candidate.version.valid) return UnsignedVerdict::Refuse;
+    const Version cutoff = parseVersion(signedFrom);
+    if (!cutoff.valid || compareVersions(candidate.version, cutoff) >= 0)
+        return UnsignedVerdict::Refuse;
+    for (const Release& r : all) {
+        if (r.version.valid && hasSignedManifest(r)
+            && compareVersions(candidate.version, r.version) > 0)
+            return UnsignedVerdict::Refuse;
+    }
+    return UnsignedVerdict::OfferReleasePage;
+}
+
 // "RC" / "DEV" / "PRE" / "" for the running build, so the UI can badge a
 // prerelease at a glance instead of relying on the reader to notice a
 // `-rc.2` suffix on the version string.

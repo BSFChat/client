@@ -1513,7 +1513,7 @@ Popup {
                         title: "Check for updates automatically"
                         // Was: promises a one-click "Restart to install".
                         // True on macOS and Windows, false on Linux —
-                        // where applyUpdate() opens the release page and
+                        // where applyUpdate() opens the download's folder and
                         // the package manager does the rest — so the
                         // promise is now the prompt, not the mechanism.
                         description: "Polls GitHub Releases on launch and "
@@ -1550,10 +1550,11 @@ Popup {
                     InfoBanner {
                         icon: "shield"
                         text: "Updates are fetched directly from the BSFChat "
-                            + "GitHub Releases over HTTPS. Linux users get "
-                            + "redirected to the release page to use their "
-                            + "distro's package manager rather than an "
-                            + "in-place upgrade."
+                            + "GitHub Releases over HTTPS and checked against "
+                            + "a signed checksum list before anything runs. "
+                            + "On Linux the verified download's folder is "
+                            + "opened for you to install from, rather than "
+                            + "an in-place upgrade."
                     }
 
                     // No trailing fillHeight spacer: inside a Flickable the

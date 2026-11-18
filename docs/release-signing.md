@@ -49,9 +49,16 @@ All of these must pass before anything runs:
    the running build, or `BSFCHAT_MACOS_TEAM_ID` if that is defined at build
    time. These checks happen before the old app quits.
 
-If a release has no `SHA256SUMS.sig`, the client shows "This update isn't
-signed — download it from the website" and links to the release page. It
-does not install that release.
+If a release has no `SHA256SUMS` + `SHA256SUMS.sig`, the client treats that as
+an integrity failure ("could not be verified and was not offered") and points
+nowhere else: stripping the signature is as easy for an attacker as swapping
+the installer, so "download it from the website" would hand users the swapped
+file. The one exception is a prerelease older than `kSignaturesRequiredFrom`
+(`ReleaseSigningKey.h`, currently 0.0.49-rc.1) and older than every signed
+release the client can see: those predate signing, are never installed
+in-app, and the client shows their GitHub release page (URL built from the
+tag, not taken from the API). So from 0.0.49-rc.1 on, **every** release,
+RCs included, must be signed, or clients will report it as tampered with.
 
 Windows Authenticode is **not** checked. The CI can sign installers
 (`WINDOWS_CERT_PFX_BASE64`), but no certificate is configured today, so the
@@ -84,7 +91,8 @@ When the secret is missing:
 
 - **Stable tags** (`vX.Y.Z`): the release job fails.
 - **RC tags** (`vX.Y.Z-suffix`): the job warns and publishes without
-  `SHA256SUMS.sig`, and clients refuse to auto-install the RC.
+  `SHA256SUMS.sig`. Clients report such an RC as failing verification (see
+  above), so configure the secret before tagging.
 
 ## Rotation
 

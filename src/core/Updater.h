@@ -56,8 +56,10 @@
 //     in (core/ReleaseSigningKey.h). The manifest is verified, bound to the
 //     release tag, and the installer is hashed while it streams to disk; it
 //     only reaches its final path if the digest matches.
-//   * A release without SHA256SUMS + .sig is never installed: the state
-//     becomes UpdateUnsigned and the UI offers the release page instead.
+//   * A release without SHA256SUMS + .sig is never installed. It is an
+//     integrity failure (Failed), unless it is a prerelease that predates
+//     release signing (unsignedReleaseVerdict): then the state is
+//     UpdateUnsigned and the UI offers its GitHub release page (C2-2).
 //   * macOS additionally requires `codesign --verify --deep --strict` on the
 //     .app inside the DMG, and the same Team ID as the running build,
 //     before the bundle is swapped. Windows Authenticode is not checked:
@@ -124,9 +126,9 @@ public:
         // about a build that is ahead of the channel, and the user who
         // just opted out is owed an explanation rather than silence.
         AheadOfChannel,
-        // A newer release exists but carries no signed SHA256SUMS (an RC
-        // published before the signing secret was configured). It is never
-        // downloaded or run; the UI points at the release page instead.
+        // A newer PRERELEASE exists with no signed SHA256SUMS, published
+        // before release signing began. It is never downloaded or run; the
+        // UI points at its release page. Any other unsigned release is Failed.
         UpdateUnsigned
     };
     Q_ENUM(State)

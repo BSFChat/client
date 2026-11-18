@@ -29,8 +29,9 @@ var ReadyToApply    = 5;
 var Applying        = 6;
 var Failed          = 7;
 var AheadOfChannel  = 8;
-// A newer release with no signed SHA256SUMS: never installed in-app, the
-// user is sent to the release page instead (audit M-5).
+// A newer PRERELEASE with no signed SHA256SUMS that predates release
+// signing: never installed in-app, the user is pointed at its GitHub
+// release page (audit M-5). Any other unsigned release is Failed (C2-2).
 var UpdateUnsigned  = 9;
 
 // ── Predicates ──────────────────────────────────────────────────────
@@ -194,7 +195,8 @@ function detail(state, ctx) {
                        : "anything on the " + chan + " channel.";
         return head + " Nothing to install.";
     case UpdateUnsigned:
-        return "This update isn't signed — download it from the website.";
+        return "This pre-release isn't signed, so it can't be installed "
+            + "in-app. Its GitHub release page is linked instead.";
     default:
         // Idle. Also reached after a check that learned nothing — an
         // empty release list, or a release with no asset for this
@@ -214,19 +216,19 @@ function detail(state, ctx) {
 // the three replace the running app:
 //   macOS   — mounts the .dmg, dittos the bundle, relaunches.
 //   Windows — starts the installer, which relaunches.
-//   Linux   — opens the release page in a browser and quits; the
-//             package manager (or the user) does the rest.
+//   Linux   — opens the folder holding the verified tarball; the app
+//             keeps running and the user (or package manager) installs.
 // Labelling the Linux case "Restart to install" would be a straight
 // falsehood, so the label and its hint are computed, not hard-coded.
 
 function applyLabel(osName) {
-    return osName === "linux" ? "Open the release page" : "Restart to install";
+    return osName === "linux" ? "Show the download" : "Restart to install";
 }
 
 function applyHint(osName) {
     return osName === "linux"
-        ? "BSFChat will close and open the release page — Linux builds are "
-          + "installed through your package manager."
+        ? "Opens the folder with the verified download. Unpack it over your "
+          + "install, or update through your package manager."
         : "BSFChat restarts to finish installing. Nothing else to do.";
 }
 

@@ -1,6 +1,7 @@
 #include "Updater.h"
 
 #include "ReleaseSelection.h"
+#include "ReleaseSigningKey.h"
 #include "UpdateIntegrity.h"
 #include "AppProfile.h"
 #include "util/ExternalBrowser.h"
@@ -240,19 +241,37 @@ void Updater::onCheckReply()
     }
 
     m_availableVersion = sel.release.tag;
-    m_releaseHtmlUrl = sel.release.htmlUrl;
+    // Built from the tag rather than taken from the API's html_url, so the
+    // one link we ever open is our own repository's release page.
+    m_releaseHtmlUrl = QStringLiteral("https://github.com/BSFChat/client/releases/tag/")
+                     + QString::fromUtf8(QUrl::toPercentEncoding(sel.release.tag));
     m_releaseNotes = sel.release.notes;
     m_assetUrl = matchedUrl;
     m_assetName = suffix;
     m_sumsUrl = assetUrlNamed(sel.release, QLatin1String(kManifestAssetName));
     m_sigUrl = assetUrlNamed(sel.release, QLatin1String(kSignatureAssetName));
 
-    // No signed manifest: an RC published before RELEASE_SIGNING_KEY was
-    // configured. Offer the release page, never the installer.
+    // No signed manifest. Only a prerelease that predates release signing
+    // can legitimately lack one; it gets the release page, never the
+    // installer. Anything else had its signature stripped or was never
+    // ours: an integrity failure, with no "download it from the website"
+    // that would hand the user the very file we refused (C2-2).
     if (m_sumsUrl.isEmpty() || m_sigUrl.isEmpty()) {
         m_sumsUrl.clear();
         m_sigUrl.clear();
-        setState(UpdateUnsigned);
+        m_assetUrl.clear();
+        if (unsignedReleaseVerdict(sel.release, releases,
+                                   QString::fromLatin1(kSignaturesRequiredFrom))
+            == UnsignedVerdict::OfferReleasePage) {
+            setState(UpdateUnsigned);
+            return;
+        }
+        m_releaseHtmlUrl.clear();
+        m_availableVersion.clear();
+        m_releaseNotes.clear();
+        setError(QStringLiteral("BSFChat %1 could not be verified and was not "
+                                "offered: the release carries no signed "
+                                "checksums.").arg(sel.release.tag));
         return;
     }
     if (!isAllowedAssetUrl(QUrl(m_sumsUrl)) || !isAllowedAssetUrl(QUrl(m_sigUrl))) {
@@ -310,9 +329,10 @@ QString Updater::replyFailure(QNetworkReply* reply)
 void Updater::failIntegrity(const QString& why)
 {
     m_sink.abort();
+    // No pointer to the release page: if the bytes we fetched from it
+    // were tampered with, so is the file a browser would download (C2-2).
     setError(QStringLiteral("The update failed its integrity check and was "
-                            "not installed (%1). Download it from the "
-                            "release page instead.").arg(why));
+                            "not installed (%1).").arg(why));
 }
 
 void Updater::fetchSmall(const QString& url,
@@ -716,15 +736,19 @@ void Updater::applyWindows(const QString&) {}
 #if defined(Q_OS_LINUX)
 void Updater::applyLinux(const QString& tarPath)
 {
-    // Linux packaging is too varied for an automatic in-place
-    // upgrade — distros ship via apt/dnf/AUR/flatpak/etc. and any
-    // self-replace path will fight whichever package manager owns
-    // /usr/bin. Best UX is to point the user at the release page
-    // and let them re-download manually (or update via their
-    // package manager when it picks up the new tag).
-    Q_UNUSED(tarPath);
-    openReleasePage();
-    QCoreApplication::quit();
+    // Linux packaging is too varied for an automatic in-place upgrade —
+    // distros ship via apt/dnf/AUR/flatpak/etc. and any self-replace path
+    // will fight whichever package manager owns /usr/bin. So the user
+    // installs it, but from the tarball we just verified against the signed
+    // SHA256SUMS: its folder is opened. It used to open the release page,
+    // i.e. send the user to re-download an UNverified copy (C2-7).
+    // The app keeps running; nothing has been replaced.
+    const QString dir = QFileInfo(tarPath).absolutePath();
+    setState(ReadyToApply);
+    if (!bsfchat::openExternalUrl(QUrl::fromLocalFile(dir))) {
+        setError(QStringLiteral("Couldn't open a file manager. The verified "
+                                "download is at %1").arg(tarPath));
+    }
 }
 #else
 void Updater::applyLinux(const QString&) {}

@@ -63,13 +63,14 @@ TestCase {
         verify(d.indexOf("(v0.0.44)") >= 0);
     }
 
-    function test_unsignedPointsAtTheWebsiteAndNeverAtAnInstall() {
+    function test_unsignedPointsAtTheReleasePageAndNeverAtAnInstall() {
         verify(UF.awaitsUser(UF.UpdateUnsigned));
         verify(UF.kind(UF.UpdateUnsigned) !== UF.kind(UF.UpdateAvailable));
         verify(UF.title(UF.UpdateUnsigned, "v1.1.0").indexOf("v1.1.0") >= 0);
         var d = UF.detail(UF.UpdateUnsigned, { currentVersion: "1.0.0" });
         verify(d.indexOf("isn't signed") >= 0, d);
-        verify(d.indexOf("website") >= 0, d);
+        verify(d.indexOf("release page") >= 0, d);
+        verify(d.indexOf("website") === -1, d); // C2-2: no steering off-app
         verify(!UF.showsProgress(UF.UpdateUnsigned));
     }
 
@@ -219,7 +220,7 @@ TestCase {
         // Updater::applyLinux opens the release page and quits; it does
         // not replace the running app. Saying "Restart to install" there
         // is a false statement about what the button does.
-        compare(UF.applyLabel("linux"), "Open the release page");
+        compare(UF.applyLabel("linux"), "Show the download");
         compare(UF.applyLabel("osx"), "Restart to install");
         compare(UF.applyLabel("windows"), "Restart to install");
         verify(UF.applyHint("linux").indexOf("restart") === -1);

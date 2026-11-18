@@ -28,4 +28,11 @@ inline constexpr std::array<const char*, 1> kReleaseSigningKeysHex = {
     "455d39374d8fdb0a63e85112d3141898deb59c4c2979fe1601a90d140637531f",
 };
 
+// The first version the release CI signs. From here on every release must
+// carry SHA256SUMS + SHA256SUMS.sig; a newer release without them is an
+// integrity failure, never a "download it from the website" offer (C2-2).
+// No release before this one was signed (v0.0.48-rc.19 and earlier have no
+// manifest), so only prereleases older than it may be unsigned.
+inline constexpr char kSignaturesRequiredFrom[] = "0.0.49-rc.1";
+
 } // namespace bsfchat::updates

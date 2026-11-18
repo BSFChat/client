@@ -45,6 +45,20 @@ QString rel(const QString& tag, bool prerelease,
              assets);
 }
 
+Release made(const QString& tag, bool prerelease, bool withSignedManifest)
+{
+    Release r;
+    r.tag = tag;
+    r.version = parseVersion(tag);
+    r.prerelease = prerelease;
+    r.assets.append({QStringLiteral("BSFChat-macOS.dmg"), QStringLiteral("https://x/dmg")});
+    if (withSignedManifest) {
+        r.assets.append({QStringLiteral("SHA256SUMS"), QStringLiteral("https://x/sums")});
+        r.assets.append({QStringLiteral("SHA256SUMS.sig"), QStringLiteral("https://x/sig")});
+    }
+    return r;
+}
+
 QByteArray list(const QStringList& entries)
 {
     return (QLatin1Char('[') + entries.join(QLatin1Char(','))
@@ -590,6 +604,52 @@ private slots:
     }
 
     // ---- Build badge -----------------------------------------------
+
+    // ---- C2-2: a release with no signed manifest -----------------
+    void anUnsignedStableReleaseIsRefused() {
+        const Release r = made(QStringLiteral("v0.0.40"), false, false);
+        QCOMPARE(unsignedReleaseVerdict(r, {r}, QStringLiteral("0.0.49-rc.1")),
+                 UnsignedVerdict::Refuse);
+    }
+
+    void anUnsignedRcFromBeforeSigningKeepsTheReleasePage() {
+        const Release r = made(QStringLiteral("v0.0.48-rc.19"), true, false);
+        QCOMPARE(unsignedReleaseVerdict(r, {r}, QStringLiteral("0.0.49-rc.1")),
+                 UnsignedVerdict::OfferReleasePage);
+    }
+
+    void anUnsignedRcAtOrPastTheCutoffIsRefused() {
+        for (const char* tag : {"v0.0.49-rc.1", "v0.0.49-rc.2", "v0.1.0-rc.1"}) {
+            const Release r = made(QString::fromLatin1(tag), true, false);
+            QCOMPARE(unsignedReleaseVerdict(r, {r}, QStringLiteral("0.0.49-rc.1")),
+                     UnsignedVerdict::Refuse);
+        }
+    }
+
+    void anUnsignedRcNewerThanASignedOneIsRefused() {
+        // Even below the compiled-in cutoff: once a signed release exists,
+        // nothing after it can claim to predate signing.
+        const Release signedOne = made(QStringLiteral("v0.0.48-rc.5"), true, true);
+        const Release later = made(QStringLiteral("v0.0.48-rc.6"), true, false);
+        const Release earlier = made(QStringLiteral("v0.0.48-rc.4"), true, false);
+        const QVector<Release> all{signedOne, later, earlier};
+        QCOMPARE(unsignedReleaseVerdict(later, all, QStringLiteral("0.0.49-rc.1")),
+                 UnsignedVerdict::Refuse);
+        QCOMPARE(unsignedReleaseVerdict(earlier, all, QStringLiteral("0.0.49-rc.1")),
+                 UnsignedVerdict::OfferReleasePage);
+    }
+
+    void aBrokenCutoffFailsClosed() {
+        const Release r = made(QStringLiteral("v0.0.1-rc.1"), true, false);
+        QCOMPARE(unsignedReleaseVerdict(r, {r}, QString()), UnsignedVerdict::Refuse);
+    }
+
+    void signedManifestNeedsBothFiles() {
+        QVERIFY(hasSignedManifest(made(QStringLiteral("v1.0.0"), false, true)));
+        Release half = made(QStringLiteral("v1.0.0"), false, false);
+        half.assets.append({QStringLiteral("SHA256SUMS"), QStringLiteral("https://x/sums")});
+        QVERIFY(!hasSignedManifest(half));
+    }
 
     void buildLabelIdentifiesPrereleaseBuilds() {
         QCOMPARE(buildChannelLabel(QStringLiteral("0.0.45-rc.1")),
