@@ -347,8 +347,9 @@ void AndroidNotifier::onSyncServiceStopped(const QString& reason)
         // an app that keeps asking just burns battery being told no. We
         // degrade to foreground-only sync — the /sync loop is ours and keeps
         // running for as long as the process does — and try once more the
-        // next time the user brings the app up. Firebase is not the answer
-        // here and never will be; see the note in SyncService.java.
+        // next time the user brings the app up. Push (FCM) is the user's
+        // other option in Settings, not something we switch to behind their
+        // back; see the note in SyncService.java.
         m_budgetExhausted = true;
         qWarning("[notifier] Android stopped background sync: the dataSync "
                  "foreground-service budget for this 24h window is spent. "

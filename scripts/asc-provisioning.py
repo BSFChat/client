@@ -461,10 +461,35 @@ def check_entitlements(name: str, decoded: bytes, path: str, bundle_id: str) -> 
     with open(path, "rb") as fh:
         wanted = plistlib.load(fh)
     missing = sorted(key for key in wanted if key not in granted)
+    # aps-environment is a value, not just a key: an App Store profile grants
+    # "production", a development profile "development", and the archive is
+    # refused if the app asks for the other one. Present-but-different means
+    # the wrong profile (or the wrong entitlements file), not a missing
+    # capability, so it gets its own message.
+    aps_wanted = wanted.get("aps-environment")
+    aps_granted = granted.get("aps-environment")
+    if aps_wanted is not None and aps_granted is not None and aps_wanted != aps_granted:
+        die(
+            f"{path} asks for aps-environment '{aps_wanted}' (Push Notifications) "
+            f"but provisioning profile '{name}' grants '{aps_granted}'. App Store "
+            "and TestFlight builds must use 'production' with an App Store "
+            "profile; 'development' is for Debug builds signed with a "
+            "development profile (CMakeLists.txt generates that copy)."
+        )
     if not missing:
         print(f"OK: profile grants every entitlement in {path}")
         return
     caps = ", ".join(CAPABILITY_NAMES.get(k, k) for k in missing)
+    extra = ""
+    if "aps-environment" in missing:
+        extra = (
+            " For Push Notifications no key or certificate is needed for the "
+            "profile itself (the APNs auth key is the Sygnal gateway's, see "
+            "docs/push-notifications.md); enabling the capability on the App "
+            "ID is enough. To ship without push meanwhile, configure with "
+            "-DBSFCHAT_IOS_PUSH=OFF and drop aps-environment from the checked "
+            "file passed here."
+        )
     die(
         f"provisioning profile '{name}' does not include the {caps} "
         f"capability ({', '.join(missing)}), which {path} requests. CI cannot "
@@ -478,6 +503,7 @@ def check_entitlements(name: str, decoded: bytes, path: str, bundle_id: str) -> 
         "job downloads the newest ACTIVE App Store profile through the App "
         "Store Connect API (ASC_KEY_ID / ASC_ISSUER_ID / "
         "ASC_PRIVATE_KEY_BASE64) on every run. Re-run the job afterwards."
+        + extra
     )
 
 

@@ -5,12 +5,21 @@ package com.bsfchat.client;
 // when the user backgrounds the app so inbound messages keep flowing
 // and we can post notifications for them.
 //
-// Why not FCM: BSFChat is self-hosted. Routing every user's push
-// traffic through Google infrastructure would betray the project's
-// own-your-server promise. A persistent foreground service keeps
-// delivery entirely within the client↔server trust boundary at the
-// cost of some battery (the Matrix /sync long-poll is cheap — most
-// of the time we're idle on a server-held socket).
+// Since push (docs/push-notifications.md) this is the FALLBACK, not the
+// default. With Firebase Cloud Messaging built in (the BSFCHAT_FCM_* values
+// at configure time) and working on the device, the server's pushes reach
+// the app through the Sygnal gateway at push.bsfchat.com and this service
+// does not run. It runs when:
+//
+//   * the user chose "Keep a background connection instead of push" in
+//     Settings > Notifications (more battery, nothing through Google);
+//   * the build has no FCM configuration; or
+//   * FCM is unavailable on the device (no Google Play services), which
+//     PushBridge reports and PushManager turns into this fallback.
+//
+// In this mode delivery stays entirely within the client-server trust
+// boundary, at the cost of some battery (the Matrix /sync long-poll is
+// cheap; most of the time we're idle on a server-held socket).
 //
 // The foreground-service type is `dataSync`: the platform's own
 // description of it is "periodic background work that downloads
@@ -32,8 +41,9 @@ package com.bsfchat.client;
 // foreground — at which point it tries exactly once more and stays
 // degraded if the budget is still spent. Foreground sync is
 // unaffected: the /sync loop belongs to the C++ side and keeps
-// running for as long as the process does. FCM is deliberately not
-// the fallback; see above.
+// running for as long as the process does. (Push is the other way to
+// background delivery, chosen in Settings; this service never switches
+// to it on its own.)
 //
 // onTimeout is declared WITHOUT @Override on purpose. The local
 // toolchain compiles against an older platform than API 35, where the

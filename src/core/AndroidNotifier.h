@@ -1,5 +1,8 @@
 // Minimal wrapper around Android's NotificationManager + a bridge to
-// start/stop the SyncService that anchors the process lifetime. Used
+// start/stop the SyncService that anchors the process lifetime — the
+// persistent background connection, which since push is only used when
+// push is not built in, not available on the device, or the user chose it
+// (NotificationManager::setBackgroundSyncPolicy). Used
 // from the desktop/ mobile shared NotificationManager so inbound
 // messages continue to surface when the app is backgrounded.
 //

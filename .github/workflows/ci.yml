@@ -1116,11 +1116,30 @@ jobs:
       - name: Build vendored OpenSSL for Android
         run: bash scripts/build-openssl-android.sh
 
+      # Firebase Cloud Messaging client config for push notifications
+      # (docs/push-notifications.md). Repository VARIABLES, not secrets: they
+      # are Firebase's public client configuration and end up inside the APK
+      # anyway. All four or none — with any unset, cmake/AndroidPush.cmake
+      # compiles push out and the app keeps its persistent background
+      # connection, so a fork without them still builds.
       - name: Configure
+        env:
+          BSFCHAT_FCM_PROJECT_ID: ${{ vars.FCM_PROJECT_ID }}
+          BSFCHAT_FCM_APP_ID: ${{ vars.FCM_APP_ID }}
+          BSFCHAT_FCM_API_KEY: ${{ vars.FCM_API_KEY }}
+          BSFCHAT_FCM_SENDER_ID: ${{ vars.FCM_SENDER_ID }}
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
           QT_ANDROID="$GITHUB_WORKSPACE/Qt/6.10.3/android_arm64_v8a"
+          if [ -n "$BSFCHAT_FCM_PROJECT_ID" ] && [ -n "$BSFCHAT_FCM_APP_ID" ] \
+             && [ -n "$BSFCHAT_FCM_API_KEY" ] && [ -n "$BSFCHAT_FCM_SENDER_ID" ]; then
+            echo "Android push: FCM project $BSFCHAT_FCM_PROJECT_ID" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::FCM_PROJECT_ID / FCM_APP_ID / FCM_API_KEY / FCM_SENDER_ID" \
+                 "repository variables are not all set; this APK has NO push" \
+                 "notifications (background connection only)."
+          fi
           cmake -B build-android -G Ninja -Wno-dev \
             -DCMAKE_TOOLCHAIN_FILE="$QT_ANDROID/lib/cmake/Qt6/qt.toolchain.cmake" \
             -DQT_HOST_PATH="$GITHUB_WORKSPACE/Qt/6.10.3/gcc_64" \
@@ -1132,7 +1151,11 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DGAMECHAT_CLIENT_BUILD_TESTS=OFF \
             -DBSFCHAT_BUNDLE_ID=com.bsfchat.app \
-            -DBSFCHAT_VERSION="${{ steps.version.outputs.version }}"
+            -DBSFCHAT_VERSION="${{ steps.version.outputs.version }}" \
+            -DBSFCHAT_FCM_PROJECT_ID="$BSFCHAT_FCM_PROJECT_ID" \
+            -DBSFCHAT_FCM_APP_ID="$BSFCHAT_FCM_APP_ID" \
+            -DBSFCHAT_FCM_API_KEY="$BSFCHAT_FCM_API_KEY" \
+            -DBSFCHAT_FCM_SENDER_ID="$BSFCHAT_FCM_SENDER_ID"
 
       # -j4 to match the desktop jobs. No ctest step: the client test
       # suite is host-architecture and there is no device to run it on
