@@ -26,6 +26,10 @@ Item {
     property bool senderIsBot: false
     property string body
     property string formattedBody
+    // The model's plainBody role: formattedBody is nothing but the escaped
+    // body (no markdown, links, mentions or sender formatting), so the body
+    // can be shown as plain text without changing a pixel of meaning.
+    property bool plainBody: false
     property real timestamp
     property string msgtype: "m.text"
     property string mediaUrl: ""
@@ -275,7 +279,7 @@ Item {
         // expects coords in the Menu's parent item's frame, and mixing
         // that with scene-root coords from a TapHandler eventPoint put
         // the menu half a screen away from the actual click.
-        onTapped: contextMenu.popup()
+        onTapped: bubble.openContextMenu()
     }
 
     // Mobile long-press → context menu. Separate handler so it only
@@ -289,7 +293,7 @@ Item {
         // platform long-press feel.
         onLongPressed: {
             if (typeof haptics !== "undefined") haptics.longPress();
-            contextMenu.popup();
+            bubble.openContextMenu();
         }
     }
 
@@ -351,14 +355,110 @@ Item {
 
     // True when we can show the "Delete" menu item. Either we sent the
     // message, or we have MANAGE_MESSAGES in the active room.
+    // permissionsGeneration is the NOTIFY the invokable lacks (U-7).
     readonly property bool canDelete: isOwnMessage
         || (serverManager.activeServer
+            && serverManager.activeServer.permissionsGeneration >= 0
             && serverManager.activeServer.canManageMessages(
                    serverManager.activeServer.activeRoomId))
 
-    // Right-click context menu. Declared at the bubble root so the
-    // position passed to popup() is in application coords and works
-    // regardless of where in the bubble the user clicked.
+    // ── Popups are built on first use, not per row ───────────────────
+    //
+    // Both menus, the reaction picker and the mobile text-selection sheet
+    // used to be declared inline, so EVERY row built them the moment it was
+    // created: two Menus of ~20 items, a second TextEdit, and an EmojiPicker
+    // (a GridView over the whole emoji table) — for 30-40 rows on every
+    // channel switch, for popups nobody opens on almost any of them. That
+    // was the single biggest cost of switching channels.
+    //
+    // Now each is a Component, instantiated by createObject(bubble) the
+    // first time it is asked for and kept for the life of the row. Parenting
+    // to the bubble keeps everything the inline declaration gave: the Popup
+    // resolves its parent item from its QObject parent, so popup() with no
+    // arguments still opens at the cursor, the row's destruction still takes
+    // the popup with it, and every `bubble.*` binding inside is unchanged.
+    // The reaction picker goes further — there is ONE, in MessageView, and
+    // the row only asks for it (reactPickerRequested).
+    property var _contextMenu: null
+    property var _userContextMenu: null
+    property var _textSelectionSheet: null
+
+    function openContextMenu() {
+        if (!_contextMenu) _contextMenu = contextMenuComponent.createObject(bubble);
+        if (_contextMenu) _contextMenu.popup();
+    }
+    function openUserContextMenu() {
+        if (!_userContextMenu)
+            _userContextMenu = userContextMenuComponent.createObject(bubble);
+        if (_userContextMenu) _userContextMenu.popup();
+    }
+    function openTextSelectionSheet() {
+        if (!_textSelectionSheet)
+            _textSelectionSheet = textSelectionSheetComponent.createObject(bubble);
+        if (_textSelectionSheet) _textSelectionSheet.open();
+    }
+
+    component CtxItem: MenuItem {
+        id: ci
+        // Annotated once here rather than at each of the ~a dozen
+        // call sites: the item's own `text` is the label a sighted
+        // user reads, so it is exactly the right accessible name,
+        // and the keyboard shortcut goes in the description where a
+        // screen reader offers it without interrupting the label.
+        Accessible.role: Accessible.MenuItem
+        Accessible.name: ci.text
+        Accessible.description: ci.shortcut
+        Accessible.onPressAction: if (ci.enabled) ci.triggered()
+        // Collapse vertical footprint when hidden. Qt Controls Menu
+        // doesn't always skip invisible MenuItems in its layout, so
+        // an `Edit` item on someone else's message would leave a
+        // blank 34px slot in the popup. Gating implicitHeight on
+        // visibility is the canonical way to fold it cleanly.
+        implicitHeight: visible ? 34 : 0
+        height: implicitHeight
+        property string iconName: ""
+        property color labelColor: Theme.fg0
+        property string shortcut: ""
+        contentItem: RowLayout {
+            spacing: Theme.sp.s3
+            Icon {
+                name: ci.iconName
+                size: 14
+                color: !ci.enabled ? Theme.fg3
+                     : ci.hovered ? ci.labelColor : Theme.fg2
+                Layout.leftMargin: Theme.sp.s3
+            }
+            Text {
+                text: ci.text
+                Accessible.ignored: true
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.md
+                color: !ci.enabled ? Theme.fg3 : ci.labelColor
+                Layout.fillWidth: true
+                verticalAlignment: Text.AlignVCenter
+            }
+            Text {
+                text: ci.shortcut
+                Accessible.ignored: true
+                visible: ci.shortcut.length > 0
+                font.family: Theme.fontMono
+                font.pixelSize: Theme.fontSize.xs
+                color: Theme.fg3
+                Layout.rightMargin: Theme.sp.s3
+            }
+        }
+        background: Rectangle {
+            color: ci.hovered && ci.enabled ? Theme.bg2 : "transparent"
+            radius: Theme.r1
+            Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+        }
+    }
+
+    // Right-click context menu. Created on the bubble (see above) so the
+    // position popup() picks is in the bubble's frame and works regardless
+    // of where in the bubble the user clicked.
+    Component {
+        id: contextMenuComponent
     Menu {
         id: contextMenu
 
@@ -368,62 +468,6 @@ Item {
             border.color: Theme.line
             border.width: 1
             implicitWidth: 200
-        }
-
-        component CtxItem: MenuItem {
-            id: ci
-            // Annotated once here rather than at each of the ~a dozen
-            // call sites: the item's own `text` is the label a sighted
-            // user reads, so it is exactly the right accessible name,
-            // and the keyboard shortcut goes in the description where a
-            // screen reader offers it without interrupting the label.
-            Accessible.role: Accessible.MenuItem
-            Accessible.name: ci.text
-            Accessible.description: ci.shortcut
-            Accessible.onPressAction: if (ci.enabled) ci.triggered()
-            // Collapse vertical footprint when hidden. Qt Controls Menu
-            // doesn't always skip invisible MenuItems in its layout, so
-            // an `Edit` item on someone else's message would leave a
-            // blank 34px slot in the popup. Gating implicitHeight on
-            // visibility is the canonical way to fold it cleanly.
-            implicitHeight: visible ? 34 : 0
-            height: implicitHeight
-            property string iconName: ""
-            property color labelColor: Theme.fg0
-            property string shortcut: ""
-            contentItem: RowLayout {
-                spacing: Theme.sp.s3
-                Icon {
-                    name: ci.iconName
-                    size: 14
-                    color: !ci.enabled ? Theme.fg3
-                         : ci.hovered ? ci.labelColor : Theme.fg2
-                    Layout.leftMargin: Theme.sp.s3
-                }
-                Text {
-                    text: ci.text
-                    Accessible.ignored: true
-                    font.family: Theme.fontSans
-                    font.pixelSize: Theme.fontSize.md
-                    color: !ci.enabled ? Theme.fg3 : ci.labelColor
-                    Layout.fillWidth: true
-                    verticalAlignment: Text.AlignVCenter
-                }
-                Text {
-                    text: ci.shortcut
-                    Accessible.ignored: true
-                    visible: ci.shortcut.length > 0
-                    font.family: Theme.fontMono
-                    font.pixelSize: Theme.fontSize.xs
-                    color: Theme.fg3
-                    Layout.rightMargin: Theme.sp.s3
-                }
-            }
-            background: Rectangle {
-                color: ci.hovered && ci.enabled ? Theme.bg2 : "transparent"
-                radius: Theme.r1
-                Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
-            }
         }
 
         CtxItem {
@@ -500,7 +544,7 @@ Item {
             text: "Select text"
             iconName: "annotate"
             visible: Theme.isMobile
-            onTriggered: textSelectionSheet.open()
+            onTriggered: bubble.openTextSelectionSheet()
         }
         CtxItem {
             text: "Copy message link"
@@ -558,17 +602,21 @@ Item {
             onTriggered: bubble.deleteRequested(bubble.eventId)
         }
     }
+    }
 
     // User-scope context menu — popped by right-click on the sender
     // avatar or sender name. Distinct from the message-scope menu
     // (which is fired by right-click on the bubble body) so "reply"/
     // "delete" actions don't appear when the user meant to reach out
     // to the person. Mirrors the MemberList right-click vocabulary.
+    Component {
+        id: userContextMenuComponent
     Menu {
         id: userContextMenu
         readonly property bool isSelfUser: serverManager.activeServer
             && bubble.sender === serverManager.activeServer.userId
         readonly property bool canManageRoles: serverManager.activeServer
+            && serverManager.activeServer.permissionsGeneration >= 0
             && serverManager.activeServer.canManageRoles(
                    serverManager.activeServer.activeRoomId)
 
@@ -646,6 +694,7 @@ Item {
                 bubble.sender, bubble.senderDisplayName)
         }
     }
+    }
 
     Rectangle {
         id: hoverBg
@@ -696,25 +745,41 @@ Item {
     // Hover action bar — visible on mouse-over. Contains reply/forward for
     // any text message and edit for own messages. Three compact icon
     // buttons sit in a row; each highlights its glyph on hover.
-    Row {
-        id: hoverActions
+    //
+    // Built only while it can be seen. It is five buttons of Rectangle +
+    // Icon + MouseArea, and it used to exist (hidden) on every row; it is
+    // shown on hover only, so a Loader gated on the same condition the
+    // visibility was gated on changes nothing a user can observe — the
+    // buttons were never reachable while invisible, by pointer or by a
+    // screen reader (an invisible item is not in the accessibility tree).
+    Loader {
+        id: hoverActionsLoader
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.topMargin: 0
         anchors.rightMargin: Theme.sp.s1
-        spacing: 0
+        z: 1
         // `bubbleHovered` (HoverHandler) stays true across the whole
         // bubble — including while the cursor is on the selectable
         // TextEdit, which would swallow hover from a plain MouseArea.
-        // The per-button MouseAreas OR'd in keep the bar visible while
-        // the cursor has travelled off the bubble onto a button itself.
-        visible: bubble.msgtype === "m.text" && (bubble.bubbleHovered
-                 || replyMouse.containsMouse
+        // The per-button MouseAreas OR'd in (through `anyButtonHovered`)
+        // keep the bar up while the cursor has travelled off the bubble
+        // onto a button itself.
+        active: bubble.msgtype === "m.text" && (bubble.bubbleHovered
+                 || (hoverActionsLoader.item !== null
+                     && hoverActionsLoader.item.anyButtonHovered === true))
+        sourceComponent: hoverActionsComponent
+    }
+    Component {
+        id: hoverActionsComponent
+    Row {
+        id: hoverActions
+        spacing: 0
+        readonly property bool anyButtonHovered: replyMouse.containsMouse
                  || forwardMouse.containsMouse
                  || copyLinkMouse.containsMouse
                  || reactMouse.containsMouse
-                 || editMouse.containsMouse)
-        z: 1
+                 || editMouse.containsMouse
 
         // Reply
         Rectangle {
@@ -808,7 +873,7 @@ Item {
             Accessible.role: Accessible.Button
             Accessible.name: qsTr("Add a reaction")
             Accessible.onPressAction: bubble.openReactPicker()
-            color: reactMouse.containsMouse || ctxReactPicker.visible
+            color: reactMouse.containsMouse || bubble.reactPickerOpen
                    ? Theme.bg3 : Theme.bg1
             border.color: Theme.line
             border.width: 1
@@ -816,7 +881,7 @@ Item {
                 anchors.centerIn: parent
                 name: "smile-plus"
                 size: 14
-                color: reactMouse.containsMouse || ctxReactPicker.visible
+                color: reactMouse.containsMouse || bubble.reactPickerOpen
                        ? Theme.accent : Theme.fg1
             }
             MouseArea {
@@ -856,6 +921,7 @@ Item {
                 onClicked: bubble.editRequested(bubble.eventId, bubble.body)
             }
         }
+    }
     }
 
     RowLayout {
@@ -928,7 +994,7 @@ Item {
                     acceptedButtons: Qt.LeftButton | Qt.RightButton
                     onClicked: (m) => {
                         if (m.button === Qt.RightButton) {
-                            userContextMenu.popup();
+                            bubble.openUserContextMenu();
                         } else {
                             bubble.senderClicked(bubble.sender,
                                                  bubble.senderDisplayName);
@@ -973,7 +1039,15 @@ Item {
                 spacing: Theme.sp.s3
 
                 Text {
+                    textFormat: Text.PlainText
                     text: bubble.senderDisplayName
+                    // Names may be 256 bytes; the timestamp and badges
+                    // after it must stay on screen (U-6). parent.parent is
+                    // the content column, the width actually available.
+                    elide: Text.ElideRight
+                    Layout.maximumWidth: Math.max(48, parent.parent.width
+                        - senderTimestamp.implicitWidth
+                        - (bubble.senderIsBot ? 56 : 0) - 2 * Theme.sp.s3)
                     // The name is spoken as part of the message. What is
                     // worth reaching separately is the ACTION on it, so
                     // this element is a button onto the profile rather
@@ -1000,7 +1074,7 @@ Item {
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
                         onClicked: (m) => {
                             if (m.button === Qt.RightButton) {
-                                userContextMenu.popup();
+                                bubble.openUserContextMenu();
                             } else {
                                 bubble.senderClicked(bubble.sender,
                                                      bubble.senderDisplayName);
@@ -1099,6 +1173,7 @@ Item {
                     }
 
                     Text {
+                        textFormat: Text.PlainText
                         text: bubble.replyToSender !== ""
                               ? bubble.replyToSender : "unknown"
                         Accessible.ignored: true
@@ -1109,6 +1184,7 @@ Item {
                     }
 
                     Text {
+                        textFormat: Text.PlainText
                         text: bubble.replyPreview !== ""
                               ? bubble.replyPreview
                               : "(message unavailable)"
@@ -1221,6 +1297,18 @@ Item {
                                 fillMode: Image.PreserveAspectFit
                                 asynchronous: true
                                 cache: true
+                                // Decode at the size it is shown at. The box
+                                // is fixed at row creation (boxW/boxH above),
+                                // so this never changes under a relayout and
+                                // never re-decodes; a phone photo is 12 MP and
+                                // was being decoded in full for a 400x300
+                                // box, per row, on every channel open. Both
+                                // dimensions set + PreserveAspectFit scales
+                                // to fit inside, keeping the aspect ratio.
+                                // The in-app viewer loads its own full-size
+                                // copy.
+                                sourceSize.width: Math.ceil(parent.boxW * Screen.devicePixelRatio)
+                                sourceSize.height: Math.ceil(parent.boxH * Screen.devicePixelRatio)
                             }
 
                             // Loading placeholder — subtle bg2 on the
@@ -1363,6 +1451,7 @@ Item {
                             visible: bubble.mediaFileName !== ""
 
                             Text {
+                                textFormat: Text.PlainText
                                 text: bubble.mediaFileName
                                 Accessible.ignored: true
                                 font.pixelSize: Theme.fontSize.sm
@@ -1459,6 +1548,7 @@ Item {
                                 Layout.fillWidth: true
                                 spacing: 2
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: bubble.mediaFileName
                                     Accessible.ignored: true
                                     font.family: Theme.fontSans
@@ -1535,7 +1625,16 @@ Item {
                 // the badge — re-rendered it as one line. Building body HTML
                 // in here is untestable without a GUI; test_message_render
                 // fails if it comes back.
+                // The cheap path. Most messages are a line of ordinary prose,
+                // and for those the markup the model built is only the
+                // escaped body: handing it to a RichText TextEdit pays for an
+                // HTML import to show what PlainText shows directly — same
+                // characters, same line breaks, still selectable. Edited and
+                // /me rows keep RichText for the badge and the prefix.
+                readonly property bool _plain: bubble.plainBody && !bubble.edited
+                                               && bubble.msgtype !== "m.emote"
                 text: {
+                    if (_plain) return bubble.body;
                     var base = bubble.formattedBody !== "" ? bubble.formattedBody : bubble.body;
                     var suffix = '<span style="color:#8e9297;font-size:small"> (edited)</span>';
                     // m.emote ("/me foo") renders as "<sender> foo" in italics
@@ -1562,9 +1661,10 @@ Item {
                     // every prose body it holds.
                     return base + suffix;
                 }
-                textFormat: (bubble.msgtype === "m.emote"
-                             || bubble.formattedBody !== ""
-                             || bubble.edited)
+                textFormat: !_plain
+                            && (bubble.msgtype === "m.emote"
+                                || bubble.formattedBody !== ""
+                                || bubble.edited)
                             ? TextEdit.RichText : TextEdit.PlainText
                 wrapMode: TextEdit.Wrap
                 font.family: Theme.fontSans
@@ -1576,8 +1676,8 @@ Item {
                 selectionColor: Theme.accent
                 persistentSelection: false
                 onLinkActivated: (link) => {
-                    // Intercept internal scheme; let anything else open in
-                    // the system browser as before.
+                    // Intercept internal scheme; everything else goes through
+                    // LinkOpener (scheme allowlist + spoofed-text check).
                     if (link.indexOf("bsfchat://channel/") === 0) {
                         bubble.channelLinkClicked(
                             link.substring("bsfchat://channel/".length));
@@ -1592,7 +1692,7 @@ Item {
                             link.substring("bsfchat://user/".length));
                         bubble.userLinkClicked(uid, uid);
                     } else {
-                        Qt.openUrlExternally(link);
+                        linkOpener.open(link, bubble.formattedBody);
                     }
                 }
                 MouseArea {
@@ -1678,6 +1778,7 @@ Item {
                             anchors.centerIn: parent
                             spacing: 5
                             Text {
+                                textFormat: Text.PlainText
                                 text: entry ? entry.emoji : ""
                                 Accessible.ignored: true
                                 font.family: Theme.fontSans
@@ -1756,30 +1857,26 @@ Item {
 
     // Reaction picker reachable from both the hover-bar smile-plus
     // button (desktop) and the context menu's "Add reaction" entry
-    // (both platforms, but mobile relies on it). Parented to
-    // Overlay.overlay so it floats correctly regardless of which
-    // trigger caused it to open — the in-line EmojiPicker inside
-    // the hover-bar's reactButton only works on desktop because
-    // the reactButton itself is hover-gated and thus hidden on
-    // mobile.
-    EmojiPicker {
-        id: ctxReactPicker
-        parent: Overlay.overlay
-        anchors.centerIn: Overlay.overlay
-        modal: true
-        onEmojiSelected: function(emoji) {
-            bubble.reactionToggled(bubble.eventId, emoji);
-            ctxReactPicker.close();
-        }
-    }
+    // (both platforms, but mobile relies on it). The picker itself is ONE
+    // shared instance in MessageView — an EmojiPicker is a GridView over the
+    // whole emoji table, and every row used to build its own. The row only
+    // asks for it; MessageView opens it, remembers which event it is for, and
+    // routes the pick through the same toggleReaction a chip click uses.
+    // `reactPickerOpen` is MessageView telling the row the shared picker is
+    // currently open for it, so the hover button keeps its pressed look.
+    signal reactPickerRequested(string eventId)
+    property bool reactPickerOpen: false
     function openReactPicker() {
-        ctxReactPicker.open();
+        bubble.reactPickerRequested(bubble.eventId);
     }
 
     // Mobile text-selection sheet. Opened from the "Select text"
     // context-menu entry. Renders the raw message body inside a
     // TextEdit with mobile-native selection handles so the user
     // can Android-copy part of a message rather than all of it.
+    // Built on first use, like the menus (see openTextSelectionSheet).
+    Component {
+        id: textSelectionSheetComponent
     Popup {
         id: textSelectionSheet
         parent: Overlay.overlay
@@ -1895,6 +1992,7 @@ Item {
                 }
             }
         }
+    }
     }
 
     // The send failed. The row stays where it is — the text is not lost and

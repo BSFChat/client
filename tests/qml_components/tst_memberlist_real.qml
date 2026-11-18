@@ -290,4 +290,33 @@ TestCase {
         // lighting it must not resize the row or reflow the list.
         compare(row.height, heightBefore);
     }
+
+    // ── U-4: the list says why it is empty ──────────────────────────
+
+    function textShown(str) {
+        var d = descendants(memberList);
+        for (var i = 0; i < d.length; ++i) {
+            if (d[i].text !== undefined && String(d[i].text) === str && d[i].visible)
+                return d[i];
+        }
+        return null;
+    }
+
+    function test_g_an_empty_list_says_loading_failed_or_empty() {
+        conn().resetMembersForTest();
+        conn().membersStatus = 1;
+        tryVerify(function() { return textShown("Loading members…") !== null; });
+        conn().membersStatus = 2;
+        tryVerify(function() { return textShown("Couldn't load the member list.") !== null; });
+        var before = conn().retryMembersCalls();
+        var retry = textShown("Try again");
+        verify(retry !== null, "no retry control on a failed member list");
+        retry.Accessible.pressAction();
+        compare(conn().retryMembersCalls(), before + 1);
+        conn().membersStatus = 0;
+        tryVerify(function() { return textShown("No members to show.") !== null; });
+        // A list with rows shows none of it.
+        conn().addMemberForTest("@alice:test", "Alice");
+        tryVerify(function() { return textShown("No members to show.") === null; });
+    }
 }

@@ -81,6 +81,11 @@ public:
     explicit VoiceSession(QObject* parent = nullptr);
 
     State state() const { return m_state; }
+    // The room this session is on its way into once queued work drains,
+    // or empty for "out of voice". Idle mid-switch (A left, B's join still
+    // queued) answers B, which is how the UI tells "between rooms" from
+    // "out of voice".
+    QString headingTo() const { return destinationRoom(); }
     // The room this session is in, joining, or leaving. Empty in Idle.
     QString roomId() const { return m_roomId; }
     // True only in Active — i.e. an engine is running. `roomId()` is

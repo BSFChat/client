@@ -159,6 +159,10 @@ class FakeServerConnection : public QObject
     Q_PROPERTY(bool canManageChannel READ canManageChannel CONSTANT)
     Q_PROPERTY(bool canChangeNickname READ canChangeNickname CONSTANT)
     Q_PROPERTY(bool canManageNicknames READ canManageNicknames CONSTANT)
+    // ServerConnection::membersStatus — 0 ready, 1 loading, 2 failed. Writable
+    // here so tst_memberlist_real can drive the list's empty states (U-4).
+    Q_PROPERTY(int membersStatus READ membersStatus WRITE setMembersStatus
+               NOTIFY membersStatusChanged)
 
 public:
     using QObject::QObject;
@@ -417,6 +421,15 @@ public:
         return m_members->isBot(uid);
     }
     Q_INVOKABLE void fetchProfile(const QString&) {}
+    int membersStatus() const { return m_membersStatus; }
+    void setMembersStatus(int v)
+    {
+        if (m_membersStatus == v) return;
+        m_membersStatus = v;
+        emit membersStatusChanged();
+    }
+    Q_INVOKABLE void retryMembers() { ++m_retryMembersCalls; }
+    Q_INVOKABLE int retryMembersCalls() const { return m_retryMembersCalls; }
     Q_INVOKABLE void fetchNickname(const QString&) {}
     Q_INVOKABLE void setNickname(const QString&, const QString&) {}
     Q_INVOKABLE QString resolveMediaUrl(const QString& mxc) const { return mxc; }
@@ -515,8 +528,11 @@ signals:
                          bool mentionsMe);
     void micLevelChanged();
     void peerLevelChanged(const QString& userId);
+    void membersStatusChanged();
 
 private:
+    int m_membersStatus = 0;
+    int m_retryMembersCalls = 0;
     // Default to the healthy state, so every test case starts from "the
     // banner says nothing" and has to put it into the state it asserts on.
     int m_status = 1;

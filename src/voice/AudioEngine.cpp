@@ -1,4 +1,12 @@
 #include "voice/AudioEngine.h"
+
+#include <QTimer>
+#include <vector>
+#include <functional>
+#include <QDeadlineTimer>
+#include <QElapsedTimer>
+#include <QPointer>
+#include <QSet>
 #include "voice/AudioPacketQueue.h"
 #include "voice/AudioWorker.h"
 #include "core/AudioDeviceStatus.h"
@@ -23,6 +31,56 @@ namespace {
 AudioEngine* g_lifecycleOwner = nullptr;
 } // namespace
 
+namespace {
+// Audio threads still shutting down after stop(): their devices are being
+// closed on their own thread while the GUI carries on. A new start waits
+// for this set to empty before it opens anything, because on macOS a
+// second VoiceProcessingIO unit initialised while the previous one is
+// still being torn down fights it for the same hardware.
+QSet<QThread*>& retiringThreads()
+{
+    static QSet<QThread*> threads;
+    return threads;
+}
+std::vector<std::function<void()>>& retireWaiters()
+{
+    static std::vector<std::function<void()>> waiters;
+    return waiters;
+}
+} // namespace
+
+bool AudioEngine::retiringInProgress()
+{
+    return !retiringThreads().isEmpty();
+}
+
+void AudioEngine::afterRetired(QObject* context, std::function<void()> fn)
+{
+    // Next event-loop turn at the earliest, either way, so callers see the
+    // same ordering whether or not anything happened to be retiring.
+    QPointer<QObject> guard(context);
+    auto run = [guard, fn = std::move(fn)]() {
+        if (guard) fn();
+    };
+    if (!retiringInProgress()) {
+        QMetaObject::invokeMethod(context, run, Qt::QueuedConnection);
+        return;
+    }
+    retireWaiters().push_back(std::move(run));
+}
+
+bool AudioEngine::waitForRetiredThreads(int timeoutMs)
+{
+    QElapsedTimer clock;
+    clock.start();
+    bool allDone = true;
+    for (QThread* t : retiringThreads().values()) {
+        const qint64 left = qMax<qint64>(0, timeoutMs - clock.elapsed());
+        if (!t->wait(QDeadlineTimer(left))) allDone = false;
+    }
+    return allDone;
+}
+
 AudioEngine::AudioEngine(QObject* parent)
     : QObject(parent)
     , m_queue(std::make_shared<AudioPacketQueue>())
@@ -34,10 +92,26 @@ AudioEngine::AudioEngine(QObject* parent)
     // disappeared left a dead sink. See the "Device enumeration" note in
     // the header for why this instance lives on this thread.
     m_mediaDevices = new QMediaDevices(this);
-    connect(m_mediaDevices, &QMediaDevices::audioInputsChanged,
+    // Coalesced. Every notification used to re-enumerate on THIS thread at
+    // once, and they come in bursts: building a VoiceProcessingIO unit on
+    // macOS creates a private aggregate device (one burst), a Bluetooth
+    // headset switching profile is another. Enumerating mid-burst asks
+    // CoreAudio about devices while the HAL is reconfiguring them, and
+    // those calls wait for it — a UI stall on every join. One enumeration
+    // a short quiet period after the last notification sees the settled
+    // list, and the worker's own debounce already expected bursts.
+    for (QTimer* t : {&m_inputsChangedTimer, &m_outputsChangedTimer}) {
+        t->setSingleShot(true);
+        t->setInterval(kDeviceChangeCoalesceMs);
+    }
+    connect(&m_inputsChangedTimer, &QTimer::timeout,
             this, [this]() { pushDeviceSnapshot(true, true); });
-    connect(m_mediaDevices, &QMediaDevices::audioOutputsChanged,
+    connect(&m_outputsChangedTimer, &QTimer::timeout,
             this, [this]() { pushDeviceSnapshot(false, true); });
+    connect(m_mediaDevices, &QMediaDevices::audioInputsChanged,
+            &m_inputsChangedTimer, qOverload<>(&QTimer::start));
+    connect(m_mediaDevices, &QMediaDevices::audioOutputsChanged,
+            &m_outputsChangedTimer, qOverload<>(&QTimer::start));
 
     // Volume and AGC. Read when a session starts (see start()) and
     // followed live, so a slider moved mid-call is heard as it moves.
@@ -66,7 +140,7 @@ void AudioEngine::applyGainSettings()
     m_worker->setAutoGain(gains.autoGain());
 }
 
-void AudioEngine::pushDeviceSnapshot(bool input, bool live)
+void AudioEngine::pushDeviceSnapshot(bool input, bool live, bool blocking)
 {
     AudioWorker* worker = m_worker;
     // No pipeline to reconfigure. start() seeds the worker itself, from
@@ -88,19 +162,25 @@ void AudioEngine::pushDeviceSnapshot(bool input, bool live)
             worker->onSystemDevicesChanged(dir, devices, def);
         }, Qt::QueuedConnection);
     } else {
+        // Non-blocking for startAsync(): queued ahead of startDevices() on
+        // the same thread, so the worker still sees the snapshot first.
         QMetaObject::invokeMethod(worker, [worker, dir, devices, def]() {
             worker->setDeviceSnapshot(dir, devices, def);
-        }, Qt::BlockingQueuedConnection);
+        }, blocking ? Qt::BlockingQueuedConnection : Qt::QueuedConnection);
     }
 }
 
 AudioEngine::~AudioEngine() {
-    stop();
+    // Destruction without a prior stop() is the application shutting down
+    // (VoiceEngine always stops before deleting): block, as this always
+    // did, so no audio thread is left running behind the exiting process.
+    // The normal leave/switch path has already retired the thread.
+    ++m_deferredStart;
+    if (m_thread) teardownThread();
 }
 
-bool AudioEngine::start() {
-    if (m_thread) return true;
-
+void AudioEngine::prepareThread() {
+    ++m_startGeneration;
     m_thread = new QThread();
     m_thread->setObjectName(QStringLiteral("bsfchat-audio"));
 
@@ -153,28 +233,10 @@ bool AudioEngine::start() {
     // so the join resolves through exactly the same policy as every
     // later change rather than through a parallel path that only runs
     // once.
-    pushDeviceSnapshot(true, false);
-    pushDeviceSnapshot(false, false);
 
-    // Open the devices on the audio thread and wait for the verdict.
-    // Blocking is safe in both directions: this thread is not the audio
-    // thread, and the audio thread cannot be waiting on us. The event is
-    // delivered even though the loop may not be up yet — invokeMethod
-    // posts and then waits on the semaphore.
-    bool ok = false;
-    QMetaObject::invokeMethod(m_worker, [w = m_worker, &ok]() {
-        ok = w->startDevices();
-    }, Qt::BlockingQueuedConnection);
+}
 
-    if (!ok) {
-        // Encoder creation failed; don't leave a thread running for a
-        // pipeline that will never produce anything. teardownThread()
-        // leaves us in the never-started state, so a later stop() from
-        // VoiceEngine is a no-op and a later start() can retry cleanly.
-        teardownThread();
-        return false;
-    }
-
+void AudioEngine::finishStart() {
     // Per-user volumes for everyone who has one. Pushed from here, on the
     // GUI thread, before this function returns — and so ahead of any
     // packet from those users, since receivePeerAudio() runs on this
@@ -196,16 +258,145 @@ bool AudioEngine::start() {
     // has nothing to lose in it.
     bsfchat::ios_audio::setEventHandler(&AudioEngine::platformAudioEventTrampoline);
     publishAudioState();
+    m_running = true;
+}
+
+bool AudioEngine::start() {
+    if (m_thread) return true;
+    // Blocking callers block for this too: never two pipelines at once.
+    waitForRetiredThreads(kThreadJoinTimeoutMs);
+    prepareThread();
+    pushDeviceSnapshot(true, false);
+    pushDeviceSnapshot(false, false);
+    // Open the devices on the audio thread and wait for the verdict.
+    // Blocking is safe in both directions: this thread is not the audio
+    // thread, and the audio thread cannot be waiting on us. The event is
+    // delivered even though the loop may not be up yet — invokeMethod
+    // posts and then waits on the semaphore.
+    bool ok = false;
+    QMetaObject::invokeMethod(m_worker, [w = m_worker, &ok]() {
+        ok = w->startDevices();
+    }, Qt::BlockingQueuedConnection);
+
+    if (!ok) {
+        // Encoder creation failed; don't leave a thread running for a
+        // pipeline that will never produce anything. teardownThread()
+        // leaves us in the never-started state, so a later stop() from
+        // VoiceEngine is a no-op and a later start() can retry cleanly.
+        teardownThread();
+        return false;
+    }
+
+    finishStart();
     return true;
 }
 
+void AudioEngine::startAsync() {
+    if (m_thread) {
+        // Already running or already starting; a second verdict would be
+        // a lie about a pipeline nobody asked to open again.
+        if (m_running) QMetaObject::invokeMethod(this, [this]() { emit startFinished(true); },
+                                                 Qt::QueuedConnection);
+        return;
+    }
+    if (retiringInProgress()) {
+        // A previous pipeline is still closing its devices. Start when it
+        // has, rather than opening a second unit on top of it. stop()
+        // cancels this by bumping m_deferredStart.
+        const quint64 ticket = ++m_deferredStart;
+        QPointer<AudioEngine> self(this);
+        retireWaiters().push_back([self, ticket]() {
+            if (self && self->m_deferredStart == ticket && !self->m_thread)
+                self->startAsync();
+        });
+        return;
+    }
+    prepareThread();
+    const quint64 generation = m_startGeneration;
+    AudioWorker* worker = m_worker;
+    // Queued, and this object is GUI-affine: the verdict lands on the GUI
+    // thread. Matched by generation, because a stop() + startAsync() pair
+    // can leave an earlier worker's verdict in the event queue.
+    connect(worker, &AudioWorker::devicesStartFinished, this,
+            [this, generation](bool ok) {
+        if (generation != m_startGeneration || !m_thread) return;
+        if (!ok) {
+            teardownThread();
+            emit startFinished(false);
+            return;
+        }
+        finishStart();
+        emit startFinished(true);
+    }, Qt::QueuedConnection);
+    pushDeviceSnapshot(true, false, /*blocking=*/false);
+    pushDeviceSnapshot(false, false, /*blocking=*/false);
+    QMetaObject::invokeMethod(worker, [worker]() {
+        emit worker->devicesStartFinished(worker->startDevices());
+    }, Qt::QueuedConnection);
+}
+
 void AudioEngine::stop() {
+    // Cancels a start that is waiting for an earlier teardown to finish.
+    ++m_deferredStart;
     if (!m_thread) return;
-    teardownThread();
+    retireThread();
+}
+
+void AudioEngine::retireThread() {
+    // Everything teardownThread() does, without waiting for any of it.
+    // Leaving or switching channels used to block the GUI here while the
+    // devices closed (AudioUnitUninitialize/Dispose on macOS) and the
+    // thread joined, up to kThreadJoinTimeoutMs. Now the audio thread
+    // closes its own devices and then quits; the QThread is reaped on the
+    // GUI thread when it finishes; and the next start waits for that
+    // (startAsync defers, start blocks) so two pipelines never overlap.
+    if (!m_thread) return;
+    m_running = false;
+    ++m_startGeneration; // a verdict still in flight is no longer ours
+    if (m_worker) m_worker->requestStop();
+    if (g_lifecycleOwner == this) {
+        bsfchat::ios_audio::setEventHandler(nullptr);
+        g_lifecycleOwner = nullptr;
+    }
+    m_lifecycle.onStop();
+
+    QThread* thread = m_thread;
+    AudioWorker* worker = m_worker;
+    retiringThreads().insert(thread);
+    // Context = the QThread object, which lives on the GUI thread, so this
+    // runs there (queued) once the audio thread has exited.
+    connect(thread, &QThread::finished, thread, [thread]() {
+        retiringThreads().remove(thread);
+        thread->deleteLater();
+        if (retiringThreads().isEmpty()) {
+            auto waiters = std::move(retireWaiters());
+            retireWaiters().clear();
+            for (auto& w : waiters) w();
+        }
+    });
+    // stopDevices() then quit, in ONE queued call on the audio thread:
+    // posting quit() separately could end the loop before the stop ran.
+    if (worker) {
+        QMetaObject::invokeMethod(worker, [worker]() {
+            worker->stopDevices();
+            QThread::currentThread()->quit();
+        }, Qt::QueuedConnection);
+    } else {
+        thread->quit();
+    }
+    m_worker = nullptr;
+    m_thread = nullptr;
+    // The retiring worker keeps its own reference to the old queue while
+    // it drains; the next pipeline gets a clean one.
+    m_queue = std::make_shared<AudioPacketQueue>();
+    bsfchat::AudioDeviceStatus::instance().setInputInUse(QString());
+    bsfchat::AudioDeviceStatus::instance().setOutputInUse(QString());
+    publishAudioState();
 }
 
 void AudioEngine::teardownThread() {
     if (!m_thread) return;
+    m_running = false;
 
     // FIRST, before anything that waits. This is a direct atomic store
     // rather than a queued call, so it takes effect even though the

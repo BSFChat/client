@@ -3,6 +3,7 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 qt_add_executable(test_models
     test_models.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
@@ -789,6 +790,7 @@ add_test(NAME test_server_roster COMMAND test_server_roster)
 qt_add_executable(test_identity_provider_url
     test_identity_provider_url.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/ServerConnectionRoomRemoval.cpp
     # ServerConnection gained a BotAdminModel* Q_PROPERTY when feat/bots merged,
     # a SelfRoleModel* with the self-role picker, a ChannelInviteModel* with
     # "add a member to a channel", and a BlockedUsersModel* with blocking.
@@ -820,6 +822,7 @@ qt_add_executable(test_identity_provider_url
     ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
     # The mesh-vs-SFU choice is made on every join regardless of whether
@@ -852,6 +855,7 @@ add_test(NAME test_identity_provider_url COMMAND test_identity_provider_url)
 qt_add_executable(test_error_surface_guards
     test_error_surface_guards.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/ServerConnectionRoomRemoval.cpp
     # ServerConnection gained a MediaTicketCache and a MediaDownloader when
     # security/media-tickets merged. This target did not exist on that branch,
     # so it never picked them up — the same cross-branch shape as BotAdminModel.
@@ -875,6 +879,7 @@ qt_add_executable(test_error_surface_guards
     ${CMAKE_SOURCE_DIR}/src/core/AudioGainSettings.cpp
     ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/voice/VoiceTransportSelector.cpp
@@ -904,6 +909,7 @@ add_test(NAME test_error_surface_guards COMMAND test_error_surface_guards)
 qt_add_executable(test_composer_upload_lock
     test_composer_upload_lock.cpp
     ${CMAKE_SOURCE_DIR}/src/net/ServerConnection.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/ServerConnectionRoomRemoval.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/core/MediaDownloader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
@@ -924,6 +930,7 @@ qt_add_executable(test_composer_upload_lock
     ${CMAKE_SOURCE_DIR}/src/core/AudioGainSettings.cpp
     ${CMAKE_SOURCE_DIR}/src/model/RoomListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/voice/VoiceTransportSelector.cpp
@@ -1004,6 +1011,20 @@ target_include_directories(test_direct_rooms PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_direct_rooms PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_direct_rooms COMMAND test_direct_rooms)
 
+# "This room is gone for me" (audit R-1): the rooms.leave parser and the
+# join-vs-leave rule, the /joined_rooms reconcile decision, and
+# LocalCache::forgetRoom. RoomRemoval.h is header-only; LocalCache needs Sql.
+qt_add_executable(test_room_removal
+    test_room_removal.cpp
+    ${CMAKE_SOURCE_DIR}/src/store/LocalCache.cpp
+)
+target_include_directories(test_room_removal PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_room_removal PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Sql Qt6::Test
+)
+add_test(NAME test_room_removal COMMAND test_room_removal)
+
 # Media cache identity. The key used to include the access token, so every
 # re-login re-downloaded every image the user had ever seen.
 qt_add_executable(test_media_cache_key
@@ -1076,6 +1097,19 @@ qt_add_executable(test_oidc_request test_oidc_request.cpp)
 target_include_directories(test_oidc_request PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_oidc_request PRIVATE bsfchat_protocol Qt6::Core Qt6::Test)
 add_test(NAME test_oidc_request COMMAND test_oidc_request)
+
+# Joining voice must not freeze the window while the audio devices open:
+# AudioEngine::startAsync() returns at once and reports later, exactly once,
+# and never lets a stale verdict through after a stop. Real AudioEngine and
+# AudioWorker from bsfchat-lib; works with or without audio devices.
+if(BSFCHAT_ENABLE_VOICE)
+    qt_add_executable(test_audio_engine_async test_audio_engine_async.cpp)
+    target_include_directories(test_audio_engine_async PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_audio_engine_async PRIVATE bsfchat-lib Qt6::Test)
+    add_test(NAME test_audio_engine_async COMMAND test_audio_engine_async)
+    set_tests_properties(test_audio_engine_async PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
 
 # One browser, one sign-in at a time (the 2026-09-24 mobile 403). Compiles the
 # real IdentityClient and drives its process-wide serialisation through a test
@@ -1197,6 +1231,7 @@ qt_add_executable(test_bots
     ${CMAKE_SOURCE_DIR}/src/model/BotAdminModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MemberListModel.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/util/MarkdownParser.cpp
@@ -1222,6 +1257,7 @@ add_test(NAME test_bots COMMAND test_bots)
 qt_add_executable(test_message_render
     test_message_render.cpp
     ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
     ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
     ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
     ${CMAKE_SOURCE_DIR}/src/util/MarkdownParser.cpp
@@ -1460,3 +1496,44 @@ target_compile_definitions(test_android_runtime PRIVATE
     BSFCHAT_SRC_DIR="${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test_android_runtime PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_android_runtime COMMAND test_android_runtime)
+
+# The QImage -> QVideoFrame copy the macOS screen-share and camera paths
+# use. A whole-image memcpy sheared every share whose width was not a
+# multiple of four pixels (QVideoFrame pads lines to 16 bytes).
+if(BSFCHAT_ENABLE_VOICE)
+    qt_add_executable(test_image_to_video_frame test_image_to_video_frame.cpp)
+    target_include_directories(test_image_to_video_frame PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_image_to_video_frame PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test)
+    add_test(NAME test_image_to_video_frame COMMAND test_image_to_video_frame)
+endif()
+
+# Q-S2: the formatted_body sanitiser, against the bypasses a hand-rolled
+# filter usually misses. Pure string code, no GUI.
+qt_add_executable(test_html_sanitizer
+    test_html_sanitizer.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
+)
+target_include_directories(test_html_sanitizer PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_html_sanitizer PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_html_sanitizer COMMAND test_html_sanitizer)
+
+# Other users' input never crashes the client or reaches the OS unchecked:
+# wrong-typed event content (C-1), call capabilities (V-2), strict mxc URIs and
+# the attachment allowlist (M-1), and the link scheme / spoofed-text policy
+# (Q-S1). No server, no GUI.
+qt_add_executable(test_untrusted_content
+    test_untrusted_content.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/MessageModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/HtmlSanitizer.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/ThreadFilterModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MarkdownParser.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/MentionRenderer.cpp
+)
+target_include_directories(test_untrusted_content PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_untrusted_content PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Test
+)
+add_test(NAME test_untrusted_content COMMAND test_untrusted_content)

@@ -152,6 +152,8 @@ public:
     bool platformVoiceProcessing() const override { return true; }
     bool capturePolled() const override { return true; }
 
+    void prepareDevices(const QAudioDevice& input, const QAudioDevice& output) override;
+
     bool openCapture(const QAudioDevice& device,
                      const QAudioFormat& format) override;
     void closeCapture() override;
@@ -197,6 +199,11 @@ private:
     bool configureUnit();
     bool applyStreamFormats();
     bool resolveDevices();
+    // macOS: read back which devices the running unit actually opened
+    // and fail if it is provably not the ones requested (VpioDeviceCheck.h).
+    // A failure here sends the call to the Qt path, which does honour
+    // the user's device choice.
+    bool verifyDevices();
 
     void fail(const QString& reason);
 

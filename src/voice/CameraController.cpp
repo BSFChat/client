@@ -5,6 +5,7 @@
 #include "voice/IVoiceTransport.h"
 #include "voice/VoiceEngine.h"
 #include "voice/video/VideoRateController.h"
+#include "voice/video/ImageToVideoFrame.h"
 #include "voice/video/VideoSendPipeline.h"
 #include "net/ServerManager.h"
 #include "net/ServerConnection.h"
@@ -74,15 +75,11 @@ CameraController::CameraController(QObject* parent)
             if (!m_active) setActiveState(true);
             // Expose the frame through our internal QVideoSink so
             // QML VideoOutputs mirrored via forwardTo() render it.
-            QVideoFrameFormat fmt(img.size(),
-                QVideoFrameFormat::pixelFormatFromImageFormat(img.format()));
-            QVideoFrame vf(fmt);
-            if (vf.map(QVideoFrame::WriteOnly)) {
-                std::memcpy(vf.bits(0), img.bits(),
-                    size_t(img.bytesPerLine()) * size_t(img.height()));
-                vf.unmap();
-                m_sink->setVideoFrame(vf);
-            }
+            // Row by row — see ImageToVideoFrame.h (a camera mode whose
+            // width is not a multiple of four would shear otherwise).
+            const QVideoFrame vf = imageToVideoFrame(img);
+            if (!vf.isValid()) return;
+            m_sink->setVideoFrame(vf);
             logFirstFrameGeometry(vf);
             noteCapturedFrame(vf);
         });

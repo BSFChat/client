@@ -475,6 +475,40 @@ private slots:
         QCOMPARE(cache.syncToken(), QStringLiteral("s50"));
     }
 
+    void testCacheRunsInWalMode()
+    {
+        // The cache is written on the GUI thread on nearly every sync and at
+        // the start of every channel switch. Under the default rollback
+        // journal with synchronous=FULL each of those commits fsyncs several
+        // times; WAL is what takes that off the switch. journal_mode is
+        // persistent in the file, so a second connection can see it.
+        QString path;
+        {
+            LocalCache cache;
+            QVERIFY(cache.open(QStringLiteral("@josh:h"), QStringLiteral("https://h")));
+            cache.recordSync(initialSync("s42"));
+            path = cache.databasePath();
+        }
+        {
+            auto db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"),
+                                                QStringLiteral("walprobe"));
+            db.setDatabaseName(path);
+            QVERIFY(db.open());
+            QSqlQuery q(db);
+            QVERIFY(q.exec(QStringLiteral("PRAGMA journal_mode")));
+            QVERIFY(q.next());
+            QCOMPARE(q.value(0).toString().toLower(), QStringLiteral("wal"));
+            q.finish();
+            db.close();
+        }
+        QSqlDatabase::removeDatabase(QStringLiteral("walprobe"));
+
+        // And reopening it through the cache still resumes.
+        LocalCache cache;
+        QVERIFY(cache.open(QStringLiteral("@josh:h"), QStringLiteral("https://h")));
+        QCOMPARE(cache.syncToken(), QStringLiteral("s42"));
+    }
+
     void testSchemaVersionMismatchWipesRatherThanMigrates()
     {
         const QString user = QStringLiteral("@josh:h");

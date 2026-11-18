@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QHash>
 #include <QJsonArray>
@@ -92,6 +93,10 @@ class ServerConnection : public QObject {
     Q_PROPERTY(RoomListModel* roomListModel READ roomListModel CONSTANT)
     Q_PROPERTY(MessageModel* messageModel READ messageModel CONSTANT)
     Q_PROPERTY(MemberListModel* memberListModel READ memberListModel CONSTANT)
+    // Where the active room's member list stands, for its loading / error
+    // state (audit U-4): 0 = what is shown is the answer, 1 = fetching with
+    // nothing cached to show meanwhile, 2 = the fetch failed.
+    Q_PROPERTY(int membersStatus READ membersStatus NOTIFY membersStatusChanged)
     // View-model behind the bot management dialog. Always present, even for a
     // user with no MANAGE_BOTS — the dialog binds to it unconditionally and is
     // itself gated on canManageBots(), so a null here would only move the
@@ -162,6 +167,14 @@ class ServerConnection : public QObject {
     Q_PROPERTY(bool voiceMuted READ voiceMuted NOTIFY voiceMutedChanged)
     Q_PROPERTY(bool voiceDeafened READ voiceDeafened NOTIFY voiceDeafenedChanged)
     Q_PROPERTY(bool inVoiceChannel READ inVoiceChannel NOTIFY activeVoiceRoomIdChanged)
+    // The voice channel the user has asked to join and is not yet fully IN:
+    // set the moment they click (before the server has even answered) and
+    // cleared once audio is running, or when the attempt ends. Empty
+    // otherwise. The dock and the channel row show "Connecting…" for it,
+    // so the click is acknowledged at once and completion is visible.
+    Q_PROPERTY(QString voiceConnectingRoomId READ voiceConnectingRoomId
+               NOTIFY voiceConnectingChanged)
+    Q_PROPERTY(bool voiceConnecting READ voiceConnecting NOTIFY voiceConnectingChanged)
     // Last voice-subsystem error (join/leave REST failures, engine
     // init failures). Auto-clears after ~8 s or on the next successful
     // join; QML routes non-empty values into the toast surface.
@@ -294,7 +307,7 @@ public:
     // rather than re-derived at the call site. ServerManager dispatches on it.
     bsfchat::client::ReconnectAction reconnectAction() const
     {
-        return m_auth.actionForReconnect();
+        return m_auth.actionForReconnect(QDateTime::currentMSecsSinceEpoch());
     }
     bool hasUnread() const { return m_hasUnread; }
 
@@ -303,6 +316,8 @@ public:
     bool voiceMuted() const { return m_voiceMuted; }
     bool voiceDeafened() const { return m_voiceDeafened; }
     bool inVoiceChannel() const { return !m_activeVoiceRoomId.isEmpty(); }
+    QString voiceConnectingRoomId() const { return m_voiceConnectingRoomId; }
+    bool voiceConnecting() const { return !m_voiceConnectingRoomId.isEmpty(); }
 
     // Empty until a transport has actually started, and empty again the
     // moment it stops. Deliberately not "assume mesh until told
@@ -380,6 +395,9 @@ public:
     QJsonArray serverRoles() const { return m_serverRoles; }
     QVariantList categorizedRooms() const { return m_categorizedRooms; }
     int permissionsGeneration() const { return m_permissionsGeneration; }
+    int membersStatus() const { return m_membersStatus; }
+    // The member list's "Retry" after a failed fetch.
+    Q_INVOKABLE void retryMembers();
     int botFlagsGeneration() const { return m_botFlagsGeneration; }
 
     RoomListModel* roomListModel() const { return m_roomListModel; }
@@ -392,6 +410,10 @@ public:
     MatrixClient* client() const { return m_client; }
 
     // Set credentials (for restoring from settings)
+    // The next startSync() must not resume from a cached `since`. For a
+    // connection built to carry a credential that was just issued (see
+    // accountSwitched); call before setCredentials(), which starts the sync.
+    void requireFullSync() { m_forceFullSync = true; }
     void setCredentials(const QString& userId, const QString& accessToken,
                         const QString& deviceId, const QString& displayName);
 
@@ -584,6 +606,11 @@ public:
     // m.login.password: the UI collects the credentials and hands them back.
     Q_INVOKABLE void reauthWithPassword(const QString& username,
                                         const QString& password);
+    // The user dismissed the password prompt reauthPasswordRequired opened.
+    // Returns the session to Expired, quietly, so "Sign in again" works on
+    // the next click — the dialog used to just close, leaving the phase in
+    // Reauthenticating where every later attempt was refused (audit C-6).
+    Q_INVOKABLE void cancelReauth();
     // Returns the identity-provider base URL (e.g. "https://id.bsfchat.com")
     // for the "Manage Account" link: the live OIDC session's provider if
     // this process ran the flow, otherwise the one this connection was
@@ -992,7 +1019,12 @@ public:
     //
     // The fetch carries an Authorization header, because a C++ downloader can:
     // it does not need a ticket and does not use one.
-    Q_INVOKABLE void openMediaExternally(const QString& mxcUri);
+    //
+    // What may be opened is decided here (core/AttachmentPolicy.h): programs
+    // and scripts are refused with mediaOpenFailed; anything but plain
+    // image/video/audio first emits mediaOpenConfirmationRequested, and the
+    // prompt calls back with `confirmed` set.
+    Q_INVOKABLE void openMediaExternally(const QString& mxcUri, bool confirmed = false);
 
 signals:
     void displayNameChanged();
@@ -1002,6 +1034,9 @@ signals:
     // The external-open path could not produce a local file. QML surfaces it
     // the same way a failed media send is surfaced.
     void mediaOpenFailed(QString error);
+    // openMediaExternally wants the user's go-ahead first. `fileName` is the
+    // sender's name for the file (may be empty), for the prompt to show.
+    void mediaOpenConfirmationRequested(QString mxcUri, QString fileName);
     // Bumped whenever presence-relevant state changes (activity
     // observed, self-status set). Views use it as a cheap reactive
     // hook since presenceFor() is a lookup on a regular QMap.
@@ -1053,6 +1088,13 @@ signals:
     // server's canonical one (stale/corrupt settings). ServerManager
     // listens and rewrites the stored entry.
     void identityCorrected();
+    // A re-authentication signed in as a DIFFERENT account than the one this
+    // connection was holding (audit C-8). Emitted after loginSucceeded, with
+    // the new credential installed and nothing synced: everything this object
+    // holds — timelines, room and member lists, unread state, the LocalCache
+    // binding — belongs to `previousUserId`. ServerManager answers it by
+    // replacing the connection with a fresh one for the new account.
+    void accountSwitched(const QString& previousUserId, const QString& userId);
     void registerSucceeded();
     void registerFailed(const QString& error);
     void mediaSendCompleted();
@@ -1096,6 +1138,7 @@ signals:
     // bled into the composer.
     void avatarUploadFailed(const QString& error);
     void activeVoiceRoomIdChanged();
+    void voiceConnectingChanged();
     // The server retired our voice row and the V-H2 re-join was
     // accepted: same room and same engine, but a NEW membership whose
     // screen_sharing/camera_on both start false. activeVoiceRoomId does
@@ -1151,6 +1194,7 @@ signals:
     void myPowerLevelChanged();
     void serverRolesChanged();
     void permissionsChanged();
+    void membersStatusChanged();
     // A bot flag was learned or changed. Coalesced to once per event-loop
     // turn — see flushBotFlagRepaint().
     void botFlagsChanged();
@@ -1213,6 +1257,50 @@ signals:
 private:
     void startSync();
     void processSyncResponse(const bsfchat::SyncResponse& response);
+
+    // ── "this room is gone for me" (audit R-1) ───────────────────────────
+    // Implemented in net/ServerConnectionRoomRemoval.cpp; the decisions are
+    // the pure functions in net/RoomRemoval.h.
+    //
+    // A LIVE /sync reply, as opposed to the cache-hydration replay that also
+    // runs through processSyncResponse. Processes the reply, then applies the
+    // raw body's rooms.leave section AFTER it (so a leave + re-join in one
+    // batch resolves on the whole batch), then — once per session — asks
+    // /joined_rooms to reconcile for servers that send no leave section.
+    void onLiveSync(const bsfchat::SyncResponse& response);
+    enum class RoomGoneCause {
+        OwnAction, // this device left or deleted it: no toast
+        Server,    // learned from the server (rooms.leave, reconcile, prune)
+    };
+    // The ONE removal path: sidebar row, categorized/DM snapshots, timeline
+    // window (memory and disk), per-room caches, unread state; voice is left
+    // if it was in one of them; and if the active room is among them, the
+    // view moves to the app's usual landing channel (restoreLastTextRoom) and
+    // — for Server — a toast says the room is no longer available.
+    void dropRoomsGoneForMe(const QStringList& roomIds, RoomGoneCause cause);
+    // Blank the main pane: no active room, empty message and member models.
+    void clearActiveRoomView();
+    // GET /joined_rooms and drop every sidebar room the answer leaves out
+    // (see roomsToDropAfterReconcile). Coalesces: one request in flight per
+    // session, a request asked for meanwhile is issued when it lands.
+    void requestJoinedRoomsReconcile();
+    void onJoinedRoomsResult(const QString& requestId, const QStringList& roomIds);
+    // New session (startSync) or teardown: forget the in-flight request so
+    // its answer — another session's, possibly another account's — is
+    // ignored, and re-arm the once-per-session reconcile.
+    void resetRoomReconcile();
+    QStringList sidebarRoomIds() const;
+    // Correlation id of the outstanding /joined_rooms request, empty if none.
+    QString m_joinedRoomsRequestId;
+    // Sidebar ids when it was issued: anything newer is protected from its
+    // answer, which was computed before that room arrived.
+    QSet<QString> m_joinedRoomsAskedWith;
+    QElapsedTimer m_joinedRoomsAskedAt;
+    bool m_joinedRoomsAgain = false;
+    bool m_reconciledThisSession = false;
+    // Pending invites as of the newest live sync (that section is a complete
+    // restatement, see the protocol header). Never dropped by a reconcile.
+    QSet<QString> m_pendingInviteIds;
     // The homeserver rejected our bearer token, from /sync or from any other
     // authenticated request. Idempotent: the ten in-flight requests that all
     // 401 at once raise one banner between them.
@@ -1225,6 +1313,9 @@ private:
     void onLoginAttemptFailed(const QString& error);
     // Return to a clearable expired state and tell the UI why.
     void failReauth(const QString& error);
+    // failReauth() minus the reauthFailed signal: the state half, shared with
+    // cancelReauth(), which has nothing to report.
+    void returnToExpired();
     // `userId`'s latest membership value in every synced room, keyed by room id
     // (empty string where the room has no member event for them). The input to
     // bsfchat::client::moderationRooms(); split out so the three moderation
@@ -1319,6 +1410,20 @@ public:
     // the bottom of a busy channel; without this it would be one HTTP
     // request per inbound message.
     QHash<QString, qint64> m_sentReadMarkerTs;
+    // RoomTimelineCache::generation of each room's window as last written
+    // to (or read from) LocalCache, so a room switch skips rewriting a
+    // window that has not changed.
+    QHash<QString, quint64> m_persistedTimelineGen;
+    // Rooms whose read marker has advanced but not been POSTed yet. A room
+    // entry produces a burst of markRoomRead calls (the batched first page,
+    // then each further page or /sync row while the view settles at the
+    // bottom); they are coalesced into ONE request per room per
+    // kReadMarkerCoalesceMs. markActiveRoomRead — the app leaving the
+    // foreground — flushes at once, because a suspended phone will not run
+    // the timer.
+    QSet<QString> m_pendingReadMarkers;
+    QTimer* m_readMarkerTimer = nullptr;
+    void flushReadMarkers();
     QMap<QString, qint64> m_userLastActivityMs; // for activity-based presence
     QString m_selfPresence = QStringLiteral("online");
     QString m_selfStatusMessage;
@@ -1403,6 +1508,8 @@ public:
     // the same key with the same meaning.
     void recordBotFlag(const QString& userId, bool isBot);
     void loadMembersForRoom(const QString& roomId);
+    void setMembersStatus(int status);
+    int m_membersStatus = 0;
     // Start a history fill of `kind` in the active room and send its first
     // request, if the model agrees to start one (see beginHistoryFill).
     void requestHistoryFill(bsfchat::client::HistoryFillKind kind, int firstPageLimit);
@@ -1492,6 +1599,11 @@ public:
     // `m_voiceTurnFetchPending` bool that used to be the join's only
     // guard; read src/net/VoiceSession.h for what that bool could not do.
     VoiceSession* m_voiceSession = nullptr;
+    // Set when a join is accepted, cleared when the join chime plays once
+    // the audio pipeline is running (or the start fails).
+    bool m_joinChimePending = false;
+    QString m_voiceConnectingRoomId;
+    void setVoiceConnecting(const QString& roomId);
     // Wire the session to MatrixClient, to the engine, and to the mirrors
     // above. Called once from the constructor.
     void setupVoiceSession();
@@ -1604,6 +1716,10 @@ private:
     bool m_voiceDeafened = false;
     QJsonArray m_voiceMembers;
     QTimer* m_voicePollTimer = nullptr;
+    // Bounds a re-authentication that never answers (audit C-6). Armed for
+    // the network and browser steps, disarmed while a password prompt is up:
+    // that wait is the user's, and the prompt's Cancel ends it.
+    QTimer m_reauthWatchdog;
     // Fold one m.call.member state event into the per-room voice roster the
     // sidebar renders. Sync is the ONLY writer of that roster: room state is
     // the server's own answer to "who is in this channel", it arrives for

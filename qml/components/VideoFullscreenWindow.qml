@@ -219,6 +219,7 @@ Window {
         Text {
             id: fsLabel
             anchors.centerIn: parent
+            textFormat: Text.PlainText
             text: VideoWindows.fullscreenLabel(
                 fsWin.displayName
                     || (fsWin.feed ? fsWin.feed.userId : ""),

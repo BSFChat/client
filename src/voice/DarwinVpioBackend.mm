@@ -19,6 +19,7 @@
 // the log.
 
 #include "voice/DarwinVpioBackend.h"
+#include "voice/VpioDeviceCheck.h"
 
 #include <QtGlobal>
 
@@ -119,8 +120,39 @@ QString statusString(OSStatus st)
 }
 
 #if TARGET_OS_OSX
+// A CFString property of a device (its UID, its name) as a QString, or
+// empty if the device does not answer.
+QString deviceString(AudioObjectID dev, AudioObjectPropertySelector selector)
+{
+    AudioObjectPropertyAddress addr = {selector, kAudioObjectPropertyScopeGlobal,
+                                       kAudioObjectPropertyElementMain};
+    CFStringRef cf = nullptr;
+    UInt32 size = sizeof(cf);
+    if (AudioObjectGetPropertyData(dev, &addr, 0, nullptr, &size, &cf) != noErr
+        || !cf) {
+        return QString();
+    }
+    const QString out = QString::fromCFString(cf);
+    CFRelease(cf);
+    return out;
+}
+
+#endif  // TARGET_OS_OSX
+
+// QAudioDevice::id() is the CoreAudio UID as UTF-8. Decode it as UTF-8:
+// USB audio UIDs embed the vendor and product names, and Latin-1 turned
+// "RØDE NT-USB+" into a string that matched no device. That bug made
+// every call with a Rode silently use the system default input instead
+// (seen in a user's logs from October to 2026-11-14).
+QString uidFromQtId(const QByteArray& id)
+{
+    return QString::fromUtf8(id);
+}
+
+#if TARGET_OS_OSX
 // QAudioDevice::id() on macOS is the device's kAudioDevicePropertyDeviceUID
-// as UTF-8 — verified in Qt 6's qdarwinmediadevices.mm, uniqueId(). So a
+// as UTF-8 — verified in Qt 6.11.3's darwin/qmacosaudiodatautils.cpp,
+// QCoreAudioUtils::readPersistentDeviceId(). So a
 // Qt device id maps back to an AudioDeviceID by walking the hardware's
 // device list and comparing UIDs.
 AudioDeviceID deviceForUid(const QString& uid)
@@ -146,22 +178,59 @@ AudioDeviceID deviceForUid(const QString& uid)
         return kAudioObjectUnknown;
     }
 
-    AudioObjectPropertyAddress uidAddr = {kAudioDevicePropertyDeviceUID,
-                                          kAudioObjectPropertyScopeGlobal,
-                                          kAudioObjectPropertyElementMain};
     for (AudioDeviceID dev : devices) {
-        CFStringRef cf = nullptr;
-        UInt32 sz = sizeof(cf);
-        if (AudioObjectGetPropertyData(dev, &uidAddr, 0, nullptr, &sz, &cf)
-                != noErr
-            || !cf) {
-            continue;
-        }
-        const QString found = QString::fromCFString(cf);
-        CFRelease(cf);
-        if (found == uid) return dev;
+        if (deviceString(dev, kAudioDevicePropertyDeviceUID) == uid) return dev;
     }
     return kAudioObjectUnknown;
+}
+
+// What one element of the unit says it has open, in the terms
+// VpioDeviceCheck.h reasons about.
+DeviceReadback readbackDevice(AudioDeviceID dev)
+{
+    DeviceReadback r;
+    if (dev == kAudioObjectUnknown) return r;
+    r.uid = deviceString(dev, kAudioDevicePropertyDeviceUID);
+
+    AudioObjectPropertyAddress tAddr = {kAudioDevicePropertyTransportType,
+                                        kAudioObjectPropertyScopeGlobal,
+                                        kAudioObjectPropertyElementMain};
+    UInt32 transport = 0;
+    UInt32 size = sizeof(transport);
+    if (AudioObjectGetPropertyData(dev, &tAddr, 0, nullptr, &size, &transport)
+            != noErr
+        || transport != kAudioDeviceTransportTypeAggregate) {
+        return r;
+    }
+    r.isAggregate = true;
+
+    AudioObjectPropertyAddress subAddr = {
+        kAudioAggregateDevicePropertyActiveSubDeviceList,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    size = 0;
+    if (AudioObjectGetPropertyDataSize(dev, &subAddr, 0, nullptr, &size) != noErr
+        || size < sizeof(AudioObjectID)) {
+        return r;
+    }
+    std::vector<AudioObjectID> subs(size / sizeof(AudioObjectID));
+    if (AudioObjectGetPropertyData(dev, &subAddr, 0, nullptr, &size, subs.data())
+        != noErr) {
+        return r;
+    }
+    subs.resize(size / sizeof(AudioObjectID));
+    for (AudioObjectID sub : subs) {
+        const QString u = deviceString(sub, kAudioDevicePropertyDeviceUID);
+        if (!u.isEmpty()) r.subDeviceUids.append(u);
+    }
+    return r;
+}
+
+// For the log: "RODE NT-USB" beats a UID.
+QString deviceLabel(AudioDeviceID dev)
+{
+    if (dev == kAudioObjectUnknown) return QStringLiteral("(none)");
+    const QString name = deviceString(dev, kAudioObjectPropertyName);
+    return name.isEmpty() ? QStringLiteral("device %1").arg(dev) : name;
 }
 #endif  // TARGET_OS_OSX
 
@@ -562,6 +631,56 @@ bool DarwinVpioBackend::configureUnit()
     m_builtSessionRate = currentSessionRate();
 
     qInfo("[voice] VPIO started: %s", qPrintable(describe()));
+    return verifyDevices();
+}
+
+bool DarwinVpioBackend::verifyDevices()
+{
+#if TARGET_OS_OSX
+    // Accepting kAudioOutputUnitProperty_CurrentDevice is not the same
+    // as honouring it. See VpioDeviceCheck.h for the bug this catches.
+    auto elementDevice = [this](AudioUnitElement element) {
+        AudioDeviceID dev = kAudioObjectUnknown;
+        UInt32 size = sizeof(dev);
+        if (AudioUnitGetProperty(m_unit, kAudioOutputUnitProperty_CurrentDevice,
+                                 kAudioUnitScope_Global, element, &dev, &size)
+            != noErr) {
+            return AudioDeviceID(kAudioObjectUnknown);
+        }
+        return dev;
+    };
+
+    struct Leg {
+        const char* what;
+        AudioUnitElement element;
+        const QString& wantedUid;
+        const QString& wantedDesc;
+    };
+    const Leg legs[] = {
+        {"input", kInputBus, m_captureDeviceId, m_captureDeviceDesc},
+        {"output", kOutputBus, m_renderDeviceId, m_renderDeviceDesc},
+    };
+    for (const Leg& leg : legs) {
+        const AudioDeviceID dev = elementDevice(leg.element);
+        const DeviceReadback got = readbackDevice(dev);
+        const DeviceCheck verdict = checkDeviceHonoured(leg.wantedUid, got);
+        qInfo("[voice] VPIO %s: asked for '%s', unit reports '%s'%s%s",
+              leg.what, qPrintable(leg.wantedDesc), qPrintable(deviceLabel(dev)),
+              got.isAggregate
+                  ? qPrintable(QStringLiteral(" (aggregate of %1)")
+                                   .arg(got.subDeviceUids.join(QStringLiteral(", "))))
+                  : "",
+              verdict == DeviceCheck::Honoured     ? ""
+              : verdict == DeviceCheck::NotHonoured ? " — NOT the requested device"
+                                                    : " — cannot confirm");
+        if (verdict == DeviceCheck::NotHonoured) {
+            fail(QStringLiteral("opened %1 '%2' instead of '%3'")
+                     .arg(QString::fromLatin1(leg.what), deviceLabel(dev),
+                          leg.wantedDesc));
+            return false;
+        }
+    }
+#endif
     return true;
 }
 
@@ -704,6 +823,24 @@ void DarwinVpioBackend::teardownUnit()
 // IAudioBackend
 // ---------------------------------------------------------------------
 
+void DarwinVpioBackend::prepareDevices(const QAudioDevice& input, const QAudioDevice& output)
+{
+    // Record both devices WITHOUT marking either direction wanted, so the
+    // first open builds the unit against the right pair. resolveDevices()
+    // maps both ids whatever is wanted, and openRender() then finds the
+    // unit already built for its device (no deviceChanged, no rebuild).
+    // A later openCapture/openRender still sets its own id, so a device
+    // that changes between here and the open is honoured as before.
+    if (!input.isNull()) {
+        m_captureDeviceId = uidFromQtId(input.id());
+        m_captureDeviceDesc = input.description();
+    }
+    if (!output.isNull()) {
+        m_renderDeviceId = uidFromQtId(output.id());
+        m_renderDeviceDesc = output.description();
+    }
+}
+
 bool DarwinVpioBackend::openCapture(const QAudioDevice& device,
                                     const QAudioFormat& format)
 {
@@ -723,7 +860,7 @@ bool DarwinVpioBackend::openCapture(const QAudioDevice& device,
               qPrintable(device.description()));
     }
 #endif
-    m_captureDeviceId = QString::fromLatin1(device.id());
+    m_captureDeviceId = uidFromQtId(device.id());
     m_captureDeviceDesc = device.description();
     m_captureWanted = true;
 
@@ -774,7 +911,7 @@ bool DarwinVpioBackend::openRender(const QAudioDevice& device,
     m_pipeline.channels = format.channelCount();
     m_pipeline.frameSamples = int(std::lround(format.sampleRate() * 0.02));
 
-    m_renderDeviceId = QString::fromLatin1(device.id());
+    m_renderDeviceId = uidFromQtId(device.id());
     m_renderDeviceDesc = device.description();
     m_renderWanted = true;
     // The depth AudioWorker asked for, honoured through bytesFree()

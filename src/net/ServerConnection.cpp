@@ -1,4 +1,6 @@
 #include "net/ServerConnection.h"
+
+#include <utility>
 #include "net/MatrixClient.h"
 #include "net/SyncLoop.h"
 #include "net/SyncBackoff.h"
@@ -7,6 +9,7 @@
 #include "net/SnapshotGate.h"
 #include "net/IgnoredUsers.h"
 #include "net/MemberJson.h"
+#include "net/RoomRemoval.h"
 #include "model/RoomListModel.h"
 #include "model/MessageModel.h"
 #include "model/MemberListModel.h"
@@ -14,6 +17,8 @@
 #include "model/BotAdminModel.h"
 #include "model/ChannelInviteModel.h"
 #include "model/SelfRoleModel.h"
+#include "util/EventGuard.h"
+#include "util/JsonSafe.h"
 #include "util/MediaUrl.h"
 #include "util/MemberCache.h"
 #include "util/MentionBadge.h"
@@ -22,6 +27,7 @@
 #include "util/TimelineTrace.h"
 #include "identity/IdentityClient.h"
 #include "identity/OidcRequest.h"
+#include "core/AttachmentPolicy.h"
 #include "core/MediaDownloader.h"
 #include "core/Settings.h"
 #include "core/ReadState.h"
@@ -32,6 +38,7 @@
 #include "voice/VoiceTransportSelector.h"
 #ifdef BSFCHAT_VOICE_ENABLED
 #include "voice/VoiceEngine.h"
+#include "voice/AudioEngine.h"
 #include "voice/NotificationSounds.h"
 #include "voice/video/VideoStreamRegistry.h"
 #endif
@@ -51,6 +58,10 @@
 #include <bsfchat/Constants.h>
 #include <nlohmann/json.hpp>
 
+// Every read of event content goes through these (util/JsonSafe.h): the
+// content is the sender's, and a throwing nlohmann read is a remote crash.
+namespace js = bsfchat::jsonsafe;
+
 // V-H4's other half: on macOS/iOS (and Android) the FIRST QAudioSource
 // open is what triggers the OS microphone prompt, and until the user
 // answers it the device produces silence. Asking BEFORE voice/join means
@@ -61,6 +72,12 @@
 #include <QCoreApplication>
 #include <QPermissions>
 #endif
+
+// How long read-marker advances are gathered before the one POST that carries
+// them (ServerConnection::m_pendingReadMarkers). Long enough to cover the
+// burst a room entry produces, short enough that another device sees the
+// channel read effectively at once.
+static constexpr int kReadMarkerCoalesceMs = 750;
 
 // HistoryFillStop as a word, for the channel-switch trace. Not a QMetaEnum:
 // util/HistoryFill.h is header-only and Qt-Core-free on purpose, so that its
@@ -493,7 +510,11 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     });
 
     // Connect sync signals
-    connect(m_syncLoop, &SyncLoop::syncCompleted, this, &ServerConnection::processSyncResponse);
+    // onLiveSync, not processSyncResponse directly: a live reply also
+    // carries rooms.leave, and earns the session's /joined_rooms reconcile.
+    connect(m_syncLoop, &SyncLoop::syncCompleted, this, &ServerConnection::onLiveSync);
+    connect(m_client, &MatrixClient::joinedRoomsResult, this,
+            &ServerConnection::onJoinedRoomsResult);
 
     // Track sync errors for UI
     connect(m_syncLoop, &SyncLoop::syncError, this, [this](const QString& error) {
@@ -579,8 +600,19 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     });
 
     // Connect room members response
+    // The list's loading / error state (U-4). A failure with rows already
+    // on screen (from the sync cache) is not worth a word — what is shown
+    // is still right — but it is forgotten, so the next open asks again.
+    connect(m_client, &MatrixClient::roomMembersError, this,
+            [this](const QString& roomId, const QString& error) {
+        qWarning().noquote() << "[ServerConnection] /members failed for" << roomId << ":" << error;
+        m_membersFetchedAt.remove(roomId);
+        if (roomId != m_activeRoomId) return;
+        setMembersStatus(m_memberListModel->rowCount() == 0 ? 2 : 0);
+    });
     connect(m_client, &MatrixClient::roomMembersResult, this, [this](const QString& roomId, const QJsonArray& members) {
         if (roomId != m_activeRoomId) return;
+        setMembersStatus(0);
         if (m_membersTimer.isValid()) {
             qCInfo(logTimeline).nospace()
                 << "/members rt=" << m_membersTimer.elapsed() << "ms n=" << members.size()
@@ -699,6 +731,11 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     connect(m_client, &MatrixClient::messagesError, this,
             [this](const QString& roomId, const QString& from, const QString& error) {
         qWarning() << "[ServerConnection] /messages failed for" << roomId << ":" << error;
+        // 403/404 on history is how a room deleted or revoked elsewhere shows
+        // up on a server that sends no rooms.leave. Ask the server which
+        // rooms we are still in; that answer, not this error, decides.
+        if (bsfchat::client::messagesErrorSuggestsRoomGone(error))
+            requestJoinedRoomsReconcile();
         if (roomId != m_activeRoomId) return;
         if (m_messageModel->failHistoryFill(from, m_userId)) {
             qCInfo(logTimeline).nospace()
@@ -807,6 +844,14 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     m_typingTimer->setSingleShot(true);
     m_typingTimer->setInterval(4000);
 
+    // Read-marker coalescing — see m_pendingReadMarkers. Not restarted by
+    // later calls, so a marker is never held back for longer than this.
+    m_readMarkerTimer = new QTimer(this);
+    m_readMarkerTimer->setSingleShot(true);
+    m_readMarkerTimer->setInterval(kReadMarkerCoalesceMs);
+    connect(m_readMarkerTimer, &QTimer::timeout, this,
+            &ServerConnection::flushReadMarkers);
+
     // Stop timer: sends typing=false after 5 seconds of no typing activity
     m_typingStopTimer = new QTimer(this);
     m_typingStopTimer->setSingleShot(true);
@@ -815,6 +860,18 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         if (!m_activeRoomId.isEmpty() && !m_userId.isEmpty()) {
             m_client->setTyping(m_activeRoomId, m_userId, false);
         }
+    });
+
+    // A re-auth step that neither succeeds nor fails — every request now
+    // times out, but a step can also simply be abandoned — must not hold
+    // Reauthenticating forever (audit C-6). Same bound SessionAuth applies.
+    m_reauthWatchdog.setSingleShot(true);
+    m_reauthWatchdog.setInterval(int(bsfchat::client::SessionAuth::kReauthStaleMs));
+    connect(&m_reauthWatchdog, &QTimer::timeout, this, [this]() {
+        if (!m_auth.isReauthenticating()) return;
+        qWarning().noquote() << "[ServerConnection] re-authentication for"
+                             << m_serverUrl << "did not finish; giving up on it";
+        failReauth(tr("Signing in didn't finish. Try again."));
     });
 
     // Voice poll timer
@@ -994,16 +1051,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 
     // Handle leave room success
     connect(m_client, &MatrixClient::leaveRoomSuccess, this, [this](const QString& roomId) {
-        if (roomId == m_activeRoomId) {
-            m_activeRoomId.clear();
-            m_activeRoomName.clear();
-            m_activeRoomTopic.clear();
-            m_messageModel->clear();
-            m_memberListModel->clear();
-            emit activeRoomIdChanged();
-            emit activeRoomNameChanged();
-            emit activeRoomTopicChanged();
-        }
+        dropRoomsGoneForMe({roomId}, RoomGoneCause::OwnAction);
     });
 }
 
@@ -1105,6 +1153,10 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
             if (m_voiceEngine) m_voiceEngine->setLocalUserId(canonicalId);
 #endif
             emit userIdChanged();
+            // Every permission answer is "for m_userId", so they all just
+            // changed with it (U-7).
+            ++m_permissionsGeneration;
+            emit permissionsChanged();
             emit identityCorrected();
             // The block list is stored per user id and the GET above went out
             // with the stale one, which the server answers 403 (account data
@@ -1145,14 +1197,25 @@ void ServerConnection::awaitLoginReply()
 
 void ServerConnection::applyLoginResponse(const bsfchat::LoginResponse& resp)
 {
-    m_userId = QString::fromStdString(resp.user_id);
+    // A re-auth may come back as somebody else: the browser held another
+    // account's session, or a different username went into the password
+    // prompt. Everything this object has cached is the previous account's,
+    // and carrying it over would show one person another's rooms and
+    // messages (audit C-8). Same account: unchanged behaviour below.
+    const QString previousUserId = m_userId;
+    const QString newUserId = QString::fromStdString(resp.user_id);
+    const bool switchedAccount = !previousUserId.isEmpty() && newUserId != previousUserId;
+
+    m_userId = newUserId;
     m_accessToken = QString::fromStdString(resp.access_token);
     m_deviceId = QString::fromStdString(resp.device_id);
     // Only on a first login. Overwriting it on re-auth would replace a real
-    // profile name with the MXID every time a session is renewed.
-    if (m_displayName.isEmpty()) m_displayName = m_userId;
+    // profile name with the MXID every time a session is renewed — but the
+    // old account's name is not this account's, so a switch resets it.
+    if (m_displayName.isEmpty() || switchedAccount) m_displayName = m_userId;
     m_client->setAccessToken(m_accessToken);
 
+    m_reauthWatchdog.stop();
     m_auth.noteAuthenticated();
     m_connected = true;
     m_connectionStatus = 1;
@@ -1173,12 +1236,28 @@ void ServerConnection::applyLoginResponse(const bsfchat::LoginResponse& resp)
     emit syncErrorMessageChanged();
     emit sessionAuthChanged();
     emit loginSucceeded();
+    if (switchedAccount) {
+        qWarning().noquote() << "[ServerConnection] re-authentication on" << m_serverUrl
+                             << "signed in as a different account; starting a new session";
+        // No sync on this object: ServerManager replaces it with a fresh
+        // connection for the new account, which runs the initial sync the
+        // way a brand-new login does. Syncing here first would merge the
+        // new account's rooms into the old account's state.
+        emit accountSwitched(previousUserId, newUserId);
+        return;
+    }
     startSync();
 }
 
 void ServerConnection::onLoginAttemptFailed(const QString& error)
 {
-    if (m_auth.isReauthenticating()) {
+    // needsReauth, not isReauthenticating: an attempt can end in Expired
+    // before its reply lands — the prompt dismissed mid-request, the
+    // watchdog, a late 401 — and a failure arriving then is still a
+    // re-auth's. Routing it to loginFailed would have ServerManager remove a
+    // server the user only meant to sign back in to. A server being ADDED
+    // never leaves Authenticated before its first login, so it is unaffected.
+    if (m_auth.needsReauth()) {
         // Deliberately NOT loginFailed: ServerManager answers that by
         // removing the connection, which is correct for a server being added
         // and destroys a server the user has been on for months.
@@ -1347,9 +1426,22 @@ void ServerConnection::onAccessTokenRejected(const QString& errorBody)
 
 void ServerConnection::failReauth(const QString& error)
 {
+    returnToExpired();
+    emit reauthFailed(error);
+}
+
+void ServerConnection::cancelReauth()
+{
+    if (!m_auth.isReauthenticating()) return;
+    returnToExpired();
+}
+
+void ServerConnection::returnToExpired()
+{
     // Back to Expired, never to a terminal state: the button has to work
     // again. The version this replaced could only be cleared by removing the
     // server from the sidebar and adding it back.
+    m_reauthWatchdog.stop();
     m_auth.noteReauthFailed();
     m_connected = false;
     m_connectionStatus = 3;
@@ -1359,12 +1451,15 @@ void ServerConnection::failReauth(const QString& error)
     emit connectionStatusChanged();
     emit syncErrorMessageChanged();
     emit sessionAuthChanged();
-    emit reauthFailed(error);
 }
 
 void ServerConnection::beginReauth()
 {
-    if (!m_auth.beginReauth()) return;  // one browser flow at a time
+    // One browser flow at a time — unless the one running has gone stale
+    // (SessionAuth::kReauthStaleMs), which is what stops a hung step from
+    // refusing every later click.
+    if (!m_auth.beginReauth(QDateTime::currentMSecsSinceEpoch())) return;
+    m_reauthWatchdog.start();
 
     // Anything still holding the old credential goes quiet first.
     m_syncLoop->stop();
@@ -1411,6 +1506,9 @@ void ServerConnection::beginReauth()
                 return;
             }
             if (passwordFlow) {
+                // The wait from here is the user's, not the network's; the
+                // prompt's Cancel (cancelReauth) is what ends it.
+                m_reauthWatchdog.stop();
                 emit reauthPasswordRequired(m_serverUrl, m_userId);
                 return;
             }
@@ -1433,7 +1531,16 @@ void ServerConnection::reauthWithPassword(const QString& username,
 {
     // Only reachable as the answer to reauthPasswordRequired. Outside that
     // window this would be a silent second login on a healthy connection.
-    if (!m_auth.isReauthenticating()) return;
+    //
+    // An Expired session is not healthy, though: a prompt left open past the
+    // stale bound, or answered after a late 401 knocked the phase back, must
+    // still be able to sign in rather than leave its button spinning forever.
+    if (!m_auth.isReauthenticating()) {
+        if (!m_auth.needsReauth()) return;
+        if (!m_auth.beginReauth(QDateTime::currentMSecsSinceEpoch())) return;
+        emit sessionAuthChanged();
+    }
+    m_reauthWatchdog.start();
     awaitLoginReply();
     m_client->login(username, password);
 }
@@ -1441,6 +1548,7 @@ void ServerConnection::reauthWithPassword(const QString& username,
 void ServerConnection::disconnectFromServer()
 {
     m_syncLoop->stop();
+    resetRoomReconcile();
     // The bot set is a fact about THIS server's users; a reconnect may be as
     // a different account against a server whose bot set has moved. The
     // member list rebuilds itself from fresh member events, so only the
@@ -1461,7 +1569,16 @@ void ServerConnection::disconnectFromServer()
     // is a privacy incident; the cost of clearing is one round trip per
     // channel. The member fetch times go with them for the same reason.
     m_timelines.clear();
+    m_persistedTimelineGen.clear();
     m_membersFetchedAt.clear();
+    // Queued read markers belong to the session being torn down; sending
+    // them after it would go out with whatever token comes next, or none.
+    // Forget that they were "sent" too, so the next advance after a
+    // reconnect is not deduplicated against a POST that never happened.
+    m_readMarkerTimer->stop();
+    for (const QString& roomId : std::as_const(m_pendingReadMarkers))
+        m_sentReadMarkerTs.remove(roomId);
+    m_pendingReadMarkers.clear();
 
     m_connected = false;
     m_connectionStatus = 0;
@@ -1471,6 +1588,8 @@ void ServerConnection::disconnectFromServer()
 
 void ServerConnection::startSync()
 {
+    // A new session: no earlier /joined_rooms answer may act on it.
+    resetRoomReconcile();
     // Resume where the last session left off when we can. An initial /sync
     // is the most expensive request the server serves — full state plus a
     // VIEW_CHANNEL check for every joined room — and the client used to pay
@@ -1500,8 +1619,11 @@ void ServerConnection::startSync()
         // a phone is nearly every open: iOS kills the app on most
         // backgroundings.
         const auto persisted = m_cache->timelines();
-        for (auto it = persisted.constBegin(); it != persisted.constEnd(); ++it)
+        for (auto it = persisted.constBegin(); it != persisted.constEnd(); ++it) {
             m_timelines.adopt(it.key(), it.value());
+            // What was just read IS what is on disk.
+            m_persistedTimelineGen.insert(it.key(), m_timelines.generation(it.key()));
+        }
         if (!persisted.isEmpty()) {
             qCInfo(logTimeline).nospace()
                 << "cache loaded rooms=" << persisted.size() << " from disk";
@@ -1562,23 +1684,25 @@ void ServerConnection::noteTimelineVisible(int rows)
 
 void ServerConnection::loadMembersForRoom(const QString& roomId)
 {
-    m_memberListModel->clear();
-
     // First, load from our cache (events we've seen in sync)
-    if (m_roomMembers.contains(roomId)) {
-        // Replay cached member events to build current state
-        // We need to build the final state, not just replay — a user might have
-        // joined then left. Process all events in order, keeping latest per-user.
+    //
+    // Replay cached member events to build current state
+    // We need to build the final state, not just replay — a user might have
+    // joined then left. Process all events in order, keeping latest per-user.
+    // Then hand the model the result as one reset rather than one insertion
+    // per member.
+    QVector<bsfchat::RoomEvent> latest;
+    if (const auto it = m_roomMembers.constFind(roomId); it != m_roomMembers.constEnd()) {
         QMap<QString, bsfchat::RoomEvent> latestByUser;
-        for (const auto& ev : m_roomMembers[roomId]) {
+        for (const auto& ev : it.value()) {
             if (ev.state_key.has_value()) {
                 latestByUser[QString::fromStdString(*ev.state_key)] = ev;
             }
         }
-        for (const auto& ev : latestByUser) {
-            m_memberListModel->processEvent(ev);
-        }
+        latest.reserve(latestByUser.size());
+        for (const auto& ev : std::as_const(latestByUser)) latest.append(ev);
     }
+    m_memberListModel->resetFromEvents(latest);
 
     // Then fetch from the server — but not on every single switch.
     //
@@ -1596,11 +1720,30 @@ void ServerConnection::loadMembersForRoom(const QString& roomId)
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     const qint64 last = m_membersFetchedAt.value(roomId, 0);
     const bool haveCached = !m_roomMembers.value(roomId).isEmpty();
+    bool fetching = false;
     if (!haveCached || last == 0 || now - last >= kMembersRefetchMs) {
         m_membersFetchedAt.insert(roomId, now);
         m_membersTimer.restart();
         m_client->getRoomMembers(roomId);
+        fetching = true;
     }
+    // "Loading" only when there is nothing to show meanwhile; a refetch
+    // behind a cached list is invisible, as it always was.
+    setMembersStatus(fetching && m_memberListModel->rowCount() == 0 ? 1 : 0);
+}
+
+void ServerConnection::setMembersStatus(int status)
+{
+    if (m_membersStatus == status) return;
+    m_membersStatus = status;
+    emit membersStatusChanged();
+}
+
+void ServerConnection::retryMembers()
+{
+    if (m_activeRoomId.isEmpty()) return;
+    m_membersFetchedAt.remove(m_activeRoomId);
+    loadMembersForRoom(m_activeRoomId);
 }
 
 void ServerConnection::setActiveRoom(const QString& roomId)
@@ -1638,9 +1781,19 @@ void ServerConnection::setActiveRoom(const QString& roomId)
     // write point: it is rare, the window is complete, and it is the only
     // moment at which the user has demonstrably finished with the room.
     // Best-effort — a failed write costs the next launch one round trip.
+    //
+    // Only when the window has changed since it was last written (or read
+    // back from disk). The write is a DELETE plus up to 150 INSERTs and a
+    // commit on the GUI thread, at the start of every switch — and flicking
+    // back and forth between two quiet channels used to rewrite both,
+    // unchanged, every time.
     if (!m_activeRoomId.isEmpty() && m_cacheWired) {
-        if (const auto* window = m_timelines.window(m_activeRoomId))
+        const quint64 gen = m_timelines.generation(m_activeRoomId);
+        if (const auto* window = m_timelines.window(m_activeRoomId);
+            window && m_persistedTimelineGen.value(m_activeRoomId, 0) != gen) {
             m_cache->recordTimeline(m_activeRoomId, *window);
+            m_persistedTimelineGen.insert(m_activeRoomId, gen);
+        }
     }
 
     // The incoming room has its own scroll position; assume nothing about
@@ -1758,10 +1911,13 @@ void ServerConnection::markRoomRead(const QString& roomId, qint64 tsMs)
 
     // One POST per advance, not one per inbound message: this is called
     // from the view on every count change while the user sits at the
-    // bottom of a busy channel.
+    // bottom of a busy channel. And not one per advance either while those
+    // advances come in a burst — entering a room moves the marker several
+    // times in the first second — so the POST itself is coalesced.
     if (tsMs > 0 && m_sentReadMarkerTs.value(roomId, 0) >= tsMs) return;
     if (tsMs > 0) m_sentReadMarkerTs.insert(roomId, tsMs);
-    m_client->sendReadMarker(roomId);
+    m_pendingReadMarkers.insert(roomId);
+    if (!m_readMarkerTimer->isActive()) m_readMarkerTimer->start();
 
     const bool hadUnread = m_hasUnread;
     m_hasUnread = m_roomListModel && m_roomListModel->totalUnreadCount() > 0;
@@ -1770,12 +1926,23 @@ void ServerConnection::markRoomRead(const QString& roomId, qint64 tsMs)
 
 void ServerConnection::markActiveRoomRead()
 {
-    if (m_activeRoomId.isEmpty()) return;
-    if (!m_timelineAtBottom) return;
-    if (!m_messageModel) return;
+    // Whatever happens below, anything already queued goes now: this is the
+    // app leaving the foreground, and a suspended process runs no timers.
+    if (m_activeRoomId.isEmpty() || !m_timelineAtBottom || !m_messageModel) {
+        flushReadMarkers();
+        return;
+    }
     const qint64 ts = m_messageModel->newestServerTimestampMs();
-    if (ts <= 0) return;
-    markRoomRead(m_activeRoomId, ts);
+    if (ts > 0) markRoomRead(m_activeRoomId, ts);
+    flushReadMarkers();
+}
+
+void ServerConnection::flushReadMarkers()
+{
+    m_readMarkerTimer->stop();
+    if (m_pendingReadMarkers.isEmpty()) return;
+    const QSet<QString> rooms = std::exchange(m_pendingReadMarkers, {});
+    for (const QString& roomId : rooms) m_client->sendReadMarker(roomId);
 }
 
 void ServerConnection::resyncNow()
@@ -2099,17 +2266,7 @@ void ServerConnection::deleteChannel(const QString& roomId)
     // Without clearing the per-room models the main pane kept rendering the
     // last message list from the deleted room which made the UI look frozen
     // until the long-poll sync came back.
-    if (roomId == m_activeRoomId) {
-        m_activeRoomId.clear();
-        m_activeRoomName.clear();
-        m_activeRoomTopic.clear();
-        m_messageModel->clear();
-        m_memberListModel->clear();
-        emit activeRoomIdChanged();
-        emit activeRoomNameChanged();
-        emit activeRoomTopicChanged();
-    }
-    m_roomListModel->removeRoom(roomId);
+    dropRoomsGoneForMe({roomId}, RoomGoneCause::OwnAction);
     m_client->deleteRoom(roomId);
 }
 
@@ -2223,6 +2380,9 @@ void ServerConnection::joinVoiceChannel(const QString& roomId)
     // for its own echo.
     m_voiceSession->setLocalUserId(m_userId);
 
+    // Acknowledge the click now: the server round trip, the TURN fetch and
+    // opening the audio devices can together take a couple of seconds.
+    setVoiceConnecting(roomId);
     // Everything about ordering (leave-before-join on a switch, a join
     // queued behind an in-flight leave) lives in the session.
     m_voiceSession->requestJoin(roomId);
@@ -2233,6 +2393,13 @@ void ServerConnection::joinVoiceChannel(const QString& roomId)
         m_viewingVoiceRoom = true;
         emit viewingVoiceRoomChanged();
     }
+}
+
+void ServerConnection::setVoiceConnecting(const QString& roomId)
+{
+    if (m_voiceConnectingRoomId == roomId) return;
+    m_voiceConnectingRoomId = roomId;
+    emit voiceConnectingChanged();
 }
 
 void ServerConnection::showVoiceRoom()
@@ -2446,12 +2613,12 @@ void ServerConnection::applyCallMemberEvent(const QString& roomId,
 
     bsfchat::client::VoiceParticipant p;
     p.userId = QString::fromStdString(*event.state_key);
-    p.muted = event.content.data.value("muted", false);
-    p.deafened = event.content.data.value("deafened", false);
-    p.cameraOn = event.content.data.value("camera_on", false);
-    p.screenSharing = event.content.data.value("screen_sharing", false);
-    p.joinedAt = static_cast<qint64>(event.content.data.value("joined_at", int64_t(0)));
-    const bool active = event.content.data.value("active", false);
+    p.muted = js::boolean(event.content.data, "muted", false);
+    p.deafened = js::boolean(event.content.data, "deafened", false);
+    p.cameraOn = js::boolean(event.content.data, "camera_on", false);
+    p.screenSharing = js::boolean(event.content.data, "screen_sharing", false);
+    p.joinedAt = static_cast<qint64>(js::integer(event.content.data, "joined_at"));
+    const bool active = js::boolean(event.content.data, "active", false);
 
     // A room only carries m.call.member if it is a voice channel, and the
     // m.room.voice marker may sit later in the same state batch — mark it now
@@ -2470,7 +2637,7 @@ void ServerConnection::applyCallMemberEvent(const QString& roomId,
         // join over an active row (which emits active=false for the OLD
         // membership, then active=true) cannot be mistaken for our
         // current one being reaped.
-        const std::string sid = event.content.data.value("session_id", "");
+        const std::string sid = js::str(event.content.data, "session_id");
         m_voiceSession->onSelfMembership(roomId, active,
                                          QString::fromStdString(sid));
     }
@@ -2626,7 +2793,13 @@ void ServerConnection::setupVoiceSession()
                 m_voicePollTimer->start();
                 clearVoiceError();
 #ifdef BSFCHAT_VOICE_ENABLED
-                m_sounds->playJoin();
+                // Not now: the server has accepted the join, which is the
+                // moment the audio thread starts opening the devices. On
+                // macOS that reconfigures the output hardware, and a
+                // QSoundEffect opening its own stream on the GUI thread at
+                // the same instant both stalls on CoreAudio and glitches.
+                // Played on audioStarted instead, through the settled device.
+                m_joinChimePending = true;
 #endif
             } else if (room.isEmpty()) {
                 m_voicePollTimer->stop();
@@ -2635,6 +2808,15 @@ void ServerConnection::setupVoiceSession()
         }
         // A join that never landed leaves the optimistically-flipped
         // VoiceRoom view pointing at nothing — flip back to text.
+        // The attempt is over without audio starting (refused, failed,
+        // left). With voice compiled out, Active is as far as it goes.
+        // Not when Idle is only the gap in a switch (A left, B's join
+        // still queued): the user is still on their way into B.
+        if (st == State::Idle && m_voiceSession->headingTo().isEmpty())
+            setVoiceConnecting(QString());
+#ifndef BSFCHAT_VOICE_ENABLED
+        if (st == State::Active) setVoiceConnecting(QString());
+#endif
         if (st == State::Idle && m_viewingVoiceRoom) {
             m_viewingVoiceRoom = false;
             emit viewingVoiceRoomChanged();
@@ -2766,6 +2948,21 @@ bool ServerConnection::startVoiceEngine(const QString& roomId,
 
     connect(m_voiceEngine, &VoiceEngine::error,
             this, [this](const QString& message) { setVoiceError(message); });
+    // The async half of start()'s refusal: the devices failed to open
+    // after the join went ahead. Leave, which unwinds the server-side
+    // membership exactly as a refused start used to.
+    connect(m_voiceEngine, &VoiceEngine::audioStarted, this, [this]() {
+        // In the call: audio is flowing. This is the "completed" moment.
+        setVoiceConnecting(QString());
+        if (!m_joinChimePending) return;
+        m_joinChimePending = false;
+        m_sounds->playJoin();
+    });
+    connect(m_voiceEngine, &VoiceEngine::audioStartFailed, this, [this]() {
+        setVoiceConnecting(QString());
+        m_joinChimePending = false;
+        if (m_voiceSession) m_voiceSession->requestLeave();
+    });
 
     // start() refuses sessions that cannot possibly connect (relay-only
     // policy with no TURN server; no usable audio device — V-H4). It has
@@ -2871,7 +3068,7 @@ void ServerConnection::teardownVoiceSession()
     // switch / kick / failed-start path funnels through here.
     clearVoiceProtection();
 #ifdef BSFCHAT_VOICE_ENABLED
-    if (!m_activeVoiceRoomId.isEmpty()) m_sounds->playLeave();
+    const bool leavingACall = !m_activeVoiceRoomId.isEmpty();
     if (m_voiceEngine) {
         m_voiceEngine->stop();
         delete m_voiceEngine;
@@ -2886,6 +3083,13 @@ void ServerConnection::teardownVoiceSession()
     // Blank every remote video surface from the session (fires
     // liveVideoChanged → peerScreen/CameraFrameChanged for QML).
     if (m_videoRegistry) m_videoRegistry->clear();
+    // The leave beep waits for the audio devices to finish closing. It used
+    // to play first, and on macOS the VoiceProcessingIO teardown that
+    // follows reconfigures the output hardware underneath it: a glitched
+    // beep on every disconnect. A fraction of a second later, but clean.
+    if (leavingACall) {
+        AudioEngine::afterRetired(this, [this]() { m_sounds->playLeave(); });
+    }
 #endif
     // Announced share/camera flags die with the session too (the
     // server resets them on leave) — otherwise peersCurrentlySharing()
@@ -3563,25 +3767,40 @@ void ServerConnection::rebuildCategorizedRooms()
     // from a delegate is not a reactive dependency: a name that arrives after
     // the row was built would never repaint. Every path that learns a new name
     // rebuilds, so the sidebar renames in step with the member list.
+    //
+    // The same pass takes OUT the three fields that move on almost every
+    // sync: unreadCount, mentionCount and lastMessageTime. This snapshot
+    // drives ChannelList's nested Repeaters, and a Repeater handed a new
+    // array destroys and recreates every row — so while it carried unread
+    // state, one message in any channel rebuilt the whole sidebar, and so
+    // did opening a channel (its count resets, the next sync republishes).
+    // Rows read those values live from RoomListModel (unreadCountFor,
+    // mentionCountFor, lastMessageTimeFor, gated on activityGeneration), so
+    // this list now changes only when the set, order, names or voice
+    // rosters of channels do.
+    static const QString kUnread = QStringLiteral("unreadCount");
+    static const QString kMention = QStringLiteral("mentionCount");
+    static const QString kLastTs = QStringLiteral("lastMessageTime");
     for (auto& g : groups) {
         QVariantMap cat = g.toMap();
         QVariantList channels = cat.value(QStringLiteral("channels")).toList();
-        bool touched = false;
         for (auto& c : channels) {
             QVariantMap ch = c.toMap();
+            ch.remove(kUnread);
+            ch.remove(kMention);
+            ch.remove(kLastTs);
             QVariantList members = ch.value(QStringLiteral("voiceMembers")).toList();
-            if (members.isEmpty()) continue;
-            for (auto& m : members) {
-                QVariantMap row = m.toMap();
-                row[QStringLiteral("displayName")] = displayNameForSender(
-                    row.value(QStringLiteral("user_id")).toString());
-                m = row;
+            if (!members.isEmpty()) {
+                for (auto& m : members) {
+                    QVariantMap row = m.toMap();
+                    row[QStringLiteral("displayName")] = displayNameForSender(
+                        row.value(QStringLiteral("user_id")).toString());
+                    m = row;
+                }
+                ch[QStringLiteral("voiceMembers")] = members;
             }
-            ch[QStringLiteral("voiceMembers")] = members;
             c = ch;
-            touched = true;
         }
-        if (!touched) continue;
         cat[QStringLiteral("channels")] = channels;
         g = cat;
     }
@@ -3845,8 +4064,9 @@ QString ServerConnection::resolveMediaUrl(const QString& mxcUri) const
     return m_client->mediaDownloadUrl(mxcUri);
 }
 
-void ServerConnection::openMediaExternally(const QString& mxcUri)
+void ServerConnection::openMediaExternally(const QString& mxcUri, bool confirmed)
 {
+    namespace attachment = bsfchat::client::attachment;
     // The bare object URL: no ticket, no token, no query string at all. The
     // credential goes in a header below, which is the whole difference between
     // this path and the Qt.openUrlExternally it replaced.
@@ -3854,6 +4074,27 @@ void ServerConnection::openMediaExternally(const QString& mxcUri)
     if (remote.isEmpty()) {
         emit mediaOpenFailed(QStringLiteral("Not a media link"));
         return;
+    }
+    // What the sender says the file is. Looked up here rather than passed in
+    // from QML so every call site gets the same judgement (M-1).
+    QString fileName, mimeType;
+    if (m_messageModel) m_messageModel->mediaInfoForMxc(mxcUri, &fileName, &mimeType);
+    switch (attachment::classify(fileName, mimeType)) {
+    case attachment::Kind::Blocked:
+        qWarning() << "[media] refused to open a program/script attachment" << fileName
+                   << mimeType;
+        emit mediaOpenFailed(QStringLiteral("\u201c%1\u201d is a program or script. "
+                                            "BSFChat never opens those for you.")
+                                 .arg(fileName.isEmpty() ? QStringLiteral("This file") : fileName));
+        return;
+    case attachment::Kind::Document:
+        if (!confirmed) {
+            emit mediaOpenConfirmationRequested(mxcUri, fileName);
+            return;
+        }
+        break;
+    case attachment::Kind::Media:
+        break;
     }
     if (!m_mediaOpener) {
         m_mediaOpener = new MediaDownloader(this);
@@ -3867,7 +4108,7 @@ void ServerConnection::openMediaExternally(const QString& mxcUri)
                 });
     }
     m_mediaOpener->setAuthToken(m_accessToken);
-    m_mediaOpener->openDownloaded(remote);
+    m_mediaOpener->openDownloaded(remote, attachment::cacheExtension(fileName, mimeType));
 }
 
 void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response)
@@ -3903,16 +4144,17 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
     if (response.presence) {
         bool anyChanged = false;
         for (const auto& ev : response.presence->events) {
+            // One malformed event is skipped and logged, not the rest of the
+            // batch (util/EventGuard.h). Body deliberately not re-indented.
+            try {
             QString uid = QString::fromStdString(ev.sender);
             if (uid.isEmpty()) continue;
             QString state, msg;
             if (ev.content.data.contains("presence")) {
-                state = QString::fromStdString(
-                    ev.content.data.value("presence", ""));
+                state = js::qstr(ev.content.data, "presence");
             }
             if (ev.content.data.contains("status_msg")) {
-                msg = QString::fromStdString(
-                    ev.content.data.value("status_msg", ""));
+                msg = js::qstr(ev.content.data, "status_msg");
             }
             QString prevState = m_userPresenceFromSync.value(uid);
             QString prevMsg = m_userStatusMessage.value(uid);
@@ -3931,6 +4173,11 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             if (uid == m_userId) {
                 if (!state.isEmpty()) m_selfPresence = state;
                 m_selfStatusMessage = msg;
+            }
+            } catch (const std::exception& e) {
+                bsfchat::client::logSkippedEvent(ev, "sync presence", e.what());
+            } catch (...) {
+                bsfchat::client::logSkippedEvent(ev, "sync presence");
             }
         }
         if (anyChanged) presenceDirty = true;
@@ -3998,15 +4245,18 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
 
         // Process state events (room name, topic, members)
         for (const auto& event : joinedRoom.state.events) {
+            // One malformed event is skipped and logged, not the rest of the
+            // batch (util/EventGuard.h). Body deliberately not re-indented.
+            try {
             QString type = QString::fromStdString(event.type);
             if (type == QString::fromUtf8(bsfchat::event_type::kRoomName)) {
-                QString name = QString::fromStdString(event.content.data.value("name", ""));
+                QString name = js::qstr(event.content.data, "name");
                 m_roomListModel->updateRoomName(roomId, name);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomTopic)) {
-                QString topic = QString::fromStdString(event.content.data.value("topic", ""));
+                QString topic = js::qstr(event.content.data, "topic");
                 m_roomListModel->updateRoomTopic(roomId, topic);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerScreenShare)) {
-                int q = event.content.data.value("max_quality", 3);
+                int q = js::int32(event.content.data, "max_quality", 3);
                 q = std::clamp(q, 0, 3);
                 if (q != m_maxScreenShareQuality) {
                     m_maxScreenShareQuality = q;
@@ -4015,11 +4265,11 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 // New explicit policy fields. Sentinel values
                 // (-1) mean "no cap"; the client applies them as
                 // INT_MAX-equivalents during clamping.
-                int maxFps = event.content.data.value("max_fps", -1);
-                int maxWidth = event.content.data.value("max_width", -1);
-                int maxJpeg = event.content.data.value("max_jpeg_quality", -1);
-                int maxKbps = event.content.data.value("max_bitrate_kbps", -1);
-                bool allowLossless = event.content.data.value("allow_lossless", true);
+                int maxFps = js::int32(event.content.data, "max_fps", -1);
+                int maxWidth = js::int32(event.content.data, "max_width", -1);
+                int maxJpeg = js::int32(event.content.data, "max_jpeg_quality", -1);
+                int maxKbps = js::int32(event.content.data, "max_bitrate_kbps", -1);
+                bool allowLossless = js::boolean(event.content.data, "allow_lossless", true);
                 if (maxFps != m_maxScreenShareFps
                     || maxWidth != m_maxScreenShareWidth
                     || maxJpeg != m_maxScreenShareJpeg
@@ -4051,13 +4301,13 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 noteDirectMembership(roomId, event);
                 if (event.state_key.has_value()) {
                     QString uid = QString::fromStdString(*event.state_key);
-                    QString dn = QString::fromStdString(event.content.data.value("displayname", ""));
+                    QString dn = js::qstr(event.content.data, "displayname");
                     // The bot flag rides on the member event itself, so this
                     // is the same fold as the display name beside it — every
                     // path that can teach us a name can teach us this too,
                     // including a LEAVE, which is what keeps a departed bot's
                     // messages badged.
-                    recordBotFlag(uid, event.content.data.value("bsfchat.bot", false));
+                    recordBotFlag(uid, js::boolean(event.content.data, "bsfchat.bot", false));
                     // Our OWN name is learned here, like everybody else's.
                     //
                     // It used to be learned only from a /profile reply, and
@@ -4100,23 +4350,23 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             } else if (type == QString::fromUtf8(bsfchat::event_type::kCallMember)) {
                 applyCallMemberEvent(roomId, event);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomType)) {
-                QString rtype = QString::fromStdString(event.content.data.value("type", ""));
+                QString rtype = js::qstr(event.content.data, "type");
                 m_roomListModel->updateRoomType(roomId, rtype);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomCategory)) {
-                QString parentId = QString::fromStdString(event.content.data.value("parent_id", ""));
+                QString parentId = js::qstr(event.content.data, "parent_id");
                 m_roomListModel->updateParentId(roomId, parentId);
                 int order = 0;
                 if (event.content.data.contains("order")) {
-                    order = event.content.data["order"].get<int>();
+                    order = js::int32(event.content.data, "order");
                 }
                 m_roomListModel->updateSortOrder(roomId, order);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerInfo)) {
-                QString name = QString::fromStdString(event.content.data.value("name", ""));
+                QString name = js::qstr(event.content.data, "name");
                 if (name != m_serverName) {
                     m_serverName = name;
                     emit serverNameChanged();
                 }
-                QString mxc = QString::fromStdString(event.content.data.value("avatar", ""));
+                QString mxc = js::qstr(event.content.data, "avatar");
                 if (mxc != m_serverAvatarMxc) {
                     m_serverAvatarMxc = mxc;
                     m_serverAvatarUrl = mxc.isEmpty() ? QString()
@@ -4148,6 +4398,11 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             } else if (type == QStringLiteral("m.room.power_levels")) {
                 // Legacy: ignored for enforcement but kept for UI compat.
             }
+            } catch (const std::exception& e) {
+                bsfchat::client::logSkippedEvent(event, "sync state", e.what());
+            } catch (...) {
+                bsfchat::client::logSkippedEvent(event, "sync state");
+            }
         }
 
         // Ensure room exists in the list
@@ -4172,11 +4427,14 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
 
         // Process timeline events
         for (const auto& event : joinedRoom.timeline.events) {
+            // One malformed event is skipped and logged, not the rest of the
+            // batch (util/EventGuard.h). Body deliberately not re-indented.
+            try {
             QString type = QString::fromStdString(event.type);
 
             // State events in timeline
             if (type == QString::fromUtf8(bsfchat::event_type::kRoomName)) {
-                QString name = QString::fromStdString(event.content.data.value("name", ""));
+                QString name = js::qstr(event.content.data, "name");
                 m_roomListModel->updateRoomName(roomId, name);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomMember)) {
                 bsfchat::client::upsertMemberEvent(m_roomMembers[roomId], event);
@@ -4190,23 +4448,23 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             } else if (type == QString::fromUtf8(bsfchat::event_type::kCallMember)) {
                 applyCallMemberEvent(roomId, event);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomType)) {
-                QString rtype = QString::fromStdString(event.content.data.value("type", ""));
+                QString rtype = js::qstr(event.content.data, "type");
                 m_roomListModel->updateRoomType(roomId, rtype);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kRoomCategory)) {
-                QString parentId = QString::fromStdString(event.content.data.value("parent_id", ""));
+                QString parentId = js::qstr(event.content.data, "parent_id");
                 m_roomListModel->updateParentId(roomId, parentId);
                 int order = 0;
                 if (event.content.data.contains("order")) {
-                    order = event.content.data["order"].get<int>();
+                    order = js::int32(event.content.data, "order");
                 }
                 m_roomListModel->updateSortOrder(roomId, order);
             } else if (type == QString::fromUtf8(bsfchat::event_type::kServerInfo)) {
-                QString name = QString::fromStdString(event.content.data.value("name", ""));
+                QString name = js::qstr(event.content.data, "name");
                 if (name != m_serverName) {
                     m_serverName = name;
                     emit serverNameChanged();
                 }
-                QString mxc = QString::fromStdString(event.content.data.value("avatar", ""));
+                QString mxc = js::qstr(event.content.data, "avatar");
                 if (mxc != m_serverAvatarMxc) {
                     m_serverAvatarMxc = mxc;
                     m_serverAvatarUrl = mxc.isEmpty() ? QString()
@@ -4241,7 +4499,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
 
             // Update last message for room list
             if (type == QString::fromUtf8(bsfchat::event_type::kRoomMessage)) {
-                QString body = QString::fromStdString(event.content.data.value("body", ""));
+                QString body = js::qstr(event.content.data, "body");
                 m_roomListModel->updateLastMessage(roomId, body, event.origin_server_ts);
                 batchNewestMsgTs = std::max(batchNewestMsgTs,
                                             static_cast<qint64>(event.origin_server_ts));
@@ -4275,7 +4533,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                 if (event.content.data.contains("m.relates_to")
                     && event.content.data["m.relates_to"].is_object()) {
                     const auto& rel = event.content.data["m.relates_to"];
-                    if (rel.value("rel_type", "") == "m.replace") {
+                    if (js::str(rel, "rel_type") == "m.replace") {
                         isEdit = true;
                     }
                 }
@@ -4435,6 +4693,11 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             if (roomId == m_activeRoomId) {
                 m_messageModel->appendEvent(event, m_userId);
             }
+            } catch (const std::exception& e) {
+                bsfchat::client::logSkippedEvent(event, "sync timeline", e.what());
+            } catch (...) {
+                bsfchat::client::logSkippedEvent(event, "sync timeline");
+            }
         }
 
         // First sight of this room: give it a read marker, or the channel
@@ -4514,13 +4777,13 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
         // is rebuilt below from m_roomTyping[m_activeRoomId].
         if (joinedRoom.ephemeral.has_value()) {
             for (const auto& event : joinedRoom.ephemeral->events) {
+                try {
                 if (event.type != std::string(bsfchat::event_type::kTyping)) continue;
                 QStringList users;
-                if (event.content.data.contains("user_ids")) {
-                    for (const auto& uid : event.content.data["user_ids"]) {
-                        QString usrId = QString::fromStdString(uid.get<std::string>());
-                        if (usrId != m_userId) users.append(usrId);
-                    }
+                for (const auto& uid : js::array(event.content.data, "user_ids")) {
+                    if (!uid.is_string()) continue;
+                    QString usrId = QString::fromStdString(uid.get<std::string>());
+                    if (usrId != m_userId) users.append(usrId);
                 }
                 auto existing = m_roomTyping.value(roomId);
                 if (existing != users) {
@@ -4528,6 +4791,11 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     else m_roomTyping[roomId] = users;
                     ++m_typingGeneration;
                     emit roomTypingChanged();
+                }
+                } catch (const std::exception& e) {
+                    bsfchat::client::logSkippedEvent(event, "sync ephemeral", e.what());
+                } catch (...) {
+                    bsfchat::client::logSkippedEvent(event, "sync ephemeral");
                 }
             }
         }
@@ -4619,16 +4887,10 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
             for (const auto& [roomIdStr, _unused] : response.rooms.join) {
                 visible.insert(QString::fromStdString(roomIdStr));
             }
-            auto removed = m_roomListModel->pruneRoomsNotIn(visible);
-            if (!removed.isEmpty() && removed.contains(m_activeRoomId)) {
-                // Active room was pruned; clear the view.
-                m_activeRoomId.clear();
-                m_activeRoomName.clear();
-                m_activeRoomTopic.clear();
-                emit activeRoomIdChanged();
-                emit activeRoomNameChanged();
-                emit activeRoomTopicChanged();
-            }
+            QStringList gone;
+            for (const QString& id : sidebarRoomIds())
+                if (!visible.contains(id)) gone.append(id);
+            if (!gone.isEmpty()) dropRoomsGoneForMe(gone, RoomGoneCause::Server);
         }
         m_firstSyncProcessed = true;
         // Tells QML the empty room list is now an ANSWER rather than the
@@ -4773,7 +5035,11 @@ void ServerConnection::applyChannelPermissionsEvent(const QString& roomId, const
     if (originMs > 0) m_channelOverrideTs[key] = originMs;
 
     auto& list = m_channelOverrides[roomId];
-    // Replace any existing entry with the same target key.
+    // Replace any existing entry with the same target key. Falls through to
+    // the notify below rather than returning: editing or clearing an
+    // override used to change permissions without permissionsChanged, so
+    // nothing bound to them updated until the next channel switch (U-7).
+    bool replaced = false;
     for (int i = 0; i < list.size(); ++i) {
         if (list[i].targetKey == stateKey) {
             if (ov.allow == 0 && ov.deny == 0) {
@@ -4781,10 +5047,11 @@ void ServerConnection::applyChannelPermissionsEvent(const QString& roomId, const
             } else {
                 list[i] = ov;
             }
-            return;
+            replaced = true;
+            break;
         }
     }
-    if (ov.allow != 0 || ov.deny != 0) list.append(ov);
+    if (!replaced && (ov.allow != 0 || ov.deny != 0)) list.append(ov);
     emit serverRolesChanged();
     ++m_permissionsGeneration;
     emit permissionsChanged();
@@ -5215,7 +5482,7 @@ void ServerConnection::noteDirectMembership(const QString& roomId,
     // profile, cleared settings, a sync that errored at the wrong moment) has
     // nothing else to go on and files the DM under channels. Room state comes
     // down on every initial sync, so this one cannot go stale.
-    const bool isDirect = event.content.data.value("is_direct", false);
+    const bool isDirect = js::boolean(event.content.data, "is_direct", false);
     if (!isDirect) return;
     recordDirectRoom(
         roomId,
@@ -5479,8 +5746,7 @@ QMap<QString, QString> ServerConnection::membershipByRoom(const QString& userId)
         for (const auto& ev : it.value()) {
             if (ev.state_key.has_value()
                 && QString::fromStdString(*ev.state_key) == userId) {
-                latest = QString::fromStdString(
-                    ev.content.data.value("membership", ""));
+                latest = js::qstr(ev.content.data, "membership");
             }
         }
         out.insert(it.key(), latest);
@@ -5499,7 +5765,7 @@ QString ServerConnection::membershipInRoom(const QString& roomId,
     for (const auto& ev : it.value()) {
         if (ev.state_key.has_value()
             && QString::fromStdString(*ev.state_key) == userId) {
-            latest = QString::fromStdString(ev.content.data.value("membership", ""));
+            latest = js::qstr(ev.content.data, "membership");
         }
     }
     return latest;
@@ -5676,8 +5942,7 @@ QVariantList ServerConnection::buildServerMembers() const {
         }
         for (auto uit = latestByUser.constBegin(); uit != latestByUser.constEnd(); ++uit) {
             const bsfchat::RoomEvent& ev = uit.value();
-            QString membership = QString::fromStdString(
-                ev.content.data.value("membership", ""));
+            QString membership = js::qstr(ev.content.data, "membership");
             if (membership != QStringLiteral("join")) continue;
 
             const QString& uid = uit.key();
@@ -5685,13 +5950,11 @@ QVariantList ServerConnection::buildServerMembers() const {
             a.rooms.append(roomId);
             QString dn = m_userDisplayNames.value(uid);
             if (dn.isEmpty()) {
-                dn = QString::fromStdString(
-                    ev.content.data.value("displayname", ""));
+                dn = js::qstr(ev.content.data, "displayname");
             }
             if (!dn.isEmpty()) a.displayName = dn;
             if (a.avatarUrl.isEmpty()) {
-                a.avatarUrl = QString::fromStdString(
-                    ev.content.data.value("avatar_url", ""));
+                a.avatarUrl = js::qstr(ev.content.data, "avatar_url");
             }
         }
     }
@@ -5744,8 +6007,7 @@ QVariantList ServerConnection::buildBannedMembers() const {
         }
         for (auto uit = latestByUser.constBegin(); uit != latestByUser.constEnd(); ++uit) {
             const bsfchat::RoomEvent& ev = uit.value();
-            QString membership = QString::fromStdString(
-                ev.content.data.value("membership", ""));
+            QString membership = js::qstr(ev.content.data, "membership");
             if (membership != QStringLiteral("ban")) continue;
 
             const QString& uid = uit.key();
@@ -5755,13 +6017,11 @@ QVariantList ServerConnection::buildBannedMembers() const {
             // the ban event, which is often blank.
             QString dn = m_userDisplayNames.value(uid);
             if (dn.isEmpty()) {
-                dn = QString::fromStdString(
-                    ev.content.data.value("displayname", ""));
+                dn = js::qstr(ev.content.data, "displayname");
             }
             if (!dn.isEmpty()) a.displayName = dn;
             if (a.reason.isEmpty()) {
-                a.reason = QString::fromStdString(
-                    ev.content.data.value("reason", ""));
+                a.reason = js::qstr(ev.content.data, "reason");
             }
         }
     }

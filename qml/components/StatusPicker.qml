@@ -112,6 +112,7 @@ Popup {
                     spacing: 1
                     Layout.fillWidth: true
                     Text {
+                        textFormat: Text.PlainText
                         text: row.title
                         Accessible.ignored: true
                         font.family: Theme.fontSans
@@ -120,6 +121,7 @@ Popup {
                         color: Theme.fg0
                     }
                     Text {
+                        textFormat: Text.PlainText
                         text: row.subtitle
                         Accessible.ignored: true
                         font.family: Theme.fontSans
@@ -215,6 +217,7 @@ Popup {
                 Accessible.name: qsTr("Cancel")
                 Accessible.onPressAction: picker.close()
                 contentItem: Text {
+                    textFormat: Text.PlainText
                     text: parent.text
                     color: Theme.fg1
                     font.family: Theme.fontSans
@@ -238,6 +241,7 @@ Popup {
                 Accessible.name: qsTr("Save status")
                 Accessible.onPressAction: picker._save()
                 contentItem: Text {
+                    textFormat: Text.PlainText
                     text: parent.text
                     color: Theme.onAccent
                     font.family: Theme.fontSans

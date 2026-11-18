@@ -114,6 +114,7 @@ Popup {
         Layout.fillWidth: true
         spacing: Theme.sp.s3
         Text {
+            textFormat: Text.PlainText
             text: parent.text
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.xxl
@@ -156,6 +157,7 @@ Popup {
                 // with wide right-hand controls leave the title column
                 // narrow).
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: title
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.md
@@ -166,6 +168,7 @@ Popup {
             Text {
                 visible: description.length > 0
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: description
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
@@ -262,6 +265,7 @@ Popup {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.left: parent.left
                             anchors.leftMargin: Theme.sp.s3
+                            textFormat: Text.PlainText
                             text: modelData
                             color: parent.isActive ? Theme.fg0 : Theme.fg1
                             font.family: Theme.fontSans
@@ -394,6 +398,7 @@ Popup {
                                     Accessible.onToggleAction: appSettings.theme = modelData.key
                                     Text {
                                         anchors.centerIn: parent
+                                        textFormat: Text.PlainText
                                         text: modelData.label
                                         color: parent.selected ? Theme.onAccent : Theme.fg1
                                         font.family: Theme.fontSans
@@ -505,6 +510,7 @@ Popup {
 
                                     Text {
                                         anchors.centerIn: parent
+                                        textFormat: Text.PlainText
                                         text: modelData.label
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.md
@@ -639,6 +645,7 @@ Popup {
                             Text {
                                 width: 260
                                 visible: appSettings.audioInputInUse.length > 0
+                                textFormat: Text.PlainText
                                 text: "In use: " + appSettings.audioInputInUse
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.xs
@@ -802,6 +809,7 @@ Popup {
                             Text {
                                 width: 260
                                 visible: appSettings.audioOutputInUse.length > 0
+                                textFormat: Text.PlainText
                                 text: "In use: " + appSettings.audioOutputInUse
                                 font.family: Theme.fontSans
                                 font.pixelSize: Theme.fontSize.xs
@@ -1600,11 +1608,13 @@ Popup {
                             Accessible.name: qsTr("Open log folder")
                             Accessible.description: qsTr("Opens the client log directory in your file manager")
                             Accessible.onPressAction: logFolderBtn.clicked()
-                            onClicked: Qt.openUrlExternally(
-                                appSettings.logDirectory().startsWith("/")
-                                    ? "file://" + appSettings.logDirectory()
-                                    : "file:///" + appSettings.logDirectory())
+                            // A local folder, which LinkOpener.open() would
+                            // rightly refuse; openLocalDirectory opens only
+                            // an existing directory.
+                            onClicked: linkOpener.openLocalDirectory(
+                                appSettings.logDirectory())
                             contentItem: Text {
+                                textFormat: Text.PlainText
                                 text: parent.text
                                 // Covered by the button's own name.
                                 Accessible.ignored: true

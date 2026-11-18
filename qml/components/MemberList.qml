@@ -229,6 +229,85 @@ Rectangle {
             ScrollBar.vertical: ThemedScrollBar {}
             model: serverManager.activeServer ? serverManager.activeServer.memberListModel : null
 
+            // Loading, failed and empty (U-4). The list used to be a blank
+            // panel in all three — indistinguishable from each other and from
+            // a broken pane. A footer rather than a child: a ListView is a
+            // Flickable and reparents its children into the scrolling content
+            // (see qml/js/TimelineOverlay.js), and with no rows the footer
+            // sits at the top where the first row would be.
+            footer: Item {
+                id: membersState
+                readonly property var _s: serverManager.activeServer
+                // 0 ready, 1 loading, 2 failed — ServerConnection::membersStatus.
+                readonly property int _status: _s ? _s.membersStatus : 0
+                readonly property bool _show: memberListView.count === 0
+                    && !!_s && (_s.activeRoomId || "") !== ""
+                width: ListView.view ? ListView.view.width : 0
+                height: _show ? membersStateCol.implicitHeight + 2 * Theme.sp.s5 : 0
+                visible: _show
+
+                Column {
+                    id: membersStateCol
+                    anchors.centerIn: parent
+                    width: parent.width - 2 * Theme.sp.s4
+                    spacing: Theme.sp.s2
+
+                    // The timeline's own pagination spinner, so the two
+                    // panes say "loading" the same way.
+                    Text {
+                        id: membersSpinner
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        visible: membersState._status === 1
+                        text: "\u21BB"
+                        font.pixelSize: 16
+                        color: Theme.fg3
+                        Accessible.ignored: true
+                        RotationAnimation on rotation {
+                            from: 0; to: 360; duration: 900
+                            loops: Animation.Infinite
+                            running: membersSpinner.visible
+                        }
+                    }
+                    Text {
+                        width: parent.width
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.Wrap
+                        textFormat: Text.PlainText
+                        text: membersState._status === 1 ? "Loading members…"
+                            : membersState._status === 2 ? "Couldn't load the member list."
+                            : "No members to show."
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        color: membersState._status === 2 ? Theme.fg2 : Theme.fg3
+                        Accessible.role: membersState._status === 2
+                                         ? Accessible.AlertMessage : Accessible.StaticText
+                        Accessible.name: text
+                    }
+                    Text {
+                        id: membersRetry
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        visible: membersState._status === 2
+                        text: "Try again"
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                        font.weight: Theme.fontWeight.semibold
+                        color: Theme.accent
+                        font.underline: membersRetryMouse.containsMouse
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Try loading the member list again")
+                        Accessible.onPressAction: if (membersState._s) membersState._s.retryMembers()
+                        MouseArea {
+                            id: membersRetryMouse
+                            anchors.fill: parent
+                            anchors.margins: -Theme.sp.s2
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: if (membersState._s) membersState._s.retryMembers()
+                        }
+                    }
+                }
+            }
+
             delegate: Item {
                 id: memberDelegate
                 width: ListView.view.width
@@ -330,6 +409,7 @@ Rectangle {
 
                                 Text {
                                     anchors.centerIn: parent
+                                    textFormat: Text.PlainText
                                     text: {
                                         var n = model.displayName || "?";
                                         var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -424,6 +504,7 @@ Rectangle {
                                 spacing: Theme.sp.s2
 
                                 Text {
+                                    textFormat: Text.PlainText
                                     // Bold on hover, tinted by highest role
                                     // normally. Falls back to fg1 for roleless
                                     // members (e.g. @everyone-only).
@@ -460,6 +541,7 @@ Rectangle {
                             // when set. Italic distinguishes user-
                             // authored copy from the role label.
                             Text {
+                                textFormat: Text.PlainText
                                 text: {
                                     // statusMessageFor is a Q_INVOKABLE: calling
                                     // it subscribes to nothing, so a status set
@@ -487,6 +569,7 @@ Rectangle {
                             // don't get a blank subtext line. Hidden
                             // when a custom status is shown above.
                             Text {
+                                textFormat: Text.PlainText
                                 text: memberDelegate._role && memberDelegate._role.hoist
                                     ? (memberDelegate._role.name || "") : ""
                                 // Hide when a custom status is being
@@ -642,6 +725,7 @@ Rectangle {
                     Layout.leftMargin: Theme.sp.s3
                 }
                 Text {
+                    textFormat: Text.PlainText
                     text: mi.text
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.md

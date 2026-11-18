@@ -124,6 +124,14 @@ public:
     // to be unusable or belongs to somebody else.
     void clearAll();
 
+    // Drop everything held for ONE room — its state snapshot, unread row and
+    // timeline window — leaving the token and every other room alone. For a
+    // room that is gone for this account (deleted, left, kicked, banned, or
+    // VIEW_CHANNEL revoked): without it the next launch hydrates the room
+    // straight back into the sidebar from the snapshot, and a resumed session
+    // never prunes, so it would stay there until the snapshot aged out.
+    void forgetRoom(const QString& roomId);
+
     // Schema revision written into PRAGMA user_version. Bump to invalidate
     // every existing cache file; a mismatch wipes rather than migrates,
     // which is safe because this is a cache and never the source of truth.
@@ -136,6 +144,7 @@ public:
 
 private:
     bool openAt(const QString& path);
+    void configureConnection();
     bool ensureSchema();
     void setMeta(const QString& key, const QString& value);
     QString meta(const QString& key) const;

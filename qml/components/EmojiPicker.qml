@@ -191,6 +191,7 @@ Popup {
                         Text {
                             anchors.centerIn: parent
                             Accessible.ignored: true
+                            textFormat: Text.PlainText
                             text: modelData.icon
                             font.pixelSize: 18
                             opacity: parent.isSelected ? 1.0 : 0.65
@@ -270,6 +271,7 @@ Popup {
                     Text {
                         anchors.centerIn: parent
                         Accessible.ignored: true
+                        textFormat: Text.PlainText
                         text: modelData.emoji
                         font.pixelSize: 24
                     }

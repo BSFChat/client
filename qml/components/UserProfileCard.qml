@@ -206,6 +206,7 @@ Popup {
 
                     Text {
                         anchors.centerIn: parent
+                        textFormat: Text.PlainText
                         text: ProfileCardAvatar.initial(profileCard.profileDisplayName,
                                                         profileCard.userId)
                         Accessible.ignored: true
@@ -233,6 +234,7 @@ Popup {
             spacing: Theme.sp.s2
 
             Text {
+                textFormat: Text.PlainText
                 text: profileCard.effectiveName
                 Accessible.ignored: true
                 font.family: Theme.fontSans
@@ -267,6 +269,7 @@ Popup {
             visible: profileCard.nickname !== ""
                 && profileCard.profileDisplayName !== ""
                 && profileCard.profileDisplayName !== profileCard.nickname
+            textFormat: Text.PlainText
             text: qsTr("aka %1").arg(profileCard.profileDisplayName)
             Accessible.role: Accessible.StaticText
             Accessible.name: qsTr("Account name %1").arg(profileCard.profileDisplayName)
@@ -279,6 +282,7 @@ Popup {
 
         // User ID — mono, fg3 (quieter than display name).
         Text {
+            textFormat: Text.PlainText
             text: profileCard.userId
             Accessible.role: Accessible.StaticText
             Accessible.name: qsTr("User ID %1").arg(profileCard.userId)
@@ -291,6 +295,7 @@ Popup {
 
         // Server host, in mono for consistency with the mxid.
         Text {
+            textFormat: Text.PlainText
             text: serverManager.activeServer ? serverManager.activeServer.serverUrl : ""
             Accessible.role: Accessible.StaticText
             Accessible.name: qsTr("Server %1").arg(
@@ -334,6 +339,7 @@ Popup {
                     }
                     Text {
                         Layout.fillWidth: true
+                        textFormat: Text.PlainText
                         text: profileCard.nickname !== "" ? profileCard.nickname
                                                           : qsTr("None")
                         Accessible.role: Accessible.StaticText

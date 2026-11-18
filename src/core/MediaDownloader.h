@@ -45,7 +45,14 @@ public:
     // remote URL to the OS is now not something any media call site can do.
     //
     // Emits `openFailed` when the download fails or the OS refuses the file.
-    Q_INVOKABLE void openDownloaded(const QString& remoteUrl);
+    //
+    // `safeExtension` (".pdf", or empty) is what the cached copy is named
+    // with, and so what decides which program opens it. Build it with
+    // attachment::cacheExtension() — anything outside that allowlist is
+    // dropped. Deciding WHETHER to open the file is the caller's job (see
+    // ServerConnection::openMediaExternally).
+    Q_INVOKABLE void openDownloaded(const QString& remoteUrl,
+                                    const QString& safeExtension = QString());
 
     // 0..1 for in-flight; sticks at 1.0 once complete.
     Q_INVOKABLE double progress(const QString& remoteUrl) const;
@@ -76,6 +83,8 @@ private:
     // a flag on the entry: a video already being streamed by the player can be
     // asked to open while its download is in flight.
     QSet<QString> m_pendingOpens;
+    // Cache key → allowlisted extension, from openDownloaded().
+    QHash<QString, QString> m_extensionHints;
 
     struct Entry {
         QString path;         // local file path

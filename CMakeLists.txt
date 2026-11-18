@@ -254,6 +254,7 @@ qt_add_library(bsfchat-lib STATIC
     src/net/AuthError.cpp
     src/net/SyncLoop.cpp
     src/net/ServerConnection.cpp
+    src/net/ServerConnectionRoomRemoval.cpp
     src/net/VoiceSession.cpp
     src/net/ServerManager.cpp
     src/net/ServerDiscovery.cpp
@@ -270,6 +271,8 @@ qt_add_library(bsfchat-lib STATIC
     src/store/LocalCache.cpp
     src/util/ExternalBrowser.cpp
     src/util/FileLogger.cpp
+    src/util/HtmlSanitizer.cpp
+    src/util/LinkOpener.cpp
     src/util/MarkdownParser.cpp
     src/util/MentionRenderer.cpp
     src/util/PermissionMath.cpp
@@ -1189,6 +1192,7 @@ qt_add_qml_module(bsfchat-lib
         qml/components/MemberList.qml
         qml/components/LoginDialog.qml
         qml/components/ReauthDialog.qml
+        qml/components/RemoveServerDialog.qml
         qml/components/UserProfileCard.qml
         qml/components/UserSettings.qml
         qml/components/ServerSettings.qml
@@ -1208,6 +1212,7 @@ qt_add_qml_module(bsfchat-lib
         qml/components/ToastHost.qml
         qml/components/VideoPlayerCard.qml
         qml/components/LinkPreview.qml
+        qml/components/ExternalOpenPrompts.qml
         qml/components/ScreenPickerDialog.qml
         qml/components/BotBadge.qml
         qml/components/BotManagerPane.qml

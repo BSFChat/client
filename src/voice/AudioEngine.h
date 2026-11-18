@@ -79,9 +79,11 @@
 // polls.
 
 #include <QObject>
+#include <QTimer>
 #include <QByteArray>
 #include <QString>
 
+#include <functional>
 #include <memory>
 
 #include "voice/DarwinVoiceLifecycle.h"
@@ -102,8 +104,33 @@ public:
     // until the thread reports back, so the return value means the same
     // thing it always did. False = the pipeline is not running.
     bool start();
-    // Tears the pipeline and the thread down, deterministically: devices
-    // are closed on the audio thread, then the thread is joined. Safe to
+    // The same, WITHOUT blocking the caller: the devices are opened on the
+    // audio thread while the GUI keeps running, and startFinished(ok)
+    // reports the verdict. This is the join path. Opening devices on macOS
+    // (VoiceProcessingIO's AudioUnitInitialize, and a Bluetooth headset
+    // switching to its headset profile) routinely takes one to three
+    // seconds, and start() made the whole window wait for it. Incoming
+    // audio pushed meanwhile waits in the bounded packet queue; mute and
+    // deafen set meanwhile are seeded/queued as usual. A stop() before
+    // the verdict tears down as normal and no startFinished is emitted.
+    void startAsync();
+    // True from a successful start/startAsync until stop().
+    bool isRunning() const { return m_running; }
+
+    // Pipelines stopped but still closing their devices on their own
+    // thread (stop() no longer waits for them). Process-wide.
+    static bool retiringInProgress();
+    // Wait (bounded) for them. For quitting, where nothing may be left
+    // running behind the application, and for the blocking start().
+    static bool waitForRetiredThreads(int timeoutMs);
+    // Run `fn` (on the GUI thread) once no pipeline is retiring — at once
+    // if none is. Dropped if `context` is destroyed first. For anything
+    // that must not overlap the device teardown, like the leave beep: on
+    // macOS closing VoiceProcessingIO reconfigures the output hardware and
+    // a sound playing through it at that moment glitches.
+    static void afterRetired(QObject* context, std::function<void()> fn);
+    // Tears the pipeline down WITHOUT blocking: the audio thread closes its
+    // devices and exits on its own; the next start waits for that. Safe to
     // call when never started, and safe to call twice.
     void stop();
 
@@ -138,6 +165,8 @@ public:
     void requestAudioResume();
 
 signals:
+    // startAsync()'s verdict. false = no pipeline (already torn down).
+    void startFinished(bool ok);
     void audioFrameReady(const QByteArray& opusFrame);
     // 0..1 smoothed RMS of the most recent 20ms mic frame. Emits zero
     // when muted. Use as a UI transmit-level indicator. Emitted at the
@@ -153,6 +182,23 @@ private:
     // Joins the audio thread and disposes of the worker. Used by both
     // stop() and the failure path in start().
     void teardownThread();
+    // start()/startAsync() share these: the thread and worker before the
+    // devices open, and the bookkeeping after they did.
+    void prepareThread();
+    void finishStart();
+    // Bumped by every prepareThread(): a verdict from a worker that has
+    // since been torn down (stop, then start again) is recognised and
+    // dropped rather than applied to the new pipeline.
+    quint64 m_startGeneration = 0;
+    // Bumped by every deferred startAsync() and by stop(): a deferred
+    // start runs only if nothing has superseded it.
+    quint64 m_deferredStart = 0;
+    void retireThread();
+    // Device-list notifications, coalesced (see the constructor).
+    static constexpr int kDeviceChangeCoalesceMs = 250;
+    QTimer m_inputsChangedTimer;
+    QTimer m_outputsChangedTimer;
+    bool m_running = false;
 
     // Performs one VoiceAudioAction against the worker, marshalling to
     // the audio thread the way the rest of this class does.
@@ -174,7 +220,7 @@ private:
     // startDevices() — blocking, and never restarts anything — from a
     // QMediaDevices change notification, which is queued and may
     // restart that direction.
-    void pushDeviceSnapshot(bool input, bool live);
+    void pushDeviceSnapshot(bool input, bool live, bool blocking = true);
 
     // How long to wait for the audio thread to finish before giving up
     // and terminating it. Nothing on that thread can block: QAudioSink

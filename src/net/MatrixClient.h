@@ -13,6 +13,7 @@
 
 #include "net/MatrixFailure.h"
 #include "net/MediaTicketCache.h"
+#include "net/RoomRemoval.h"
 #include "util/SearchParser.h"
 
 class MatrixClient : public QObject {
@@ -56,6 +57,17 @@ public:
     // chain on one SyncLoop — see tests/test_sync_single_flight.cpp.
     void abortSync();
 
+    // `rooms.leave` of the /sync reply being delivered RIGHT NOW, read from
+    // the raw body because bsfchat::SyncResponse has no field for it. Valid
+    // only for the duration of the syncSuccess emission (handlers further
+    // down the chain — SyncLoop::syncCompleted — read it synchronously);
+    // empty at any other time, and always empty for a server that predates
+    // the section.
+    const QVector<bsfchat::client::SyncLeave>& currentSyncLeaves() const
+    {
+        return m_currentSyncLeaves;
+    }
+
     // Rooms
     // `requestId` correlates the call with its createRoomSuccess/
     // createRoomError reply. Those signals are connection-wide and several
@@ -73,7 +85,12 @@ public:
     void joinRoom(const QString& roomIdOrAlias);
     void leaveRoom(const QString& roomId);
     void deleteRoom(const QString& roomId);
-    void getJoinedRooms();
+    // GET /joined_rooms. `requestId` comes back on joinedRoomsResult so the
+    // caller can tell its current request apart from one issued by an earlier
+    // session (a re-login): that answer describes another account's rooms and
+    // must not prune this one's sidebar. Silent on failure, on purpose — see
+    // the definition.
+    void getJoinedRooms(const QString& requestId);
     void getRoomMembers(const QString& roomId);
 
     // Messages
@@ -442,8 +459,11 @@ signals:
     void leaveRoomSuccess(const QString& roomId);
     void leaveRoomError(const QString& error);
 
-    void joinedRoomsResult(const QStringList& roomIds);
+    void joinedRoomsResult(const QString& requestId, const QStringList& roomIds);
     void roomMembersResult(const QString& roomId, const QJsonArray& members);
+    // GET /members failed or answered with something unreadable. The member
+    // list used to get no word at all, and sat empty with nothing on it.
+    void roomMembersError(const QString& roomId, const QString& error);
 
     void messageSent(const QString& eventId);
     void sendMessageError(const QString& error);
@@ -723,6 +743,8 @@ private:
     QPointer<QNetworkReply> m_syncReply;
     QNetworkAccessManager m_nam;
     bsfchat::client::MediaTicketCache m_mediaTickets;
+    // See currentSyncLeaves().
+    QVector<bsfchat::client::SyncLeave> m_currentSyncLeaves;
     QString m_homeserver;
     QString m_accessToken;
 };

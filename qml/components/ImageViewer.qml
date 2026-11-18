@@ -412,6 +412,7 @@ Popup {
                 Text {
                     visible: viewer.filename.length > 0
                     Accessible.ignored: true
+                    textFormat: Text.PlainText
                     text: viewer.filename
                     color: Theme.scrimFg
                     font.family: Theme.fontSans

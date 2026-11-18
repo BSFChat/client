@@ -157,6 +157,7 @@ Popup {
 
                 Text {
                     Layout.fillWidth: true
+                    textFormat: Text.PlainText
                     text: popup.model ? popup.model.errorText : ""
                     Accessible.ignored: true
                     color: Theme.danger
@@ -312,6 +313,7 @@ Popup {
                                 Text {
                                     Layout.alignment: Qt.AlignVCenter
                                     Layout.fillWidth: true
+                                    textFormat: Text.PlainText
                                     text: roleRow.modelData.name || roleRow.roleId
                                     Accessible.ignored: true
                                     color: roleRow.modelData.color || Theme.fg0
@@ -340,6 +342,7 @@ Popup {
                                 Layout.fillWidth: true
                                 Layout.leftMargin: 18 + Theme.sp.s3
                                 visible: roleRow.blocked
+                                textFormat: Text.PlainText
                                 text: roleRow.modelData.blockedReason || ""
                                 Accessible.ignored: true
                                 wrapMode: Text.WordWrap

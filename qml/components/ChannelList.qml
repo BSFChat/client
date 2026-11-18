@@ -423,6 +423,7 @@ Rectangle {
                                     color: Theme.senderColor(modelData.userId)
                                     Text {
                                         anchors.centerIn: parent
+                                        textFormat: Text.PlainText
                                         text: {
                                             var n = modelData.displayName
                                                   || modelData.userId;
@@ -441,6 +442,7 @@ Rectangle {
                                     Layout.fillWidth: true
                                     spacing: 0
                                     Text {
+                                        textFormat: Text.PlainText
                                         text: modelData.displayName
                                               || modelData.userId
                                         font.family: Theme.fontSans
@@ -451,6 +453,7 @@ Rectangle {
                                         Accessible.ignored: true
                                     }
                                     Text {
+                                        textFormat: Text.PlainText
                                         text: modelData.userId
                                               + (modelData.serverName
                                                   ? " · " + modelData.serverName
@@ -563,6 +566,7 @@ Rectangle {
                                 color: Theme.senderColor(modelData.peerId)
                                 Text {
                                     anchors.centerIn: parent
+                                    textFormat: Text.PlainText
                                     text: {
                                         var n = modelData.peerDisplayName
                                               || modelData.peerId;
@@ -611,6 +615,7 @@ Rectangle {
                             Layout.fillWidth: true
                             spacing: 0
                             Text {
+                                textFormat: Text.PlainText
                                 text: modelData.peerDisplayName
                                       || modelData.peerId
                                 font.family: Theme.fontSans
@@ -629,6 +634,7 @@ Rectangle {
                             // is useful when the user is in DMs
                             // across multiple servers).
                             Text {
+                                textFormat: Text.PlainText
                                 text: {
                                     if (modelData.peerStatusMessage
                                         && modelData.peerStatusMessage.length > 0) {
@@ -795,6 +801,7 @@ Rectangle {
                 Text {
                     Layout.fillWidth: true
                     verticalAlignment: Text.AlignVCenter
+                    textFormat: Text.PlainText
                     text: serverManager.activeServer ? serverManager.activeServer.serverName : "BSFChat"
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.lg
@@ -1040,6 +1047,7 @@ Rectangle {
                                         color: Theme.senderColor(modelData.peerId)
                                         Text {
                                             anchors.centerIn: parent
+                                            textFormat: Text.PlainText
                                             text: {
                                                 var n = (modelData.peerDisplayName || modelData.peerId || "?");
                                                 var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -1071,6 +1079,7 @@ Rectangle {
                                 }
 
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: modelData.peerDisplayName || modelData.peerId
                                     font.family: Theme.fontSans
                                     font.pixelSize: Theme.fontSize.base
@@ -1306,6 +1315,7 @@ Rectangle {
                                 }
 
                                 Text {
+                                    textFormat: Text.PlainText
                                     text: modelData.categoryName ? modelData.categoryName.toUpperCase() : ""
                                     font.family: Theme.fontSans
                                     font.pixelSize: Theme.fontSize.xs
@@ -1453,13 +1463,39 @@ Rectangle {
                                         channelListRoot.muteGeneration;
                                         return appSettings.isRoomMuted(modelData.roomId);
                                     }
+                                    // Live activity for this row, read from
+                                    // the room model rather than from
+                                    // modelData. categorizedRooms no longer
+                                    // carries these three (they moved on
+                                    // nearly every sync, and a new snapshot
+                                    // makes the Repeaters destroy and rebuild
+                                    // every row); RoomListModel's
+                                    // activityGeneration is the dependency
+                                    // that repaints just these bindings.
+                                    readonly property var _roomModel:
+                                        serverManager.activeServer
+                                            ? serverManager.activeServer.roomListModel
+                                            : null
+                                    readonly property int unreadCount: {
+                                        var m = _roomModel;
+                                        if (!m) return 0;
+                                        m.activityGeneration;
+                                        return m.unreadCountFor(channelRoomId);
+                                    }
                                     // Mentions of the local user in this room
-                                    // since it was last opened. Comes from the
-                                    // room model (not QSettings), so it needs
-                                    // no generation counter — categorizedRooms
-                                    // is rebuilt after every sync.
-                                    readonly property int mentionCount:
-                                        modelData.mentionCount || 0
+                                    // since it was last opened.
+                                    readonly property int mentionCount: {
+                                        var m = _roomModel;
+                                        if (!m) return 0;
+                                        m.activityGeneration;
+                                        return m.mentionCountFor(channelRoomId);
+                                    }
+                                    readonly property real lastMessageTime: {
+                                        var m = _roomModel;
+                                        if (!m) return 0;
+                                        m.activityGeneration;
+                                        return m.lastMessageTimeFor(channelRoomId);
+                                    }
                                     readonly property bool hasUnread: {
                                         channelListRoot.unreadGeneration;
                                         channelListRoot.muteGeneration;
@@ -1473,7 +1509,7 @@ Rectangle {
                                         // comparable against everything after.
                                         return appSettings.isRoomUnread(
                                             modelData.roomId,
-                                            modelData.lastMessageTime || 0);
+                                            channelDelegate.lastMessageTime);
                                     }
                                     // Drag state — while `dragging` is
                                     // true, the row lifts via bg + z
@@ -1656,16 +1692,17 @@ Rectangle {
                                                 }
 
                                                 Text {
+                                                    textFormat: Text.PlainText
                                                     text: modelData.displayName
                                                     font.family: Theme.fontSans
                                                     font.pixelSize: Theme.fontSize.base
                                                     font.weight: (channelItemContent.parent.parent.isActive
-                                                                  || modelData.unreadCount > 0)
+                                                                  || channelDelegate.unreadCount > 0)
                                                                  ? Theme.fontWeight.medium
                                                                  : Theme.fontWeight.regular
                                                     color: channelItemContent.parent.parent.isActive
                                                            ? Theme.fg0
-                                                           : (modelData.unreadCount > 0
+                                                           : (channelDelegate.unreadCount > 0
                                                               ? Theme.fg0
                                                               : Theme.fg1)
                                                     elide: Text.ElideRight
@@ -2068,8 +2105,10 @@ Rectangle {
             Layout.rightMargin: Theme.sp.s3
             Layout.topMargin: Theme.sp.s3
             Layout.preferredHeight: visible ? 72 : 0
+            // From the click (voiceConnecting), not from the server's answer.
             visible: serverManager.activeServer !== null
-                     && serverManager.activeServer.inVoiceChannel
+                     && (serverManager.activeServer.inVoiceChannel
+                         || serverManager.activeServer.voiceConnecting)
 
             Rectangle {
                 id: voiceStatusCard
@@ -2097,6 +2136,12 @@ Rectangle {
                 Accessible.role: Accessible.Button
                 Accessible.name: {
                     var s = serverManager.activeServer;
+                    if (s && s.voiceConnecting) {
+                        var cn = s.roomListModel
+                                 ? s.roomListModel.roomDisplayName(s.voiceConnectingRoomId)
+                                 : s.voiceConnectingRoomId;
+                        return qsTr("Connecting to voice in %1").arg(cn);
+                    }
                     if (!s || !s.activeVoiceRoomId) return qsTr("Voice connected");
                     var n = s.roomListModel
                             ? s.roomListModel.roomDisplayName(s.activeVoiceRoomId)
@@ -2159,7 +2204,9 @@ Rectangle {
                         // "Voice connected" label in fg2, small caps wide-
                         // tracked so it reads as a status line not a title.
                         Text {
-                            text: "VOICE CONNECTED"
+                            text: serverManager.activeServer
+                                  && serverManager.activeServer.voiceConnecting
+                                  ? "CONNECTING…" : "VOICE CONNECTED"
                             font.family: Theme.fontSans
                             font.pixelSize: 10
                             font.weight: Theme.fontWeight.semibold
@@ -2171,12 +2218,16 @@ Rectangle {
                         }
                         // Active voice channel name — the "#room" line.
                         Text {
+                            textFormat: Text.PlainText
                             text: {
                                 var s = serverManager.activeServer;
-                                if (!s || !s.activeVoiceRoomId) return "";
+                                if (!s) return "";
+                                var rid = s.voiceConnecting ? s.voiceConnectingRoomId
+                                                            : s.activeVoiceRoomId;
+                                if (!rid) return "";
                                 var n = s.roomListModel
-                                        ? s.roomListModel.roomDisplayName(s.activeVoiceRoomId)
-                                        : s.activeVoiceRoomId;
+                                        ? s.roomListModel.roomDisplayName(rid)
+                                        : rid;
                                 return "#" + n;
                             }
                             font.family: Theme.fontSans
@@ -2191,6 +2242,7 @@ Rectangle {
                         // publish one yet, so we fall back to the server
                         // host. When CallController.latencyMs lands, swap.
                         Text {
+                            textFormat: Text.PlainText
                             text: serverManager.activeServer
                                   ? serverManager.activeServer.serverName : ""
                             font.family: Theme.fontMono
@@ -2400,6 +2452,7 @@ Rectangle {
 
                                 Text {
                                     anchors.centerIn: parent
+                                    textFormat: Text.PlainText
                                     text: {
                                         if (!serverManager.activeServer) return "?";
                                         var name = serverManager.activeServer.displayName
@@ -2454,6 +2507,7 @@ Rectangle {
                             // still lives (the account menu below, and
                             // Settings → Account → USER ID).
                             Text {
+                                textFormat: Text.PlainText
                                 text: serverManager.activeServer
                                     ? UserIdentity.accountTitle(
                                           serverManager.activeServer.userId,
@@ -2470,6 +2524,7 @@ Rectangle {
                             }
 
                             Text {
+                                textFormat: Text.PlainText
                                 text: serverManager.activeServer
                                     ? UserIdentity.accountSubtitle(
                                           serverManager.activeServer.userId)
@@ -2690,6 +2745,7 @@ Rectangle {
                         // 20th character is the ambiguity this whole block was
                         // added to end. A popup menu can afford a second row.
                         Text {
+                            textFormat: Text.PlainText
                             text: serverManager.activeServer
                                   ? serverManager.activeServer.displayName : ""
                             font.family: Theme.fontSans
@@ -2705,6 +2761,7 @@ Rectangle {
                         // grows a row taller is a far cheaper price than an
                         // id that cannot be read.
                         Text {
+                            textFormat: Text.PlainText
                             text: serverManager.activeServer
                                   ? serverManager.activeServer.userId : ""
                             font.family: Theme.fontMono
@@ -2756,7 +2813,9 @@ Rectangle {
                             ? serverManager.activeServer.identityProviderUrl()
                             : "";
                         if (!base) base = "https://id.bsfchat.com";
-                        Qt.openUrlExternally(base + "/profile.html");
+                        // The base is server-supplied, so it takes the
+                        // same scheme check as any other link.
+                        linkOpener.open(base + "/profile.html");
                     }
                 }
                 ThemedUserItem {
@@ -2802,10 +2861,30 @@ Rectangle {
     // empty-state vocabulary we use elsewhere: accent-tinted icon tile,
     // headline, subtext, then a primary action pulling the LoginDialog.
     ColumnLayout {
+        id: welcomeState
         anchors.centerIn: parent
         visible: serverManager.activeServer === null
         width: Math.min(parent.width - Theme.sp.s7 * 2, 280)
         spacing: Theme.sp.s4
+
+        // rowCount() is a function, not a property: a binding that calls it
+        // is evaluated once and never again. So the welcome copy and both
+        // CTAs kept whatever the count was when this view was created — on a
+        // launch with one saved server, signing out of it (or a failed add
+        // removing it) left "Pick a server from the sidebar" over an empty
+        // sidebar, with the "Add a server" button hidden. Re-read on every
+        // insert/remove instead.
+        property int serverCount: serverManager.servers ? serverManager.servers.rowCount() : 0
+        function _recount() {
+            welcomeState.serverCount = serverManager.servers ? serverManager.servers.rowCount() : 0;
+        }
+        Connections {
+            target: serverManager.servers
+            ignoreUnknownSignals: true
+            function onRowsInserted() { welcomeState._recount(); }
+            function onRowsRemoved() { welcomeState._recount(); }
+            function onModelReset() { welcomeState._recount(); }
+        }
 
         Rectangle {
             Layout.alignment: Qt.AlignHCenter
@@ -2824,10 +2903,7 @@ Rectangle {
         }
         Text {
             Layout.alignment: Qt.AlignHCenter
-            text: {
-                var count = serverManager.servers ? serverManager.servers.rowCount() : 0;
-                return count === 0 ? "Welcome to BSFChat" : "No server selected";
-            }
+            text: welcomeState.serverCount === 0 ? "Welcome to BSFChat" : "No server selected"
             color: Theme.fg0
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.lg
@@ -2839,8 +2915,7 @@ Rectangle {
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
             text: {
-                var count = serverManager.servers ? serverManager.servers.rowCount() : 0;
-                return count === 0
+                return welcomeState.serverCount === 0
                     ? "Add a server to start chatting. Sign in with a BSFChat ID to pull in all the servers you've joined."
                     : "Pick a server from the sidebar to see its channels.";
             }
@@ -2858,7 +2933,7 @@ Rectangle {
             id: addServerCta
             Layout.alignment: Qt.AlignHCenter
             Layout.topMargin: Theme.sp.s2
-            visible: serverManager.servers && serverManager.servers.rowCount() === 0
+            visible: welcomeState.serverCount === 0
             Accessible.role: Accessible.Button
             Accessible.name: qsTr("Add a server")
             Accessible.onPressAction: Window.window.openLoginDialog()
@@ -2899,7 +2974,7 @@ Rectangle {
         Button {
             id: joinByAddressCta
             Layout.alignment: Qt.AlignHCenter
-            visible: serverManager.servers && serverManager.servers.rowCount() === 0
+            visible: welcomeState.serverCount === 0
             Accessible.role: Accessible.Button
             Accessible.name: qsTr("Join a server by address")
             Accessible.description: qsTr(
@@ -3005,16 +3080,10 @@ Rectangle {
                 if (!serverManager.activeServer) return 0;
                 var rid = roomContextMenu.roomId;
                 if (!rid) return 0;
-                var s = serverManager.activeServer;
-                var groups = s.categorizedRooms;
-                for (var i = 0; i < groups.length; i++) {
-                    var ch = groups[i].channels || [];
-                    for (var j = 0; j < ch.length; j++) {
-                        if (ch[j].roomId === rid)
-                            return ch[j].lastMessageTime || 0;
-                    }
-                }
-                return 0;
+                var m = serverManager.activeServer.roomListModel;
+                if (!m) return 0;
+                m.activityGeneration;   // dep — see the channel rows
+                return m.lastMessageTimeFor(rid);
             }
             enabled: {
                 channelListRoot.unreadGeneration;
@@ -3251,6 +3320,7 @@ Rectangle {
                 }
                 Text {
                     Layout.fillWidth: true
+                    textFormat: Text.PlainText
                     text: "Delete #" + deleteChannelConfirm.roomName + "?"
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.xl
@@ -3484,6 +3554,7 @@ Rectangle {
                 Layout.fillWidth: true
                 spacing: Theme.sp.s3
                 Text {
+                    textFormat: Text.PlainText
                     text: createPrompt.promptTitle
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.xl

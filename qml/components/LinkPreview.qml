@@ -123,7 +123,7 @@ Rectangle {
     Accessible.description: preview.ogDescription.length > 0
         ? preview.ogDescription
         : qsTr("Opens the link in your browser")
-    Accessible.onPressAction: Qt.openUrlExternally(preview.url)
+    Accessible.onPressAction: linkOpener.open(preview.url)
 
     // Left accent stripe — mirrors the reply-preamble chrome so
     // "quoted content" reads consistently whether it's another
@@ -175,6 +175,9 @@ Rectangle {
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
                 cache: true
+                // The tile is at most 270pt tall at 16:9, i.e. 480pt wide.
+                // Width only, so the decode keeps the thumbnail's aspect.
+                sourceSize.width: 480 * Screen.devicePixelRatio
                 // YouTube returns a small "video thumbnail not found"
                 // grey placeholder as a 200 for missing maxres — we
                 // can't easily detect that without pixel-peeping,
@@ -221,7 +224,7 @@ Rectangle {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: Qt.openUrlExternally(preview.url)
+                onClicked: linkOpener.open(preview.url)
             }
         }
 
@@ -235,6 +238,7 @@ Rectangle {
             Accessible.ignored: true
             Layout.preferredHeight: Math.ceil(
                 Theme.fontSize.md * 1.3 * 2)
+            textFormat: Text.PlainText
             text: preview.ogTitle
             color: Theme.accent
             font.family: Theme.fontSans
@@ -247,7 +251,7 @@ Rectangle {
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: Qt.openUrlExternally(preview.url)
+                onClicked: linkOpener.open(preview.url)
             }
         }
         Text {
@@ -255,6 +259,7 @@ Rectangle {
             Accessible.ignored: true
             Layout.preferredHeight: Math.ceil(
                 Theme.fontSize.xs * 1.3)
+            textFormat: Text.PlainText
             // Always render — `hostName` is derived from the URL
             // synchronously, so the row is populated before the OG
             // fetch resolves. ogSiteName replaces it if/when it
@@ -289,6 +294,7 @@ Rectangle {
             // Site name — quiet, small. Falls back to the URL's host.
             Text {
                 Accessible.ignored: true
+                textFormat: Text.PlainText
                 text: preview.ogSiteName.length > 0
                     ? preview.ogSiteName : preview.hostName
                 visible: text.length > 0
@@ -301,6 +307,7 @@ Rectangle {
             // Title — accent-coloured, clickable like a link.
             Text {
                 Accessible.ignored: true
+                textFormat: Text.PlainText
                 text: preview.ogTitle
                 visible: text.length > 0
                 color: Theme.accent
@@ -315,12 +322,13 @@ Rectangle {
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: Qt.openUrlExternally(preview.url)
+                    onClicked: linkOpener.open(preview.url)
                 }
             }
             // Description — dimmer, up to 3 lines.
             Text {
                 Accessible.ignored: true
+                textFormat: Text.PlainText
                 text: preview.ogDescription
                 visible: text.length > 0
                 color: Theme.fg2
@@ -355,6 +363,12 @@ Rectangle {
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
                 cache: true
+                // Decode at tile size, not at whatever the page's og:image
+                // is — routinely 1200x630 and sometimes several thousand
+                // pixels a side, for a 96pt square. Fixed numbers, not the
+                // tile's live size, so a relayout never re-decodes.
+                sourceSize.width: 96 * Screen.devicePixelRatio
+                sourceSize.height: 96 * Screen.devicePixelRatio
                 // If the thumbnail itself 404s or the origin blocks
                 // hotlinking, hide the tile so the card doesn't look
                 // broken — the text side still stands on its own.
@@ -365,7 +379,7 @@ Rectangle {
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: Qt.openUrlExternally(preview.url)
+                onClicked: linkOpener.open(preview.url)
             }
         }
     }

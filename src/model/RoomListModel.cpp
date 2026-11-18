@@ -35,6 +35,40 @@ QVariantList voiceRosterToVariantList(const VoiceRoster& roster)
 RoomListModel::RoomListModel(QObject* parent)
     : QAbstractListModel(parent)
 {
+    // activityGeneration follows the three roles the sidebar reads live, plus
+    // anything that changes which rooms exist.
+    connect(this, &QAbstractItemModel::dataChanged, this,
+            [this](const QModelIndex&, const QModelIndex&, const QList<int>& roles) {
+                if (roles.isEmpty() || roles.contains(UnreadCountRole)
+                    || roles.contains(MentionCountRole)
+                    || roles.contains(LastMessageTimeRole))
+                    scheduleActivityBump();
+            });
+    connect(this, &QAbstractItemModel::rowsInserted, this,
+            [this] { scheduleActivityBump(); });
+    connect(this, &QAbstractItemModel::rowsRemoved, this,
+            [this] { scheduleActivityBump(); });
+    connect(this, &QAbstractItemModel::modelReset, this,
+            [this] { scheduleActivityBump(); });
+}
+
+void RoomListModel::scheduleActivityBump()
+{
+    // Coalesced: one sync pass touches many rooms, and every bump
+    // re-evaluates every sidebar row's bindings.
+    if (m_activityBumpQueued) return;
+    m_activityBumpQueued = true;
+    QMetaObject::invokeMethod(this, [this] {
+        m_activityBumpQueued = false;
+        ++m_activityGeneration;
+        emit activityGenerationChanged();
+    }, Qt::QueuedConnection);
+}
+
+qint64 RoomListModel::lastMessageTimeFor(const QString& roomId) const
+{
+    const int idx = findRoom(roomId);
+    return idx < 0 ? 0 : m_rooms[idx].lastMessageTime;
 }
 
 int RoomListModel::rowCount(const QModelIndex& parent) const
@@ -150,6 +184,8 @@ void RoomListModel::updateLastMessage(const QString& roomId, const QString& mess
     ensureRoom(roomId);
     int idx = findRoom(roomId);
     if (idx < 0) return;
+    if (m_rooms[idx].lastMessage == message && m_rooms[idx].lastMessageTime == timestamp)
+        return;
     m_rooms[idx].lastMessage = message;
     m_rooms[idx].lastMessageTime = timestamp;
     emit dataChanged(index(idx), index(idx), {LastMessageRole, LastMessageTimeRole});

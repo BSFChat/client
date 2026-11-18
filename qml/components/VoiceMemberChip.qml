@@ -156,6 +156,7 @@ Item {
                 color: Theme.senderColor(chip.userId)
                 Text {
                     anchors.centerIn: parent
+                    textFormat: Text.PlainText
                     text: (chip.dispName.replace(/^[^a-zA-Z0-9]+/, "")
                           .charAt(0) || "?").toUpperCase()
                     Accessible.ignored: true
@@ -194,6 +195,7 @@ Item {
             Layout.fillWidth: true
             Layout.alignment: Qt.AlignHCenter
             horizontalAlignment: Text.AlignHCenter
+            textFormat: Text.PlainText
             text: chip.dispName
             Accessible.ignored: true
             font.family: Theme.fontSans

@@ -69,6 +69,7 @@ CheckBox {
     }
 
     contentItem: Text {
+        textFormat: Text.PlainText
         // Inline label (if any). Default to hidden so settings rows can
         // use their own left-column label without double-labelling.
         text: cb.text

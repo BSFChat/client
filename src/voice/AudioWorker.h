@@ -307,6 +307,9 @@ signals:
     // metatype registration. AudioEngine publishes it for the settings
     // dialog's "In use:" caption.
     void deviceInUseChanged(bool input, const QString& description);
+    // startDevices() finished, as AudioEngine::startAsync() asked. Emitted
+    // from the audio thread; AudioEngine receives it queued.
+    void devicesStartFinished(bool ok);
 
 private:
     // Pulls everything the backend has captured and encodes whole
@@ -341,6 +344,8 @@ private:
     // Snapshot -> policy input.
     QList<bsfchat::voice::DeviceInfo> deviceInfos(Direction dir) const;
     const QAudioDevice* snapshotDevice(Direction dir, const QString& id) const;
+    // The device evaluateDevice(dir) would open now, without opening it.
+    const QAudioDevice* plannedDevice(Direction dir) const;
     // Open or close exactly ONE direction. These touch no shared
     // pipeline state: no encoder, no jitter buffers, no pump timer.
     void openSource(const QAudioDevice& device);

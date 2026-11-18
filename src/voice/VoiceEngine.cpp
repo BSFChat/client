@@ -1,6 +1,7 @@
 #include "voice/VoiceEngine.h"
 #include "voice/AudioEngine.h"
 #include "voice/CallSignalCodec.h"
+#include "util/JsonSafe.h"
 #include "voice/VoiceStartPolicy.h"
 #include "voice/VoiceRosterReconcile.h"
 #include "voice/PeerCaps.h"
@@ -107,25 +108,30 @@ bool VoiceEngine::start(const QString& roomId, const QJsonArray& members, const 
     });
     connect(m_audioEngine, &AudioEngine::peerLevelChanged,
             this, &VoiceEngine::peerLevelChanged);
-    if (!m_audioEngine->start()) {
-        // V-H4: this used to be a warning and a toast, and start()
-        // returned true anyway — the user joined the channel deaf and
-        // mute, the member poll kept their server-side heartbeat alive,
-        // and the ghost reaper therefore never removed them. There is no
-        // way back from that state, so refuse the session and let the
-        // caller unwind the join.
-        qCWarning(logVoice) << "AudioEngine::start failed — refusing the "
-                               "voice session";
+    // Opened WITHOUT blocking the GUI thread. On macOS opening the devices
+    // (VoiceProcessingIO, a Bluetooth headset changing profile) takes one
+    // to three seconds, and the blocking start() froze the whole window
+    // for that long on every join. The peer connections below are set up
+    // meanwhile; audio arriving before the devices open waits in the
+    // bounded packet queue and the jitter buffer sheds the backlog.
+    //
+    // V-H4 still holds: if the devices cannot be opened the session must
+    // not carry on deaf and mute behind a live heartbeat. The verdict now
+    // arrives later, so instead of start() returning false the engine
+    // reports audioStartFailed and the owner leaves the channel, which
+    // drops the server-side membership the same way.
+    connect(m_audioEngine, &AudioEngine::startFinished, this, [this](bool ok) {
+        if (ok) {
+            qCInfo(logVoice, "AudioEngine started OK");
+            emit audioStarted();
+            return;
+        }
+        qCWarning(logVoice) << "AudioEngine failed to open the audio devices — "
+                               "leaving the voice session";
         emit error(voice::refusalMessage(voice::StartRefusal::AudioUnavailable));
-        m_audioEngine->stop();
-        delete m_audioEngine;
-        m_audioEngine = nullptr;
-        m_running = false;
-        m_roomId.clear();
-        m_turnConfig = QJsonObject();
-        return false;
-    }
-    qCInfo(logVoice, "AudioEngine started OK");
+        emit audioStartFailed();
+    });
+    m_audioEngine->startAsync();
 
     m_candidateBatchTimer.start();
     m_rrTimer.start();
@@ -648,7 +654,11 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
                  qPrintable(userId), int(json.size()));
         return;
     }
-    const std::string t = doc.value("t", "");
+    // Every read below is type-checked: the peer's build, not ours, wrote this
+    // message, and a throwing value<>() here escapes a libdatachannel
+    // callback and takes the app down (V-3).
+    namespace js = bsfchat::jsonsafe;
+    const std::string t = js::str(doc, "t");
     if (t == "caps") {
         // Mid-call capability refresh — including the RETRACTION a peer
         // sends when a codec it advertised turns out to be undecodable
@@ -675,13 +685,13 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
         // capture tick and so waits for the next pixel to change —
         // the same pre-existing property as the H.264 profile flip.)
         if (auto* peer = m_peers.value(userId)) {
-            peer->setRemoteCaps(PeerCaps::fromJson(doc.value("caps", nlohmann::json::object())));
+            peer->setRemoteCaps(PeerCaps::fromJson(js::object(doc, "caps")));
             maybeSetupVideoFor(userId);
         }
     } else if (t == "kf") {
         // App-level keyframe request — the guaranteed cross-version
         // recovery path (RTCP PLI also feeds videoKeyframeRequested).
-        const int stream = doc.value("stream", 0);
+        const int stream = js::int32(doc, "stream");
         if (stream >= 0 && stream < kVideoStreamCount)
             emit videoKeyframeRequested(stream);
     } else if (t == "stream") {
@@ -690,17 +700,11 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
         // liveness timeout, and then on "Starting share…" until the
         // roster poll cleared the announced flag — up to ~9 s of lying
         // UI after the sender stopped.
-        const int stream = doc.value("stream", 0);
+        const int stream = js::int32(doc, "stream");
         if (stream < 0 || stream >= kVideoStreamCount) return;
         // "on" may arrive as a bool or a 0/1 number depending on the
-        // sender's json library; nlohmann's value<int>() would throw on
-        // the bool form, and this runs inside a slot.
-        bool on = true;
-        if (doc.contains("on")) {
-            const auto& v = doc.at("on");
-            if (v.is_boolean()) on = v.get<bool>();
-            else if (v.is_number()) on = v.get<double>() != 0.0;
-        }
+        // sender's json library; anything else reads as the default.
+        const bool on = js::boolean(doc, "on", true);
         if (!on) {
             // Drop the decode worker too: whatever restarts the stream
             // starts at a keyframe, so nothing about the old session is
@@ -717,16 +721,18 @@ void VoiceEngine::onControlMessage(const QString& userId, const QByteArray& json
         // cumulative received bytes plus (S-17) cumulative expected /
         // lost RTP packets. Packets are what the rate controller is
         // graded on; bytes survive only as a goodput cross-check.
-        const int stream = doc.value("stream", 0);
+        const int stream = js::int32(doc, "stream");
         if (stream < 0 || stream >= kVideoStreamCount) return;
         if (!m_peers.contains(userId)) return;
-        const quint64 rxBytes = doc.value("b", quint64(0));
+        const quint64 rxBytes = js::count(doc, "b");
         // A peer on a build that predates the packet counters sends
         // neither field. That must read as "no opinion" — not as total
         // loss, which would collapse the share for everyone else.
-        const bool hasLoss = doc.contains("e") && doc.contains("l");
-        const quint64 expected = hasLoss ? doc.value("e", quint64(0)) : 0;
-        const quint64 lost = hasLoss ? doc.value("l", quint64(0)) : 0;
+        const auto* e = js::member(doc, "e");
+        const auto* l = js::member(doc, "l");
+        const bool hasLoss = e && l && e->is_number() && l->is_number();
+        const quint64 expected = hasLoss ? js::count(doc, "e") : 0;
+        const quint64 lost = hasLoss ? js::count(doc, "l") : 0;
         const VideoDeliveryReport report =
             m_rrSnapshots[{userId, stream}].update(
                 rxBytes, expected, lost, hasLoss,

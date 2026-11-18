@@ -43,6 +43,16 @@ Dialog {
 
     property string errorMessage: ""
     property bool busy: false
+    // Set when the sign-in this prompt was opened for completed. Closing
+    // without it means the user walked away, and the connection has to be
+    // told: until it is, it sits in Reauthenticating and refuses every
+    // "Sign in again" as already running (audit C-6).
+    property bool _signedIn: false
+
+    onClosed: {
+        if (!dialog._signedIn && dialog.conn) dialog.conn.cancelReauth();
+        dialog.busy = false;
+    }
 
     Connections {
         target: serverManager
@@ -52,6 +62,7 @@ Dialog {
             dialog.serverIndex = index;
             dialog.errorMessage = "";
             dialog.busy = false;
+            dialog._signedIn = false;
             usernameField.text = dialog.localpartOf(userId);
             passwordField.text = "";
             dialog.open();
@@ -70,6 +81,7 @@ Dialog {
         target: dialog.conn
         ignoreUnknownSignals: true
         function onLoginSucceeded() {
+            dialog._signedIn = true;
             dialog.busy = false;
             dialog.close();
         }
@@ -109,6 +121,7 @@ Dialog {
 
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: dialog.conn
                       ? "Your session on " + dialog.conn.serverUrl
                         + " has ended. Sign in again to reconnect."
@@ -145,6 +158,7 @@ Dialog {
             Text {
                 Layout.fillWidth: true
                 visible: dialog.errorMessage.length > 0
+                textFormat: Text.PlainText
                 text: dialog.errorMessage
                 // §8: a refusal a sighted user sees appear has to be said out
                 // loud, not left to be stumbled on.

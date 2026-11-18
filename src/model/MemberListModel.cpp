@@ -6,7 +6,12 @@
 
 #include <bsfchat/Constants.h>
 
+#include "util/JsonSafe.h"
+
 namespace {
+
+namespace jsonsafe = bsfchat::jsonsafe;
+
 // How often the release edge is checked. A quarter of kSpeakingHoldMs, so a
 // member stops being "speaking" within 100 ms of when they are due to — under
 // the ~200 ms a listener notices — without waking the event loop at the
@@ -167,13 +172,32 @@ void MemberListModel::emitSpeakingChanged(const QString& userId)
 
 int MemberListModel::findMember(const QString& userId) const
 {
-    for (int i = 0; i < m_members.size(); ++i) {
-        if (m_members[i].userId == userId) return i;
-    }
-    return -1;
+    return m_indexByUser.value(userId, -1);
+}
+
+void MemberListModel::rebuildIndex()
+{
+    m_indexByUser.clear();
+    m_indexByUser.reserve(m_members.size());
+    for (int i = 0; i < m_members.size(); ++i) m_indexByUser.insert(m_members[i].userId, i);
 }
 
 void MemberListModel::processEvent(const bsfchat::RoomEvent& event)
+{
+    applyEvent(event, true);
+}
+
+void MemberListModel::resetFromEvents(const QVector<bsfchat::RoomEvent>& events)
+{
+    beginResetModel();
+    m_members.clear();
+    m_indexByUser.clear();
+    m_members.reserve(events.size());
+    for (const auto& ev : events) applyEvent(ev, false);
+    endResetModel();
+}
+
+void MemberListModel::applyEvent(const bsfchat::RoomEvent& event, bool notify)
 {
     if (event.type != std::string(bsfchat::event_type::kRoomMember))
         return;
@@ -182,18 +206,18 @@ void MemberListModel::processEvent(const bsfchat::RoomEvent& event)
         ? QString::fromStdString(*event.state_key)
         : QString::fromStdString(event.sender);
 
-    QString membership = QString::fromStdString(event.content.data.value("membership", ""));
-    QString displayName = QString::fromStdString(event.content.data.value("displayname", ""));
-    QString avatarUrl = QString::fromStdString(event.content.data.value("avatar_url", ""));
+    // Type-checked reads: member content is the member's own to write.
+    QString membership = jsonsafe::qstr(event.content.data, "membership");
+    QString displayName = jsonsafe::qstr(event.content.data, "displayname");
+    QString avatarUrl = jsonsafe::qstr(event.content.data, "avatar_url");
     // The server writes the EFFECTIVE name into `displayname` and the nickname
     // separately, so `displayName` above is already the string to render and this
     // is only for telling the two apart in admin UI.
-    QString nickname = QString::fromStdString(
-        event.content.data.value(std::string("bsfchat.nickname"), std::string()));
+    QString nickname = jsonsafe::qstr(event.content.data, "bsfchat.nickname");
     // Absent is the server's encoding for "human" — it never writes `false` —
     // so a default of false is the whole of the rule, and there is no third
     // "not known yet" state to represent.
-    bool isBotAccount = event.content.data.value(std::string("bsfchat.bot"), false);
+    bool isBotAccount = jsonsafe::boolean(event.content.data, "bsfchat.bot");
 
     int idx = findMember(userId);
 
@@ -208,21 +232,27 @@ void MemberListModel::processEvent(const bsfchat::RoomEvent& event)
             // U-M15: an empty role vector means "every role changed", which
             // makes every delegate binding on this row re-evaluate. Name the
             // five fields this branch can actually move.
-            emit dataChanged(index(idx), index(idx),
-                             {DisplayNameRole, AvatarUrlRole,
-                              MembershipRole, NicknameRole, IsBotRole});
+            if (notify)
+                emit dataChanged(index(idx), index(idx),
+                                 {DisplayNameRole, AvatarUrlRole,
+                                  MembershipRole, NicknameRole, IsBotRole});
         } else {
             // Add new member
-            beginInsertRows(QModelIndex(), m_members.size(), m_members.size());
+            const int row = static_cast<int>(m_members.size());
+            if (notify) beginInsertRows(QModelIndex(), row, row);
             m_members.append({userId, displayName, avatarUrl, membership,
                               nickname, isBotAccount});
-            endInsertRows();
+            m_indexByUser.insert(userId, row);
+            if (notify) endInsertRows();
         }
     } else if (membership == "leave" || membership == "ban") {
         if (idx >= 0) {
-            beginRemoveRows(QModelIndex(), idx, idx);
+            if (notify) beginRemoveRows(QModelIndex(), idx, idx);
             m_members.removeAt(idx);
-            endRemoveRows();
+            // Every later row moved up one. Leaves are rare next to the
+            // lookups, so a rebuild here is the cheap side of the trade.
+            rebuildIndex();
+            if (notify) endRemoveRows();
         }
     }
 }
@@ -247,5 +277,6 @@ void MemberListModel::clear()
 {
     beginResetModel();
     m_members.clear();
+    m_indexByUser.clear();
     endResetModel();
 }

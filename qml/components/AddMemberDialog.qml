@@ -143,6 +143,7 @@ Popup {
             }
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: "Add someone to " + addMemberDialog._channelPhrase
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.xl
@@ -192,6 +193,7 @@ Popup {
             // so a test can assert it still says so.
             Text {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText
                 text: addMemberDialog._model ? addMemberDialog._model.botAdvisory() : ""
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
@@ -272,6 +274,7 @@ Popup {
             Text {
                 Layout.fillWidth: true
                 visible: text.length > 0
+                textFormat: Text.PlainText
                 text: memberIdField.problem
                 Accessible.role: Accessible.AlertMessage
                 Accessible.name: qsTr("Check the ID you typed: %1").arg(memberIdField.problem)
@@ -286,6 +289,7 @@ Popup {
             Text {
                 Layout.fillWidth: true
                 visible: text.length > 0 && memberIdField.problem.length === 0
+                textFormat: Text.PlainText
                 text: addMemberDialog._model ? addMemberDialog._model.errorText : ""
                 Accessible.role: Accessible.AlertMessage
                 Accessible.name: qsTr("Could not add them: %1")
@@ -302,6 +306,7 @@ Popup {
             Text {
                 Layout.fillWidth: true
                 visible: text.length > 0 && memberIdField.problem.length === 0
+                textFormat: Text.PlainText
                 text: memberIdField.readmitNote
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
@@ -311,6 +316,7 @@ Popup {
             Text {
                 Layout.fillWidth: true
                 visible: text.length > 0
+                textFormat: Text.PlainText
                 text: addMemberDialog._model ? addMemberDialog._model.noticeText : ""
                 // It worked — informational, so Polite (§8).
                 Accessible.role: Accessible.AlertMessage

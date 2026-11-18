@@ -340,6 +340,7 @@ Popup {
                         spacing: Theme.sp.s3
                         Text {
                             Accessible.ignored: true
+                            textFormat: Text.PlainText
                             text: modelData.sender
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.base
@@ -352,6 +353,7 @@ Popup {
                         Text {
                             visible: text.length > 1
                             Accessible.ignored: true
+                            textFormat: Text.PlainText
                             text: modelData.roomName ? "#" + modelData.roomName : ""
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.xs
@@ -419,6 +421,7 @@ Popup {
                             return qsTr("No messages matched");
                         return qsTr("Search messages across every channel you can see");
                     }
+                    textFormat: Text.PlainText
                     text: {
                         if (searchPopup.errorText !== "") return searchPopup.errorText;
                         if (searchPopup.searching) return "Searching…";

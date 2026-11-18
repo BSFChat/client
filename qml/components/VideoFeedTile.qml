@@ -197,6 +197,7 @@ Rectangle {
             color: Theme.senderColor(tile.feed ? tile.feed.userId : "")
             Text {
                 anchors.centerIn: parent
+                textFormat: Text.PlainText
                 text: {
                     var n = tile.displayName
                         || (tile.feed ? tile.feed.userId : "");
@@ -238,6 +239,7 @@ Rectangle {
             anchors.centerIn: parent
             width: Math.min(implicitWidth, parent.width - Theme.sp.s3 * 2)
             elide: Text.ElideRight
+            textFormat: Text.PlainText
             text: VideoStage.feedLabel(
                 tile.displayName || (tile.feed ? tile.feed.userId : ""),
                 tile.feed ? tile.feed.kind : "",
@@ -343,6 +345,7 @@ Rectangle {
         Text {
             id: diagText
             anchors.centerIn: parent
+            textFormat: Text.PlainText
             text: diagOverlay.statsLine
             color: "#e0ffffff"
             font.family: Theme.fontMono

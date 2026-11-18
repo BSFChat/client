@@ -565,6 +565,7 @@ Rectangle {
                         anchors.verticalCenter: parent.verticalCenter
                         Accessible.ignored: true
                         width: parent.width * 0.5
+                        textFormat: Text.PlainText
                         text: "Uploading " + modelData
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
@@ -631,6 +632,7 @@ Rectangle {
             }
             Text {
                 Accessible.ignored: true
+                textFormat: Text.PlainText
                 text: inputRoot.replyToSenderName !== ""
                       ? inputRoot.replyToSenderName : "unknown"
                 color: Theme.accent
@@ -640,6 +642,7 @@ Rectangle {
             }
             Text {
                 Accessible.ignored: true
+                textFormat: Text.PlainText
                 text: inputRoot.replyToPreview
                 color: Theme.fg3
                 font.family: Theme.fontSans
@@ -1237,6 +1240,7 @@ Rectangle {
                                    : Theme.senderColor(modelData.userId || modelData.tokenName)
                             Text {
                                 anchors.centerIn: parent
+                                textFormat: Text.PlainText
                                 text: {
                                     var n = modelData.displayName || modelData.tokenName;
                                     var s = n.replace(/^[^a-zA-Z0-9]+/, "");
@@ -1251,6 +1255,7 @@ Rectangle {
 
                         Text {
                             Accessible.ignored: true
+                            textFormat: Text.PlainText
                             text: modelData.displayName
                             color: index === inputRoot.mentionSelected
                                    ? Theme.onAccent : Theme.fg0
@@ -1261,6 +1266,7 @@ Rectangle {
                         }
                         Text {
                             Accessible.ignored: true
+                            textFormat: Text.PlainText
                             // @room has no mxid to show, so it explains
                             // itself here instead.
                             text: modelData.subtitle
@@ -1367,6 +1373,7 @@ Rectangle {
                         // immediately read it as something to type.
                         Text {
                             Accessible.ignored: true
+                            textFormat: Text.PlainText
                             text: modelData.name
                                 + (modelData.usage ? " " + modelData.usage : "")
                             font.family: Theme.fontMono
@@ -1378,6 +1385,7 @@ Rectangle {
                         }
                         Text {
                             Accessible.ignored: true
+                            textFormat: Text.PlainText
                             text: modelData.description
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.xs

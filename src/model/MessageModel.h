@@ -79,7 +79,15 @@ public:
         // Delivery state of a message this client sent, for the tick/retry
         // affordance on the bubble. Always DeliveryConfirmed for anything
         // that arrived over /sync — see DeliveryState.
-        DeliveryStateRole
+        DeliveryStateRole,
+        // True when the body would render the same as plain text: its display
+        // markup is nothing but the escaped body with <br> line breaks — no
+        // markdown, no links, no #channel or mention anchors, no sender
+        // formatting. MessageBubble shows such a body as TextEdit.PlainText
+        // instead of RichText, which skips the HTML import for the common
+        // case of an ordinary one-line message. Media rows are never plain
+        // (they show no body text at all).
+        PlainBodyRole
     };
 
     // Where a row is between "the user pressed Enter" and "the server has
@@ -374,6 +382,10 @@ public:
     Q_INVOKABLE void discardLocalEcho(const QString& localId);
     // Body of a pending/failed echo, for a retry that re-sends the text.
     Q_INVOKABLE QString localEchoBody(const QString& localId) const;
+    // The sender's file name and info.mimetype for a loaded media row, so
+    // "open externally" can judge the file without trusting QML to pass them.
+    // False when no loaded row shows `mxc`.
+    bool mediaInfoForMxc(const QString& mxc, QString* fileName, QString* mimeType) const;
 
     void appendEvent(const bsfchat::RoomEvent& event, const QString& ownUserId);
     void appendEvents(const QVector<bsfchat::RoomEvent>& events, const QString& ownUserId);
@@ -505,6 +517,7 @@ private:
         QString mediaMxc;       // The mxc:// URI mediaUrl was resolved from
         QString mediaFileName;  // Filename from content
         qint64 mediaFileSize = 0; // Size in bytes
+        QString mediaMimeType;  // info.mimetype, as the sender claimed it
         int    mediaWidth  = 0;   // intrinsic px from info.w (0 = unknown)
         int    mediaHeight = 0;   // intrinsic px from info.h (0 = unknown)
         bool edited = false;    // True if ≥1 m.replace has been applied

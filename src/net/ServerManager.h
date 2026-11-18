@@ -78,6 +78,14 @@ public:
     // desktop never did.
     void markActiveRoomsRead();
     Q_INVOKABLE void checkLoginFlows(const QString& url);
+    // "Same server?" key for QML: bsfchat::normaliseServerUrl, then the
+    // roster's own comparison (net/ServerDedup.h serverComparisonKey).
+    // LoginDialog compares the URL a loginError / loginSuccess /
+    // serverProbed reply names against the one it is attempting, and has to
+    // spell both the way this side does — or a trailing slash, an upper-case
+    // host, a missing scheme or an explicit :443 makes its own reply look
+    // foreign. Empty for text that is not an address at all.
+    Q_INVOKABLE QString serverUrlKey(const QString& url) const;
     Q_INVOKABLE void registerServer(const QString& url, const QString& username, const QString& password);
 
     // Identity-first login: authenticate to the identity provider directly,
@@ -268,7 +276,10 @@ private:
     // serverRemoved+serverAdded for the index so NotificationManager
     // and the screen/camera controllers rewire their per-connection
     // signal subscriptions.
-    void rebuildConnection(int index, const QString& url);
+    // `freshSession`: the credential was just issued (an account switch,
+    // C-8), so the replacement runs a full initial sync instead of resuming
+    // from that account's cached stream position.
+    void rebuildConnection(int index, const QString& url, bool freshSession = false);
     // Hooks up a ServerConnection so per-server UI state (unread dot, etc.)
     // in the sidebar tracks the connection's state.
     // "Are we already on this server?" — see net/ServerDedup.h for why

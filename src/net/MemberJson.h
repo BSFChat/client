@@ -90,7 +90,8 @@ inline std::optional<bsfchat::RoomEvent> joinedMemberEventFromJson(const QJsonOb
 // caller's own bot-flag cache.
 inline bool memberEventIsBot(const bsfchat::RoomEvent& ev)
 {
-    return ev.content.data.value(std::string("bsfchat.bot"), false);
+    const auto it = ev.content.data.find("bsfchat.bot");
+    return it != ev.content.data.end() && it->is_boolean() && it->get<bool>();
 }
 
 }  // namespace bsfchat::client

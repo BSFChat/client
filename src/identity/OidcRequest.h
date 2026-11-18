@@ -150,27 +150,66 @@ inline bool isNativeCallbackUrl(const QUrl& url)
         && path.compare(QLatin1String("/callback"), Qt::CaseInsensitive) == 0;
 }
 
+// The RFC 6749 `error` code, reduced to something safe to put in a sentence:
+// the spec's own alphabet for it is printable ASCII minus `"` and `\`, and
+// every code it defines is lower-case words and underscores. Anything else is
+// dropped, and the length capped, so a crafted callback cannot use this field
+// to put a paragraph of its own in front of the user either.
+inline QString sanitizedErrorCode(const QString& raw)
+{
+    QString out;
+    for (const QChar c : raw) {
+        if (out.size() >= 64) break;
+        const char16_t u = c.unicode();
+        if ((u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9')
+            || u == '_' || u == '-' || u == '.')
+            out.append(c);
+    }
+    return out;
+}
+
+// What the user is told for a provider error. Deliberately NOT the callback's
+// error_description: the callback is an unauthenticated request — on desktop
+// any page the browser loads can fetch the loopback URL, on Android any app or
+// page can fire the bsfchat:// intent — so its free text is attacker-chosen
+// and has no business being shown as if this app or the provider said it
+// (audit 2026-11, C-9). The code is kept because it is the useful part for a
+// bug report, and after sanitizedErrorCode it cannot say anything else.
+inline QString providerErrorMessage(const QString& rawCode)
+{
+    const QString code = sanitizedErrorCode(rawCode);
+    if (code == QLatin1String("access_denied"))
+        return QStringLiteral("Sign-in was declined at the identity provider (access_denied).");
+    if (code.isEmpty())
+        return QStringLiteral("The identity provider reported an error.");
+    return QStringLiteral("The identity provider reported an error (%1).").arg(code);
+}
+
 // The one place that decides what a callback means.
 //
-// Order is load-bearing and matches what the loopback path has always done:
-// a provider-reported error is reported as such even when `state` is absent
-// (an error redirect may legitimately arrive without one), then the CSRF
-// guard, then the code. `expectedState` is the value generated for THIS
-// attempt; an empty one can never match, so a callback arriving when no
-// sign-in is in flight is refused rather than accepted.
+// Order is load-bearing: the CSRF guard comes FIRST, for errors as well as for
+// codes. It used to come second, so an `?error=` without `state` was reported
+// as the provider's — which let anything able to reach the callback abort a
+// sign-in in progress with a message of its choosing (C-9). The provider this
+// client talks to echoes `state` on its error redirects (RFC 6749 4.1.2.1
+// requires it whenever the request carried one, and ours always does), so
+// requiring it costs a genuine refusal nothing. `expectedState` is the value
+// generated for THIS attempt; an empty one can never match, so a callback
+// arriving when no sign-in is in flight is refused rather than accepted.
+//
+// The text in `error` is ours, never the callback's: see providerErrorMessage.
 inline CallbackParse parseCallbackQuery(const QUrlQuery& query,
                                         const QString& expectedState)
 {
-    const QString error = query.queryItemValue("error");
-    if (!error.isEmpty()) {
-        const QString desc = query.queryItemValue("error_description");
-        return {CallbackStatus::ProviderError, {}, desc.isEmpty() ? error : desc};
-    }
-
     const QString state = query.queryItemValue("state");
     if (expectedState.isEmpty() || state != expectedState) {
         return {CallbackStatus::StateMismatch, {},
                 QStringLiteral("State mismatch - possible CSRF attack")};
+    }
+
+    const QString error = query.queryItemValue("error");
+    if (!error.isEmpty()) {
+        return {CallbackStatus::ProviderError, {}, providerErrorMessage(error)};
     }
 
     const QString code = query.queryItemValue("code");

@@ -11,6 +11,14 @@
 
 class RoomListModel : public QAbstractListModel {
     Q_OBJECT
+    // Changes (at most once per event-loop pass) whenever any room's unread
+    // count, mention count or last-message time changes, or rooms come and
+    // go. The sidebar's rows read those three through the *For() invokables
+    // below and depend on this, so they repaint in place instead of the
+    // whole category tree being rebuilt — see
+    // ServerConnection::rebuildCategorizedRooms.
+    Q_PROPERTY(int activityGeneration READ activityGeneration
+               NOTIFY activityGenerationChanged)
 
 public:
     enum Roles {
@@ -106,6 +114,9 @@ public:
     // updated from server-side state, not derived from any local
     // last-read timestamp. Returns 0 if the room is unknown.
     Q_INVOKABLE int unreadCountFor(const QString& roomId) const;
+    // origin_server_ts of the newest message seen in the room, 0 if none.
+    Q_INVOKABLE qint64 lastMessageTimeFor(const QString& roomId) const;
+    int activityGeneration() const { return m_activityGeneration; }
 
     // First text channel (non-voice) in display order. Used by the
     // mobile shell to auto-select a landing channel on login so the
@@ -156,8 +167,14 @@ public:
     void updateSortOrder(const QString& roomId, int order);
     Q_INVOKABLE QVariantList getCategoriesWithChannels() const;
 
+signals:
+    void activityGenerationChanged();
+
 private:
     int findRoom(const QString& roomId) const;
+    void scheduleActivityBump();
+    int m_activityGeneration = 0;
+    bool m_activityBumpQueued = false;
 
     struct RoomEntry {
         QString roomId;

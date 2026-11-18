@@ -81,6 +81,20 @@ public:
     // is AVAudioSession's business and Qt enumerates exactly one
     // microphone) may ignore it, but must say so in its log line rather
     // than silently.
+    // Called once at session start, before either direction opens, with
+    // the devices both directions are about to open (null = none). A
+    // backend that runs capture and render as ONE unit (VoiceProcessingIO)
+    // uses it to build that unit once, against both devices: otherwise
+    // opening capture builds it against "default output" and opening
+    // render then tears it down and builds it again, which on macOS is a
+    // second AudioUnitInitialize and a second hardware reconfiguration —
+    // system-wide audio drops out for both. Others ignore it.
+    virtual void prepareDevices(const QAudioDevice& input, const QAudioDevice& output)
+    {
+        Q_UNUSED(input);
+        Q_UNUSED(output);
+    }
+
     virtual bool openCapture(const QAudioDevice& device,
                              const QAudioFormat& format) = 0;
     virtual void closeCapture() = 0;
