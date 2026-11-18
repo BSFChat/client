@@ -2,7 +2,6 @@
 
 #include "core/SecretStore.h"
 #include "identity/OidcRequest.h"
-#include "net/RequestTimeout.h"
 
 #include <QDebug>
 #include <QJsonDocument>
@@ -21,7 +20,7 @@ IdentitySession::IdentitySession(QObject* parent)
         req.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
         // Without one a dead connection leaves m_busy set forever, and every
         // later join and the launch-time restore queue behind it (C-6).
-        req.setTransferTimeout(bsfchat::net::kRequestTimeoutMs);
+        req.setTransferTimeout(kTokenTimeoutMs);
         auto* reply = m_nam->post(req, form.toString(QUrl::FullyEncoded).toUtf8());
         connect(reply, &QNetworkReply::finished, this, [reply, done = std::move(done)]() {
             reply->deleteLater();
@@ -64,18 +63,41 @@ bool IdentitySession::restore(const QString& providerUrl)
     SecretStore& store = m_store ? *m_store : SecretStore::instance();
     const auto saved = store.read(storeKey(providerUrl));
     if (!saved || saved->isEmpty()) return false;
+    // Already holding exactly this: leave any refresh in flight alone (its
+    // reply is from the same grant; revoking it would revoke this token too).
+    if (trimProvider(providerUrl) == m_providerUrl && *saved == m_refreshToken) return true;
+    abandonInFlight(true, {});
     m_providerUrl = trimProvider(providerUrl);
     m_refreshToken = *saved;
     m_persisted = true;
+    pump();
     return true;
 }
 
 void IdentitySession::adopt(const QString& providerUrl, const QString& refreshToken)
 {
     if (refreshToken.isEmpty()) return;
-    m_providerUrl = trimProvider(providerUrl);
+    const QString provider = trimProvider(providerUrl);
+    if (provider == m_providerUrl && refreshToken == m_refreshToken) return;
+    // A browser sign-in is a new grant. A refresh still running presents the
+    // old one; its answer is discarded (and revoked), and its caller is
+    // served again with the new token.
+    abandonInFlight(true, {});
+    m_providerUrl = provider;
     m_refreshToken = refreshToken;
     persist();
+    pump();
+}
+
+void IdentitySession::abandonInFlight(bool requeue, const QString& error)
+{
+    ++m_generation;
+    m_busy = false;
+    if (!m_inFlight) return;
+    const Pending p = *m_inFlight;
+    m_inFlight.reset();
+    if (requeue) m_queue.prepend(p);
+    else complete(p, {}, error);
 }
 
 void IdentitySession::persist()
@@ -96,16 +118,43 @@ void IdentitySession::persist()
 
 void IdentitySession::signOut()
 {
+    clearSession(true);
+}
+
+void IdentitySession::clearSession(bool revokeAtProvider)
+{
+    const QString provider = m_providerUrl;
+    const QString token = m_refreshToken;
     if (!m_providerUrl.isEmpty()) {
         SecretStore& store = m_store ? *m_store : SecretStore::instance();
         store.remove(storeKey(m_providerUrl));
     }
     m_refreshToken.clear();
     m_persisted = false;
+    const QString why = tr("Signed out of BSFChat ID");
+    abandonInFlight(false, why);
     // Anything still queued would present a token we no longer hold.
     const auto pending = m_queue;
     m_queue.clear();
-    for (const auto& p : pending) complete(p, {}, tr("Signed out of BSFChat ID"));
+    for (const auto& p : pending) complete(p, {}, why);
+    // Revoking takes the whole grant with it, so nothing rotated out of this
+    // token (including a reply still in flight) stays usable elsewhere.
+    if (revokeAtProvider && !token.isEmpty() && !provider.isEmpty()) revoke(provider, token);
+}
+
+void IdentitySession::revoke(const QString& providerUrl, const QString& refreshToken)
+{
+    // RFC 7009; the provider's discovery document names this as its
+    // revocation_endpoint (issuer + "/token/revoke"), as it names
+    // issuer + "/token" for the token endpoint used below.
+    QUrlQuery form;
+    form.addQueryItem("token", refreshToken);
+    form.addQueryItem("token_type_hint", "refresh_token");
+    form.addQueryItem("client_id", QString::fromLatin1(oidc::kClientId));
+    m_transport(QUrl(providerUrl + "/token/revoke"), form, [](int status, const QByteArray&) {
+        // Best effort: a failure here leaves the grant to expire on its own.
+        if (status != 200) qWarning() << "[IdentitySession] revocation failed, HTTP" << status;
+    });
 }
 
 void IdentitySession::requestServerToken(const QString& resource, ServerTokenCallback callback)
@@ -141,8 +190,12 @@ void IdentitySession::pump()
     }
     m_busy = true;
     const Pending p = m_queue.takeFirst();
-    const QString nonce = p.resource.isEmpty() ? QString() : oidc::generateNonce();
+    m_inFlight = p;
+    send(p, p.resource.isEmpty() ? QString() : oidc::generateNonce(), false);
+}
 
+void IdentitySession::send(const Pending& p, const QString& nonce, bool isRetry)
+{
     QUrlQuery form;
     form.addQueryItem("grant_type", "refresh_token");
     form.addQueryItem("refresh_token", m_refreshToken);
@@ -152,10 +205,31 @@ void IdentitySession::pump()
         form.addQueryItem("nonce", nonce);
     }
 
+    const quint64 generation = m_generation;
+    const QString provider = m_providerUrl;
     m_transport(QUrl(m_providerUrl + "/token"), form,
-                [this, p, nonce](int status, const QByteArray& body) {
+                [this, p, nonce, isRetry, generation, provider](int status, const QByteArray& body) {
         const QJsonObject obj = QJsonDocument::fromJson(body).object();
         const QString newRefresh = obj.value("refresh_token").toString();
+
+        if (generation != m_generation) {
+            // Signed out or re-signed-in while this was in flight. Its caller
+            // has already been answered or requeued; the token it bought must
+            // not resurrect the old session, so kill it at the provider.
+            if (status == 200 && !newRefresh.isEmpty()) revoke(provider, newRefresh);
+            return;
+        }
+
+        if (status == 0 && !isRetry) {
+            // The reply was lost, perhaps after the provider rotated. One
+            // retry with the same token, now, falls inside the provider's
+            // grace window and is answered with the token it already issued;
+            // giving up instead would leave us holding a spent token whose
+            // next use revokes the grant.
+            send(p, nonce, true);
+            return;
+        }
+        m_inFlight.reset();
 
         if (status == 200 && !newRefresh.isEmpty()) {
             // Rule 2: the rotated token is saved before anything else runs.
@@ -190,7 +264,7 @@ void IdentitySession::pump()
             const QString reason = tr("Your BSFChat ID sign-in on this device has ended. "
                                       "Sign in again to continue.");
             complete(p, {}, reason);
-            signOut();
+            clearSession(false); // already dead at the provider
             emit signedOut(reason);
             return;
         }

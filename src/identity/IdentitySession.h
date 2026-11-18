@@ -23,6 +23,14 @@
 //
 // The refresh token lives in SecretStore (the OS keychain) and nowhere else.
 // If the keychain is unavailable it is kept in memory for this run only.
+//
+// Every signOut()/adopt()/restore() starts a new GENERATION. A /token reply
+// that arrives for an older generation is discarded, and the refresh token it
+// carries is revoked at the provider: otherwise a refresh in flight during
+// sign-out would put the old session straight back (C2-5). Sign-out revokes
+// the held token too. A transport failure (status 0) is retried once at once,
+// inside the provider's one-retry grace window, so a reply lost after the
+// provider rotated does not strand a spent token (C2-6).
 
 #include <QByteArray>
 #include <QList>
@@ -32,6 +40,7 @@
 #include <QUrlQuery>
 
 #include <functional>
+#include <optional>
 
 class QNetworkAccessManager;
 class SecretStore;
@@ -39,7 +48,7 @@ class SecretStore;
 class IdentitySession : public QObject {
     Q_OBJECT
 public:
-    // POSTs a form to the token endpoint; calls `done` with the HTTP status
+    // POSTs a form (to the token or revocation endpoint); calls `done` with the HTTP status
     // (0 for a transport failure) and the body. Replaceable for tests.
     using Transport = std::function<void(const QUrl& tokenUrl, const QUrlQuery& form,
                                          std::function<void(int status, const QByteArray& body)> done)>;
@@ -55,7 +64,8 @@ public:
     bool restore(const QString& providerUrl);
     // Take over the refresh token from a browser sign-in, and save it.
     void adopt(const QString& providerUrl, const QString& refreshToken);
-    // Forget it locally (sign out of BSFChat ID on this device).
+    // Forget it locally and revoke it at the provider (sign out of BSFChat
+    // ID on this device). A refresh still in flight is abandoned.
     void signOut();
 
     bool isSignedIn() const { return !m_refreshToken.isEmpty(); }
@@ -72,6 +82,9 @@ public:
     void requestAccessToken(AccessTokenCallback callback);
 
     static QString storeKey(const QString& providerUrl);
+    // Shorter than the provider's 30 s refresh grace window, so the one
+    // immediate retry after a lost reply still lands inside it.
+    static constexpr int kTokenTimeoutMs = 15000;
     static QString normaliseProvider(const QString& url);
 
 signals:
@@ -86,8 +99,14 @@ private:
         AccessTokenCallback accessCallback;
     };
     void pump();
+    void send(const Pending& p, const QString& nonce, bool isRetry);
     void complete(const Pending& p, const QString& value, const QString& error);
     void persist();
+    // Ends the current generation: the in-flight request (if any) is no
+    // longer ours. `requeue` puts its caller back at the front of the queue.
+    void abandonInFlight(bool requeue, const QString& error);
+    void clearSession(bool revoke);
+    void revoke(const QString& providerUrl, const QString& refreshToken);
 
     Transport m_transport;
     SecretStore* m_store = nullptr;
@@ -96,5 +115,7 @@ private:
     QString m_refreshToken;
     bool m_persisted = false;
     bool m_busy = false;
+    quint64 m_generation = 0;
+    std::optional<Pending> m_inFlight;
     QList<Pending> m_queue;
 };
