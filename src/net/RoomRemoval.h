@@ -109,12 +109,15 @@ inline QVector<SyncLeave> parseSyncLeaves(const nlohmann::json& body) noexcept
 // Which rooms named in `rooms.leave` really have to go, given the rest of the
 // same response.
 //
-// A batch can carry a leave AND a re-join of one room (left on the phone,
-// rejoined a second later). The rule: a room in both sections is kept only if
-// rooms.join carries an own m.room.member "join" provably LATER than the own
-// leave event in rooms.leave. When the leave carries no own member event —
-// deletions and lost access usually don't — nothing can be proven later, and
-// the server's statement that the room is gone wins.
+// A batch can carry a leave AND a join of one room (left on the phone and
+// rejoined a second later; access lost and given back). The rule: a room in
+// both sections is dropped only if rooms.leave carries an own leave/ban/kick
+// member event that is provably NEWER than any own join in rooms.join (or
+// rooms.join has none). A leave with no own member event — lost access,
+// a deletion — cannot outrank a room the same response still lists as
+// joined, so the room is kept (C2-7: it used to vanish). If it really is
+// gone, the next batch without the join, or the /joined_rooms reconcile a
+// 403 triggers, removes it.
 inline QStringList roomsToDropForSyncLeaves(const QVector<SyncLeave>& leaves,
                                             const bsfchat::SyncResponse& response,
                                             const QString& ownUserId)
@@ -154,8 +157,8 @@ inline QStringList roomsToDropForSyncLeaves(const QVector<SyncLeave>& leaves,
         scan(joined->second.state.events);
         scan(joined->second.timeline.events);
 
-        const bool rejoinedLater = ownLeaveTs >= 0 && ownJoinTs > ownLeaveTs;
-        if (!rejoinedLater) out.append(leave.roomId);
+        const bool leftAfterJoin = ownLeaveTs >= 0 && ownLeaveTs > ownJoinTs;
+        if (leftAfterJoin) out.append(leave.roomId);
     }
     return out;
 }

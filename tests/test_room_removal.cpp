@@ -181,14 +181,29 @@ private slots:
         QCOMPARE(roomsToDropForSyncLeaves({leave}, resp, kMe), QStringList{QStringLiteral("!r:h")});
     }
 
-    void joinWithoutProvableOrderDropsTheRoom()
+    void aLeaveWithoutAnOwnEventDoesNotOutrankTheJoin()
     {
-        // No own member event in the leave: nothing can be proven later than
-        // it, so the server's "gone" wins.
+        // C2-7: no own member event in the leave (lost access, then given
+        // back in the same batch): the room is still listed as joined, so it
+        // stays. Before, it vanished from the sidebar.
         bsfchat::SyncResponse resp;
         resp.rooms.join["!r:h"].timeline.events.push_back(member(kMe, "join", 999));
         const QVector<SyncLeave> leaves{{QStringLiteral("!r:h"), QStringLiteral("no_access"), {}}};
-        QCOMPARE(roomsToDropForSyncLeaves(leaves, resp, kMe), QStringList{QStringLiteral("!r:h")});
+        QVERIFY(roomsToDropForSyncLeaves(leaves, resp, kMe).isEmpty());
+        // Even when rooms.join has no own join event at all (just new messages).
+        bsfchat::SyncResponse busy;
+        busy.rooms.join["!r:h"].timeline.events.push_back(
+            member(QStringLiteral("@other:h"), "join", 5));
+        QVERIFY(roomsToDropForSyncLeaves(leaves, busy, kMe).isEmpty());
+    }
+
+    void anOwnLeaveWithNoJoinEventInTheBatchDropsTheRoom()
+    {
+        bsfchat::SyncResponse resp;
+        resp.rooms.join["!r:h"]; // listed, but no own join event
+        SyncLeave leave{QStringLiteral("!r:h"), QStringLiteral("ban"), {}};
+        leave.members.append({kMe, QStringLiteral("ban"), 50});
+        QCOMPARE(roomsToDropForSyncLeaves({leave}, resp, kMe), QStringList{QStringLiteral("!r:h")});
     }
 
     void somebodyElsesJoinDoesNotCount()
