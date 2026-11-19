@@ -365,10 +365,16 @@ public:
     //
     // `localId` is the transaction id the send used; it is the handle for
     // both outcomes. `body`/`formattedBody` are what was typed.
+    //
+    // The echo renders exactly as the event will when it comes back: an
+    // empty formattedBody goes through the same markdown/escape promotion a
+    // received event does (it used to show raw until a reload), and a
+    // supplied one is sanitised like a received one.
     void appendLocalEcho(const QString& localId, const QString& body,
                          const QString& formattedBody, const QString& ownUserId,
                          const QString& replyToEventId = {},
-                         const QString& threadRootId = {});
+                         const QString& threadRootId = {},
+                         const QString& msgtype = QStringLiteral("m.text"));
     // The server accepted the send and assigned `eventId`. The echo row
     // adopts it and becomes Confirmed — and, crucially, registers that id in
     // m_indexByEventId, so when the same event arrives over /sync moments
@@ -382,6 +388,24 @@ public:
     Q_INVOKABLE void discardLocalEcho(const QString& localId);
     // Body of a pending/failed echo, for a retry that re-sends the text.
     Q_INVOKABLE QString localEchoBody(const QString& localId) const;
+    // What a retry needs to re-send a failed echo the way it was sent:
+    // {body, formattedBody, msgtype, replyToEventId, threadRootId}. Empty map
+    // for an unknown id.
+    Q_INVOKABLE QVariantMap localEchoPayload(const QString& localId) const;
+
+    // --- local echo for edits -------------------------------------------
+    //
+    // Show an edit the moment it is sent. The target row takes the new text
+    // at once; what the server had is kept aside until the real m.replace
+    // comes back over /sync (which restores it and applies the edit
+    // normally, so "Show edit history" stays exact) or the PUT fails (which
+    // restores it). False when `targetEventId` is not loaded.
+    bool applyLocalEdit(const QString& localId, const QString& targetEventId,
+                        const QString& body, const QString& formattedBody);
+    // The PUT for `localId` failed: put the row back. Returns the target id
+    // (empty when `localId` was not an edit) and the text that did not make
+    // it in `failedBody`, so the composer can offer it again.
+    QString failLocalEdit(const QString& localId, QString* failedBody = nullptr);
     // The sender's file name and info.mimetype for a loaded media row, so
     // "open externally" can judge the file without trusting QML to pass them.
     // False when no loaded row shows `mxc`.
@@ -629,6 +653,20 @@ private:
     };
     static constexpr int kMaxPendingEditTargets = 256;
     QHash<QString, PendingEdit> m_pendingEdits;
+    // Local edits in flight or awaiting their /sync copy, by target event
+    // id: the row as the server last described it, and the transaction ids
+    // of the local edits layered on top. See applyLocalEdit.
+    struct LocalEditSnapshot {
+        QString body;
+        QString formattedBody;
+        bool edited = false;
+        qint64 editedAt = 0;
+        QStringList localIds;
+        QString lastBody; // the newest local text, for failLocalEdit
+    };
+    QHash<QString, LocalEditSnapshot> m_localEdits;
+    // Put a row back to its server state before a real edit is applied.
+    void restoreLocalEdit(MessageEntry& entry);
 
     QVector<MessageEntry> m_messages;
     // event id -> row index. Every "find the message this event refers to"

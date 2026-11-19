@@ -196,6 +196,10 @@ Rectangle {
             for (var k in inputRoot._drafts) d[k] = inputRoot._drafts[k];
             if (inputRoot.editingEventId === "" && inputArea.text.length > 0) {
                 d[prev] = { text: inputArea.text, tokens: inputRoot.mentionTokens };
+            } else if (inputRoot.editingEventId !== "" && inputRoot._preEditDraft
+                       && inputRoot._preEditDraft.text.length > 0) {
+                // Mid-edit: the draft the edit pushed aside is the room's.
+                d[prev] = inputRoot._preEditDraft;
             } else {
                 delete d[prev];
             }
@@ -206,6 +210,7 @@ Rectangle {
         // Nothing that named something in the old room may survive.
         inputRoot.editingEventId = "";
         inputRoot.editingOriginalBody = "";
+        inputRoot._preEditDraft = null;
         inputRoot.replyToEventId = "";
         inputRoot.replyToSenderName = "";
         inputRoot.replyToPreview = "";
@@ -267,8 +272,14 @@ Rectangle {
         }
     }
     readonly property var _uploadKeys: Object.keys(inputRoot._uploads)
+    // The draft an edit pushed aside ({text, tokens}), put back when the edit
+    // is saved or cancelled. Editing used to overwrite the composer and then
+    // clear it, so starting an edit threw away whatever you were typing.
+    property var _preEditDraft: null
     function beginEditing(eventId, currentBody) {
         if (replyToEventId !== "") cancelReplying();
+        if (editingEventId === "")
+            _preEditDraft = { text: inputArea.text, tokens: inputRoot.mentionTokens };
         editingEventId = eventId;
         editingOriginalBody = currentBody;
         inputArea.text = currentBody;
@@ -286,7 +297,24 @@ Rectangle {
     function cancelEditing() {
         editingEventId = "";
         editingOriginalBody = "";
-        inputArea.text = "";
+        var d = _preEditDraft;
+        _preEditDraft = null;
+        inputArea.text = d ? d.text : "";
+        inputRoot.mentionTokens = (d && d.tokens) ? d.tokens : [];
+        inputArea.cursorPosition = inputArea.text.length;
+    }
+    // An edit's PUT failed and the row went back to its old text. Offer the
+    // typed text again rather than losing it — unless the user is already
+    // busy with another edit.
+    Connections {
+        target: serverManager.activeServer
+        ignoreUnknownSignals: true
+        function onEditSendFailed(eventId, body) {
+            if (inputRoot.editingEventId !== "" || !body) return;
+            inputRoot.beginEditing(eventId, body);
+            // Any text counts as a change: the message never took this one.
+            inputRoot.editingOriginalBody = "";
+        }
     }
 
     // Reply state. When replyToEventId is non-empty, sendCurrentMessage()
@@ -1838,8 +1866,9 @@ Rectangle {
             // everyone but will never badge or notify Alice.
             serverManager.activeServer.editMessage(
                 inputRoot.editingEventId, text, rich.html, rich.uids);
-            inputRoot.cancelEditing();
+            // Clear the edit's tokens, then put the pushed-aside draft back.
             inputRoot._clearMentionState();
+            inputRoot.cancelEditing();
             return;
         }
 

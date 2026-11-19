@@ -10,6 +10,7 @@
 #include "net/IgnoredUsers.h"
 #include "net/LinkPreviewCache.h"
 #include "net/MemberJson.h"
+#include "net/MessageContent.h"
 #include "net/RoomRemoval.h"
 #include "model/RoomListModel.h"
 #include "model/MessageModel.h"
@@ -184,6 +185,12 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     connect(m_client, &MatrixClient::messageSendAccepted, this,
         [this](const QString& localId, const QString& eventId) {
             m_messageModel->confirmLocalEcho(localId, eventId);
+            // A forward has no echo (it lands in another room): confirm it.
+            const auto fwd = m_pendingForwards.constFind(localId);
+            if (fwd != m_pendingForwards.cend()) {
+                emitFeedback(tr("Forwarded to %1").arg(*fwd), QStringLiteral("success"));
+                m_pendingForwards.erase(fwd);
+            }
         });
     // Failed: the row stays, marked failed. Previously a failed send left a
     // toast and an empty composer — the text was gone and the user could not
@@ -191,6 +198,12 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     connect(m_client, &MatrixClient::messageSendFailed, this,
         [this](const QString& localId, const QString&) {
             m_messageModel->failLocalEcho(localId);
+            m_pendingForwards.remove(localId);
+            // An edit's echo is the target row itself: put it back, and hand
+            // the text to the composer so it is not lost.
+            QString failedBody;
+            const QString target = m_messageModel->failLocalEdit(localId, &failedBody);
+            if (!target.isEmpty()) emit editSendFailed(target, failedBody);
         });
 
     connect(m_client, &MatrixClient::mediaUploadProgress,
@@ -2063,17 +2076,24 @@ void ServerConnection::sendEmote(const QString& body)
     m_typingTimer->stop();
     m_typingStopTimer->stop();
     m_client->setTyping(m_activeRoomId, m_userId, false);
-    m_client->sendEmote(m_activeRoomId, body);
+    // Echoed like a plain send, so a failed /me keeps its text (Retry).
+    const QString localId = m_client->sendEmote(m_activeRoomId, body);
+    m_messageModel->appendLocalEcho(localId, body, QString(), m_userId, {}, {},
+                                    QStringLiteral("m.emote"));
 }
 
-void ServerConnection::sendThreadReply(const QString& rootEventId, const QString& body)
+void ServerConnection::sendThreadReply(const QString& rootEventId, const QString& body,
+                                       const QString& formattedBody,
+                                       const QStringList& mentionedUserIds)
 {
     if (m_activeRoomId.isEmpty() || rootEventId.isEmpty()
         || body.trimmed().isEmpty()) return;
     m_typingTimer->stop();
     m_typingStopTimer->stop();
     m_client->setTyping(m_activeRoomId, m_userId, false);
-    m_client->sendThreadReply(m_activeRoomId, body, rootEventId);
+    const QString localId = m_client->sendThreadReply(m_activeRoomId, body, rootEventId,
+                                                      formattedBody, mentionedUserIds);
+    m_messageModel->appendLocalEcho(localId, body, formattedBody, m_userId, {}, rootEventId);
 }
 
 void ServerConnection::sendRichMessage(const QString& body,
@@ -2116,8 +2136,29 @@ void ServerConnection::editMessage(const QString& eventId, const QString& newBod
         }
     }
 
-    m_client->editMessage(m_activeRoomId, eventId, newBody, formattedBody,
-                          mentions);
+    // The ORIGINAL's msgtype, so an /me edit stays m.emote — and nothing at
+    // all for media, which an m.replace would replace with its file name.
+    if (!canEditMessage(eventId)) return;
+    const QString msgtype = m_messageModel->data(
+        m_messageModel->index(m_messageModel->indexForEventId(eventId)),
+        MessageModel::MsgtypeRole).toString();
+    const QString localId = m_client->editMessage(m_activeRoomId, eventId, newBody,
+                                                  formattedBody, mentions, msgtype);
+    if (!localId.isEmpty())
+        m_messageModel->applyLocalEdit(localId, eventId, newBody, formattedBody);
+}
+
+bool ServerConnection::canEditMessage(const QString& eventId) const
+{
+    if (!m_messageModel || eventId.isEmpty()) return false;
+    const int row = m_messageModel->indexForEventId(eventId);
+    if (row < 0) return false;
+    const QModelIndex mi = m_messageModel->index(row);
+    if (!m_messageModel->data(mi, MessageModel::IsOwnMessageRole).toBool()) return false;
+    if (m_messageModel->data(mi, MessageModel::DeliveryStateRole).toInt()
+        != MessageModel::DeliveryConfirmed) return false;
+    return bsfchat::client::msgcontent::isEditableMsgtype(
+        m_messageModel->data(mi, MessageModel::MsgtypeRole).toString());
 }
 
 QVariantMap ServerConnection::editLastMessageWithSed(const QString& text)
@@ -2184,8 +2225,27 @@ void ServerConnection::replyToMessage(const QString& targetEventId, const QStrin
     m_typingStopTimer->stop();
     m_client->setTyping(m_activeRoomId, m_userId, false);
 
-    m_client->replyToMessage(m_activeRoomId, body, targetEventId, formattedBody,
-                             mentionedUserIds);
+    const QString localId = m_client->replyToMessage(m_activeRoomId, body, targetEventId,
+                                                     formattedBody, mentionedUserIds);
+    m_messageModel->appendLocalEcho(localId, body, formattedBody, m_userId, targetEventId);
+}
+
+void ServerConnection::retryLocalEcho(const QString& localId)
+{
+    if (!m_messageModel || m_activeRoomId.isEmpty()) return;
+    const QVariantMap p = m_messageModel->localEchoPayload(localId);
+    if (p.isEmpty()) return;
+    const QString body = p.value(QStringLiteral("body")).toString();
+    const QString msgtype = p.value(QStringLiteral("msgtype")).toString();
+    const QString replyTo = p.value(QStringLiteral("replyToEventId")).toString();
+    const QString root = p.value(QStringLiteral("threadRootId")).toString();
+    // The row's formatted body is display markup, not what was sent; re-send
+    // the plain body and let the receivers render it, as for a plain send.
+    m_messageModel->discardLocalEcho(localId);
+    if (msgtype == QLatin1String("m.emote")) sendEmote(body);
+    else if (!root.isEmpty()) sendThreadReply(root, body);
+    else if (!replyTo.isEmpty()) replyToMessage(replyTo, body);
+    else sendMessage(body);
 }
 
 void ServerConnection::forwardMessage(const QString& sourceEventId, const QString& destRoomId)
@@ -2202,12 +2262,21 @@ void ServerConnection::forwardMessage(const QString& sourceEventId, const QStrin
     QModelIndex mi = m_messageModel->index(idx);
     QString body = m_messageModel->data(mi, MessageModel::BodyRole).toString();
     QString sender = m_messageModel->data(mi, MessageModel::SenderDisplayNameRole).toString();
-    QString sourceChannelName = m_roomListModel->roomDisplayName(m_activeRoomId);
+    const QString formatted =
+        m_messageModel->data(mi, MessageModel::FormattedBodyRole).toString();
+    // "#general" for a channel; a DM is named after the person, no "#".
+    QString sourceLabel = m_roomListModel->roomDisplayName(m_activeRoomId);
+    if (!isDirectRoom(m_activeRoomId)) sourceLabel.prepend(QLatin1Char('#'));
 
-    // Pass the source location so MatrixClient can embed a clickable link
-    // back to the original event in the forwarded header.
-    m_client->forwardMessage(destRoomId, body, sourceChannelName, sender,
-                             m_serverUrl, m_activeRoomId, sourceEventId);
+    // Pass the source location so the header links back to the original.
+    const QString localId = m_client->forwardMessage(destRoomId, body, sourceLabel, sender,
+                                                     m_serverUrl, m_activeRoomId,
+                                                     sourceEventId, formatted);
+    if (!localId.isEmpty()) {
+        QString dest = m_roomListModel->roomDisplayName(destRoomId);
+        if (!isDirectRoom(destRoomId)) dest.prepend(QLatin1Char('#'));
+        m_pendingForwards.insert(localId, dest);
+    }
 }
 
 void ServerConnection::toggleReaction(const QString& targetEventId, const QString& emoji)

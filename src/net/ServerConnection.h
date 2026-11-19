@@ -497,7 +497,11 @@ public:
     Q_INVOKABLE void sendEmote(const QString& body);
     // Send a threaded reply. The message carries m.relates_to with
     // rel_type=m.thread and event_id=rootEventId. Uses the active room.
-    Q_INVOKABLE void sendThreadReply(const QString& rootEventId, const QString& body);
+    // formattedBody/mentionedUserIds as for sendRichMessage — a mention in a
+    // thread notifies like one in the channel.
+    Q_INVOKABLE void sendThreadReply(const QString& rootEventId, const QString& body,
+                                     const QString& formattedBody = QString(),
+                                     const QStringList& mentionedUserIds = {});
     // Rich variant used when the composer has tracked @mention or #channel
     // tokens. `formattedBody` is the sender-generated HTML (with <a>
     // anchors for mentions/channels); `mentionedUserIds` goes into
@@ -535,7 +539,15 @@ public:
     // Forward the message identified by sourceEventId (in the active room)
     // into destRoomId on this server. Builds the attribution prefix from
     // the message model + RoomListModel.
+    // Confirms with a "Forwarded to …" success toast once the server has it.
     Q_INVOKABLE void forwardMessage(const QString& sourceEventId, const QString& destRoomId);
+    // Re-send a failed local echo the way it was sent (reply, thread, /me),
+    // replacing the failed row with a fresh echo. No-op for an unknown id.
+    Q_INVOKABLE void retryLocalEcho(const QString& localId);
+    // Whether an edit may be sent for `eventId` — own, delivered prose
+    // (m.text/m.notice/m.emote). Media is never editable: an m.replace has
+    // no url/info, and the server would fold it in over the attachment.
+    Q_INVOKABLE bool canEditMessage(const QString& eventId) const;
 
     // Back-pagination. Issues GET /rooms/{id}/messages?from=<prev_batch>&dir=b
     // — as many pages as it takes to add kHistoryMoreTargetRows VISIBLE rows,
@@ -1104,6 +1116,9 @@ public:
     bool linkPreviewsSupported() const;
 
 signals:
+    // An edit's PUT failed; the row is back to its previous text. `body`
+    // is what was typed, so the composer can offer it again.
+    void editSendFailed(const QString& eventId, const QString& body);
     void linkPreviewResolved(QString url);
     void linkPreviewsSupportedChanged();
     void displayNameChanged();
@@ -1618,6 +1633,9 @@ public:
     QString m_typingDisplay;
     QTimer* m_typingTimer = nullptr;
     QTimer* m_typingStopTimer = nullptr;
+    // Forwards awaiting the server, by transaction id → "#destination", for
+    // the success toast.
+    QHash<QString, QString> m_pendingForwards;
     // Per-room typing state. Populated for every joined room's
     // ephemeral typing event, not just the active one, so the sidebar
     // can surface a quiet indicator on non-active channels where

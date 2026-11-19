@@ -72,6 +72,14 @@ Item {
     // this client sent in this session — everything that arrived over /sync
     // is on the server by definition.
     property int deliveryState: 0
+    // Edit is offered only on prose this client sent and the server has.
+    // A media row's body is its file name, and an m.replace carries no
+    // url/info, so "editing" an image used to replace it with text (the
+    // server folds m.new_content in as the event's content). No caption
+    // editing either: nothing in this client renders a media caption.
+    readonly property bool canEdit: isOwnMessage && deliveryState === 0
+        && eventId !== ""
+        && (msgtype === "m.text" || msgtype === "m.notice" || msgtype === "m.emote")
 
     signal senderClicked(string userId, string displayName)
     // Emitted when the user clicks a reaction chip (toggle) or picks an
@@ -208,7 +216,7 @@ Item {
     Accessible.focusable: true
     Accessible.focused: bubble.activeFocus
     Accessible.description: bubble.activeFocus && !Theme.isMobile
-        ? (bubble.isOwnMessage
+        ? (bubble.canEdit
            ? qsTr("Return for actions. R to reply, E to edit, Delete to delete, plus to react. Escape returns to the composer.")
            : (bubble.canDelete
               ? qsTr("Return for actions. R to reply, Delete to delete, plus to react. Escape returns to the composer.")
@@ -542,10 +550,10 @@ Item {
             }
         }
         CtxItem {
-            text: "Edit"
+            text: qsTr("Edit")
             iconName: "edit"
             shortcut: Theme.isMobile ? "" : "E"
-            visible: bubble.isOwnMessage
+            visible: bubble.canEdit
             onTriggered: bubble.editRequested(bubble.eventId, bubble.body)
         }
 
@@ -943,7 +951,7 @@ Item {
             }
         }
 
-        // Edit — only on your own messages.
+        // Edit — only on your own prose messages (see canEdit).
         Rectangle {
             width: 28; height: 24
             radius: Theme.r1
@@ -953,7 +961,7 @@ Item {
             color: editMouse.containsMouse ? Theme.bg3 : Theme.bg1
             border.color: Theme.line
             border.width: 1
-            visible: bubble.isOwnMessage
+            visible: bubble.canEdit
             Icon {
                 anchors.centerIn: parent
                 name: "edit"

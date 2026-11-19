@@ -1274,7 +1274,7 @@ Rectangle {
                                               bubble.senderDisplayName);
                         return;
                     }
-                    if (mods === 0 && k === Qt.Key_E && bubble.isOwnMessage) {
+                    if (mods === 0 && k === Qt.Key_E && bubble.canEdit) {
                         bubble.editRequested(bubble.eventId, bubble.body);
                         return;
                     }

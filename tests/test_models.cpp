@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QMap>
 #include <QRegularExpression>
+#include <QSet>
 #include <QSignalSpy>
 
 #include "model/MessageModel.h"
@@ -26,6 +27,7 @@
 #include "util/VoiceRoster.h"
 #include "util/MemberCache.h"
 #include "net/MemberJson.h"
+#include "net/MessageContent.h"
 
 #include <bsfchat/MatrixTypes.h>
 #include <bsfchat/Constants.h>
@@ -4304,6 +4306,147 @@ private slots:
         model.appendLocalEcho("local-1", "first words", QString(),
                               QStringLiteral("@josh:server"));
         QCOMPARE(model.newestServerTimestampMs(), qint64(0));
+    }
+
+    // ── Send payloads (net/MessageContent.h) ─────────────────────────
+
+    void testEditKeepsTheOriginalsMsgtype()
+    {
+        namespace mc = bsfchat::client::msgcontent;
+        const auto c = mc::edit("$t", "m.emote", "waves", {}, {});
+        QCOMPARE(QString::fromStdString(c["msgtype"].get<std::string>()), QString("m.emote"));
+        QCOMPARE(QString::fromStdString(c["m.new_content"]["msgtype"].get<std::string>()),
+                 QString("m.emote"));
+        QCOMPARE(QString::fromStdString(c["m.new_content"]["body"].get<std::string>()),
+                 QString("waves"));
+        QCOMPARE(QString::fromStdString(c["body"].get<std::string>()), QString("* waves"));
+        QCOMPARE(QString::fromStdString(c["m.relates_to"]["rel_type"].get<std::string>()),
+                 QString("m.replace"));
+    }
+
+    void testEditRefusesMedia()
+    {
+        // An m.replace carries no url/info; the server folds m.new_content in
+        // as the content, so editing an image used to destroy it.
+        namespace mc = bsfchat::client::msgcontent;
+        for (const char* t : {"m.image", "m.file", "m.audio", "m.video", "m.location"})
+            QVERIFY2(mc::edit("$t", t, "x", {}, {}).is_null(), t);
+        QVERIFY(mc::isEditableMsgtype("m.notice"));
+        QVERIFY(!mc::isEditableMsgtype("m.image"));
+    }
+
+    void testThreadReplyCarriesFormattedBodyAndMentions()
+    {
+        namespace mc = bsfchat::client::msgcontent;
+        const auto c = mc::threadReply("$root", "hi @Al", "hi <a>@Al</a>",
+                                       {"@al:s", "@room"});
+        QCOMPARE(QString::fromStdString(c["formatted_body"].get<std::string>()),
+                 QString("hi <a>@Al</a>"));
+        QCOMPARE(QString::fromStdString(c["format"].get<std::string>()),
+                 QString("org.matrix.custom.html"));
+        QCOMPARE(c["m.mentions"]["user_ids"].size(), std::size_t(1));
+        QVERIFY(c["m.mentions"]["room"].get<bool>());
+        QCOMPARE(QString::fromStdString(c["m.relates_to"]["rel_type"].get<std::string>()),
+                 QString("m.thread"));
+    }
+
+    void testTxnIdsAreUniqueAcrossPrefixes()
+    {
+        namespace mc = bsfchat::client::msgcontent;
+        QSet<QString> seen;
+        for (int i = 0; i < 200; ++i) {
+            // The counter is shared, so even the same prefix in the same
+            // millisecond cannot repeat.
+            QVERIFY(!seen.contains(mc::nextTxnId(u"m")));
+            seen.insert(mc::nextTxnId(u"m"));
+        }
+    }
+
+    void testForwardEscapesNamesAndAttributes()
+    {
+        namespace mc = bsfchat::client::msgcontent;
+        const auto c = mc::forward("hello", {}, "#<b>chan</b>", "Eve</b><img src=x>",
+                                   "https://s", "!r", "$e");
+        const QString html = QString::fromStdString(c["formatted_body"].get<std::string>());
+        QVERIFY(!html.contains("<img"));
+        QVERIFY(html.contains("&lt;img src=x&gt;"));
+        QVERIFY(html.contains("originally by @Eve&lt;/b&gt;"));
+        QVERIFY(html.contains("bsfchat://message/"));
+        const QString plain = QString::fromStdString(c["body"].get<std::string>());
+        QVERIFY(plain.startsWith("Forwarded from #<b>chan</b> — originally by @"));
+        QVERIFY(plain.endsWith("\n> hello"));
+    }
+
+    // ── Local echo for every send kind ───────────────────────────────
+
+    void testEchoRendersOwnMarkdownImmediately()
+    {
+        MessageModel model;
+        const QString me = "@josh:server";
+        model.appendLocalEcho("l1", "**bold**", QString(), me);
+        const QString html = model.data(model.index(0), MessageModel::FormattedBodyRole).toString();
+        QVERIFY2(html.contains("<b>bold</b>"), qPrintable(html));
+        QVERIFY(!model.data(model.index(0), MessageModel::PlainBodyRole).toBool());
+    }
+
+    void testEmoteEchoKeepsItsMsgtype()
+    {
+        MessageModel model;
+        model.appendLocalEcho("l1", "*waves*", QString(), "@josh:server", {}, {},
+                              QStringLiteral("m.emote"));
+        QCOMPARE(model.data(model.index(0), MessageModel::MsgtypeRole).toString(),
+                 QString("m.emote"));
+        // Not markdown: an /me keeps its asterisks.
+        QVERIFY(!model.data(model.index(0), MessageModel::FormattedBodyRole)
+                     .toString().contains("<i>"));
+        const auto p = model.localEchoPayload("l1");
+        QCOMPARE(p.value("msgtype").toString(), QString("m.emote"));
+    }
+
+    void testReplyEchoResolvesTheQuote()
+    {
+        MessageModel model;
+        const QString me = "@josh:server";
+        model.appendEvent(makeMessageEvent("$a", "@alice:server", "original"), me);
+        model.appendLocalEcho("l1", "answer", QString(), me, "$a");
+        QCOMPARE(model.data(model.index(1), MessageModel::ReplyToEventIdRole).toString(),
+                 QString("$a"));
+        QCOMPARE(model.data(model.index(1), MessageModel::ReplyPreviewRole).toString(),
+                 QString("original"));
+        QCOMPARE(model.localEchoPayload("l1").value("replyToEventId").toString(),
+                 QString("$a"));
+    }
+
+    void testLocalEditShowsAtOnceAndRollsBackOnFailure()
+    {
+        MessageModel model;
+        const QString me = "@josh:server";
+        model.appendEvent(makeMessageEvent("$m", me.toStdString(), "teh"), me);
+        QVERIFY(model.applyLocalEdit("e1", "$m", "the", QString()));
+        QCOMPARE(model.data(model.index(0), MessageModel::BodyRole).toString(), QString("the"));
+        QVERIFY(model.data(model.index(0), MessageModel::EditedRole).toBool());
+
+        QString failed;
+        QCOMPARE(model.failLocalEdit("e1", &failed), QString("$m"));
+        QCOMPARE(failed, QString("the"));
+        QCOMPARE(model.data(model.index(0), MessageModel::BodyRole).toString(), QString("teh"));
+        QVERIFY(!model.data(model.index(0), MessageModel::EditedRole).toBool());
+        QVERIFY(model.failLocalEdit("unknown").isEmpty());
+    }
+
+    void testLocalEditIsReplacedByTheServersCopy()
+    {
+        // The /sync copy lands on the server's version, so edit history lists
+        // the real previous text once, not the echoed text.
+        MessageModel model;
+        const QString me = "@josh:server";
+        model.appendEvent(makeMessageEvent("$m", me.toStdString(), "teh"), me);
+        model.applyLocalEdit("e1", "$m", "the", QString());
+        model.appendEvent(makeEditEvent("$edit", me.toStdString(), "$m", "the"), me);
+        QCOMPARE(model.data(model.index(0), MessageModel::BodyRole).toString(), QString("the"));
+        // A late failure report for the same txn finds nothing to roll back.
+        QVERIFY(model.failLocalEdit("e1").isEmpty());
+        QCOMPARE(model.data(model.index(0), MessageModel::BodyRole).toString(), QString("the"));
     }
 
     void testPinnedToEndIsMeasuredFromTheContentOrigin()

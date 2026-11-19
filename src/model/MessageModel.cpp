@@ -549,7 +549,8 @@ void MessageModel::adoptEventId(int row, const QString& eventId, qint64 serverTs
 void MessageModel::appendLocalEcho(const QString& localId, const QString& body,
                                    const QString& formattedBody, const QString& ownUserId,
                                    const QString& replyToEventId,
-                                   const QString& threadRootId)
+                                   const QString& threadRootId,
+                                   const QString& msgtype)
 {
     if (localId.isEmpty()) return;
     if (indexOfLocalEcho(localId) >= 0) return; // already echoed
@@ -570,11 +571,25 @@ void MessageModel::appendLocalEcho(const QString& localId, const QString& body,
     // confirmation — re-sorting a message under the user's cursor at the
     // moment it is confirmed would be worse than a few ms of skew.
     entry.timestamp = QDateTime::currentMSecsSinceEpoch();
-    entry.msgtype = QStringLiteral("m.text");
+    entry.msgtype = msgtype.isEmpty() ? QStringLiteral("m.text") : msgtype;
     entry.body = body;
-    entry.formattedBody = formattedBody;
+    // Rendered the way eventToEntry will render the copy that comes back, so
+    // the row does not change under the user when it is confirmed — and your
+    // own markdown shows at once instead of after a reload.
+    entry.formattedBody = formattedBody.isEmpty()
+        ? renderBodyHtml(body, entry.msgtype)
+        : bsfchat::client::sanitizeHtml(formattedBody);
     entry.replyToEventId = replyToEventId;
     entry.threadRootId = threadRootId;
+    if (!replyToEventId.isEmpty()) {
+        const int target = rowForEventId(replyToEventId);
+        if (target >= 0) {
+            entry.replyToSender = m_messages[target].senderDisplayName;
+            QString preview = m_messages[target].body;
+            if (preview.size() > 80) preview = preview.left(80) + "…";
+            entry.replyPreview = preview;
+        }
+    }
 
     beginInsertRows(QModelIndex(), m_messages.size(), m_messages.size());
     m_messages.append(std::move(entry));
@@ -625,6 +640,83 @@ QString MessageModel::localEchoBody(const QString& localId) const
 {
     const int row = indexOfLocalEcho(localId);
     return row < 0 ? QString() : m_messages[row].body;
+}
+
+QVariantMap MessageModel::localEchoPayload(const QString& localId) const
+{
+    const int row = indexOfLocalEcho(localId);
+    if (row < 0) return {};
+    const auto& m = m_messages[row];
+    // The formatted body as SENT is not kept (the row holds display markup),
+    // so a retry re-renders from the body; mentions survive as the markup's
+    // anchors only for display. Good enough for a retry of a failed send.
+    return {{QStringLiteral("body"), m.body},
+            {QStringLiteral("formattedBody"), m.formattedBody},
+            {QStringLiteral("msgtype"), m.msgtype},
+            {QStringLiteral("replyToEventId"), m.replyToEventId},
+            {QStringLiteral("threadRootId"), m.threadRootId}};
+}
+
+bool MessageModel::applyLocalEdit(const QString& localId, const QString& targetEventId,
+                                  const QString& body, const QString& formattedBody)
+{
+    if (localId.isEmpty() || targetEventId.isEmpty()) return false;
+    const int row = rowForEventId(targetEventId);
+    if (row < 0) return false;
+    auto& m = m_messages[row];
+    auto it = m_localEdits.find(targetEventId);
+    if (it == m_localEdits.end()) {
+        // First local edit on this row: remember the server's version.
+        LocalEditSnapshot snap;
+        snap.body = m.body;
+        snap.formattedBody = m.formattedBody;
+        snap.edited = m.edited;
+        snap.editedAt = m.editedAt;
+        it = m_localEdits.insert(targetEventId, snap);
+    }
+    it->localIds.append(localId);
+    it->lastBody = body;
+    m.body = body;
+    m.formattedBody = formattedBody.isEmpty()
+        ? renderBodyHtml(body, m.msgtype)
+        : bsfchat::client::sanitizeHtml(formattedBody);
+    m.edited = true;
+    applyMentionMarkup(m);
+    const auto idx = index(row);
+    emit dataChanged(idx, idx, {BodyRole, FormattedBodyRole, EditedRole, PlainBodyRole});
+    return true;
+}
+
+QString MessageModel::failLocalEdit(const QString& localId, QString* failedBody)
+{
+    if (localId.isEmpty()) return {};
+    for (auto it = m_localEdits.begin(); it != m_localEdits.end(); ++it) {
+        if (!it->localIds.contains(localId)) continue;
+        const QString target = it.key();
+        if (failedBody) *failedBody = it->lastBody;
+        const int row = rowForEventId(target);
+        if (row >= 0) {
+            restoreLocalEdit(m_messages[row]);
+            const auto idx = index(row);
+            emit dataChanged(idx, idx, {BodyRole, FormattedBodyRole, EditedRole,
+                                        PlainBodyRole});
+        } else {
+            m_localEdits.remove(target);
+        }
+        return target;
+    }
+    return {};
+}
+
+void MessageModel::restoreLocalEdit(MessageEntry& entry)
+{
+    auto it = m_localEdits.find(entry.eventId);
+    if (it == m_localEdits.end()) return;
+    entry.body = it->body;
+    entry.formattedBody = it->formattedBody;
+    entry.edited = it->edited;
+    entry.editedAt = it->editedAt;
+    m_localEdits.erase(it);
 }
 
 bool MessageModel::mediaInfoForMxc(const QString& mxc, const QString& eventId,
@@ -1136,7 +1228,12 @@ void MessageModel::appendEvent(const bsfchat::RoomEvent& event, const QString& o
             stashPendingEdit(targetId, edit);
             return;
         }
-        if (applyEditToEntry(m_messages[i], edit)) {
+        // A local echo of this edit (or an earlier one) is showing: go back to
+        // the server's version first, so the edit lands on what the server
+        // has and the history records the real previous text.
+        const bool hadLocal = m_localEdits.contains(targetId);
+        restoreLocalEdit(m_messages[i]);
+        if (applyEditToEntry(m_messages[i], edit) || hadLocal) {
             auto idx = index(i);
             emit dataChanged(idx, idx, {BodyRole, FormattedBodyRole, EditedRole,
                                          PlainBodyRole});
@@ -1600,6 +1697,7 @@ void MessageModel::clear()
     m_threadReplyCounts.clear();
     m_pendingReactions.clear();
     m_pendingEdits.clear();
+    m_localEdits.clear();
     m_reactionIndex.clear();
     // The rows are gone, so no echo is awaiting reconciliation any more.
     // Left set, it would make indexOfEchoMatching walk the new room's
