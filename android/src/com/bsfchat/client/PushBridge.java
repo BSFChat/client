@@ -210,13 +210,19 @@ public final class PushBridge {
         }
     }
 
-    // "Visible or better" also covers a process held up by a foreground
-    // service (a voice call, or the background connection): /sync is
-    // running then, so the push has nothing to add either.
+    // An activity on screen (foreground or visible). A process kept up only
+    // by a foreground service (a backgrounded voice call, or the background
+    // connection) reports IMPORTANCE_FOREGROUND_SERVICE, which also sorts
+    // below VISIBLE, and used to count as foreground here, so the push was
+    // dropped. It is background: the message goes through the native /sync
+    // path below (which answers quickly, since Qt 6 keeps the event loop
+    // running in the background) or the generic notification.
     private static boolean isForeground(Context ctx) {
         ActivityManager.RunningAppProcessInfo info = new ActivityManager.RunningAppProcessInfo();
         ActivityManager.getMyMemoryState(info);
-        return info.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE;
+        int imp = info.importance;
+        return imp <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
+            && imp != ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND_SERVICE;
     }
 
     private static void ensureChannel(NotificationManager nm) {

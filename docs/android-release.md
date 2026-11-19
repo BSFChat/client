@@ -434,6 +434,22 @@ works on a device.
   interrupted — please try again." Verify on a device with "Don't keep
   activities" on. The page itself opens in a Custom Tab
   (`BrowserTab.java`) where the default browser supports one.
+* **The Qt event loop in the background (checked against Qt source,
+  not yet on a device).** Qt 5 stopped the Android event dispatchers on
+  `ApplicationSuspended` unless `android.app.background_running` was set,
+  which would freeze `/sync` inside a running SyncService or call. Qt 6
+  dropped that metadata and inverted the default: from 6.5 through 6.11,
+  `QAndroidEventDispatcher` registers with the stopper only when
+  `QT_BLOCK_EVENT_LOOPS_WHEN_SUSPENDED` is set (`androidjnimain.cpp`,
+  `qandroideventdispatcher.cpp`), and nothing here sets it. So the loop,
+  its timers and its sockets keep running while backgrounded, and adding
+  the metadata would do nothing. Do not set that variable. On a device:
+  background the app during a call, send a message from another
+  account, and check the notification arrives within a second or two.
+  `PushBridge.isForeground` treats a process held up only by a
+  foreground service (`IMPORTANCE_FOREGROUND_SERVICE`) as background, so
+  a push during a backgrounded call goes through the native `/sync`
+  path (or the generic notification) instead of being dropped.
 * **POST_NOTIFICATIONS denial.** The foreground service is not killed
   when the permission is denied on 13+ — the notification is suppressed
   and the service runs. That is the documented behaviour, unverified

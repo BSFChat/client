@@ -240,8 +240,8 @@
                  swallow the website's own pages.
 
                  BROWSABLE is what lets a browser hand the URL back to us
-                 (a loopback redirect can never arrive on Android: Qt stops
-                 servicing socket notifiers when the activity pauses). The
+                 (instead of a loopback redirect, which no App Link
+                 verification can protect). The
                  activity is singleTask, so the redirect resumes the running
                  instance and onNewIntent -> nativeOnNewIntent ->
                  UrlHandler::checkAndroidLaunchIntent picks it up.
