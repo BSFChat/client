@@ -1726,6 +1726,15 @@ bool VoiceEngine::relayIsLocalChoice() const { return icePolicy().localChoice();
 
 void VoiceEngine::setRelayMode(voice::RelayMode mode) {
     if (m_relayMode == mode) return;
+    // "Hide my IP" switched on DURING a call on a server with no relay:
+    // the same refusal a join gets, not a rebuild into peers that gather
+    // nothing (which ended the call silently, audit 3). The setting stays
+    // as chosen; it is the next join that will be refused with it.
+    if (m_running && mode == voice::RelayMode::RelayOnly && !canHideIpAddress()) {
+        qCWarning(logVoice, "refusing \"Hide my IP address\" mid-call: no TURN server");
+        emit error(voice::relayRefusalMessage(voice::RelaySource::UserSetting));
+        return;
+    }
     const bool wasRelay = icePolicy().relayOnly();
     m_relayMode = mode;
     if (icePolicy().relayOnly() != wasRelay)
