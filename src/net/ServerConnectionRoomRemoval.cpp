@@ -165,6 +165,12 @@ void ServerConnection::dropRoomsGoneForMe(const QStringList& roomIds, RoomGoneCa
             m_roomListModel->removeRoom(roomId);
             listChanged = true;
         }
+        // A left or deleted DM goes from the @ view too; it used to stay
+        // there for good (audit 3, #11).
+        if (m_directRooms.contains(roomId)) {
+            forgetDirectRoom(roomId);
+            listChanged = true;
+        }
     }
 
     if (voiceGone) leaveVoiceChannel();

@@ -1558,6 +1558,11 @@ public:
     // setup and extended by m.direct on sync.
     bsfchat::net::DirectRooms m_directRooms;
     void persistDirectRoom(const QString& roomId);
+    void forgetDirectRoom(const QString& roomId);
+    // (Re)load the DM map for the account now in m_userId; a no-op when it
+    // is the one already loaded.
+    void loadDirectRoomsForAccount();
+    QString m_directRoomsGroup;
     // The one way a room becomes a DM. Flags it in RoomListModel (which is
     // what keeps it out of this server's channels) and, when the peer is
     // known, records and persists it. `peer` may be empty: the isolation half

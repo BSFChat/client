@@ -196,22 +196,9 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     connect(m_client, &MatrixClient::mediaUploadProgress,
             this, &ServerConnection::mediaUploadProgress);
 
-    // Hydrate the DM map from QSettings so the "Direct Messages"
-    // section survives restart. Empty if first-run. Group is scoped
-    // by homeserver host so two servers don't clobber each other.
-    {
-        QSettings s;
-        s.beginGroup(QStringLiteral("dm/") + QUrl(serverUrl).host());
-        for (const auto& rid : s.childKeys()) {
-            if (m_directRooms.record(rid, s.value(rid).toString())) {
-                // Flag it in the model too, so a DM restored from the cached
-                // room snapshot is out of the channel tree from the first
-                // frame rather than from the first sync.
-                m_roomListModel->markDirect(rid);
-            }
-        }
-        s.endGroup();
-    }
+    // The DM map is hydrated per ACCOUNT once the user id is known
+    // (loadDirectRoomsForAccount), not here: the server address alone does
+    // not say whose conversations they are (audit 3, #11).
     m_messageModel->setDisplayNameCache(&m_userDisplayNames);
     m_memberListModel->setDisplayNameCache(&m_userDisplayNames);
     m_messageModel->setAccessTokenSource(&m_accessToken);
@@ -1164,6 +1151,7 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
     m_deviceId = deviceId;
     m_displayName = displayName;
     m_client->setAccessToken(accessToken);
+    loadDirectRoomsForAccount();
 
     // A restored entry with no token is one whose token the homeserver
     // already rejected — ServerManager blanks the stored copy on expiry so a
@@ -1235,6 +1223,7 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
             const bool displayNameWasId = (m_displayName == m_userId
                                            || m_displayName == localpartOf(m_userId));
             m_userId = canonicalId;
+            loadDirectRoomsForAccount();
             if (displayNameWasId) {
                 m_displayName = canonicalId;
                 emit displayNameChanged();
@@ -1303,6 +1292,7 @@ void ServerConnection::applyLoginResponse(const bsfchat::LoginResponse& resp)
     const bool switchedAccount = !previousUserId.isEmpty() && newUserId != previousUserId;
 
     m_userId = newUserId;
+    loadDirectRoomsForAccount();
     m_accessToken = QString::fromStdString(resp.access_token);
     m_deviceId = QString::fromStdString(resp.device_id);
     // Only on a first login. Overwriting it on re-auth would replace a real
@@ -1377,6 +1367,7 @@ void ServerConnection::registerUser(const QString& username, const QString& pass
             m_accessToken = QString::fromStdString(resp.access_token);
             m_deviceId = QString::fromStdString(resp.device_id);
             m_displayName = m_userId;
+            loadDirectRoomsForAccount();
             m_client->setAccessToken(m_accessToken);
             m_connected = true;
             m_connectionStatus = 1;
@@ -1428,6 +1419,12 @@ void ServerConnection::forgetLocalData()
     m_cache->close();
     m_cacheWired = false;
     LocalCache::removeFilesFor(m_userId, m_serverUrl);
+    // And this account's DM list (audit 3, #11): it outlived sign-out and was
+    // shown to whoever signed in next.
+    const QString dmGroup = bsfchat::net::directRoomsSettingsGroup(m_serverUrl, m_userId);
+    if (!dmGroup.isEmpty()) QSettings().remove(dmGroup);
+    m_directRooms.clear();
+    m_directRoomsGroup.clear();
     // And the media it served: downloaded attachments and videos are cached
     // per server origin (C2-7). Both the saved address and the homeserver
     // .well-known pointed at, since media URLs are built from either.
@@ -5851,17 +5848,54 @@ void ServerConnection::setSelfStatusMessage(const QString& msg)
 // Which rooms are DMs comes from the server's m.direct (processSyncResponse)
 // and from our own creates, and is mirrored into a QSettings group so every
 // reload has its DM list before the first sync answers — and at all, against
-// a server that predates m.direct.
-static QString dmSettingsGroup(const QString& serverUrl) {
-    return QStringLiteral("dm/") + QUrl(serverUrl).host();
-}
-
+// a server that predates m.direct. One group per account
+// (directRoomsSettingsGroup).
 void ServerConnection::persistDirectRoom(const QString& roomId)
 {
+    const QString group = bsfchat::net::directRoomsSettingsGroup(m_serverUrl, m_userId);
+    if (group.isEmpty()) return;
     QSettings s;
-    s.beginGroup(dmSettingsGroup(m_serverUrl));
+    s.beginGroup(group);
     s.setValue(roomId, m_directRooms.peerOf(roomId));
     s.endGroup();
+}
+
+void ServerConnection::forgetDirectRoom(const QString& roomId)
+{
+    if (!m_directRooms.remove(roomId)) return;
+    const QString group = bsfchat::net::directRoomsSettingsGroup(m_serverUrl, m_userId);
+    if (group.isEmpty()) return;
+    QSettings s;
+    s.beginGroup(group);
+    s.remove(roomId);
+    s.endGroup();
+}
+
+void ServerConnection::loadDirectRoomsForAccount()
+{
+    const QString group = bsfchat::net::directRoomsSettingsGroup(m_serverUrl, m_userId);
+    if (group == m_directRoomsGroup) return;
+    // A different account (or none): nothing of the previous one's list may
+    // be shown to this one.
+    m_directRooms.clear();
+    m_directRoomsGroup = group;
+    QSettings s;
+    // The pre-account group ("dm/<host>") was shared by every account on the
+    // host; it cannot be attributed, and m.direct / is_direct rebuild it.
+    s.remove(QStringLiteral("dm/") + QUrl(m_serverUrl).host());
+    if (!group.isEmpty()) {
+        s.beginGroup(group);
+        for (const auto& rid : s.childKeys()) {
+            if (m_directRooms.record(rid, s.value(rid).toString())) {
+                // Flag it in the model too, so a DM restored from the cached
+                // room snapshot is out of the channel tree from the first
+                // frame rather than from the first sync.
+                m_roomListModel->markDirect(rid);
+            }
+        }
+        s.endGroup();
+    }
+    refreshDirectRooms();
 }
 
 void ServerConnection::recordDirectRoom(const QString& roomId, const QString& peer)

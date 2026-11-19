@@ -425,6 +425,47 @@ private slots:
         QVERIFY(m.isDirect("!dm:x"));
         QVERIFY(m.getCategoriesWithChannels().isEmpty());
     }
+
+    // ── audit 3, #11: DMs leaked between accounts and never went away ──
+
+    void theSettingsGroupIsPerAccount()
+    {
+        using bsfchat::net::directRoomsSettingsGroup;
+        const QString a = directRoomsSettingsGroup(QStringLiteral("https://chat.example"),
+                                                   QStringLiteral("@alice:chat.example"));
+        const QString b = directRoomsSettingsGroup(QStringLiteral("https://chat.example"),
+                                                   QStringLiteral("@bob:chat.example"));
+        const QString c = directRoomsSettingsGroup(QStringLiteral("https://chat.example:8448"),
+                                                   QStringLiteral("@alice:chat.example"));
+        QVERIFY(!a.isEmpty());
+        QVERIFY(a != b);
+        QVERIFY(a != c);
+        // Exactly two separators: "dm2/<server>/<user>". Nothing in either
+        // part may open a nested group.
+        QCOMPARE(a.count(QLatin1Char('/')), 2);
+        QVERIFY(directRoomsSettingsGroup(QStringLiteral("https://x"), QString()).isEmpty());
+    }
+
+    void aGoneRoomStopsBeingADm()
+    {
+        bsfchat::net::DirectRooms dm;
+        dm.record(QStringLiteral("!dm:h"), QStringLiteral("@bob:h"));
+        QVERIFY(dm.remove(QStringLiteral("!dm:h")));
+        QVERIFY(!dm.contains(QStringLiteral("!dm:h")));
+        QVERIFY(!dm.remove(QStringLiteral("!dm:h")));
+        QVERIFY(dm.roomWith(QStringLiteral("@bob:h"), [](const QString&) { return true; })
+                    .isEmpty());
+    }
+
+    void clearForgetsPeersAndInFlightCreates()
+    {
+        bsfchat::net::DirectRooms dm;
+        dm.record(QStringLiteral("!dm:h"), QStringLiteral("@bob:h"));
+        QVERIFY(dm.beginCreate(QStringLiteral("@carol:h")));
+        dm.clear();
+        QVERIFY(dm.peers().isEmpty());
+        QVERIFY(!dm.isCreating(QStringLiteral("@carol:h")));
+    }
 };
 
 QTEST_MAIN(TestDirectRooms)

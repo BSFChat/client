@@ -4,6 +4,7 @@
 #include <QSet>
 #include <QString>
 #include <QStringList>
+#include <QUrl>
 
 #include <map>
 #include <string>
@@ -92,12 +93,35 @@ public:
         return true;
     }
     void endCreate(const QString& peer) { m_creating.remove(peer); }
+
+    // The room is gone for this account (left, kicked, deleted): it stops
+    // being anybody's DM here, or the @ view lists it for good (audit 3, #11).
+    bool remove(const QString& roomId) { return m_peers.remove(roomId) > 0; }
+    // Another account now owns this map: nothing of the last one carries over.
+    void clear()
+    {
+        m_peers.clear();
+        m_creating.clear();
+    }
     bool isCreating(const QString& peer) const { return m_creating.contains(peer); }
 
 private:
     QMap<QString, QString> m_peers;   // roomId -> peer user id
     QSet<QString> m_creating;         // peers with a /createRoom outstanding
 };
+
+// The QSettings group a DM map is persisted under: one per ACCOUNT, i.e.
+// server address plus user id. It used to be "dm/<host>", so two accounts on
+// one server, or a sign-out and a sign-in as somebody else, shared one list
+// and the second account was shown the first's conversations (audit 3, #11).
+// Both parts are percent-encoded so neither can introduce a group separator.
+inline QString directRoomsSettingsGroup(const QString& serverUrl, const QString& userId)
+{
+    if (serverUrl.isEmpty() || userId.isEmpty()) return {};
+    return QStringLiteral("dm2/")
+         + QString::fromLatin1(QUrl::toPercentEncoding(serverUrl)) + QLatin1Char('/')
+         + QString::fromLatin1(QUrl::toPercentEncoding(userId));
+}
 
 // Who the DM is with, according to one m.room.member event that carries
 // `is_direct`. Empty when this particular event cannot say.
