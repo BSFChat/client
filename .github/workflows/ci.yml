@@ -1936,6 +1936,22 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="${{ steps.profile.outputs.uuid }}" \
             OTHER_CODE_SIGN_FLAGS="--keychain $IOS_KEYCHAIN_PATH"
 
+      # uploadSymbols (ios/ExportOptions.plist.in) silently uploads nothing
+      # when the archive has no dSYM, and Apple's "Upload Symbols Failed"
+      # mail is the only sign. CMakeLists.txt sets dwarf-with-dsym for
+      # Release; fail here if that ever stops producing one.
+      - name: Verify the archive carries a dSYM
+        if: steps.profile.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          DSYM="$RUNNER_TEMP/BSFChat.xcarchive/dSYMs/bsfchat-app.app.dSYM"
+          if [ ! -d "$DSYM" ]; then
+            echo "::error::No app dSYM in the archive; App Store Connect could not symbolicate crashes."
+            ls -la "$RUNNER_TEMP/BSFChat.xcarchive/dSYMs" || true
+            exit 1
+          fi
+          dwarfdump --uuid "$DSYM"
+
       # === The loud part ===
       #
       # An archive signed by the wrong certificate is not a cosmetic

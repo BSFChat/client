@@ -23,6 +23,23 @@ if(IOS AND (NOT CMAKE_OSX_DEPLOYMENT_TARGET
     set(CMAKE_OSX_DEPLOYMENT_TARGET "${BSFCHAT_IOS_MIN_VERSION}")
 endif()
 
+# iOS dSYMs, so App Store Connect can symbolicate TestFlight and store crash
+# reports (uploadSymbols in ios/ExportOptions.plist.in needs something to
+# upload). CMake's Xcode generator derives GCC_GENERATE_DEBUGGING_SYMBOLS from
+# "-g" in the config flags, and Release has none, so the archive used to carry
+# no debug info at all. Both settings are set here, before any target exists,
+# so the app target and every static library linked into it (our own and
+# FetchContent's) compile with debug info; dsymutil runs once at the app link,
+# and the archive strips the binary afterwards as usual. Debug keeps plain
+# dwarf (no dSYM step on every incremental build).
+if(IOS)
+    foreach(_cfg Release RelWithDebInfo MinSizeRel)
+        set("CMAKE_XCODE_ATTRIBUTE_GCC_GENERATE_DEBUGGING_SYMBOLS[variant=${_cfg}]" "YES")
+        set("CMAKE_XCODE_ATTRIBUTE_DEBUG_INFORMATION_FORMAT[variant=${_cfg}]" "dwarf-with-dsym")
+    endforeach()
+    set("CMAKE_XCODE_ATTRIBUTE_DEBUG_INFORMATION_FORMAT[variant=Debug]" "dwarf")
+endif()
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Ccache.cmake)
 
 set(CMAKE_CXX_STANDARD 20)
