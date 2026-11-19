@@ -75,7 +75,36 @@ Popup {
                             name: textChannels[k].displayName });
             }
         }
+        // Direct messages are destinations too (they were missing).
+        var dms = serverManager.activeServer.directRooms
+            ? serverManager.activeServer.directRooms() : [];
+        if (dms && dms.length > 0) {
+            out.push({ type: "cat", name: qsTr("Direct messages") });
+            for (var d = 0; d < dms.length; ++d) {
+                out.push({ type: "dm", roomId: dms[d].roomId,
+                           name: dms[d].peerDisplayName || dms[d].peerId || dms[d].roomId });
+            }
+        }
         _rows = out;
+    }
+
+    function _forwardTo(roomId) {
+        if (serverManager.activeServer && forwardDialog.sourceEventId !== "" && roomId)
+            serverManager.activeServer.forwardMessage(forwardDialog.sourceEventId, roomId);
+        forwardDialog.close();
+    }
+    // Keyboard: the current row skips category headers.
+    function _step(delta) {
+        var i = channelList.currentIndex;
+        for (var n = 0; n < _rows.length; ++n) {
+            i += delta;
+            if (i < 0 || i >= _rows.length) return;
+            if (_rows[i].type !== "cat") { channelList.currentIndex = i; return; }
+        }
+    }
+    function _firstTarget() {
+        for (var i = 0; i < _rows.length; ++i) if (_rows[i].type !== "cat") return i;
+        return -1;
     }
 
     onAboutToShow: _rebuildRows()
@@ -83,7 +112,10 @@ Popup {
     // §9. There is no field here; the channel list is the whole decision, so
     // it takes focus. aboutToShow is too early — the content item is not
     // visible yet — hence a separate onOpened.
-    onOpened: channelList.forceActiveFocus()
+    onOpened: {
+        channelList.currentIndex = _firstTarget();
+        channelList.forceActiveFocus();
+    }
 
     // On the Popup, which Qt warns about and supports anyway — see
     // docs/accessibility.md §11 for why this is the right place and why
@@ -142,7 +174,9 @@ Popup {
                     Text {
                         textFormat: Text.PlainText
                         text: forwardDialog.sourceSenderName !== ""
-                              ? forwardDialog.sourceSenderName : "unknown"
+                              ? forwardDialog.sourceSenderName : qsTr("unknown")
+                        elide: Text.ElideRight
+                        Layout.fillWidth: true
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm
                         font.weight: Theme.fontWeight.semibold
@@ -164,7 +198,7 @@ Popup {
         }
 
         Text {
-            text: "DESTINATION CHANNEL"
+            text: qsTr("DESTINATION")
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.xs
             font.weight: Theme.fontWeight.semibold
@@ -185,10 +219,21 @@ Popup {
             ScrollBar.vertical: ThemedScrollBar {}
             model: forwardDialog._rows
             spacing: 1
+            keyNavigationEnabled: false
+            Keys.onDownPressed: forwardDialog._step(1)
+            Keys.onUpPressed: forwardDialog._step(-1)
+            Keys.onReturnPressed: _activateCurrent()
+            Keys.onEnterPressed: _activateCurrent()
+            Keys.onSpacePressed: _activateCurrent()
+            function _activateCurrent() {
+                var r = forwardDialog._rows[currentIndex];
+                if (r && r.type !== "cat") forwardDialog._forwardTo(r.roomId);
+            }
 
             delegate: Loader {
                 width: channelList.width
                 property var row: modelData
+                property bool isCurrent: ListView.isCurrentItem
                 sourceComponent: row.type === "cat" ? categoryHeaderComponent
                                                     : channelRowComponent
             }
@@ -217,7 +262,9 @@ Popup {
                 Rectangle {
                     height: 32
                     radius: Theme.r1
-                    color: chanHover.containsMouse ? Theme.bg3 : "transparent"
+                    color: chanHover.containsMouse || isCurrent ? Theme.bg3 : "transparent"
+                    border.width: isCurrent && channelList.activeFocus ? 1 : 0
+                    border.color: Theme.accent
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
                     // The row is the accessible node, not the MouseArea
@@ -225,14 +272,7 @@ Popup {
                     // the visual item (§2). Same action as onClicked below.
                     Accessible.role: Accessible.ListItem
                     Accessible.name: qsTr("Forward to %1").arg(row.name)
-                    Accessible.onPressAction: {
-                        if (serverManager.activeServer
-                            && forwardDialog.sourceEventId !== "") {
-                            serverManager.activeServer.forwardMessage(
-                                forwardDialog.sourceEventId, row.roomId);
-                        }
-                        forwardDialog.close();
-                    }
+                    Accessible.onPressAction: forwardDialog._forwardTo(row.roomId)
 
                     RowLayout {
                         anchors.fill: parent
@@ -241,7 +281,7 @@ Popup {
                         spacing: Theme.sp.s3
 
                         Icon {
-                            name: "hash"
+                            name: row.type === "dm" ? "at" : "hash"
                             size: 14
                             color: chanHover.containsMouse ? Theme.accent : Theme.fg2
                         }
@@ -264,14 +304,7 @@ Popup {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            if (serverManager.activeServer
-                                && forwardDialog.sourceEventId !== "") {
-                                serverManager.activeServer.forwardMessage(
-                                    forwardDialog.sourceEventId, row.roomId);
-                            }
-                            forwardDialog.close();
-                        }
+                        onClicked: forwardDialog._forwardTo(row.roomId)
                     }
                 }
             }
