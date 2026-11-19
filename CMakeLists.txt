@@ -1418,6 +1418,7 @@ qt_add_qml_module(bsfchat-lib
         # instead of a C++ transcription of them.
         qml/js/UploadTally.js
         qml/js/SearchHighlight.js
+        qml/js/LinkExtract.js
         # Row + closed-field label resolution for ThemedComboBox: the one
         # place that knows textRole does not resolve against a QJsonArray
         # Q_PROPERTY (blank Role-overrides dropdown) and that the older

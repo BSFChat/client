@@ -89,6 +89,10 @@ public:
     // "Show link previews". Turning it off drops the queue (resolving each
     // queued URL as Empty) and makes request() a no-op; in-flight replies
     // still land in the cache, which is harmless.
+    // Emits enabledChanged, which is what lets a card that was hidden while
+    // the setting was off ask again once it is back on: QML used to see the
+    // setting flip before this cache did, request(), get a no-op, and record
+    // the link as having no preview.
     void setEnabled(bool enabled);
     bool enabled() const { return m_enabled; }
 
@@ -130,6 +134,7 @@ signals:
     // The outcome for `url` changed; re-read state()/preview().
     void resolved(QString url);
     void supportedChanged();
+    void enabledChanged();
 
 private:
     struct Entry {

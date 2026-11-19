@@ -124,10 +124,12 @@ void LinkPreviewCache::setEnabled(bool enabled)
 {
     if (m_enabled == enabled) return;
     m_enabled = enabled;
-    if (enabled) return;
-    const QStringList dropped = m_queue;
-    m_queue.clear();
-    for (const QString& url : dropped) emit resolved(url);
+    if (!enabled) {
+        const QStringList dropped = m_queue;
+        m_queue.clear();
+        for (const QString& url : dropped) emit resolved(url);
+    }
+    emit enabledChanged();
 }
 
 LinkPreviewCache::State LinkPreviewCache::state(const QString& url) const

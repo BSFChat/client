@@ -276,6 +276,8 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             this, &ServerConnection::linkPreviewResolved);
     connect(m_linkPreviews, &bsfchat::client::LinkPreviewCache::supportedChanged,
             this, &ServerConnection::linkPreviewsSupportedChanged);
+    connect(m_linkPreviews, &bsfchat::client::LinkPreviewCache::enabledChanged,
+            this, &ServerConnection::linkPreviewsEnabledChanged);
 
     m_botAdminModel = new BotAdminModel(this);
     m_botAdminModel->hooks.listBots = [this]() { m_client->listBots(); };
@@ -4516,6 +4518,11 @@ QVariantMap ServerConnection::linkPreview(const QString& url) const
 bool ServerConnection::linkPreviewsSupported() const
 {
     return m_linkPreviews->supported();
+}
+
+bool ServerConnection::linkPreviewsEnabled() const
+{
+    return m_linkPreviews->enabled();
 }
 
 void ServerConnection::openMediaExternally(const QString& mxcUri, bool confirmed,

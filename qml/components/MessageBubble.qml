@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import QtQuick.Window
 import BSFChat
 import "../js/PlaybackMath.js" as PlaybackMath
+import "../js/LinkExtract.js" as LinkExtract
 
 Item {
     id: bubble
@@ -260,23 +261,9 @@ Item {
         // video) already carry their own preview chrome; a URL buried
         // in an image caption isn't worth fetching.
         if (bubble.msgtype !== "m.text") return [];
-        if (!bubble.body) return [];
-        // Match http(s) URLs anywhere in the body. Stops at whitespace
-        // or closing punctuation commonly seen at the end of a prose
-        // sentence (`.`, `)`, `]`, `!`, `?`, `,`, `"`, `'`).
-        var re = /\bhttps?:\/\/[^\s<>"'()\[\]]+[^\s<>"'()\[\].,!?]/gi;
-        var matches = bubble.body.match(re);
-        if (!matches) return [];
-        // Dedupe + cap.
-        var seen = {};
-        var out = [];
-        for (var i = 0; i < matches.length && out.length < 2; i++) {
-            var u = matches[i];
-            if (seen[u]) continue;
-            seen[u] = true;
-            out.push(u);
-        }
-        return out;
+        // Balanced parentheses stay in the URL (wiki links), prose
+        // punctuation at the end does not — see js/LinkExtract.js.
+        return LinkExtract.previewUrls(bubble.body, 2);
     }
 
     implicitHeight: contentLayout.implicitHeight + (showSender ? Theme.sp.s7 : 2)

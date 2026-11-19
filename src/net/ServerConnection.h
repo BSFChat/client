@@ -84,6 +84,10 @@ class ServerConnection : public QObject {
     // endpoint". Previews are then off for the rest of the session — there is
     // no client-side fallback, by design (audit Q-S4).
     Q_PROPERTY(bool linkPreviewsSupported READ linkPreviewsSupported NOTIFY linkPreviewsSupportedChanged)
+    // The cache's own enabled state (follows "Show link previews"). Cards
+    // bind to this, not to the setting, so they re-request only once the
+    // cache will actually fetch.
+    Q_PROPERTY(bool linkPreviewsEnabled READ linkPreviewsEnabled NOTIFY linkPreviewsEnabledChanged)
     Q_PROPERTY(QString userId READ userId NOTIFY userIdChanged)
     // The composer's character... BYTE budget. See messageByteLength() below
     // for why the composer has to count in bytes, and Constants.h for why the
@@ -1135,6 +1139,7 @@ public:
     Q_INVOKABLE bool requestLinkPreview(const QString& url);
     Q_INVOKABLE QVariantMap linkPreview(const QString& url) const;
     bool linkPreviewsSupported() const;
+    bool linkPreviewsEnabled() const;
 
 signals:
     // An edit's PUT failed; the row is back to its previous text. `body`
@@ -1142,6 +1147,7 @@ signals:
     void editSendFailed(const QString& eventId, const QString& body);
     void linkPreviewResolved(QString url);
     void linkPreviewsSupportedChanged();
+    void linkPreviewsEnabledChanged();
     void displayNameChanged();
     void serverNameChanged();
     void serverAvatarUrlChanged();
