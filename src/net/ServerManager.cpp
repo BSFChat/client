@@ -45,6 +45,12 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
     });
     connect(this, &ServerManager::serverRemoved,
             this, &ServerManager::voiceServerChanged);
+    connect(this, &ServerManager::serverRemoved,
+            this, &ServerManager::callServerChanged);
+    connect(this, &ServerManager::callServerChanged,
+            this, &ServerManager::voiceTargetChanged);
+    connect(this, &ServerManager::activeServerChanged,
+            this, &ServerManager::voiceTargetChanged);
     // Sign-ins finished after process death (Android; M2-5). Wired before
     // anything can deliver a launch intent.
     connect(IdentityClient::recovery(), &IdentityRecovery::loginRecovered,
@@ -664,6 +670,26 @@ ServerConnection* ServerManager::voiceServer() const
     return nullptr;
 }
 
+ServerConnection* ServerManager::callServer() const
+{
+    if (auto* vs = voiceServer()) return vs;
+    for (auto* conn : m_roster.connections()) {
+        if (conn && conn->voiceConnecting()) return conn;
+    }
+    return nullptr;
+}
+
+void ServerManager::showCall()
+{
+    ServerConnection* conn = callServer();
+    if (!conn) return;
+    const int index = m_roster.indexOf(conn);
+    if (index < 0) return;
+    if (m_viewingDms) setViewingDms(false);
+    if (index != activeServerIndex()) setActiveServer(index);
+    conn->showVoiceRoom();
+}
+
 void ServerManager::configurePushToTalk(bool enabled, const QString& sequence)
 {
     m_pttKeys->configure(enabled, sequence);
@@ -796,6 +822,14 @@ void ServerManager::wireConnection(ServerConnection* conn)
 
     connect(conn, &ServerConnection::activeVoiceRoomIdChanged,
             this, &ServerManager::voiceServerChanged);
+    connect(conn, &ServerConnection::activeVoiceRoomIdChanged,
+            this, &ServerManager::callServerChanged);
+    connect(conn, &ServerConnection::voiceConnectingChanged,
+            this, &ServerManager::callServerChanged);
+    connect(conn, &ServerConnection::voiceErrorChanged, this, [this, conn]() {
+        const QString message = conn->voiceError();
+        if (!message.isEmpty()) emit voiceErrorRaised(conn->serverName(), message);
+    });
 
     // One call at a time, app-wide (V2-4). Joining voice on server B used
     // to leave server A's call running: two VoiceEngines, two microphones

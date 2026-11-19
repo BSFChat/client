@@ -2574,54 +2574,55 @@ Rectangle {
                 }
 
                 // Mute / deafen / settings trio (SPEC §3.2). Bound to the
-                // active ServerConnection so toggling here tracks the
-                // state shown in the VoiceDock and vice-versa. Hidden
+                // server holding the call (else the one on screen, whose
+                // toggles carry into its next join), the same one the
+                // VoiceDock acts on, so the two always agree. Hidden
                 // on mobile since voice is off there and the buttons
                 // eat precious horizontal space that the user's
                 // display name + MXID need (otherwise they elide to
                 // "@j…" / "@jo…" in the 272 px channel drawer).
                 FooterButton {
                     Layout.alignment: Qt.AlignVCenter
-                    icon: serverManager.activeServer
-                          && serverManager.activeServer.voiceMuted ? "mic-off" : "mic"
-                    toggled: serverManager.activeServer
-                             && serverManager.activeServer.voiceMuted
+                    icon: serverManager.voiceTarget
+                          && serverManager.voiceTarget.voiceMuted ? "mic-off" : "mic"
+                    toggled: serverManager.voiceTarget
+                             && serverManager.voiceTarget.voiceMuted
                     tooltip: toggled ? "Unmute" : "Mute microphone"
                     Accessible.role: Accessible.CheckBox
                     Accessible.checkable: true
-                    Accessible.checked: !!serverManager.activeServer
-                                        && serverManager.activeServer.voiceMuted
+                    Accessible.checked: !!serverManager.voiceTarget
+                                        && serverManager.voiceTarget.voiceMuted
                     Accessible.name: qsTr("Microphone")
-                    Accessible.description: serverManager.activeServer
-                                            && serverManager.activeServer.voiceMuted
+                    Accessible.description: serverManager.voiceTarget
+                                            && serverManager.voiceTarget.voiceMuted
                         ? qsTr("Currently muted. Activate to unmute.")
                         : qsTr("Currently live. Activate to mute.")
-                    Accessible.onToggleAction: if (serverManager.activeServer)
-                                                   serverManager.activeServer.toggleMute()
-                    onClicked: if (serverManager.activeServer)
-                                   serverManager.activeServer.toggleMute()
+                    Accessible.onToggleAction: if (serverManager.voiceTarget)
+                                                   serverManager.voiceTarget.toggleMute()
+                    onClicked: if (serverManager.voiceTarget)
+                                   serverManager.voiceTarget.toggleMute()
                 }
                 FooterButton {
                     Layout.alignment: Qt.AlignVCenter
-                    icon: serverManager.activeServer
-                          && serverManager.activeServer.voiceDeafened
+                    icon: serverManager.voiceTarget
+                          && serverManager.voiceTarget.voiceDeafened
                           ? "headphones-off" : "headphones"
-                    toggled: serverManager.activeServer
-                             && serverManager.activeServer.voiceDeafened
+                    toggled: serverManager.voiceTarget
+                             && serverManager.voiceTarget.voiceDeafened
                     tooltip: toggled ? "Undeafen" : "Deafen headphones"
                     Accessible.role: Accessible.CheckBox
                     Accessible.checkable: true
-                    Accessible.checked: !!serverManager.activeServer
-                                        && serverManager.activeServer.voiceDeafened
+                    Accessible.checked: !!serverManager.voiceTarget
+                                        && serverManager.voiceTarget.voiceDeafened
                     Accessible.name: qsTr("Headphones")
-                    Accessible.description: serverManager.activeServer
-                                            && serverManager.activeServer.voiceDeafened
+                    Accessible.description: serverManager.voiceTarget
+                                            && serverManager.voiceTarget.voiceDeafened
                         ? qsTr("Currently deafened. Activate to hear others again.")
                         : qsTr("Currently hearing others. Activate to deafen.")
-                    Accessible.onToggleAction: if (serverManager.activeServer)
-                                                   serverManager.activeServer.toggleDeafen()
-                    onClicked: if (serverManager.activeServer)
-                                   serverManager.activeServer.toggleDeafen()
+                    Accessible.onToggleAction: if (serverManager.voiceTarget)
+                                                   serverManager.voiceTarget.toggleDeafen()
+                    onClicked: if (serverManager.voiceTarget)
+                                   serverManager.voiceTarget.toggleDeafen()
                 }
                 FooterButton {
                     Layout.alignment: Qt.AlignVCenter

@@ -29,6 +29,13 @@ class ServerManager : public QObject {
     // must use this, not activeServer — they differ whenever the user
     // browses another server mid-call.
     Q_PROPERTY(ServerConnection* voiceServer READ voiceServer NOTIFY voiceServerChanged)
+    // The voice server, or else the server a join is under way on: what
+    // the dock, its buttons and the call toasts act on (the dock shows from
+    // the click, before the server has accepted the join).
+    Q_PROPERTY(ServerConnection* callServer READ callServer NOTIFY callServerChanged)
+    // callServer, else activeServer: what the sidebar's mute/deafen act on
+    // (outside a call they set the preference the next join starts with).
+    Q_PROPERTY(ServerConnection* voiceTarget READ voiceTarget NOTIFY voiceTargetChanged)
     Q_PROPERTY(int activeServerIndex READ activeServerIndex WRITE setActiveServer NOTIFY activeServerChanged)
     // "Direct Messages" sits at the top of the server rail as a
     // server-shaped destination, even though DMs are hosted per-
@@ -78,6 +85,15 @@ public:
     // pushing frames to A's engine regardless of which server has
     // sidebar focus.
     ServerConnection* voiceServer() const;
+    ServerConnection* callServer() const;
+    ServerConnection* voiceTarget() const
+    {
+        ServerConnection* c = callServer();
+        return c ? c : activeServer();
+    }
+    // "In call on <server>": make the call's server the active one and
+    // show its call view.
+    Q_INVOKABLE void showCall();
 
     // Push-to-talk (V2-2). QML calls configurePushToTalk with the voice
     // mode and key; the key's real press/release edges (PttKeyFilter)
@@ -265,6 +281,12 @@ public:
 signals:
     void activeServerChanged();
     void voiceServerChanged();
+    void callServerChanged();
+    void voiceTargetChanged();
+    // Any connection's voice error, whichever server is being browsed — a
+    // join refused on the call's server must not be toasted only when that
+    // server happens to be the active one. Already user-readable.
+    void voiceErrorRaised(const QString& serverName, const QString& message);
     void serverAdded(int index);
     void serverRemoved(int index);
     void loginError(const QString& serverUrl, const QString& error);

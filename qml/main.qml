@@ -573,6 +573,15 @@ ApplicationWindow {
         function onIdentitySessionEnded(reason) { toastWarn(reason); }
         // No OS keychain: sign-ins last until the app quits (ServerSecrets).
         function onCredentialsNotPersisted(message) { toastWarn(message); }
+        // Voice errors from EVERY connection: the call's server is often
+        // not the one being browsed, and its refusals used to go unseen.
+        // Named by server when that is not the one on screen.
+        function onVoiceErrorRaised(serverName, message) {
+            var s = serverManager.activeServer;
+            var here = s && s.serverName === serverName;
+            toastError(here || !serverName ? "Voice: " + message
+                                           : "Voice (" + serverName + "): " + message);
+        }
         function onLoginError(serverUrl, error) {
             // The dialog shows the error inline when it is up; toasting
             // the same string at the same moment is the duplicate surface
@@ -642,13 +651,6 @@ ApplicationWindow {
         // the channel is muted.
         function onNotifyLevelFailed(roomId, error) {
             toastError("Couldn't change notification settings: " + error);
-        }
-        function onVoiceErrorChanged() {
-            // Fires on set AND on the 8s auto-clear — only toast the
-            // non-empty transitions.
-            var s = serverManager.activeServer;
-            if (s && s.voiceError && s.voiceError.length > 0)
-                toastError("Voice: " + s.voiceError);
         }
         function onStateWriteFailed(kind, status, error) {
             // ServerSettings has its own inline banner for the cases

@@ -39,9 +39,18 @@ Rectangle {
     implicitHeight: visible ? Theme.layout.voiceDockH : 0
     // From the click, not from the server's answer: voiceConnecting is set
     // the moment the user asks to join, so the dock itself acknowledges it.
-    visible: serverManager.activeServer
-             && (serverManager.activeServer.inVoiceChannel
-                 || serverManager.activeServer.voiceConnecting)
+    visible: dock.call
+             && (dock.call.inVoiceChannel
+                 || dock.call.voiceConnecting)
+
+    // The server that holds the call, NOT the one being browsed: every
+    // control below acts on this (audit 3 — the dock used to follow
+    // activeServer, so mute and leave hit whichever server was on screen).
+    readonly property var call: serverManager.callServer
+    // Browsing another server (or the DM list) mid-call: the identity
+    // line says where the call is and a click jumps back to it.
+    readonly property bool callElsewhere: !!call
+        && (call !== serverManager.activeServer || serverManager.viewingDms)
 
     // Top-edge divider.
     Rectangle {
@@ -203,8 +212,8 @@ Rectangle {
         Accessible.name: qsTr("Leave voice channel")
         Accessible.description: qsTr("Disconnect from the call")
         Accessible.onPressAction: leaveBtn.clicked()
-        onClicked: if (serverManager.activeServer)
-                       serverManager.activeServer.leaveVoiceChannel()
+        onClicked: if (dock.call)
+                       dock.call.leaveVoiceChannel()
     }
 
     RowLayout {
@@ -245,24 +254,27 @@ Rectangle {
             clip: true
             implicitHeight: leftClusterRow.implicitHeight + Theme.sp.s2 * 2
             radius: Theme.r1
-            color: leftClusterHover.containsMouse
-                   && !serverManager.activeServer.viewingVoiceRoom
+            color: leftClusterHover.containsMouse && dock.call
+                   && (dock.callElsewhere || !dock.call.viewingVoiceRoom)
                    ? Theme.bg2 : "transparent"
             Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
             MouseArea {
                 id: leftClusterHover
                 Accessible.role: Accessible.Button
-                Accessible.name: qsTr("Show the call")
+                Accessible.name: dock.callElsewhere
+                    ? qsTr("In call on %1").arg(dock.call.serverName)
+                    : qsTr("Show the call")
                 Accessible.description: qsTr("Switches the main area back to the voice room")
-                Accessible.onPressAction: if (serverManager.activeServer)
-                                              serverManager.activeServer.showVoiceRoom()
+                Accessible.onPressAction: serverManager.showCall()
                 anchors.fill: parent
                 hoverEnabled: true
-                cursorShape: !serverManager.activeServer.viewingVoiceRoom
+                cursorShape: dock.call
+                             && (dock.callElsewhere || !dock.call.viewingVoiceRoom)
                              ? Qt.PointingHandCursor : Qt.ArrowCursor
-                onClicked: if (serverManager.activeServer)
-                               serverManager.activeServer.showVoiceRoom()
+                // Switches to the call's server first when it is not the
+                // one on screen.
+                onClicked: serverManager.showCall()
             }
 
             RowLayout {
@@ -287,15 +299,15 @@ Rectangle {
                     // app (ServerRail / MemberList / UserSettings / profile
                     // card). We were still on the circular legacy here.
                     radius: Theme.r2
-                    color: Theme.senderColor(serverManager.activeServer
-                        ? (serverManager.activeServer.userId || "") : "")
+                    color: Theme.senderColor(dock.call
+                        ? (dock.call.userId || "") : "")
                     Text {
                         anchors.centerIn: parent
                         textFormat: Text.PlainText
                         text: {
-                            if (!serverManager.activeServer) return "?";
-                            var n = serverManager.activeServer.displayName
-                                 || serverManager.activeServer.userId;
+                            if (!dock.call) return "?";
+                            var n = dock.call.displayName
+                                 || dock.call.userId;
                             var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
                             return (stripped.length > 0
                                     ? stripped.charAt(0) : "?").toUpperCase();
@@ -321,8 +333,8 @@ Rectangle {
                         // am I in?" while you are off reading a text channel.
                         visible: !Theme.isMobile
                         textFormat: Text.PlainText
-                        text: serverManager.activeServer
-                              ? serverManager.activeServer.displayName : ""
+                        text: dock.call
+                              ? dock.call.displayName : ""
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.base
                         font.weight: Theme.fontWeight.semibold
@@ -338,8 +350,8 @@ Rectangle {
                     // Pulsing while connecting; gone once audio is running,
                     // which is the "you are in" moment (the chime plays then).
                     Rectangle {
-                        visible: !!serverManager.activeServer
-                                 && serverManager.activeServer.voiceConnecting
+                        visible: !!dock.call
+                                 && dock.call.voiceConnecting
                         width: 6; height: 6; radius: 3
                         color: Theme.accent
                         Layout.alignment: Qt.AlignVCenter
@@ -353,14 +365,25 @@ Rectangle {
                     Text {
                         textFormat: Text.PlainText
                         text: {
-                            var s = serverManager.activeServer;
+                            var s = dock.call;
                             if (!s) return "";
+                            var where = dock.callElsewhere && s.serverName
+                                ? (Theme.isMobile ? " · " : " on ") + s.serverName : "";
+                            // An established call whose audio dropped: say
+                            // so, rather than "Connecting to" a room the
+                            // user is already in.
+                            if (s.voiceReconnecting && s.activeVoiceRoomId) {
+                                var rn = s.roomListModel
+                                         ? s.roomListModel.roomDisplayName(s.activeVoiceRoomId)
+                                         : s.activeVoiceRoomId;
+                                return "Reconnecting… #" + rn + where;
+                            }
                             if (s.voiceConnecting) {
                                 var cn = s.roomListModel
                                          ? s.roomListModel.roomDisplayName(s.voiceConnectingRoomId)
                                          : s.voiceConnectingRoomId;
                                 return (Theme.isMobile ? "Connecting… #" : "Connecting to #") + cn
-                                       + (Theme.isMobile ? "" : "…");
+                                       + (Theme.isMobile ? "" : "…") + where;
                             }
                             if (!s.activeVoiceRoomId) return "";
                             var name = s.roomListModel
@@ -371,6 +394,8 @@ Rectangle {
                             // phone the dock is only ever visible while you
                             // ARE connected, so the preamble says nothing the
                             // dock's own presence has not already said.
+                            if (dock.callElsewhere)
+                                return "In call on " + s.serverName + " · #" + name;
                             return (Theme.isMobile ? "#" : "Connected to #") + name;
                         }
                         font.family: Theme.fontSans
@@ -402,8 +427,8 @@ Rectangle {
                     // could not simply be hidden on a phone — it had to be
                     // squashed to zero width instead, which in turn read to
                     // the touch-target scan as somebody sizing a 0 pt button.
-                    visible: serverManager.activeServer
-                             && serverManager.activeServer.voiceIpPrivacyBadge.length > 0
+                    visible: dock.call
+                             && dock.call.voiceIpPrivacyBadge.length > 0
                     // Icon-only on a phone. The badge's four words are what
                     // made it wide; the tap-to-open detail below carries the
                     // whole sentence either way, so the shield keeps its
@@ -419,12 +444,12 @@ Rectangle {
                     // "can the other people in this call see my IP
                     // address?" and it should not be behind a gesture.
                     Accessible.role: Accessible.StaticText
-                    Accessible.name: serverManager.activeServer
-                        ? (serverManager.activeServer.voiceIpPrivacyDetail.length > 0
+                    Accessible.name: dock.call
+                        ? (dock.call.voiceIpPrivacyDetail.length > 0
                             ? qsTr("%1. %2")
-                                .arg(serverManager.activeServer.voiceIpPrivacyBadge)
-                                .arg(serverManager.activeServer.voiceIpPrivacyDetail)
-                            : serverManager.activeServer.voiceIpPrivacyBadge)
+                                .arg(dock.call.voiceIpPrivacyBadge)
+                                .arg(dock.call.voiceIpPrivacyDetail)
+                            : dock.call.voiceIpPrivacyBadge)
                         : ""
                     implicitHeight: 20
                     radius: Theme.r1
@@ -448,8 +473,8 @@ Rectangle {
                             Accessible.ignored: true
                             visible: !Theme.isMobile
                             textFormat: Text.PlainText
-                            text: serverManager.activeServer
-                                ? serverManager.activeServer.voiceIpPrivacyBadge : ""
+                            text: dock.call
+                                ? dock.call.voiceIpPrivacyBadge : ""
                             font.family: Theme.fontSans
                             font.pixelSize: 10
                             font.weight: Theme.fontWeight.semibold
@@ -492,8 +517,8 @@ Rectangle {
                     PlainToolTip {
                         visible: (ipShieldHover.containsMouse
                                   || ipShieldPin.pinned) && text.length > 0
-                        text: serverManager.activeServer
-                            ? serverManager.activeServer.voiceIpPrivacyDetail : ""
+                        text: dock.call
+                            ? dock.call.voiceIpPrivacyDetail : ""
                         delay: 400
                         contentWidth: 320
                     }
@@ -529,8 +554,8 @@ Rectangle {
                 // tint is gone with it. It could only reach the fill, so
                 // the held button drew a red glyph on an accent
                 // background; DockButton now colours both.
-                active: serverManager.activeServer
-                        && serverManager.activeServer.pttPressed
+                active: dock.call
+                        && dock.call.pttPressed
                 tooltip: active ? "Transmitting" : "Hold to talk"
                 // Held, not pressed: `checked` here means "your voice is
                 // going out right now", which is the single fact this
@@ -555,47 +580,47 @@ Rectangle {
 
             DockButton {
                 visible: !(appSettings && appSettings.voiceMode === "ptt")
-                icon: serverManager.activeServer
-                      && serverManager.activeServer.voiceMuted ? "mic-off" : "mic"
-                toggled: serverManager.activeServer
-                         && serverManager.activeServer.voiceMuted
+                icon: dock.call
+                      && dock.call.voiceMuted ? "mic-off" : "mic"
+                toggled: dock.call
+                         && dock.call.voiceMuted
                 tooltip: toggled ? "Unmute" : "Mute"
                 // "Mute, checked" means muted. The noun stays put and
                 // the state is the state — the tooltip's Mute/Unmute
                 // flip is right for a hover label and wrong for a name.
                 Accessible.name: qsTr("Mute")
                 Accessible.checkable: true
-                Accessible.checked: serverManager.activeServer
-                                    && serverManager.activeServer.voiceMuted
-                Accessible.description: (serverManager.activeServer
-                                         && serverManager.activeServer.voiceMuted)
+                Accessible.checked: dock.call
+                                    && dock.call.voiceMuted
+                Accessible.description: (dock.call
+                                         && dock.call.voiceMuted)
                     ? qsTr("Your microphone is off. Activate to turn it on.")
                     : qsTr("Your microphone is live. Activate to mute it.")
-                Accessible.onToggleAction: if (serverManager.activeServer)
-                                               serverManager.activeServer.toggleMute()
-                onClicked: if (serverManager.activeServer)
-                               serverManager.activeServer.toggleMute()
+                Accessible.onToggleAction: if (dock.call)
+                                               dock.call.toggleMute()
+                onClicked: if (dock.call)
+                               dock.call.toggleMute()
             }
 
             DockButton {
-                icon: serverManager.activeServer
-                      && serverManager.activeServer.voiceDeafened
+                icon: dock.call
+                      && dock.call.voiceDeafened
                       ? "headphones-off" : "headphones"
-                toggled: serverManager.activeServer
-                         && serverManager.activeServer.voiceDeafened
+                toggled: dock.call
+                         && dock.call.voiceDeafened
                 tooltip: toggled ? "Undeafen" : "Deafen"
                 Accessible.name: qsTr("Deafen")
                 Accessible.checkable: true
-                Accessible.checked: serverManager.activeServer
-                                    && serverManager.activeServer.voiceDeafened
-                Accessible.description: (serverManager.activeServer
-                                         && serverManager.activeServer.voiceDeafened)
+                Accessible.checked: dock.call
+                                    && dock.call.voiceDeafened
+                Accessible.description: (dock.call
+                                         && dock.call.voiceDeafened)
                     ? qsTr("You cannot hear the call and nobody can hear you. Activate to rejoin the audio.")
                     : qsTr("Activate to silence the call and mute yourself.")
-                Accessible.onToggleAction: if (serverManager.activeServer)
-                                               serverManager.activeServer.toggleDeafen()
-                onClicked: if (serverManager.activeServer)
-                               serverManager.activeServer.toggleDeafen()
+                Accessible.onToggleAction: if (dock.call)
+                                               dock.call.toggleDeafen()
+                onClicked: if (dock.call)
+                               dock.call.toggleDeafen()
             }
 
             // Screen-share + camera context properties only get set
@@ -788,12 +813,12 @@ Rectangle {
                     height: 10 + index * 2
                     radius: 1.5
                     readonly property real level:
-                        serverManager.activeServer
-                        ? serverManager.activeServer.micLevel : 0
+                        dock.call
+                        ? dock.call.micLevel : 0
                     readonly property real threshold: (index + 1) / 7
                     color: {
-                        if (serverManager.activeServer
-                            && serverManager.activeServer.micSilent) return Theme.danger;
+                        if (dock.call
+                            && dock.call.micSilent) return Theme.danger;
                         return level >= threshold ? Theme.accent : Theme.bg3;
                     }
                     Behavior on color { ColorAnimation { duration: 60 } }
