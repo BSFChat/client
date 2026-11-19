@@ -1121,6 +1121,16 @@ Rectangle {
                         }
                         console.warn("MessageView: target event not in loaded history:",
                                      eventId);
+                        // Say so rather than doing nothing: either the budget
+                        // ran out or the start of the room was reached.
+                        var w = messageListView.Window.window;
+                        if (w && w.toastInfo) {
+                            w.toastInfo(mm.hasMoreHistory
+                                ? qsTr("That message is too far back — open search to find it.")
+                                : qsTr("That message isn't in this channel any more."));
+                        }
+                        _jumpPendingEventId = "";
+                        _jumpAttemptsLeft = 10;
                         return false;
                     }
                     // Disable auto-scroll-to-bottom so the jump sticks even if
@@ -1210,8 +1220,16 @@ Rectangle {
                 function _kbMove(fromIdx, delta) {
                     var target = fromIdx + delta;
                     if (target < 0) {
+                        // A page jump from row 3 lands on row 0 first; only
+                        // a move FROM the top asks for more (it used to stall
+                        // on row 3 and load instead).
+                        if (fromIdx > 0) { _kbFocusIndex(0); return; }
                         // Off the top of what is loaded: ask for more, stay put.
                         _maybeLoadOlder();
+                        return;
+                    }
+                    if (target >= count && fromIdx < count - 1) {
+                        _kbFocusIndex(count - 1);
                         return;
                     }
                     if (target >= count) return;
