@@ -1607,12 +1607,23 @@ jobs:
       # and then failed at the compile step threw it away and paid for
       # it again next time. Saving inline, right after a successful
       # build, keeps it whatever the rest of the job does.
+      #
+      # The key also carries the deployment target (read from CMakeLists.txt,
+      # as the script does) and the Xcode build: either changing must rebuild,
+      # or a cached library built for another floor or SDK gets linked.
+      - name: OpenSSL cache key
+        id: openssl_key
+        run: |
+          MIN=$(sed -n 's/^set(BSFCHAT_IOS_MIN_VERSION "\([0-9.]*\)").*/\1/p' CMakeLists.txt | head -1)
+          XCB=$(xcodebuild -version | awk '/Build version/{print $3}')
+          echo "key=openssl-ios-device-ios${MIN}-xc${XCB}-${{ hashFiles('scripts/build-openssl-ios.sh') }}" >> "$GITHUB_OUTPUT"
+
       - name: Restore vendored OpenSSL for iOS
         id: openssl_cache
         uses: actions/cache/restore@v4
         with:
           path: deps/openssl-ios-device
-          key: openssl-ios-device-${{ hashFiles('scripts/build-openssl-ios.sh') }}
+          key: ${{ steps.openssl_key.outputs.key }}
 
       - name: Build vendored OpenSSL for iOS
         if: steps.openssl_cache.outputs.cache-hit != 'true'
@@ -1623,7 +1634,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: deps/openssl-ios-device
-          key: openssl-ios-device-${{ hashFiles('scripts/build-openssl-ios.sh') }}
+          key: ${{ steps.openssl_key.outputs.key }}
 
       # === iOS: Import the Apple Distribution certificate ===
       #

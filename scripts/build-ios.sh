@@ -62,10 +62,9 @@ COMMON_ARGS=(
     -Wno-dev
 )
 
-if [ ! -f "$OPENSSL_DIR/lib/libcrypto.a" ]; then
-    echo "Building OpenSSL for iOS ($TARGET)..."
-    ./scripts/build-openssl-ios.sh "$TARGET"
-fi
+# Always called: the script itself skips when the vendored build already
+# matches its OpenSSL version, deployment target and SDK.
+./scripts/build-openssl-ios.sh "$TARGET"
 # All four, not just the root hint: under the iOS toolchain CMake's
 # find_library is confined to the sysroot, so FindOpenSSL would search
 # $OPENSSL_DIR and still come up empty.
