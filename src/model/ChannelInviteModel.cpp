@@ -172,7 +172,16 @@ QString ChannelInviteModel::noticeFor(const QString& userId,
         return who + QStringLiteral(" is a bot, so it has joined ") + were
              + QStringLiteral(" already — no invite to accept.");
     }
-    return QStringLiteral("Added ") + who + QStringLiteral(" to ") + were
+    // Someone the client already saw joined there: the server wrote nothing
+    // (a writeless 200), so "Invited" would be untrue. Read from the cache as
+    // it was when the request went out, never decisive for sending.
+    if (m_pendingPriorMembership == QLatin1String("join")) {
+        return who + QStringLiteral(" is already in ") + were + QStringLiteral(".");
+    }
+    // Otherwise a person now holds an invite and is a member once they accept
+    // it, which invites can now be (audit 3, #6). "Added" read as if they were
+    // in already.
+    return QStringLiteral("Invited ") + who + QStringLiteral(" to ") + were
          + QStringLiteral(".");
 }
 
@@ -225,6 +234,7 @@ void ChannelInviteModel::invite(const QString& roomId, const QString& userId,
     }
 
     m_pendingRoomId = roomId;
+    m_pendingPriorMembership = hooks.membershipOf ? hooks.membershipOf(roomId, trimmed) : QString();
     setErrorText({});
     setBusy(true);
     hooks.invite(roomId, trimmed);
@@ -355,6 +365,7 @@ void ChannelInviteModel::onInvited(const QString& userId, const QString& roomNam
     setNoticeText(noticeFor(userId, roomName));
     if (!m_pendingRoomId.isEmpty()) emit memberAdded(m_pendingRoomId, userId);
     m_pendingRoomId.clear();
+    m_pendingPriorMembership.clear();
 }
 
 void ChannelInviteModel::onFailed(const QString& userId, const QString& roomName,
@@ -364,4 +375,5 @@ void ChannelInviteModel::onFailed(const QString& userId, const QString& roomName
     setNoticeText({});
     setErrorText(explainFailure(userId, roomName, status, message));
     m_pendingRoomId.clear();
+    m_pendingPriorMembership.clear();
 }

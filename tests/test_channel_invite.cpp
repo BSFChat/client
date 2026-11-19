@@ -289,6 +289,10 @@ private slots:
         QVERIFY(m.noticeText().contains(QStringLiteral("Bob")));
         QVERIFY2(!m.noticeText().contains(QStringLiteral("sees the invite")),
                  qPrintable(m.noticeText()));
+        QVERIFY2(!m.noticeText().startsWith(QStringLiteral("Invited")),
+                 qPrintable(m.noticeText()));
+        QVERIFY2(m.noticeText().contains(QStringLiteral("already in")),
+                 qPrintable(m.noticeText()));
 
         // A membership the client has NOT seen behaves identically; there is
         // no longer any path where the cache changes what happens.
@@ -391,6 +395,9 @@ private slots:
 
         QVERIFY(m.noticeText().contains(who));
         QVERIFY(m.noticeText().contains(QStringLiteral("#general")));
+        // A person holds an invite until they accept: not "Added".
+        QVERIFY2(m.noticeText().startsWith(QStringLiteral("Invited")),
+                 qPrintable(m.noticeText()));
         // Nothing about what happens next, because whatever it said would be
         // false for one of the three.
         for (const char* claim : {"sees the invite", "next time they connect",

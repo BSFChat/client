@@ -244,4 +244,7 @@ private:
     // The request in flight, so a reply can be phrased about the right target
     // even if the field has since been retyped.
     QString m_pendingRoomId;
+    // The target's cached membership in that room when the request went out,
+    // read before sync can turn it into "invite". Copy only (noticeFor).
+    QString m_pendingPriorMembership;
 };
