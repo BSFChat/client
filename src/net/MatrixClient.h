@@ -395,8 +395,11 @@ public:
     // "you typed a funny character".
     //
     // `nextBatch` is the opaque token from a previous page; empty for page one.
+    // `senders` narrows to those user ids (filter.senders; the server
+    // honours it).
     void searchMessages(const QString& searchTerm, int limit,
-                         const QString& nextBatch = QString());
+                         const QString& nextBatch = QString(),
+                         const QStringList& senders = {});
 
     // ── Per-room notification level ───────────────────────────────────────
     //

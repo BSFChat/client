@@ -1423,7 +1423,7 @@ void MatrixClient::sendReadMarker(const QString& roomId)
 }
 
 void MatrixClient::searchMessages(const QString& searchTerm, int limit,
-                                   const QString& nextBatch)
+                                   const QString& nextBatch, const QStringList& senders)
 {
     // No api_path constant for this yet — protocol/ is owned elsewhere, so the
     // path is spelled here rather than adding one.
@@ -1436,6 +1436,11 @@ void MatrixClient::searchMessages(const QString& searchTerm, int limit,
     json roomEvents;
     roomEvents["search_term"] = searchTerm.toStdString();
     roomEvents["filter"] = json{{"limit", limit}};
+    if (!senders.isEmpty()) {
+        json arr = json::array();
+        for (const auto& u : senders) arr.push_back(u.toStdString());
+        roomEvents["filter"]["senders"] = std::move(arr);
+    }
     body["search_categories"] = json{{"room_events", std::move(roomEvents)}};
     if (!nextBatch.isEmpty()) body["next_batch"] = nextBatch.toStdString();
 

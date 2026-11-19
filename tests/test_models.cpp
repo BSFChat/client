@@ -4463,6 +4463,18 @@ private slots:
         QVERIFY(model.roleNames().value(MessageModel::RevealedBodyRole) == "revealedBody");
     }
 
+    void testSearchQuerySplitsFromFilters()
+    {
+        using bsfchat::client::parseSearchQuery;
+        auto q = parseSearchQuery("deploy from:@alice:s.example notes FROM:bob");
+        QCOMPARE(q.term, QString("deploy notes"));
+        QCOMPARE(q.fromTokens, QStringList({"@alice:s.example", "bob"}));
+        // A bare "from:" is text, and a term-less query has an empty term.
+        QCOMPARE(parseSearchQuery("from: x").term, QString("from: x"));
+        QVERIFY(parseSearchQuery("from:bob").term.isEmpty());
+        QVERIFY(parseSearchQuery("plain").fromTokens.isEmpty());
+    }
+
     void testPinnedToEndIsMeasuredFromTheContentOrigin()
     {
         using bsfchat::client::isPinnedToEnd;

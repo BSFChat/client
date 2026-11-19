@@ -809,7 +809,19 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         }
         QVariantList rows;
         rows.reserve(resp.hits.size());
+        int dropped = 0;
         for (const auto& hit : resp.hits) {
+            // A from: name we couldn't resolve to a user: filter here.
+            if (!m_searchSenderNames.isEmpty()) {
+                const QString name = displayNameForSender(hit.sender);
+                const bool any = std::any_of(m_searchSenderNames.cbegin(),
+                                             m_searchSenderNames.cend(),
+                                             [&](const QString& n) {
+                    return name.contains(n, Qt::CaseInsensitive)
+                        || hit.sender.contains(n, Qt::CaseInsensitive);
+                });
+                if (!any) { ++dropped; continue; }
+            }
             QVariantMap row;
             row[QStringLiteral("eventId")] = hit.eventId;
             row[QStringLiteral("roomId")] = hit.roomId;
@@ -818,6 +830,8 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             // a result frequently isn't in the room currently on screen.
             row[QStringLiteral("roomName")] =
                 m_roomListModel->roomDisplayName(hit.roomId);
+            // A DM is named after the person; the view drops the "#".
+            row[QStringLiteral("isDirect")] = isDirectRoom(hit.roomId);
             row[QStringLiteral("sender")] = displayNameForSender(hit.sender);
             row[QStringLiteral("senderId")] = hit.sender;
             row[QStringLiteral("body")] = hit.body;
@@ -825,13 +839,17 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             row[QStringLiteral("timestamp")] = hit.timestamp;
             rows.append(row);
         }
-        emit searchResultsReady(rows, resp.count, resp.highlights, resp.nextBatch,
+        emit searchResultsReady(rows, std::max(0, resp.count - dropped), resp.highlights,
+                                resp.nextBatch,
                                 /*appended=*/!requestedNextBatch.isEmpty());
     });
     connect(m_client, &MatrixClient::searchFailed, this,
             [this](const QString& term, const QString& error) {
         if (term != m_searchTerm) return;
-        emitSearchError(error);
+        // The transport's own errorString() ("Host … not found", "Connection
+        // refused") meant nothing to anyone; it goes to the log instead.
+        qWarning().noquote() << "[search] transport failure:" << error;
+        emitSearchError(tr("Couldn't reach the server. Check your connection and try again."));
     });
 
     // ── Per-room notify level ─────────────────────────────────────────────
@@ -2740,17 +2758,45 @@ QString ServerConnection::displayNameForSender(const QString& userId) const
 void ServerConnection::searchMessages(const QString& searchTerm, int limit,
                                        const QString& nextBatch)
 {
-    const QString term = searchTerm.trimmed();
+    // `from:` tokens become the server's filter.senders when they name a
+    // user we can resolve; a name we can't resolve filters the hits here
+    // by display name instead. They used to be searched as words.
+    const auto q = bsfchat::client::parseSearchQuery(searchTerm.trimmed());
+    const QString term = q.term;
+    QStringList senders;
+    QStringList unresolved;
+    for (const QString& who : q.fromTokens) {
+        if (who.startsWith(QLatin1Char('@')) && who.contains(QLatin1Char(':'))) {
+            senders.append(who);
+            continue;
+        }
+        const QString bare = who.startsWith(QLatin1Char('@')) ? who.mid(1) : who;
+        QString match;
+        for (const QVariant& v : searchKnownUsers(bare, 20)) {
+            const QVariantMap u = v.toMap();
+            const QString uid = u.value(QStringLiteral("userId")).toString();
+            const QString dn = u.value(QStringLiteral("displayName")).toString();
+            const QString local = uid.mid(1).section(QLatin1Char(':'), 0, 0);
+            if (dn.compare(bare, Qt::CaseInsensitive) == 0
+                || local.compare(bare, Qt::CaseInsensitive) == 0) {
+                match = uid;
+                break;
+            }
+        }
+        if (!match.isEmpty()) senders.append(match);
+        else unresolved.append(bare);
+    }
     // Record the term BEFORE issuing, so the result handler can recognise its
     // own reply and discard anything belonging to an abandoned query.
     m_searchTerm = term;
+    m_searchSenderNames = unresolved;
     if (term.isEmpty()) {
-        // Clearing the box is not an error and not a query — reset to empty
+        // Clearing the box (or only a from:) is not a query — reset to empty
         // rather than asking the server about "".
         emit searchResultsReady({}, 0, {}, QString(), false);
         return;
     }
-    m_client->searchMessages(term, limit, nextBatch);
+    m_client->searchMessages(term, limit, nextBatch, senders);
 }
 
 void ServerConnection::jumpToRoomEvent(const QString& roomId, const QString& eventId)

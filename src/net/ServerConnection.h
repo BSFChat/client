@@ -1719,6 +1719,8 @@ public:
     // term; a response naming anything else is stale and dropped (the search box
     // fires per keystroke and replies can complete out of order).
     QString m_searchTerm;
+    // from: names that matched no known user; hits are filtered on them.
+    QStringList m_searchSenderNames;
     // @mxid → display name for a search hit, falling back to the localpart.
     // Search spans rooms, so MemberListModel (active room only) can't serve it.
     QString displayNameForSender(const QString& userId) const;

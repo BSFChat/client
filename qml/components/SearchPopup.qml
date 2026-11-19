@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import BSFChat
+import "../js/SearchHighlight.js" as SearchHighlight
 
 // Message search. Bound to ⌘K.
 //
@@ -50,6 +51,10 @@ Popup {
     // Guards against a "load more" firing repeatedly while its page is in
     // flight (the ListView's atYEnd goes true for the whole scroll).
     property bool loadingMore: false
+    // A LATER page failed: the hits already shown stay, and "Try again"
+    // re-requests this batch rather than starting over.
+    property string failedBatch: ""
+    property string pageError: ""
 
     readonly property var _server: serverManager.activeServer
 
@@ -91,6 +96,8 @@ Popup {
             searchPopup.loadingMore = true;
         }
         searchPopup.errorText = "";
+        searchPopup.pageError = "";
+        searchPopup.failedBatch = "";
         s.searchMessages(q, 30, batch);
     }
 
@@ -101,8 +108,11 @@ Popup {
         searchPopup.highlights = [];
         searchPopup.nextBatch = "";
         searchPopup.errorText = "";
+        searchPopup.pageError = "";
+        searchPopup.failedBatch = "";
         searchPopup.searching = false;
         searchPopup.loadingMore = false;
+        resultsList.currentIndex = -1;
     }
 
     function runSearch(text) {
@@ -130,12 +140,20 @@ Popup {
             searchPopup.errorText = "";
             searchPopup.results = appended
                 ? searchPopup.results.concat(rows) : rows;
+            if (!appended) resultsList.currentIndex = rows.length > 0 ? 0 : -1;
             searchPopup.totalMatches = total;
             searchPopup.highlights = terms;
             searchPopup.nextBatch = batch;
         }
         function onSearchErrored(message) {
             searchPopup.searching = false;
+            if (searchPopup.loadingMore) {
+                // Page N failed: keep pages 1..N-1 on screen.
+                searchPopup.loadingMore = false;
+                searchPopup.failedBatch = searchPopup.nextBatch;
+                searchPopup.pageError = message;
+                return;
+            }
             searchPopup.loadingMore = false;
             searchPopup.results = [];
             searchPopup.totalMatches = 0;
@@ -157,20 +175,10 @@ Popup {
     // Wrap the search terms in <b> for emphasis. Escapes first, so a body
     // containing markup renders as text — the results list is never a place to
     // interpret someone else's HTML.
+    // Matching runs on the raw text and each piece is escaped afterwards, so
+    // a term can never land inside an entity or a tag (SearchHighlight.js).
     function _renderBody(body) {
-        var out = String(body)
-            .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        var terms = searchPopup.highlights;
-        for (var i = 0; i < terms.length; i++) {
-            var t = String(terms[i]);
-            if (t.length === 0) continue;
-            // Escape regex metacharacters in the term itself. The server's
-            // tokeniser strips them, but never rely on that from here.
-            var safe = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            out = out.replace(new RegExp("(" + safe + ")", "gi"),
-                              "<b>$1</b>");
-        }
-        return out;
+        return SearchHighlight.highlight(body, searchPopup.highlights);
     }
 
     contentItem: ColumnLayout {
@@ -218,14 +226,13 @@ Popup {
                     onTextChanged: searchPopup.runSearch(text)
                     // Enter re-issues immediately rather than waiting out the
                     // debounce, and opens the top hit once results are in.
-                    Keys.onReturnPressed: {
-                        if (searchPopup.results.length > 0) {
-                            searchPopup._activate(0);
-                        } else if (!searchPopup.searching) {
-                            searchPopup._issue(searchField.text, "");
-                        }
-                    }
-                    Keys.onDownPressed: resultsList.forceActiveFocus()
+                    // Up/Down move the highlighted hit without leaving the
+                    // field; Return opens it; Esc closes the popup.
+                    Keys.onReturnPressed: searchPopup._fieldReturn()
+                    Keys.onEnterPressed: searchPopup._fieldReturn()
+                    Keys.onDownPressed: searchPopup._moveSelection(1)
+                    Keys.onUpPressed: searchPopup._moveSelection(-1)
+                    Keys.onEscapePressed: searchPopup.close()
                 }
 
                 BusyIndicator {
@@ -273,6 +280,17 @@ Popup {
             clip: true
             spacing: 2
             model: searchPopup.results
+            currentIndex: -1
+            keyNavigationEnabled: true
+            highlightFollowsCurrentItem: false
+            activeFocusOnTab: true
+            Keys.onReturnPressed: searchPopup._activate(currentIndex)
+            Keys.onEnterPressed: searchPopup._activate(currentIndex)
+            Keys.onEscapePressed: searchPopup.close()
+            Keys.onUpPressed: {
+                if (currentIndex <= 0) searchField.forceActiveFocus();
+                else decrementCurrentIndex();
+            }
             ScrollBar.vertical: ThemedScrollBar { id: resultsScrollBar }
             boundsBehavior: Flickable.StopAtBounds
             // Pagination: pull the next page as the user reaches the bottom.
@@ -289,8 +307,30 @@ Popup {
 
             footer: Item {
                 width: ListView.view ? ListView.view.width : 0
-                height: searchPopup.loadingMore ? 32 : 0
-                visible: searchPopup.loadingMore
+                height: searchPopup.loadingMore ? 32
+                      : (searchPopup.pageError !== "" ? pageErrRow.implicitHeight + 16 : 0)
+                visible: searchPopup.loadingMore || searchPopup.pageError !== ""
+                RowLayout {
+                    id: pageErrRow
+                    anchors.centerIn: parent
+                    width: parent.width - 2 * Theme.sp.s4
+                    visible: searchPopup.pageError !== "" && !searchPopup.loadingMore
+                    spacing: Theme.sp.s3
+                    Text {
+                        Layout.fillWidth: true
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        text: qsTr("Couldn't load more results. %1").arg(searchPopup.pageError)
+                        color: Theme.fg3
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xs
+                    }
+                    Button {
+                        text: qsTr("Try again")
+                        Accessible.name: qsTr("Try loading more results again")
+                        onClicked: searchPopup._issue(searchField.text, searchPopup.failedBatch)
+                    }
+                }
                 BusyIndicator {
                     anchors.centerIn: parent
                     Accessible.ignored: true
@@ -308,7 +348,9 @@ Popup {
                 width: ListView.view.width - resultsScrollBar.reservedWidth
                 height: 62
                 radius: Theme.r1
-                color: resultMouse.containsMouse ? Theme.bg2 : "transparent"
+                color: resultMouse.containsMouse || ListView.isCurrentItem ? Theme.bg2 : "transparent"
+                border.width: ListView.isCurrentItem && (resultsList.activeFocus || searchField.activeFocus) ? 1 : 0
+                border.color: Theme.accent
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
 
                 // One announcement for the whole hit: who, where, what, when.
@@ -319,7 +361,8 @@ Popup {
                     var when = new Date(modelData.timestamp)
                         .toLocaleString(Qt.locale(), "MMM d, h:mm ap");
                     return modelData.roomName
-                        ? qsTr("%1 in #%2: %3, %4").arg(modelData.sender)
+                        ? qsTr("%1 in %2: %3, %4").arg(modelData.sender)
+                              .arg((modelData.isDirect ? "" : "#") + modelData.roomName)
                               .arg(modelData.roomName).arg(modelData.body)
                               .arg(when)
                         : qsTr("%1: %2, %3").arg(modelData.sender)
@@ -348,6 +391,9 @@ Popup {
                             font.weight: Theme.fontWeight.semibold
                             color: Theme.fg0
                             elide: Text.ElideRight
+                            // A long display name must not push the channel
+                            // and the time off the row.
+                            Layout.maximumWidth: parent.width * 0.45
                         }
                         // Which channel the hit is in — the whole point of a
                         // server-side search is that it isn't the current one.
@@ -355,7 +401,8 @@ Popup {
                             visible: text.length > 1
                             Accessible.ignored: true
                             textFormat: Text.PlainText
-                            text: modelData.roomName ? "#" + modelData.roomName : ""
+                            text: modelData.roomName
+                                  ? (modelData.isDirect ? "" : "#") + modelData.roomName : ""
                             font.family: Theme.fontSans
                             font.pixelSize: Theme.fontSize.xs
                             color: Theme.accent
@@ -448,6 +495,24 @@ Popup {
                 }
             }
         }
+    }
+
+    function _fieldReturn() {
+        if (searchPopup.results.length > 0) {
+            searchPopup._activate(Math.max(0, resultsList.currentIndex));
+        } else if (!searchPopup.searching) {
+            searchPopup._issue(searchField.text, "");
+        }
+    }
+
+    function _moveSelection(delta) {
+        var n = searchPopup.results.length;
+        if (n === 0) return;
+        var next = Math.max(0, Math.min(n - 1, resultsList.currentIndex + delta));
+        resultsList.currentIndex = next;
+        resultsList.positionViewAtIndex(next, ListView.Contain);
+        // Reaching the last loaded hit pulls the next page.
+        if (next === n - 1) searchPopup.loadMore();
     }
 
     function _activate(idx) {
