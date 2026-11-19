@@ -71,8 +71,11 @@ QString normaliseGatewayUrl(const QString& input);
 
 // The /pushers/set body that registers `pushkey`. Pure, so the wire format
 // is pinned by tests.
+// `append` (Matrix spec): true keeps pushers for OTHER users with the same
+// app_id + pushkey on that homeserver; false (the default) removes them.
 QJsonObject pusherBody(const PusherIdentity& id, const QString& pushkey,
-                       const QString& gatewayUrl, PayloadTier tier);
+                       const QString& gatewayUrl, PayloadTier tier,
+                       bool append = false);
 // The body that deletes the pusher (app_id, pushkey).
 QJsonObject deletionBody(const QString& appId, const QString& pushkey);
 
@@ -184,9 +187,15 @@ private:
         QString lastError;
         int failures = 0;
         quint64 generation = 0;       // bumps on drop/take so late replies are ignored
+        bool reregister = false;      // a sibling's append=false may have evicted us
     };
 
-    QJsonObject desiredBody(const Account& a) const;
+    QJsonObject desiredBody(const QString& account, const Account& a) const;
+    // Another account of this device on the same homeserver: they share
+    // the pushkey, so each must register with append=true or evict the
+    // other. Account keys are "userId|serverUrl".
+    bool sharesHomeserver(const QString& account) const;
+    void reregisterSiblings(const QString& account);
     void pump(const QString& account);
     void pumpAll();
     void setState(const QString& account, Account& a, State s);

@@ -26,7 +26,7 @@ QString normaliseGatewayUrl(const QString& input)
 }
 
 QJsonObject pusherBody(const PusherIdentity& id, const QString& pushkey,
-                       const QString& gatewayUrl, PayloadTier tier)
+                       const QString& gatewayUrl, PayloadTier tier, bool append)
 {
     QJsonObject data{
         {QStringLiteral("url"), gatewayUrl},
@@ -65,9 +65,13 @@ QJsonObject pusherBody(const PusherIdentity& id, const QString& pushkey,
         {QStringLiteral("data"), data},
     };
     if (!id.lang.isEmpty()) body.insert(QStringLiteral("lang"), id.lang);
-    // `append` is left at its default, false: this app_id + pushkey belongs to
-    // this account alone, so a token the OS recycles onto another sign-in
-    // stops delivering the previous owner's notifications.
+    // `append` normally stays at its default, false: this app_id + pushkey
+    // then belongs to one account alone on that homeserver, so a sign-in
+    // whose sign-out could not delete its pusher stops receiving through
+    // this device. With two accounts of THIS device on one homeserver the
+    // same default makes them evict each other (audit 3), so the registrar
+    // asks for append=true exactly then.
+    if (append) body.insert(QStringLiteral("append"), true);
     return body;
 }
 
@@ -217,13 +221,58 @@ int PushRegistrar::backoffMs(int failures)
     return int(std::min<qint64>(ms, 30LL * 60 * 1000));
 }
 
-QJsonObject PushRegistrar::desiredBody(const Account& a) const
+namespace {
+QString homeserverOf(const QString& account)
+{
+    // Keys without a server part (tests) are their own homeserver.
+    const int bar = account.indexOf(QLatin1Char('|'));
+    return bar < 0 ? account : account.mid(bar + 1);
+}
+// `append` is a request flag, not part of the pusher the server keeps, so
+// a change in it alone is no reason to re-register.
+QJsonObject withoutAppend(QJsonObject body)
+{
+    body.remove(QStringLiteral("append"));
+    return body;
+}
+} // namespace
+
+bool PushRegistrar::sharesHomeserver(const QString& account) const
+{
+    const QString hs = homeserverOf(account);
+    for (auto it = m_accounts.constBegin(); it != m_accounts.constEnd(); ++it)
+        if (it.key() != account && homeserverOf(it.key()) == hs) return true;
+    return false;
+}
+
+void PushRegistrar::reregisterSiblings(const QString& account)
+{
+    // `account` just registered with append=false, which removes every
+    // other user's pusher for this pushkey on its homeserver. Any sibling
+    // there (it appeared while that request was on the wire) has to
+    // register again — with append=true now, since the two share a server.
+    const QString hs = homeserverOf(account);
+    QStringList again;
+    for (auto it = m_accounts.begin(); it != m_accounts.end(); ++it) {
+        if (it.key() == account || homeserverOf(it.key()) != hs) continue;
+        if (it->busy) {
+            it->reregister = true;
+        } else if (!it->registeredBody.isEmpty()) {
+            it->registeredBody = {};
+            again << it.key();
+        }
+    }
+    for (const QString& k : again) pump(k);
+}
+
+QJsonObject PushRegistrar::desiredBody(const QString& account, const Account& a) const
 {
     if (!m_wanted || m_token.isEmpty() || m_gatewayUrl.isEmpty()) return {};
     const PayloadTier tier =
         (m_tier == PayloadTier::Names && !a.namesRefused) ? PayloadTier::Names
                                                           : PayloadTier::EventIdOnly;
-    return push::pusherBody(m_identity, m_token, m_gatewayUrl, tier);
+    return push::pusherBody(m_identity, m_token, m_gatewayUrl, tier,
+                            sharesHomeserver(account));
 }
 
 void PushRegistrar::pumpAll()
@@ -266,13 +315,14 @@ void PushRegistrar::pump(const QString& account)
     Account& a = *it;
     if (a.busy) return;
 
-    const QJsonObject want = desiredBody(a);
+    const QJsonObject want = desiredBody(account, a);
     const QString wantKey = want.isEmpty() ? QString() : m_token;
     const bool inPlace = !want.isEmpty() && a.registeredKey == wantKey
-                         && a.registeredBody == want;
+                         && withoutAppend(a.registeredBody) == withoutAppend(want);
     const bool gatewayRefused = !want.isEmpty() && !a.refusedGateway.isEmpty()
                                 && a.refusedGateway == m_gatewayUrl;
-    const bool bodyRefused = !want.isEmpty() && a.refusedBody == want;
+    const bool bodyRefused = !want.isEmpty()
+                             && withoutAppend(a.refusedBody) == withoutAppend(want);
     const quint64 gen = a.generation;
 
     // 1. Register what is wanted, unless it is already in place or this
@@ -300,7 +350,15 @@ void PushRegistrar::pump(const QString& account)
                 acc.lastError.clear();
                 acc.refusedGateway.clear();
                 acc.refusedBody = {};
+                if (acc.reregister) {
+                    // Another account's append=false registration may have
+                    // landed after this one and evicted it.
+                    acc.reregister = false;
+                    acc.registeredBody = {};
+                }
                 qInfo().noquote() << "[push] pusher registered on" << account;
+                if (!want.value(QStringLiteral("append")).toBool())
+                    reregisterSiblings(account);
                 break;
             }
             case push::ReplyKind::FormatRefused:

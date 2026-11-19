@@ -465,6 +465,63 @@ private slots:
         QVERIFY(summariseStatus(in).backgroundSyncWanted);
     }
 
+    void twoAccountsOnOneHomeserverAppend()
+    {
+        // Audit 3: the server dedupes app_id+pushkey across users unless
+        // append=true, so two sign-ins on one homeserver evicted each other.
+        FakeTransport t;
+        PushRegistrar r(&t, androidId());
+        r.setAutoRetry(false);
+        r.setWanted(true);
+        r.setToken("tok");
+        r.addAccount("@a:hs|https://hs.example");
+        QCOMPARE(t.calls.size(), 1);
+        QVERIFY(!t.calls.first().body.contains("append"));   // alone: default
+        t.answer(200);
+        QCOMPARE(r.state("@a:hs|https://hs.example"), PushRegistrar::State::Registered);
+
+        r.addAccount("@b:hs|https://hs.example");
+        QCOMPARE(t.calls.size(), 1);
+        QCOMPARE(t.calls.first().body.value("append").toBool(), true);
+        t.answer(200);
+        // The first account is not re-registered just because append would
+        // now be true for it as well.
+        QVERIFY(t.calls.isEmpty());
+
+        // A different homeserver is unaffected.
+        r.addAccount("@c:other|https://other.example");
+        QVERIFY(!t.calls.first().body.contains("append"));
+        t.answer(200);
+        QVERIFY(t.calls.isEmpty());
+    }
+
+    void lateAppendFalseReregistersTheSibling()
+    {
+        // Both added at start-up: the first request went out append=false
+        // before the second account existed. If it lands last it evicts the
+        // second, so the second registers again (append=true).
+        FakeTransport t;
+        PushRegistrar r(&t, androidId());
+        r.setAutoRetry(false);
+        r.setWanted(true);
+        r.setToken("tok");
+        r.addAccount("@a:hs|https://hs.example");
+        r.addAccount("@b:hs|https://hs.example");
+        QCOMPARE(t.calls.size(), 2);
+        FakeTransport::Call ca = t.calls.takeFirst();
+        FakeTransport::Call cb = t.calls.takeFirst();
+        QVERIFY(!ca.body.contains("append"));
+        QVERIFY(cb.body.value("append").toBool());
+        cb.done({200, "{}", false});
+        QVERIFY(t.calls.isEmpty());
+        ca.done({200, "{}", false});          // lands last, append=false
+        QCOMPARE(t.calls.size(), 1);
+        QCOMPARE(t.calls.first().account, QStringLiteral("@b:hs|https://hs.example"));
+        QVERIFY(t.calls.first().body.value("append").toBool());
+        t.answer(200);
+        QVERIFY(t.calls.isEmpty());
+    }
+
     void backoffGrowsAndCaps()
     {
         QCOMPARE(PushRegistrar::backoffMs(1), 5000);
