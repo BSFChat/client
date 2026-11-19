@@ -287,6 +287,7 @@ private slots:
     // Audit 3 fix-first #8.
     void muteMirrorFollowsTheSessionAcrossLeaveAndSwitch();
     void deafenImpliesMuteAndRestoresIt();
+    void switchIsNeverSeenAsAHangUp();
 };
 
 void TestVoiceLifecycle::joinReachesActiveThroughEveryState()
@@ -1884,6 +1885,46 @@ void TestVoiceLifecycle::deafenImpliesMuteAndRestoresIt()
     QVERIFY(!s.muted());
     QCOMPARE(engine.gates.last(), false);
     QCOMPARE(engine.deafenGates.last(), false);
+}
+
+void TestVoiceLifecycle::switchIsNeverSeenAsAHangUp()
+{
+    // Audit 3: switching channels flipped to the text view and hid the
+    // dock, because the leave half moved the state before the join was
+    // queued — every observer saw "out of voice" for a moment.
+    VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
+    s.setLocalUserId("@me:x");
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    joinTo(s, net, "!a:x");
+
+    QStringList seen;
+    QObject::connect(&s, &VoiceSession::stateChanged, &s, [&]() {
+        seen << QStringLiteral("%1>%2").arg(VoiceSession::stateName(s.state()),
+                                             s.headingTo());
+    });
+    // The engine stopper runs inside the switch too (ServerConnection's
+    // teardown); it must see the destination as well.
+    QString headingAtStop;
+    s.setEngineStopper([&]() { headingAtStop = s.headingTo(); engine.running = false; });
+
+    s.requestJoin("!b:x");
+    QCOMPARE(headingAtStop, QStringLiteral("!b:x"));
+    net.replyLeaveOk("!a:x");
+    net.replyJoinOk("!b:x");
+    net.replyTurn(turnConfig());
+    QVERIFY(!seen.isEmpty());
+    for (const QString& entry : seen)
+        QVERIFY2(entry.endsWith(QLatin1String(">!b:x")), qPrintable(seen.join(' ')));
+    QCOMPARE(s.state(), VoiceSession::State::Active);
+
+    // A real leave still reads as one.
+    seen.clear();
+    s.requestLeave();
+    QVERIFY(seen.last().endsWith(QLatin1Char('>')));
 }
 
 QTEST_MAIN(TestVoiceLifecycle)

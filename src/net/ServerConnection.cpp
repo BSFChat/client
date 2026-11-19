@@ -3063,7 +3063,10 @@ void ServerConnection::setupVoiceSession()
 #ifndef BSFCHAT_VOICE_ENABLED
         if (st == State::Active) setVoiceConnecting(QString());
 #endif
-        if (st == State::Idle && m_viewingVoiceRoom) {
+        // Same guard as above: the Idle between leaving A and joining B is
+        // not the end of the call, so the user stays on the VoiceRoom view.
+        if (st == State::Idle && m_viewingVoiceRoom
+            && m_voiceSession->headingTo().isEmpty()) {
             m_viewingVoiceRoom = false;
             emit viewingVoiceRoomChanged();
         }

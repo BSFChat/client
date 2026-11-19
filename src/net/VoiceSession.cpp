@@ -329,6 +329,11 @@ QString VoiceSession::destinationRoom() const
     // Where the queue, once drained, leaves this session. Answers
     // "are we already on our way there?" without the caller having to
     // reason about in-flight requests.
+    // Mid-requestJoin: the leave half of a switch moves the state before
+    // the join is queued, and everything watching that state change must
+    // already see where we are going (the dock's "Connecting…", the
+    // VoiceRoom view) or it treats the switch as a hang-up.
+    if (!m_switchingTo.isEmpty()) return m_switchingTo;
     QString dest = (m_state == State::Idle || m_state == State::Leaving)
         ? QString() : m_roomId;
     for (const Op& op : m_queue) {
@@ -406,9 +411,11 @@ void VoiceSession::requestJoin(const QString& roomId)
     // is the V-H1 fix. Sending both at once let the server apply
     // join-then-leave and leave the user a ghost.
     if (!dest.isEmpty()) {
+        m_switchingTo = roomId;
         const QString serverRoom = leaveLocally();
         if (!serverRoom.isEmpty())
             m_queue.enqueue(makeOp(OpKind::Leave, serverRoom));
+        m_switchingTo.clear();
     }
     enqueue(makeOp(OpKind::Join, roomId));
 }

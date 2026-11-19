@@ -385,6 +385,9 @@ private:
 
     QQueue<Op> m_queue;
     std::optional<Op> m_inFlight;
+    // Set only inside requestJoin's channel switch, while the local leave
+    // runs and before the join is queued (see destinationRoom).
+    QString m_switchingTo;
 
     // Mute/deafen: `m_muted`/`m_deafened` are what the user asked for;
     // `m_ackedMuted`/`m_ackedDeafened` are what the server's row holds
