@@ -8,6 +8,8 @@
 #include <QPointer>
 #include <QSysInfo>
 
+#include <iterator>
+
 #if defined(Q_OS_ANDROID) && defined(BSFCHAT_PUSH_ENABLED)
 #define BSFCHAT_PUSH_ANDROID 1
 #include <QJniEnvironment>
@@ -52,6 +54,12 @@ nativeOnPushUnavailable(JNIEnv* env, jclass, jstring reason)
     PushBridge::instance()->deliverUnavailable(fromJString(env, reason));
 }
 
+extern "C" JNIEXPORT void JNICALL
+nativeOnPushRetrying(JNIEnv* env, jclass, jstring reason)
+{
+    PushBridge::instance()->deliverRetrying(fromJString(env, reason));
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 nativeOnPushMessage(JNIEnv* env, jclass, jstring roomId, jstring eventId, jint unread)
 {
@@ -72,9 +80,12 @@ void registerNatives()
         { const_cast<char*>("nativeOnPushMessage"),
           const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;I)Z"),
           reinterpret_cast<void*>(nativeOnPushMessage) },
+        { const_cast<char*>("nativeOnPushRetrying"),
+          const_cast<char*>("(Ljava/lang/String;)V"),
+          reinterpret_cast<void*>(nativeOnPushRetrying) },
     };
     QJniEnvironment env;
-    if (!env.registerNativeMethods(kJavaBridge, methods, 3)) {
+    if (!env.registerNativeMethods(kJavaBridge, methods, int(std::size(methods)))) {
         qWarning("[push] could not register the PushBridge natives; push is off");
         return;
     }

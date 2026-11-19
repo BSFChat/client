@@ -53,14 +53,15 @@ final class FcmPush {
                     if (task.isSuccessful() && task.getResult() != null) {
                         PushBridge.onToken(ctx, task.getResult());
                     } else {
-                        // Typically no Google Play services on the device.
-                        // The native side falls back to a background
-                        // connection.
-                        PushBridge.onUnavailable(String.valueOf(task.getException()));
+                        // No network yet, Play services updating, or none
+                        // at all. PushBridge decides: retry with backoff,
+                        // or unavailable (background connection) for good.
+                        PushBridge.onTokenFailed(ctx, String.valueOf(task.getException()));
                     }
                 }
             });
         } catch (Throwable t) {
+            // Firebase classes missing or refusing to initialise: final.
             PushBridge.onUnavailable(t.toString());
         }
     }

@@ -93,4 +93,7 @@ private:
     QHash<ServerConnection*, QString> m_keys;
     QHash<ServerConnection*, QStringList> m_recent;
     bool m_lastBackgroundSyncWanted = false;
+    // start(true) already issued (Android: Firebase asked for a token).
+    bool m_bridgeStarted = false;
+    void startBridge(bool wanted);
 };

@@ -78,6 +78,9 @@ PushManager::PushManager(ServerManager* serverManager, Settings* settings, QObje
         watch(m_serverManager->connectionAt(i));
     connect(m_serverManager, &ServerManager::serverAdded, this, [this](int index) {
         watch(m_serverManager->connectionAt(index));
+        // Android: Firebase is first contacted here, for the first server,
+        // never at a launch with nothing signed in (audit 3, Android A4).
+        if (!kIsIos && pushWanted()) startBridge(true);
     });
     // iOS asks for notification permission after the first server sign-in,
     // the moment Android asks for POST_NOTIFICATIONS (main.cpp). The system
@@ -94,8 +97,14 @@ PushManager::PushManager(ServerManager* serverManager, Settings* settings, QObje
     m_lastBackgroundSyncWanted = backgroundSyncWanted();
     m_registrar->setToken(m_bridge->token());
     applySettings();
-    if (!kIsIos) m_bridge->start(pushWanted());
-    else if (pushWanted() && m_serverManager->connectionCount() > 0) m_bridge->start(true);
+    // start(false) only deletes a token that exists; start(true) waits for
+    // a server (Android A4: no Firebase traffic before there is anything
+    // to push for).
+    if (!pushWanted()) {
+        if (!kIsIos) startBridge(false);
+    } else if (m_serverManager->connectionCount() > 0) {
+        startBridge(true);
+    }
 
     QString room, event;
     if (m_bridge->takePendingTap(&room, &event)) {
@@ -112,6 +121,13 @@ PushManager::~PushManager()
 bool PushManager::available() const
 {
     return bsfchat::push::kCompiledIn;
+}
+
+void PushManager::startBridge(bool wanted)
+{
+    if (wanted && m_bridgeStarted) return;
+    m_bridgeStarted = wanted;
+    m_bridge->start(wanted);
 }
 
 bool PushManager::pushWanted() const
@@ -205,8 +221,9 @@ void PushManager::applySettings()
         m_registrar->setWanted(wanted);
         // Android: starting or stopping Firebase itself (token minted or
         // deleted). iOS: only (re-)register; there is nothing to stop.
-        if (!kIsIos || (wanted && m_serverManager->connectionCount() > 0))
-            m_bridge->start(wanted);
+        // Either way, never started before the first server exists.
+        if (wanted ? m_serverManager->connectionCount() > 0 : !kIsIos)
+            startBridge(wanted);
     }
     m_bridge->setPreferences(m_settings->notificationsEnabled(), m_settings->pushShowNames());
     refreshStatus();

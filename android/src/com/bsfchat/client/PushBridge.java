@@ -36,6 +36,8 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
 import java.util.Map;
@@ -63,6 +65,18 @@ public final class PushBridge {
     // delivered the event. Firebase allows roughly ten seconds.
     private static final long NATIVE_WAIT_MS = 8000;
 
+    // Token request retries (audit 3: one transient failure used to mark
+    // push unavailable for the whole session). Backoff per attempt; the
+    // last value repeats. After GIVE_UP_AFTER failures the native side is
+    // told push is unavailable, but retrying carries on at the slow rate
+    // and a later token clears it.
+    private static final long[] RETRY_MS = { 10_000, 30_000, 120_000, 600_000, 1_800_000 };
+    private static final int GIVE_UP_AFTER = 6;
+    private static final Handler sMain = new Handler(Looper.getMainLooper());
+    private static volatile boolean sWanted = false;
+    private static int sFailures = 0;           // main thread only
+    private static Runnable sRetry = null;      // main thread only
+
     private static volatile boolean sNativeReady = false;
     private static final Map<String, CountDownLatch> sWaiting = new ConcurrentHashMap<>();
     private static final Map<String, Boolean> sHandled = new ConcurrentHashMap<>();
@@ -89,6 +103,10 @@ public final class PushBridge {
             notifyUnavailable("not-configured");
             return;
         }
+        sWanted = wanted;
+        sMain.post(new Runnable() {
+            @Override public void run() { cancelRetry(); sFailures = 0; }
+        });
         String stored = prefs(ctx).getString(KEY_TOKEN, null);
         if (!wanted) {
             // Only if there is a token to delete: a user who never used
@@ -126,6 +144,9 @@ public final class PushBridge {
 
     static void onToken(Context ctx, String token) {
         if (token == null || token.isEmpty()) return;
+        sMain.post(new Runnable() {
+            @Override public void run() { cancelRetry(); sFailures = 0; }
+        });
         prefs(ctx).edit().putString(KEY_TOKEN, token).apply();
         notifyToken(token);
     }
@@ -138,6 +159,53 @@ public final class PushBridge {
     static void onUnavailable(String reason) {
         Log.w(TAG, "push unavailable: " + reason);
         notifyUnavailable(reason == null ? "unknown" : reason);
+    }
+
+    // FcmPush.requestToken's failure. Only a device that cannot do FCM at
+    // all is final; anything else (no network yet, Play services busy or
+    // updating, a timeout) is retried with backoff.
+    static void onTokenFailed(final Context ctx, final String reason) {
+        if (isPermanent(reason)) {
+            onUnavailable(reason);
+            return;
+        }
+        final Context app = ctx.getApplicationContext();
+        sMain.post(new Runnable() {
+            @Override public void run() {
+                if (!sWanted) return;
+                long delay = RETRY_MS[Math.min(sFailures, RETRY_MS.length - 1)];
+                ++sFailures;
+                Log.w(TAG, "token request failed (" + reason + "); retry " + sFailures
+                           + " in " + (delay / 1000) + " s");
+                if (sFailures >= GIVE_UP_AFTER) notifyUnavailable(reason);
+                else notifyRetrying(reason);
+                cancelRetry();
+                sRetry = new Runnable() {
+                    @Override public void run() {
+                        sRetry = null;
+                        if (sWanted) FcmPush.requestToken(app);
+                    }
+                };
+                sMain.postDelayed(sRetry, delay);
+            }
+        });
+    }
+
+    private static boolean isPermanent(String reason) {
+        if (reason == null) return false;
+        // No Google Play services / no FCM on this device, or a build whose
+        // Firebase configuration is wrong. Neither improves with time.
+        return reason.contains("MISSING_INSTANCEID_SERVICE")
+            || reason.contains("INVALID_SENDER")
+            || reason.contains("NoClassDefFoundError")
+            || reason.contains("API key not valid");
+    }
+
+    private static void cancelRetry() {
+        if (sRetry != null) {
+            sMain.removeCallbacks(sRetry);
+            sRetry = null;
+        }
     }
 
     // Runs on a Firebase worker thread, never the main thread.
@@ -300,6 +368,15 @@ public final class PushBridge {
         }
     }
 
+    private static void notifyRetrying(String reason) {
+        if (!sNativeReady) return;
+        try {
+            nativeOnPushRetrying(reason == null ? "unknown" : reason);
+        } catch (UnsatisfiedLinkError e) {
+            sNativeReady = false;
+        }
+    }
+
     private static void notifyUnavailable(String reason) {
         if (!sNativeReady) return;
         try {
@@ -314,5 +391,6 @@ public final class PushBridge {
     // (it then answers through onNativeDone).
     private static native void nativeOnPushToken(String token, String deviceName);
     private static native void nativeOnPushUnavailable(String reason);
+    private static native void nativeOnPushRetrying(String reason);
     private static native boolean nativeOnPushMessage(String roomId, String eventId, int unread);
 }
