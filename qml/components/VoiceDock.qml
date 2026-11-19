@@ -658,7 +658,10 @@ Rectangle {
                     // displays (QScreenCapture) and individual
                     // windows (QWindowCapture). Always a dialog now —
                     // even one monitor leaves windows to choose from.
-                    if (Qt.platform.os === "osx") {
+                    // Android: AndroidScreenShareController.showPicker()
+                    // asks for MediaProjection consent and starts; the
+                    // desktop dialog lists nothing there (audit 3).
+                    if (Qt.platform.os === "osx" || Qt.platform.os === "android") {
                         screenShare.showPicker();
                     } else {
                         screenPickerDialog.open();
