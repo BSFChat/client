@@ -4449,6 +4449,20 @@ private slots:
         QCOMPARE(model.data(model.index(0), MessageModel::BodyRole).toString(), QString("the"));
     }
 
+    void testSpoilerIsHiddenUntilRevealed()
+    {
+        MessageModel model;
+        auto ev = makeMessageEvent("$s", "@alice:server", "[spoiler] Snape");
+        ev.content.data["format"] = "org.matrix.custom.html";
+        ev.content.data["formatted_body"] = "<span data-mx-spoiler>Snape</span>";
+        model.appendEvent(ev, "@josh:server");
+        const QString shown = model.data(model.index(0), MessageModel::FormattedBodyRole).toString();
+        QVERIFY2(!shown.contains("Snape"), qPrintable(shown));
+        QVERIFY(shown.contains("bsfchat://spoiler"));
+        QVERIFY(model.data(model.index(0), MessageModel::RevealedBodyRole).toString().contains("Snape"));
+        QVERIFY(model.roleNames().value(MessageModel::RevealedBodyRole) == "revealedBody");
+    }
+
     void testPinnedToEndIsMeasuredFromTheContentOrigin()
     {
         using bsfchat::client::isPinnedToEnd;

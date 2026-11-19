@@ -90,7 +90,14 @@ public:
         PlainBodyRole,
         // The transaction id of a row this client sent (empty for anything
         // from /sync) — the handle Retry and Discard on a "Not sent" row use.
-        LocalIdRole
+        LocalIdRole,
+        // formattedBody with its spoilers shown (tinted) rather than hidden
+        // behind a click-to-reveal block, which is what FormattedBodyRole
+        // gives. See util/HtmlSanitizer.h hideSpoilers.
+        RevealedBodyRole,
+        // The stored markup with spoiler spans intact, for C++ callers that
+        // re-send it (forward). Not exposed to QML.
+        RawFormattedBodyRole
     };
 
     // Where a row is between "the user pressed Enter" and "the server has

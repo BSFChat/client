@@ -90,7 +90,11 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
     case PlainBodyRole: return rendersAsPlainText(msg.body, msg.formattedBody, msg.msgtype);
     case LocalIdRole: return msg.localId;
     case BodyRole: return msg.body;
-    case FormattedBodyRole: return msg.formattedBody;
+    // Spoilers hidden: Qt's rich text would show a data-mx-spoiler span
+    // openly. RevealedBodyRole is the form shown once the user clicks one.
+    case FormattedBodyRole: return bsfchat::client::hideSpoilers(msg.formattedBody);
+    case RevealedBodyRole: return bsfchat::client::revealSpoilers(msg.formattedBody);
+    case RawFormattedBodyRole: return msg.formattedBody;
     case TimestampRole: return msg.timestamp;
     case MsgtypeRole: return msg.msgtype;
     case IsOwnMessageRole: return msg.isOwnMessage;
@@ -159,7 +163,8 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {SenderIsBotRole, "senderIsBot"},
         {DeliveryStateRole, "deliveryState"},
         {PlainBodyRole, "plainBody"},
-        {LocalIdRole, "localId"}
+        {LocalIdRole, "localId"},
+        {RevealedBodyRole, "revealedBody"}
     };
 }
 
@@ -294,7 +299,7 @@ QVariantList MessageModel::threadReplies(const QString& rootEventId) const
         // needs the mention-rendered markup and the highlight flags too —
         // otherwise a reply that pings you looks inert in the drawer and
         // highlighted in the channel behind it.
-        row[QStringLiteral("formattedBody")] = m.formattedBody;
+        row[QStringLiteral("formattedBody")] = bsfchat::client::hideSpoilers(m.formattedBody);
         row[QStringLiteral("mentionsMe")] = m.mentionsMe;
         row[QStringLiteral("mentionsRoom")] = m.mentionsRoom;
         row[QStringLiteral("timestamp")] = m.timestamp;

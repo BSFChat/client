@@ -25,7 +25,10 @@ namespace bsfchat::client {
 //     own inline style, so our composer's markdown still renders as before;
 //   * comments, doctypes and processing instructions are removed; stray '<',
 //     '>' and '&' are escaped; well-formed character references are kept;
-//   * open tags are closed at the end, and nesting is capped.
+//   * open tags are closed at the end, and nesting is capped;
+//   * the one exception to "no attributes": a <span data-mx-spoiler> (any
+//     value — the reason is dropped) is re-emitted as exactly
+//     kSpoilerOpen, so hideSpoilers/revealSpoilers below can find it.
 //
 // The output is always well-formed and contains only markup this function
 // wrote itself; nothing in the input is copied through as markup.
@@ -35,5 +38,22 @@ QString sanitizeHtml(const QString& html);
 // render: http, https, mailto or bsfchat, with no control characters or
 // whitespace that a browser would strip before reading the scheme.
 bool isAllowedLinkHref(const QString& href);
+
+// The canonical spoiler opener sanitizeHtml emits. Qt's rich text ignores the
+// attribute, so markup holding one must go through hideSpoilers (or
+// revealSpoilers) before it is displayed — otherwise the text shows openly.
+inline constexpr char kSpoilerOpen[] = "<span data-mx-spoiler>";
+
+// The link a hidden spoiler becomes; the view reveals the message's spoilers
+// when it is activated.
+inline constexpr char kSpoilerHref[] = "bsfchat://spoiler";
+
+// Replace every spoiler in SANITISED markup with a click-to-reveal block: a
+// bsfchat://spoiler link showing one "█" per visible character (capped), with
+// the spoiler's own text and markup gone. Inside an existing link the block is
+// not a link (no nested anchors). Markup without a spoiler comes back as is.
+QString hideSpoilers(const QString& sanitized);
+// The revealed form: each spoiler span gets a tinted background instead.
+QString revealSpoilers(const QString& sanitized);
 
 } // namespace bsfchat::client

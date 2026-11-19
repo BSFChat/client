@@ -26,6 +26,10 @@ Item {
     property bool senderIsBot: false
     property string body
     property string formattedBody
+    // formattedBody with spoilers shown; swapped in once the user clicks a
+    // hidden spoiler (model role revealedBody). Per row, not persisted.
+    property string revealedBody: ""
+    property bool spoilersRevealed: false
     // The model's plainBody role: formattedBody is nothing but the escaped
     // body (no markdown, links, mentions or sender formatting), so the body
     // can be shown as plain text without changing a pixel of meaning.
@@ -1716,7 +1720,9 @@ Item {
                                                && bubble.msgtype !== "m.emote"
                 text: {
                     if (_plain) return bubble.body;
-                    var base = bubble.formattedBody !== "" ? bubble.formattedBody : bubble.body;
+                    var fb = bubble.spoilersRevealed && bubble.revealedBody !== ""
+                        ? bubble.revealedBody : bubble.formattedBody;
+                    var base = fb !== "" ? fb : bubble.body;
                     var suffix = '<span style="color:#8e9297;font-size:small"> (edited)</span>';
                     // m.emote ("/me foo") renders as "<sender> foo" in italics
                     // and with accent colour, same convention Element / Fluffy
@@ -1731,7 +1737,7 @@ Item {
                             .replace(/>/g, "&gt;");
                         var out = '<span style="color:' + Theme.accent
                             + ';font-weight:600">* ' + senderEsc
-                            + '</span> <i>' + bubble.formattedBody + '</i>';
+                            + '</span> <i>' + fb + '</i>';
                         if (bubble.edited) out += suffix;
                         return out;
                     }
@@ -1759,7 +1765,9 @@ Item {
                 onLinkActivated: (link) => {
                     // Intercept internal scheme; everything else goes through
                     // LinkOpener (scheme allowlist + spoofed-text check).
-                    if (link.indexOf("bsfchat://channel/") === 0) {
+                    if (link === "bsfchat://spoiler") {
+                        bubble.spoilersRevealed = true;
+                    } else if (link.indexOf("bsfchat://channel/") === 0) {
                         bubble.channelLinkClicked(
                             link.substring("bsfchat://channel/".length));
                     } else if (link.indexOf("bsfchat://message/") === 0) {

@@ -2273,7 +2273,7 @@ void ServerConnection::forwardMessage(const QString& sourceEventId, const QStrin
     QString body = m_messageModel->data(mi, MessageModel::BodyRole).toString();
     QString sender = m_messageModel->data(mi, MessageModel::SenderDisplayNameRole).toString();
     const QString formatted =
-        m_messageModel->data(mi, MessageModel::FormattedBodyRole).toString();
+        m_messageModel->data(mi, MessageModel::RawFormattedBodyRole).toString();
     // "#general" for a channel; a DM is named after the person, no "#".
     QString sourceLabel = m_roomListModel->roomDisplayName(m_activeRoomId);
     if (!isDirectRoom(m_activeRoomId)) sourceLabel.prepend(QLatin1Char('#'));
