@@ -183,11 +183,9 @@ void NotificationManager::wireConnection(ServerConnection* conn)
             if (!m_androidNotifier) return;
             QString roomId = conn->activeRoomId();
             if (roomId.isEmpty()) return;
-            m_androidNotifier->cancelByTag(conn->serverUrl()
-                + QStringLiteral("|") + roomId);
-            // And the one a push may have posted while BSFChat was not
-            // running (PushBridge.java tags those by room alone).
-            m_androidNotifier->cancelByTag(QStringLiteral("push|") + roomId);
+            // One tag per room, shared with the notifications PushBridge.java
+            // posts while BSFChat is not running, so this clears either.
+            m_androidNotifier->cancelByTag(AndroidNotifier::roomTag(roomId));
         });
 }
 
@@ -316,14 +314,10 @@ void NotificationManager::onMessageReceived(const QString& roomId,
                 QUrl::toPercentEncoding(roomId)))
             .arg(QString::fromUtf8(
                 QUrl::toPercentEncoding(eventId)));
-        // Tag = server|room so multiple new messages in the same
-        // room collapse into the latest (classic chat-app
-        // behaviour). Room becomes the group key so the shade can
-        // summarise per-room.
-        QString tag = sender->serverUrl() + QStringLiteral("|") + roomId;
-        QString group = QStringLiteral("bsfchat:room:") + roomId;
+        // One notification per room: a newer message replaces the older
+        // one, and replaces a generic one a push posted for the same room.
         m_androidNotifier->postChatNotification(
-            tag, title, preview, deepLink, group);
+            AndroidNotifier::roomTag(roomId), title, preview, deepLink);
     }
 
     if (m_settings->notificationSound() && m_sounds) {

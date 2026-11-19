@@ -15,8 +15,8 @@
 //     AndroidPermissions before first post)
 //   * a PendingIntent for the tap action
 //
-// We post per-event with a stable ID = hash(eventId) so re-posting
-// the same event collapses rather than duplicates. Tap action fires
+// We post one notification per room (roomTag), so a newer message
+// replaces the previous one rather than stacking. Tap action fires
 // a bsfchat:// deep-link that UrlHandler already knows how to
 // navigate.
 #pragma once
@@ -61,14 +61,22 @@ public:
     void onSyncServiceStopped(const QString& reason);
 
     // Post a chat notification. `tapDeepLink` should be a bsfchat://
-    // URI (same format UrlHandler handles). `groupKey` groups
-    // notifications for the same room so users can swipe them
-    // collectively.
+    // URI (same format UrlHandler handles). Posting again with the same
+    // tag replaces the earlier notification.
     Q_INVOKABLE void postChatNotification(const QString& tag,
                                           const QString& title,
                                           const QString& body,
-                                          const QString& tapDeepLink,
-                                          const QString& groupKey = QString());
+                                          const QString& tapDeepLink);
+
+    // The tag for a room's chat notification: "push|<roomId>", notification
+    // id 1. PushBridge.java posts its generic push notifications under the
+    // same tag and id, so the two replace each other and one cancelByTag
+    // clears whichever is showing. Room ids carry their server name, so
+    // the server URL is not needed to keep rooms apart.
+    static QString roomTag(const QString& roomId)
+    {
+        return QStringLiteral("push|") + roomId;
+    }
 
     // Clear by tag (used when a room is marked read).
     Q_INVOKABLE void cancelByTag(const QString& tag);
