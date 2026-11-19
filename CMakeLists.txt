@@ -1347,6 +1347,7 @@ qt_add_qml_module(bsfchat-lib
         qml/components/ReauthDialog.qml
         qml/components/RemoveServerDialog.qml
         qml/components/PendingInviteList.qml
+        qml/components/ConfirmDialog.qml
         qml/components/UserProfileCard.qml
         qml/components/UserSettings.qml
         qml/components/ServerSettings.qml

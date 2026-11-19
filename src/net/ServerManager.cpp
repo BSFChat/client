@@ -69,7 +69,7 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
         // one that happened to be syncing at launch landed on the "Pick a
         // channel" empty state. No-op when that server already has a channel
         // open, and defers itself if its channel list hasn't arrived yet.
-        if (m_roster.active()) m_roster.active()->restoreLastTextRoom();
+        if (m_roster.active() && !m_switchingForRoom) m_roster.active()->restoreLastTextRoom();
     };
     m_roster.hooks.serverRemoved = [this](int index) {
         emit serverRemoved(index);
@@ -684,6 +684,20 @@ void ServerManager::setViewingDms(bool v)
     if (m_viewingDms == v) return;
     m_viewingDms = v;
     emit viewingDmsChanged();
+    // Leaving the @ view while a DM is open: the server view shows that
+    // server's channel, not the DM highlighted in its sidebar.
+    if (!v && m_roster.active()) m_roster.active()->showChannelInsteadOfDirectRoom();
+}
+
+void ServerManager::openRoom(int serverIndex, const QString& roomId)
+{
+    if (serverIndex < 0 || serverIndex >= m_roster.count() || roomId.isEmpty()) return;
+    // The switch must not restore (and history-fill) that server's last
+    // channel first, only to leave it again for `roomId` (audit 3).
+    m_switchingForRoom = true;
+    setActiveServer(serverIndex);
+    m_switchingForRoom = false;
+    if (auto* conn = m_roster.active()) conn->setActiveRoom(roomId);
 }
 
 // Called on every wired connection's activeRoomIdChanged — keeps

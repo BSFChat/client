@@ -633,6 +633,9 @@ public:
     Q_INVOKABLE void acceptInvite(const QString& roomId);
     Q_INVOKABLE void declineInvite(const QString& roomId);
     QVariantList pendingInvites() const;
+    // Leaving the @ view: if a DM is the open room, open this server's
+    // remembered (or first) text channel instead.
+    void showChannelInsteadOfDirectRoom();
     // Pending DM invites not being answered: counted on the @ chip.
     int directInviteCount() const;
     // Delete a channel (server-side destructive). Requires MANAGE_CHANNELS;

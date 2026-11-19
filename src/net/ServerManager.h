@@ -198,6 +198,10 @@ public:
     // DM invites from every connection, each tagged with serverIndex /
     // serverName / serverUrl like allDirectRooms. The @ view lists these.
     Q_INVOKABLE QVariantList allDirectInvites() const;
+    // Bring `serverIndex` to the front already showing `roomId` — without the
+    // remembered-channel restore a plain setActiveServer does first. For DM
+    // rows, notifications and keyboard cycling.
+    Q_INVOKABLE void openRoom(int serverIndex, const QString& roomId);
     // Unread DM messages plus pending DM invites across every server: the
     // @ chip's badge (audit 3, #11).
     Q_PROPERTY(int directUnreadCount READ directUnreadCount NOTIFY directUnreadCountChanged)
@@ -383,6 +387,7 @@ private:
     Settings* m_settings;
     ServerListModel* m_serverListModel;
     int m_directUnreadCount = 0;
+    bool m_switchingForRoom = false;
     void recomputeDirectUnread();
     // Connection list + active pointer/index. See ServerRoster.h for why
     // the bookkeeping lives there rather than inline.

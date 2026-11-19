@@ -2522,6 +2522,13 @@ void ServerConnection::declineInvite(const QString& roomId)
     m_client->leaveRoom(roomId);
 }
 
+void ServerConnection::showChannelInsteadOfDirectRoom()
+{
+    if (m_activeRoomId.isEmpty() || !isDirectRoom(m_activeRoomId)) return;
+    clearActiveRoomView();
+    restoreLastTextRoom();
+}
+
 int ServerConnection::directInviteCount() const
 {
     int n = 0;

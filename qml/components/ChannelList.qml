@@ -564,13 +564,21 @@ Rectangle {
                                       .arg(out);
                         return out;
                     }
-                    Accessible.onPressAction: {
-                        serverManager.setActiveServer(modelData.serverIndex);
-                        if (serverManager.activeServer) {
-                            serverManager.activeServer
-                                .setActiveRoom(modelData.roomId);
-                        }
-                    }
+                    Accessible.onPressAction: serverManager.openRoom(modelData.serverIndex,
+                                                                     modelData.roomId)
+                    activeFocusOnTab: true
+                    Keys.onReturnPressed: serverManager.openRoom(modelData.serverIndex,
+                                                                 modelData.roomId)
+                    Keys.onEnterPressed: serverManager.openRoom(modelData.serverIndex,
+                                                                modelData.roomId)
+                    Keys.onSpacePressed: serverManager.openRoom(modelData.serverIndex,
+                                                                modelData.roomId)
+                    Keys.onMenuPressed: dmRowMenu.openFor(modelData.serverIndex,
+                                                          modelData.roomId,
+                                                          modelData.peerDisplayName
+                                                              || modelData.peerId)
+                    border.width: activeFocus ? 2 : 0
+                    border.color: Theme.accent
 
                     RowLayout {
                         anchors.fill: parent
@@ -734,16 +742,25 @@ Rectangle {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: {
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onPressAndHold: dmRowMenu.openFor(modelData.serverIndex,
+                                                          modelData.roomId,
+                                                          modelData.peerDisplayName
+                                                              || modelData.peerId)
+                        onClicked: (mouse) => {
+                            if (mouse.button === Qt.RightButton) {
+                                dmRowMenu.openFor(modelData.serverIndex, modelData.roomId,
+                                                  modelData.peerDisplayName || modelData.peerId);
+                                return;
+                            }
                             // Switch to the owning server without
                             // clearing DM mode, then select the DM
                             // room. The @ chip stays highlighted.
-                            serverManager.setActiveServer(
-                                modelData.serverIndex);
-                            if (serverManager.activeServer) {
-                                serverManager.activeServer
-                                    .setActiveRoom(modelData.roomId);
-                            }
+                            // openRoom skips that server's channel
+                            // restore, which history-filled a channel
+                            // nobody asked for.
+                            serverManager.openRoom(modelData.serverIndex,
+                                                   modelData.roomId);
                         }
                     }
                 }
@@ -1128,12 +1145,35 @@ Rectangle {
                                 }
                             }
 
+                            activeFocusOnTab: true
+                            border.width: activeFocus ? 2 : 0
+                            border.color: Theme.accent
+                            Keys.onReturnPressed: serverManager.activeServer
+                                && serverManager.activeServer.setActiveRoom(modelData.roomId)
+                            Keys.onEnterPressed: serverManager.activeServer
+                                && serverManager.activeServer.setActiveRoom(modelData.roomId)
+                            Keys.onSpacePressed: serverManager.activeServer
+                                && serverManager.activeServer.setActiveRoom(modelData.roomId)
+                            Keys.onMenuPressed: dmRowMenu.openFor(
+                                serverManager.activeServerIndex, modelData.roomId,
+                                modelData.peerDisplayName || modelData.peerId)
+
                             MouseArea {
                                 id: dmRowMouse
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: {
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                onPressAndHold: dmRowMenu.openFor(
+                                    serverManager.activeServerIndex, modelData.roomId,
+                                    modelData.peerDisplayName || modelData.peerId)
+                                onClicked: (mouse) => {
+                                    if (mouse.button === Qt.RightButton) {
+                                        dmRowMenu.openFor(
+                                            serverManager.activeServerIndex, modelData.roomId,
+                                            modelData.peerDisplayName || modelData.peerId);
+                                        return;
+                                    }
                                     if (serverManager.activeServer)
                                         serverManager.activeServer.setActiveRoom(modelData.roomId);
                                 }
@@ -3297,6 +3337,27 @@ Rectangle {
             }
         }
 
+        // Leaving is open to anyone in the channel (audit 3: there was no
+        // way to leave one at all). Confirmed, because coming back to a
+        // private channel takes a new invite.
+        ThemedRoomItem {
+            text: qsTr("Leave Channel…")
+            iconName: "x"
+            labelColor: Theme.danger
+            Accessible.name: qsTr("Leave %1").arg(roomContextMenu.roomName)
+            onTriggered: {
+                var s = serverManager.activeServer;
+                leaveConfirm.payload = { serverIndex: serverManager.activeServerIndex,
+                                         roomId: roomContextMenu.roomId };
+                leaveConfirm.title = qsTr("Leave #%1?").arg(roomContextMenu.roomName);
+                leaveConfirm.message = qsTr(
+                    "It leaves your sidebar and you stop getting its messages. "
+                    + "To come back to a private channel you need a new invite.");
+                leaveConfirm.confirmText = qsTr("Leave channel");
+                leaveConfirm.open();
+            }
+        }
+
         ThemedRoomItem {
             text: "Delete Channel"
             iconName: "x"
@@ -3311,6 +3372,55 @@ Rectangle {
                 deleteChannelConfirm.roomId = roomContextMenu.roomId;
                 deleteChannelConfirm.roomName = roomContextMenu.roomName;
                 deleteChannelConfirm.open();
+            }
+        }
+    }
+
+    // Leave a channel / close a DM. One dialog for both; `payload` says which
+    // connection and room.
+    ConfirmDialog {
+        id: leaveConfirm
+        onConfirmed: (p) => {
+            var c = p ? serverManager.connectionAt(p.serverIndex) : null;
+            if (c) c.leaveRoom(p.roomId);
+        }
+    }
+
+    // Right-click / long-press / Menu key on a DM row, in either list.
+    Menu {
+        id: dmRowMenu
+        property int serverIndex: -1
+        property string roomId: ""
+        property string peerName: ""
+        function openFor(serverIndex, roomId, peerName) {
+            dmRowMenu.serverIndex = serverIndex;
+            dmRowMenu.roomId = roomId;
+            dmRowMenu.peerName = peerName || "";
+            dmRowMenu.popup();
+        }
+        background: Rectangle {
+            color: Theme.bg1
+            radius: Theme.r2
+            border.color: Theme.line
+            border.width: 1
+            implicitWidth: 200
+        }
+        MenuItem {
+            text: qsTr("Open")
+            onTriggered: serverManager.openRoom(dmRowMenu.serverIndex, dmRowMenu.roomId)
+        }
+        MenuItem {
+            text: qsTr("Close conversation…")
+            Accessible.name: qsTr("Close conversation with %1").arg(dmRowMenu.peerName)
+            onTriggered: {
+                leaveConfirm.payload = { serverIndex: dmRowMenu.serverIndex,
+                                         roomId: dmRowMenu.roomId };
+                leaveConfirm.title = qsTr("Close the conversation with %1?")
+                                         .arg(dmRowMenu.peerName);
+                leaveConfirm.message = qsTr(
+                    "You leave it and it is removed from your direct messages.");
+                leaveConfirm.confirmText = qsTr("Close conversation");
+                leaveConfirm.open();
             }
         }
     }

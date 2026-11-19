@@ -389,10 +389,13 @@ void NotificationManager::onNotificationClicked()
     for (int i = 0; i < m_serverManager->connectionCount(); ++i) {
         ServerConnection* conn = m_serverManager->connectionAt(i);
         if (!conn || conn->serverUrl() != serverUrl) continue;
-        if (m_serverManager->activeServerIndex() != i)
+        if (!roomId.isEmpty()) {
+            if (conn->activeRoomId() != roomId || m_serverManager->activeServerIndex() != i)
+                m_serverManager->openRoom(i, roomId);
+        } else if (m_serverManager->activeServerIndex() != i) {
+            m_serverManager->setViewingDms(false);
             m_serverManager->setActiveServer(i);
-        if (!roomId.isEmpty() && conn->activeRoomId() != roomId)
-            conn->setActiveRoom(roomId);
+        }
         break;
     }
 }
