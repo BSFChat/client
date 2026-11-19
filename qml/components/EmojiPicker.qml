@@ -7,9 +7,14 @@ import "../data/EmojiData.js" as EmojiData
 Popup {
     id: emojiPicker
 
-    // Cap to viewport on narrow phone screens.
-    width: Math.min(350, (parent ? parent.width : 350) - 24)
-    height: Math.min(400, (parent ? parent.height : 400) - 48)
+    // Cap to the window, not the parent: the composer parents this to its
+    // 28 px smiley button, which made the picker 4 px wide. The overlay is
+    // the window's content area, so this caps on narrow phone screens too.
+    readonly property Item _host: Overlay.overlay
+    width: Math.min(350, (_host ? _host.width : 374) - 24)
+    height: Math.min(400, (_host ? _host.height : 448) - 48)
+    // Keep it inside the window wherever the opener positions it.
+    margins: 8
     padding: 0
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
