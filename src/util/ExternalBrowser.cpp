@@ -5,6 +5,11 @@
 #include <QProcess>
 #include <QStandardPaths>
 
+#ifdef Q_OS_ANDROID
+#include <QCoreApplication>
+#include <QJniObject>
+#endif
+
 namespace bsfchat {
 namespace {
 
@@ -95,6 +100,28 @@ bool openExternalUrl(const QUrl& url)
             qWarning() << "[browser]" << opener << "could not be started for"
                        << forLog(url);
         }
+    }
+#endif
+
+#ifdef Q_OS_ANDROID
+    // A local file is always one of ours (the media cache), and another app
+    // can neither be handed a file:// URI (FileUriExposedException) nor read
+    // our private storage. MediaFileProvider shares it as content:// with a
+    // one-off read grant instead.
+    if (url.isLocalFile()) {
+        const QJniObject ctx(QNativeInterface::QAndroidApplication::context());
+        const bool ok = ctx.isValid()
+            && QJniObject::callStaticMethod<jboolean>(
+                   "com/bsfchat/client/MediaFileProvider", "view",
+                   "(Landroid/content/Context;Ljava/lang/String;)Z",
+                   ctx.object(),
+                   QJniObject::fromString(url.toLocalFile()).object<jstring>());
+        if (ok) {
+            qInfo() << "[browser] opened a cached file through MediaFileProvider";
+            return true;
+        }
+        qWarning() << "[browser] no app opened the cached file";
+        return false;
     }
 #endif
 

@@ -342,6 +342,16 @@
             android:name="com.bsfchat.client.MediaProjectionService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+        <!-- Attachment hand-off: serves files from the media cache to
+             the app the user opens an attachment in, through a one-off
+             read grant (MediaFileProvider.java). Not exported, read-only,
+             cache/media only. A file:// URI is what this replaced; Android
+             refuses those across apps. -->
+        <provider
+            android:name="com.bsfchat.client.MediaFileProvider"
+            android:authorities="${applicationId}.media"
+            android:exported="false"
+            android:grantUriPermissions="true" />
         <!-- BSFCHAT_PUSH_COMPONENTS
              Replaced in the staged copy by cmake/AndroidPush.cmake: with
              the FCM values configured, the Firebase messaging service
