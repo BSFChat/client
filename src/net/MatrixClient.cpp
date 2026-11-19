@@ -2074,19 +2074,23 @@ void MatrixClient::moveChannel(const QString& roomId, const QString& categoryId)
 
 void MatrixClient::setChannelOrder(const QString& roomId, int order)
 {
-    // Set the sort order via bsfchat.room.category state event
+    // PUT /rooms/{id}/order, not a raw bsfchat.room.category state write: the
+    // state event holds parent_id AND order, and writing {"order":N} on its
+    // own un-filed every dragged channel from its category (audit 3, #7). The
+    // server's endpoint keeps the stored parent_id and replaces only the order.
     json content;
     content["order"] = order;
     QByteArray body = QByteArray::fromStdString(content.dump());
 
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
-                   + QUrl::toPercentEncoding(roomId) + "/state/"
-                   + QString::fromUtf8(bsfchat::event_type::kRoomCategory) + "/";
+                   + QUrl::toPercentEncoding(roomId) + "/order";
 
     auto* reply = makeRequest("PUT", path, body);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
+        const QByteArray data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
+            emit channelOrderFailed(roomId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         emit channelOrderSet();

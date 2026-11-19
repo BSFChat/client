@@ -1177,6 +1177,21 @@ target_link_libraries(test_token_rejection
     PRIVATE Qt6::Core Qt6::Network Qt6::Test bsfchat_protocol nlohmann_json::nlohmann_json)
 add_test(NAME test_token_rejection COMMAND test_token_rejection)
 
+# Channel reorder keeps the channel in its category (audit 3, #7): the
+# request setChannelOrder sends, against a capturing stub server.
+qt_add_executable(test_channel_order
+    test_channel_order.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/TimelineTrace.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
+)
+target_include_directories(test_channel_order PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_channel_order
+    PRIVATE Qt6::Core Qt6::Network Qt6::Test bsfchat_protocol nlohmann_json::nlohmann_json)
+add_test(NAME test_channel_order COMMAND test_channel_order)
+
 # 401 classification: the client had no dead-token handling at all, so an
 # expired access token showed as a permanent "Reconnecting…".
 # Which server a BSFChat ID sign-in is for (identity audit 2026-09, C1): the

@@ -1097,6 +1097,15 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         emitFeedback(text, QStringLiteral("error"));
     });
 
+    // A refused reorder leaves the sidebar in the dragged order until the
+    // next sync restates the server's; say why rather than snap back silently.
+    connect(m_client, &MatrixClient::channelOrderFailed, this,
+            [this](const QString&, const QString& error) {
+        emitFeedback(error.isEmpty() ? tr("Could not reorder the channel.")
+                                     : tr("Could not reorder the channel: %1").arg(error),
+                     QStringLiteral("error"));
+    });
+
     // Handle leave room success
     connect(m_client, &MatrixClient::leaveRoomSuccess, this, [this](const QString& roomId) {
         dropRoomsGoneForMe({roomId}, RoomGoneCause::OwnAction);
