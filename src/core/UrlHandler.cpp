@@ -318,29 +318,48 @@ void UrlHandler::checkAndroidLaunchIntent()
         "getType", "()Ljava/lang/String;");
     QString mime = typeObj.isValid() ? typeObj.toString() : QString();
 
-    // text/* shares go through EXTRA_TEXT as a plain String.
-    if (mime.startsWith("text/")) {
+    // A file arrives as an EXTRA_STREAM Uri whatever its type, text/*
+    // included: sharing a .txt or .csv from a file manager is text/plain
+    // with a stream and no EXTRA_TEXT, and used to be dropped by a
+    // text-only branch. So the stream is looked at first, and only a share
+    // without one is treated as text.
+    QJniObject streamKey = QJniObject::fromString(
+        QStringLiteral("android.intent.extra.STREAM"));
+    QJniObject uri;
+    if (QNativeInterface::QAndroidApplication::sdkVersion() >= 33) {
+        // The untyped overload is deprecated from 33; Uri is the only class
+        // a share stream can be.
+        QJniEnvironment env;
+        jclass uriClass = env.findClass("android/net/Uri");
+        if (uriClass) {
+            uri = intent.callObjectMethod(
+                "getParcelableExtra",
+                "(Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/Object;",
+                streamKey.object<jstring>(), uriClass);
+        }
+    } else {
+        uri = intent.callObjectMethod(
+            "getParcelableExtra",
+            "(Ljava/lang/String;)Landroid/os/Parcelable;",
+            streamKey.object<jstring>());
+    }
+
+    if (!uri.isValid()) {
+        // getCharSequenceExtra, not getStringExtra: browsers and editors
+        // often share a Spanned, which getStringExtra turns into null.
         QJniObject textKey = QJniObject::fromString(
             QStringLiteral("android.intent.extra.TEXT"));
         QJniObject text = intent.callObjectMethod(
-            "getStringExtra",
-            "(Ljava/lang/String;)Ljava/lang/String;",
+            "getCharSequenceExtra",
+            "(Ljava/lang/String;)Ljava/lang/CharSequence;",
             textKey.object<jstring>());
-        if (text.isValid()) {
-            emit sharedPayloadReceived(text.toString(), mime, false);
-        }
         clearAction();
+        const QString body = text.isValid() ? text.toString() : QString();
+        if (!body.isEmpty())
+            emit sharedPayloadReceived(body, mime, false);
         return;
     }
 
-    // Everything else (image/video/audio/application/*) arrives as an
-    // EXTRA_STREAM Uri.
-    QJniObject streamKey = QJniObject::fromString(
-        QStringLiteral("android.intent.extra.STREAM"));
-    QJniObject uri = intent.callObjectMethod(
-        "getParcelableExtra",
-        "(Ljava/lang/String;)Landroid/os/Parcelable;",
-        streamKey.object<jstring>());
     // Cleared before any refusal below, so a rejected share is not re-read
     // and re-refused on every resume.
     clearAction();

@@ -1255,12 +1255,33 @@ ApplicationWindow {
         property string targetRoomName: ""
         readonly property bool tooLarge: isFile && sizeBytes > maxBytes
 
+        // A share that arrived before any channel was open — typically a
+        // cold start, where the share intent is read before the session is
+        // restored. Held here rather than refused, and offered as soon as a
+        // channel is active. A newer share replaces it.
+        property var pending: null
+        readonly property string _readyRoomId: serverManager.activeServer
+                                               && serverManager.activeServer.activeRoomId
+                                               ? serverManager.activeServer.activeRoomId : ""
+        on_ReadyRoomIdChanged: {
+            if (pending && _readyRoomId.length > 0 && !opened) {
+                var p = pending;
+                pending = null;
+                // Let the channel switch settle before the sheet pins it.
+                Qt.callLater(function() { offer(p.file, p.value, p.name, p.size); });
+            }
+        }
+
         function offer(file, value, name, size) {
             var s = serverManager.activeServer;
             if (!s || !s.activeRoomId || s.activeRoomId.length === 0) {
-                root.toast("Pick a channel first, then share again.", "info");
+                var first = pending === null;
+                pending = { file: file, value: value, name: name, size: size };
+                if (first)
+                    root.toast(qsTr("Open a channel to send what you shared."), "info");
                 return;
             }
+            pending = null;
             isFile = file;
             payload = value;
             fileName = name && name.length > 0 ? name : (file ? "attachment" : "");
