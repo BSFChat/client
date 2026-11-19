@@ -747,6 +747,16 @@ QVariantList ServerManager::allDirectRooms() const
     return out;
 }
 
+void ServerManager::recomputeDirectUnread()
+{
+    int total = 0;
+    for (auto* conn : m_roster.connections())
+        if (conn) total += conn->directUnreadCount() + conn->directInviteCount();
+    if (total == m_directUnreadCount) return;
+    m_directUnreadCount = total;
+    emit directUnreadCountChanged();
+}
+
 QVariantList ServerManager::allDirectInvites() const
 {
     QVariantList out;
@@ -795,10 +805,14 @@ void ServerManager::wireConnection(ServerConnection* conn)
     // Keep the sidebar's per-server unread dot in sync with this
     // connection's hasUnread. The index can shift as servers are added or
     // removed, so resolve it at signal-emission time.
+    // Real counts now, not 0/1: the rail's screen-reader name reads them
+    // ("3 unread"), and mentions get their own badge (audit 3).
     auto pushUnread = [this, conn]() {
         int idx = m_roster.indexOf(conn);
         if (idx < 0) return;
-        m_serverListModel->setUnreadCount(idx, conn->hasUnread() ? 1 : 0);
+        m_serverListModel->setUnreadCount(idx, conn->unreadCount());
+        m_serverListModel->setMentionCount(idx, conn->mentionCount());
+        recomputeDirectUnread();
     };
     connect(conn, &ServerConnection::hasUnreadChanged, this, pushUnread);
     pushUnread();
@@ -951,6 +965,12 @@ void ServerManager::wireConnection(ServerConnection* conn)
             if (idx < 0) return;
             rebuildConnection(idx, conn->serverUrl(), /*freshSession=*/true);
         }, Qt::QueuedConnection);
+
+    connect(conn, &ServerConnection::pendingInvitesChanged, this,
+            [this]() { recomputeDirectUnread(); });
+    connect(conn, &ServerConnection::destroyed, this,
+            [this]() { QMetaObject::invokeMethod(this, [this]() { recomputeDirectUnread(); },
+                                                 Qt::QueuedConnection); });
 
     connect(conn, &ServerConnection::inviteReceived, this,
         [this, conn](const QString& roomId, const QString& roomName,

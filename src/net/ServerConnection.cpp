@@ -2027,10 +2027,7 @@ void ServerConnection::setActiveRoom(const QString& roomId)
                            bsfchat::client::kHistoryFirstPageLimit);
     }
 
-    // Recalculate hasUnread
-    bool hadUnread = m_hasUnread;
-    m_hasUnread = m_roomListModel->totalUnreadCount() > 0;
-    if (m_hasUnread != hadUnread) emit hasUnreadChanged();
+    refreshUnreadState();
 }
 
 void ServerConnection::setTimelineAtBottom(bool atBottom)
@@ -2054,9 +2051,7 @@ void ServerConnection::markRoomRead(const QString& roomId, qint64 tsMs)
     m_pendingReadMarkers.insert(roomId);
     if (!m_readMarkerTimer->isActive()) m_readMarkerTimer->start();
 
-    const bool hadUnread = m_hasUnread;
-    m_hasUnread = m_roomListModel && m_roomListModel->totalUnreadCount() > 0;
-    if (m_hasUnread != hadUnread) emit hasUnreadChanged();
+    refreshUnreadState();
 }
 
 void ServerConnection::markActiveRoomRead()
@@ -2523,6 +2518,14 @@ void ServerConnection::declineInvite(const QString& roomId)
     m_client->leaveRoom(roomId);
 }
 
+int ServerConnection::directInviteCount() const
+{
+    int n = 0;
+    for (const auto& inv : m_pendingInvites)
+        if (inv.isDirect && !m_inviteAnswersInFlight.contains(inv.roomId)) ++n;
+    return n;
+}
+
 QVariantList ServerConnection::pendingInvites() const
 {
     QVariantList out;
@@ -2553,12 +2556,30 @@ void ServerConnection::deleteChannel(const QString& roomId)
     m_client->deleteRoom(roomId);
 }
 
+void ServerConnection::refreshUnreadState()
+{
+    if (!m_roomListModel) return;
+    // Muted channels neither light the rail nor count; mentions do (a
+    // mention outranks a mute). DMs are counted apart, for the @ chip.
+    const QSet<QString> muted = m_settings ? m_settings->mutedRooms() : QSet<QString>();
+    const int unread = m_roomListModel->totalUnreadCount(muted);
+    const int mentions = m_roomListModel->totalMentionCount();
+    const int direct = m_roomListModel->totalDirectUnreadCount(muted);
+    const bool has = unread > 0 || mentions > 0;
+    if (unread == m_unreadCount && mentions == m_mentionCount
+        && direct == m_directUnreadCount && has == m_hasUnread)
+        return;
+    m_unreadCount = unread;
+    m_mentionCount = mentions;
+    m_directUnreadCount = direct;
+    m_hasUnread = has;
+    emit hasUnreadChanged();
+}
+
 void ServerConnection::resetUnreadForRoom(const QString& roomId)
 {
     m_roomListModel->resetUnreadCount(roomId);
-    bool hadUnread = m_hasUnread;
-    m_hasUnread = m_roomListModel->totalUnreadCount() > 0;
-    if (m_hasUnread != hadUnread) emit hasUnreadChanged();
+    refreshUnreadState();
 }
 
 voice::MicPermission ServerConnection::microphonePermission() const
@@ -3964,6 +3985,10 @@ void ServerConnection::setSettings(Settings* settings)
         connect(settings, &Settings::showLinkPreviewsChanged, this, [this]() {
             if (m_settings) m_linkPreviews->setEnabled(m_settings->showLinkPreviews());
         });
+        // Muting a channel takes it off the rail at once.
+        connect(settings, &Settings::mutedRoomsChanged,
+                this, &ServerConnection::refreshUnreadState);
+        refreshUnreadState();
         // Refresh the mic gate whenever voice mode flips so a user
         // switching Open-mic → PTT immediately goes silent (and vv).
         connect(settings, &Settings::voiceModeChanged,
@@ -5267,9 +5292,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
     refreshMemberSnapshots();
 
     // Recalculate global hasUnread flag from the authoritative per-room counts.
-    bool hadUnread = m_hasUnread;
-    m_hasUnread = m_roomListModel->totalUnreadCount() > 0;
-    if (m_hasUnread != hadUnread) emit hasUnreadChanged();
+    refreshUnreadState();
 
     // First sync of a session. Replaying the local snapshot doesn't count:
     // m_firstSyncProcessed is also what suppresses notifications for the

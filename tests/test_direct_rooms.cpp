@@ -340,6 +340,15 @@ private slots:
 
         m.setUnreadCount("!general:x", 1);
         QCOMPARE(m.totalUnreadCount(), 1);
+
+        // The @ chip's number is the other half of the split (audit 3, #11).
+        QCOMPARE(m.totalDirectUnreadCount(), 3);
+        // And a muted room counts toward neither (no rail dot for it).
+        QCOMPARE(m.totalUnreadCount(QSet<QString>{"!general:x"}), 0);
+        QCOMPARE(m.totalDirectUnreadCount(QSet<QString>{"!dm:x"}), 0);
+        // Reading the DM clears what the @ chip shows.
+        m.resetUnreadCount("!dm:x");
+        QCOMPARE(m.totalDirectUnreadCount(), 0);
     }
 
     // The classification and the room arrive in either order: m.direct is

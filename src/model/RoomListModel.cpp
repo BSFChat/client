@@ -275,6 +275,26 @@ int RoomListModel::totalUnreadCount() const
     return total;
 }
 
+int RoomListModel::totalUnreadCount(const QSet<QString>& excluded) const
+{
+    int total = 0;
+    for (const auto& room : m_rooms) {
+        if (m_directRoomIds.contains(room.roomId) || excluded.contains(room.roomId)) continue;
+        total += room.unreadCount;
+    }
+    return total;
+}
+
+int RoomListModel::totalDirectUnreadCount(const QSet<QString>& excluded) const
+{
+    int total = 0;
+    for (const auto& room : m_rooms) {
+        if (!m_directRoomIds.contains(room.roomId) || excluded.contains(room.roomId)) continue;
+        total += room.unreadCount;
+    }
+    return total;
+}
+
 QString RoomListModel::roomDisplayName(const QString& roomId) const
 {
     int idx = findRoom(roomId);

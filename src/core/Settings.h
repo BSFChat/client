@@ -337,6 +337,8 @@ public:
     // unread dot. Stored as a QStringList under mutedRooms.
     Q_INVOKABLE bool isRoomMuted(const QString& roomId) const;
     Q_INVOKABLE void setRoomMuted(const QString& roomId, bool muted);
+    // Every muted room, for the unread totals that leave them out.
+    QSet<QString> mutedRooms() const { loadMutedRooms(); return m_mutedRooms; }
 
     // Per-room notification mode.
     //   "all"      — notify for every inbound message (default)

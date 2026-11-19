@@ -54,8 +54,16 @@ Rectangle {
                 Accessible.role: Accessible.ListItem
                 Accessible.name: dmEntry._active
                     ? qsTr("Direct messages, showing")
-                    : qsTr("Direct messages")
+                    : serverManager.directUnreadCount > 0
+                      ? qsTr("Direct messages, %n unread", "", serverManager.directUnreadCount)
+                      : qsTr("Direct messages")
                 Accessible.onPressAction: serverManager.setViewingDms(true)
+                activeFocusOnTab: true
+                Keys.onReturnPressed: serverManager.setViewingDms(true)
+                Keys.onEnterPressed: serverManager.setViewingDms(true)
+                Keys.onSpacePressed: serverManager.setViewingDms(true)
+                border.width: activeFocus ? 2 : 0
+                border.color: Theme.accent
 
                 Icon {
                     anchors.centerIn: parent
@@ -75,6 +83,35 @@ Rectangle {
                 ToolTip.visible: dmMouse.containsMouse
                 ToolTip.text: "Direct messages"
                 ToolTip.delay: 500
+            }
+
+            // Unread DMs and message requests, across every server
+            // (audit 3, #11). A DM never lit any server's dot, so outside
+            // the @ view nothing said one had arrived.
+            Rectangle {
+                visible: !dmEntry._active && serverManager.directUnreadCount > 0
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.rightMargin: -3
+                anchors.bottomMargin: -3
+                height: 16
+                width: Math.max(16, dmBadgeText.implicitWidth + 8)
+                radius: 8
+                color: Theme.danger
+                border.width: 2
+                border.color: Theme.bg0
+                Accessible.ignored: true
+                Text {
+                    id: dmBadgeText
+                    anchors.centerIn: parent
+                    textFormat: Text.PlainText
+                    text: serverManager.directUnreadCount > 99
+                          ? "99+" : serverManager.directUnreadCount
+                    color: Theme.onAccent
+                    font.family: Theme.fontSans
+                    font.pixelSize: 9
+                    font.weight: Theme.fontWeight.semibold
+                }
             }
 
             // Left-edge accent bar mirrors the server icons'
@@ -129,6 +166,7 @@ Rectangle {
                     index === serverManager.activeServerIndex
                     && !serverManager.viewingDms
                 readonly property bool hasUnread: (model.unreadCount || 0) > 0
+                                                  || (model.mentionCount || 0) > 0
                 readonly property bool isHovered: hoverArea.containsMouse
 
                 // The whole tile is one row: name, whether it is the one
@@ -139,9 +177,10 @@ Rectangle {
                 Accessible.name: {
                     var n = model.displayName || "";
                     if (row.isActive) return qsTr("%1, showing").arg(n);
-                    if (row.hasUnread)
-                        return qsTr("%1, %n unread", "", model.unreadCount || 0)
-                               .arg(n);
+                    if ((model.mentionCount || 0) > 0)
+                        n = qsTr("%1, %n mentions", "", model.mentionCount).arg(n);
+                    if ((model.unreadCount || 0) > 0)
+                        return qsTr("%1, %n unread", "", model.unreadCount).arg(n);
                     return n;
                 }
                 Accessible.onPressAction: {
@@ -254,8 +293,35 @@ Rectangle {
                     anchors.rightMargin: -1
                     anchors.bottomMargin: -1
                     visible: !row.isActive && row.hasUnread
+                             && (model.mentionCount || 0) === 0
                     // "Unread" is already in the row's name.
                     Accessible.ignored: true
+                }
+                // Mentions get a count, and win over the plain dot: being
+                // addressed is the thing worth switching servers for.
+                Rectangle {
+                    visible: !row.isActive && (model.mentionCount || 0) > 0
+                    anchors.right: tile.right
+                    anchors.bottom: tile.bottom
+                    anchors.rightMargin: -3
+                    anchors.bottomMargin: -3
+                    height: 16
+                    width: Math.max(16, mentionBadgeText.implicitWidth + 8)
+                    radius: 8
+                    color: Theme.danger
+                    border.width: 2
+                    border.color: Theme.bg0
+                    Accessible.ignored: true
+                    Text {
+                        id: mentionBadgeText
+                        anchors.centerIn: parent
+                        textFormat: Text.PlainText
+                        text: (model.mentionCount || 0) > 99 ? "99+" : (model.mentionCount || 0)
+                        color: Theme.onAccent
+                        font.family: Theme.fontSans
+                        font.pixelSize: 9
+                        font.weight: Theme.fontWeight.semibold
+                    }
                 }
 
                 MouseArea {

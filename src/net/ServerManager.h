@@ -198,6 +198,10 @@ public:
     // DM invites from every connection, each tagged with serverIndex /
     // serverName / serverUrl like allDirectRooms. The @ view lists these.
     Q_INVOKABLE QVariantList allDirectInvites() const;
+    // Unread DM messages plus pending DM invites across every server: the
+    // @ chip's badge (audit 3, #11).
+    Q_PROPERTY(int directUnreadCount READ directUnreadCount NOTIFY directUnreadCountChanged)
+    int directUnreadCount() const { return m_directUnreadCount; }
 
     // Union of searchKnownUsers across every connection with the
     // hosting server's URL + index stamped on each row so the DM
@@ -323,6 +327,7 @@ signals:
     // identityLoginFailed instead (IdentityClient::startLogin).
     void browserOpenFailed(const QString& authUrl);
     void viewingDmsChanged();
+    void directUnreadCountChanged();
     // A connection learned of a new invite (ServerConnection::inviteReceived),
     // with its sidebar index. Both shells toast it.
     void inviteReceived(int serverIndex, const QString& roomId, const QString& roomName,
@@ -377,6 +382,8 @@ private:
 
     Settings* m_settings;
     ServerListModel* m_serverListModel;
+    int m_directUnreadCount = 0;
+    void recomputeDirectUnread();
     // Connection list + active pointer/index. See ServerRoster.h for why
     // the bookkeeping lives there rather than inline.
     ServerRoster<ServerConnection> m_roster;

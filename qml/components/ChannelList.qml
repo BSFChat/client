@@ -262,6 +262,13 @@ Rectangle {
                 property var inviteConn: conn
                     ? conn.pendingInvitesChanged.connect(function() { dmView._gen++; })
                     : null
+                // Reading a DM clears its pill: hasUnreadChanged fires when
+                // any unread count moves, DMs included. It used to be
+                // messageReceived alone, so the pill outlived the read
+                // (a regression from 247ad33).
+                property var unreadConn: conn
+                    ? conn.hasUnreadChanged.connect(function() { dmView._gen++; })
+                    : null
             }
         }
 
@@ -1727,15 +1734,19 @@ Rectangle {
                                                     text: modelData.displayName
                                                     font.family: Theme.fontSans
                                                     font.pixelSize: Theme.fontSize.base
+                                                    // Muted: not bold for plain unread,
+                                                    // still bold for a mention.
+                                                    readonly property bool _loud:
+                                                        (channelDelegate.unreadCount > 0
+                                                         && !channelDelegate.isMuted)
+                                                        || channelDelegate.mentionCount > 0
                                                     font.weight: (channelItemContent.parent.parent.isActive
-                                                                  || channelDelegate.unreadCount > 0)
+                                                                  || _loud)
                                                                  ? Theme.fontWeight.medium
                                                                  : Theme.fontWeight.regular
                                                     color: channelItemContent.parent.parent.isActive
                                                            ? Theme.fg0
-                                                           : (channelDelegate.unreadCount > 0
-                                                              ? Theme.fg0
-                                                              : Theme.fg1)
+                                                           : (_loud ? Theme.fg0 : Theme.fg1)
                                                     elide: Text.ElideRight
                                                     Layout.fillWidth: true
                                                     Accessible.ignored: true

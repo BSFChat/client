@@ -198,9 +198,7 @@ void ServerConnection::dropRoomsGoneForMe(const QStringList& roomIds, RoomGoneCa
         rebuildCategorizedRooms();
         refreshDirectRooms();
         refreshMemberSnapshots();
-        const bool hadUnread = m_hasUnread;
-        m_hasUnread = m_roomListModel->totalUnreadCount() > 0;
-        if (m_hasUnread != hadUnread) emit hasUnreadChanged();
+        refreshUnreadState();
     }
 }
 

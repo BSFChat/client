@@ -105,6 +105,12 @@ public:
     // Absolute set — used when the server provides authoritative unread count.
     void setUnreadCount(const QString& roomId, int count);
     int totalUnreadCount() const;
+    // The same, leaving out `excluded` (muted channels: a muted channel
+    // neither lights the server's rail dot nor counts toward it).
+    int totalUnreadCount(const QSet<QString>& excluded) const;
+    // The DM side of the split: unread across this server's DMs, for the @
+    // chip and the DM rows' badges (audit 3, #11). `excluded` as above.
+    int totalDirectUnreadCount(const QSet<QString>& excluded = {}) const;
     Q_INVOKABLE QString roomDisplayName(const QString& roomId) const;
     // Reverse lookup: find a text channel by exact case-insensitive name.
     // Used by the #channel-mention click handler. Returns "" if no match.

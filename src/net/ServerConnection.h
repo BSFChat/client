@@ -171,6 +171,12 @@ class ServerConnection : public QObject {
     Q_PROPERTY(bool needsReauth READ needsReauth NOTIFY sessionAuthChanged)
     Q_PROPERTY(bool reauthInProgress READ reauthInProgress NOTIFY sessionAuthChanged)
     Q_PROPERTY(bool hasUnread READ hasUnread NOTIFY hasUnreadChanged)
+    // The rail's numbers (audit 3): unread in unmuted channels, mentions in
+    // channels, and unread across this server's DMs. All on hasUnreadChanged,
+    // which fires whenever any of them moves.
+    Q_PROPERTY(int unreadCount READ unreadCount NOTIFY hasUnreadChanged)
+    Q_PROPERTY(int mentionCount READ mentionCount NOTIFY hasUnreadChanged)
+    Q_PROPERTY(int directUnreadCount READ directUnreadCount NOTIFY hasUnreadChanged)
     Q_PROPERTY(QString activeVoiceRoomId READ activeVoiceRoomId NOTIFY activeVoiceRoomIdChanged)
     Q_PROPERTY(bool voiceMuted READ voiceMuted NOTIFY voiceMutedChanged)
     Q_PROPERTY(bool voiceDeafened READ voiceDeafened NOTIFY voiceDeafenedChanged)
@@ -327,6 +333,9 @@ public:
         return m_auth.actionForReconnect(QDateTime::currentMSecsSinceEpoch());
     }
     bool hasUnread() const { return m_hasUnread; }
+    int unreadCount() const { return m_unreadCount; }
+    int mentionCount() const { return m_mentionCount; }
+    int directUnreadCount() const { return m_directUnreadCount; }
 
     QString activeVoiceRoomId() const { return m_activeVoiceRoomId; }
     QString voiceError() const { return m_voiceError; }
@@ -624,6 +633,8 @@ public:
     Q_INVOKABLE void acceptInvite(const QString& roomId);
     Q_INVOKABLE void declineInvite(const QString& roomId);
     QVariantList pendingInvites() const;
+    // Pending DM invites not being answered: counted on the @ chip.
+    int directInviteCount() const;
     // Delete a channel (server-side destructive). Requires MANAGE_CHANNELS;
     // server enforces regardless.
     Q_INVOKABLE void deleteChannel(const QString& roomId);
@@ -1510,6 +1521,11 @@ private:
     bool m_forceFullSync = false;
     QString m_syncErrorMessage;
     bool m_hasUnread = false;
+    int m_unreadCount = 0;
+    int m_mentionCount = 0;
+    int m_directUnreadCount = 0;
+    // Recompute the four above and emit hasUnreadChanged if any moved.
+    void refreshUnreadState();
     bool m_viewingVoiceRoom = false;
 
 public:
