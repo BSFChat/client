@@ -174,8 +174,18 @@ for Android, a Firebase app registration for the `.dev` package).
   A tap opens the room from `room_id`.
 * **Badge on iOS**: set by APNs only in the names tier (Sygnal's full path).
   In the default tier Sygnal puts the count in `unread_count`, which only a
-  Notification Service Extension could turn into a badge; the app sets the
-  badge itself while running.
+  Notification Service Extension could turn into a badge. While running, the
+  app reconciles the badge itself: `PushManager` sets it to the sum of every
+  room's unread count whenever that changes, including back to 0.
+* **`mutable-content` in the names tier is uncertain.** Our
+  `default_payload` (which sets `mutable-content: 1`) is only what Sygnal's
+  event-id-only path sends. The names tier takes Sygnal's full path, which
+  builds its own `aps` and, from its source, does not carry
+  `mutable-content` (or anything else from `default_payload`). Today that
+  costs nothing: there is no Notification Service Extension. Whoever adds
+  one must check a live names-tier payload first; if the flag is missing,
+  the extension simply never runs for names-tier pushes (they still show
+  Sygnal's localised alert), and the fix is on the gateway side.
 
 These are assumptions about Sygnal written from its source, not tested
 against a live gateway here. If the deployed Sygnal differs, the symptoms are:
@@ -280,6 +290,29 @@ default app on a cold start caused by a push), stages
 `android-push/fcm/*.java` (or the stub), adds the messaging service to the
 manifest, and appends the dependency to a copy of Qt's `build.gradle`
 template.
+
+### Status line, multiple accounts and failures (audit 3)
+
+* **Android background connection per server.** `SyncService` runs not
+  only when the user chooses it or push is unavailable, but whenever any
+  signed-in server has no registered pusher: it refuses the gateway (the
+  default for a self-hosted server), refuses the pusher, keeps failing, or
+  the gateway URL is invalid; and while the FCM token is being retried.
+  The status line names the servers that rely on it. The decision and the
+  text are `summariseStatus()` in `src/net/PushRegistrar.cpp`, unit-tested.
+* **Two accounts, one homeserver.** Matrix `pushers/set` without
+  `append: true` removes other users' pushers with the same app id and
+  pushkey. The registrar sends `append: true` when another account of this
+  device is on the same homeserver, and re-registers a sibling that an
+  earlier `append: false` request may have evicted. A lone account keeps the
+  default, so a sign-out whose deletion failed still stops delivery here.
+* **FCM token failures** are retried with backoff (10 s up to 30 min);
+  only a device without FCM or a broken Firebase config is final. After six
+  failures the native side is told push is unavailable, but the slow retry
+  continues. Firebase is not contacted until the first server is added.
+* **Blocked notifications** (Android 13+ permission denied, iOS alerts
+  denied) are reported as such, with a way to the system settings.
+* **Gateway URL**: must be `https://`; `http://` only for localhost.
 
 ## Not verified here
 
