@@ -8,6 +8,7 @@
 #include "net/ServerManager.h"
 
 #include <QDebug>
+#include <QGuiApplication>
 #include <QJsonDocument>
 #include <QLocale>
 #include <QTimer>
@@ -65,7 +66,14 @@ PushManager::PushManager(ServerManager* serverManager, Settings* settings, QObje
     });
     connect(m_bridge, &PushBridge::unavailableChanged, this, &PushManager::applySettings);
     connect(m_bridge, &PushBridge::retryingChanged, this, &PushManager::refreshStatus);
-    connect(m_bridge, &PushBridge::permissionChanged, this, &PushManager::refreshStatus);
+    connect(m_bridge, &PushBridge::permissionChanged, this, [this]() {
+        // Allowed again in system settings: iOS has to ask APNs afresh
+        // (a refusal left the bridge "unavailable").
+        if (kIsIos && !m_bridge->notificationsBlocked() && pushWanted()
+            && m_serverManager->connectionCount() > 0)
+            m_bridge->start(true);
+        refreshStatus();
+    });
     connect(m_bridge, &PushBridge::messageReceived, this, &PushManager::onPushedEvent);
     connect(m_bridge, &PushBridge::notificationTapped, this, &PushManager::onTapped);
 
@@ -93,6 +101,16 @@ PushManager::PushManager(ServerManager* serverManager, Settings* settings, QObje
     m_serverManager->setPusherDeletionHook([this](ServerConnection* conn) {
         return takeDeletions(conn);
     });
+
+    // The notification permission can change behind our back (system
+    // settings); re-read it whenever the app comes to the foreground.
+    if (auto* app = qobject_cast<QGuiApplication*>(QCoreApplication::instance())) {
+        connect(app, &QGuiApplication::applicationStateChanged, this,
+                [this](Qt::ApplicationState state) {
+                    if (state == Qt::ApplicationActive) m_bridge->refreshPermission();
+                });
+    }
+    m_bridge->refreshPermission();
 
     m_lastBackgroundSyncWanted = backgroundSyncWanted();
     m_registrar->setToken(m_bridge->token());

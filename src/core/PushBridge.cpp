@@ -23,6 +23,9 @@ namespace bsfchat::push::ios {
 void attach(PushBridge* bridge); // flushes what arrived before Qt was up
 void requestAuthorizationAndRegister();
 QString deviceModel();          // UIDevice.model, e.g. "iPhone"
+void queryPermission();         // answers through PushBridge::deliverPermission
+void openNotificationSettings();
+void setBadgeCount(int count);
 
 }
 #endif
@@ -245,11 +248,27 @@ void PushBridge::deliverPermission(bool blocked)
 
 void PushBridge::refreshPermission()
 {
-    // Platform implementations follow in their own changes.
+#ifdef BSFCHAT_PUSH_ANDROID
+    QJniObject ctx = appContext();
+    if (!ctx.isValid()) return;
+    const bool blocked = QJniObject::callStaticMethod<jboolean>(
+        kJavaBridge, "notificationsBlocked", "(Landroid/content/Context;)Z", ctx.object());
+    deliverPermission(blocked);
+#elif defined(BSFCHAT_PUSH_IOS)
+    bsfchat::push::ios::queryPermission();
+#endif
 }
 
 void PushBridge::openNotificationSettings()
 {
+#ifdef BSFCHAT_PUSH_ANDROID
+    QJniObject ctx = appContext();
+    if (!ctx.isValid()) return;
+    QJniObject::callStaticMethod<void>(kJavaBridge, "openNotificationSettings",
+                                       "(Landroid/content/Context;)V", ctx.object());
+#elif defined(BSFCHAT_PUSH_IOS)
+    bsfchat::push::ios::openNotificationSettings();
+#endif
 }
 
 void PushBridge::setToken(const QString& token, const QString& deviceName)

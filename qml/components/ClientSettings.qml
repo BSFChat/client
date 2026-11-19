@@ -1557,11 +1557,45 @@ Popup {
                     // gateway is normal for a self-hosted server and is
                     // reported here, not as an error.
                     SettingRow {
+                        id: pushStatusRow
                         readonly property string status: typeof pushManager !== "undefined"
                             ? pushManager.statusText : ""
+                        readonly property bool blocked: typeof pushManager !== "undefined"
+                            && pushManager.notificationsBlocked
                         title: "Push status"
                         description: status
                         visible: appSettings.pushAvailable && status.length > 0
+                        // The OS switch is the only fix for a blocked
+                        // permission, so offer the way there. Android has
+                        // its own "Allow…" row above for the same thing.
+                        Button {
+                            id: pushOpenSettingsBtn
+                            visible: pushStatusRow.blocked && Qt.platform.os !== "android"
+                            text: qsTr("Open Settings")
+                            Accessible.role: Accessible.Button
+                            Accessible.name: qsTr("Open system notification settings")
+                            Accessible.onPressAction: pushOpenSettingsBtn.clicked()
+                            onClicked: pushManager.openNotificationSettings()
+                            contentItem: Text {
+                                textFormat: Text.PlainText
+                                text: pushOpenSettingsBtn.text
+                                Accessible.ignored: true
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                font.weight: Theme.fontWeight.medium
+                                color: Theme.fg0
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                color: pushOpenSettingsBtn.hovered ? Theme.bg3 : Theme.bg2
+                                border.color: Theme.line
+                                border.width: 1
+                                radius: Theme.r2
+                                implicitWidth: 120
+                                implicitHeight: Theme.controlHeight.md
+                            }
+                        }
                     }
 
                     InfoBanner {

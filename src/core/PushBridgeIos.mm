@@ -212,6 +212,8 @@ void attach(PushBridge* bridge)
     }
 }
 
+void queryPermission();
+
 void requestAuthorizationAndRegister()
 {
     UNAuthorizationOptions options =
@@ -223,6 +225,7 @@ void requestAuthorizationAndRegister()
                               if (!granted) {
                                   handleError(error ? error.localizedDescription
                                                     : @"notifications-denied");
+                                  queryPermission();
                                   return;
                               }
                               [[UIApplication sharedApplication] registerForRemoteNotifications];
@@ -233,6 +236,28 @@ void requestAuthorizationAndRegister()
 QString deviceModel()
 {
     return toQ(UIDevice.currentDevice.model);
+}
+
+void queryPermission()
+{
+    // Denied = the user switched notifications off for BSFChat (or refused
+    // the prompt). Push still registers, but nothing would be shown, so
+    // Settings says so instead of "Push is on".
+    [[UNUserNotificationCenter currentNotificationCenter]
+        getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings* settings) {
+            const bool blocked = settings.authorizationStatus == UNAuthorizationStatusDenied;
+            if (g_bridge) g_bridge->deliverPermission(blocked);
+        }];
+}
+
+void openNotificationSettings()
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString* target = UIApplicationOpenSettingsURLString;
+        if (@available(iOS 16.0, *)) target = UIApplicationOpenNotificationSettingsURLString;
+        NSURL* url = [NSURL URLWithString:target];
+        if (url) [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+    });
 }
 
 } // namespace bsfchat::push::ios

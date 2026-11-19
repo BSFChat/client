@@ -133,6 +133,33 @@ public final class PushBridge {
         latch.countDown();
     }
 
+    // Android 13+ POST_NOTIFICATIONS denied, or notifications switched off
+    // for the app in system settings. Push would still arrive and show
+    // nothing, so Settings says so (audit 3).
+    public static boolean notificationsBlocked(Context ctx) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false;
+        NotificationManager nm =
+            (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+        return nm != null && !nm.areNotificationsEnabled();
+    }
+
+    public static void openNotificationSettings(Context ctx) {
+        Intent i;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            i = new Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+            i.putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, ctx.getPackageName());
+        } else {
+            i = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+            i.setData(Uri.parse("package:" + ctx.getPackageName()));
+        }
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            ctx.startActivity(i);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "cannot open notification settings: " + e);
+        }
+    }
+
     public static String deviceName() {
         String maker = Build.MANUFACTURER == null ? "" : Build.MANUFACTURER;
         String model = Build.MODEL == null ? "" : Build.MODEL;
