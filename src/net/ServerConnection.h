@@ -36,6 +36,7 @@
 #include "net/DirectRooms.h"
 #include "net/MatrixFailure.h"
 #include "net/VoiceSession.h"
+#include "net/VoiceStateMirror.h"
 
 class MatrixClient;
 class MediaDownloader;
@@ -325,8 +326,8 @@ public:
 
     QString activeVoiceRoomId() const { return m_activeVoiceRoomId; }
     QString voiceError() const { return m_voiceError; }
-    bool voiceMuted() const { return m_voiceMuted; }
-    bool voiceDeafened() const { return m_voiceDeafened; }
+    bool voiceMuted() const { return m_voiceMirror.muted; }
+    bool voiceDeafened() const { return m_voiceMirror.deafened; }
     bool inVoiceChannel() const { return !m_activeVoiceRoomId.isEmpty(); }
     QString voiceConnectingRoomId() const { return m_voiceConnectingRoomId; }
     bool voiceConnecting() const { return !m_voiceConnectingRoomId.isEmpty(); }
@@ -1722,7 +1723,8 @@ public:
     float m_micLevel = 0.0f;
     bool m_micSilent = false;
     int m_zeroLevelFrames = 0; // consecutive frames with near-zero level
-    bool m_voiceMuted = false;
+    // Always a copy of m_voiceSession (see VoiceStateMirror.h).
+    VoiceStateMirror m_voiceMirror;
     bool m_pttPressed = false;
     Settings* m_settings = nullptr;
     void applyMicGate();  // recompute mute from voiceMuted + ptt mode
@@ -1807,7 +1809,6 @@ private:
     bool m_voiceProtectionActive = false;
     void setVoiceProtection(voice::MediaProtection p);
     void clearVoiceProtection();
-    bool m_voiceDeafened = false;
     QJsonArray m_voiceMembers;
     QTimer* m_voicePollTimer = nullptr;
     // Bumped on every sync-side m.call.member fold for the room we are in

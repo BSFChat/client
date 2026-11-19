@@ -643,6 +643,11 @@ void VoiceSession::onTurnConfig(const QJsonObject& config)
     // engine at the AudioEngine default.
     m_appliedDeafen.reset();
     applyDeafenGate();
+    // Re-announce the toggles to whoever mirrors them (ServerConnection's
+    // dock properties): the new engine was gated with these values, so the
+    // UI must show exactly these, whatever it showed in between.
+    emit mutedChanged();
+    emit deafenedChanged();
     completeOp();   // pump() → maybeSendState() announces any difference
 }
 

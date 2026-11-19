@@ -13,6 +13,7 @@
 
 #include "net/VoiceQuit.h"
 #include "net/VoiceSession.h"
+#include "net/VoiceStateMirror.h"
 #include "voice/CallEventOutbox.h"
 #include "voice/TurnCredentials.h"
 #include "voice/VoiceRosterReconcile.h"
@@ -283,6 +284,8 @@ private slots:
 
     // ---- V-L4 -------------------------------------------------------
     void transportSelectorRefusesMixedRoster();
+    // Audit 3 fix-first #8.
+    void muteMirrorFollowsTheSessionAcrossLeaveAndSwitch();
 };
 
 void TestVoiceLifecycle::joinReachesActiveThroughEveryState()
@@ -1754,6 +1757,78 @@ void TestVoiceLifecycle::rejoinRefetchesTurn()
     s.onSelfMembership("!room:x", false, net.lastIssuedToken);
     net.replyJoinOk("!room:x");
     QCOMPARE(net.turnFetches, 2);
+}
+
+void TestVoiceLifecycle::muteMirrorFollowsTheSessionAcrossLeaveAndSwitch()
+{
+    // ServerConnection reset its copy of mute/deafen to false on every
+    // teardown while VoiceSession kept them, so after a leave or a switch
+    // the dock said "live" over a shut mic and the next click muted for
+    // real... by unmuting. Wire the mirror exactly as ServerConnection
+    // does: the two change signals plus a sync in teardown.
+    VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
+    s.setLocalUserId("@me:x");
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    VoiceStateMirror mirror;
+    int mirrorEmits = 0;
+    QObject::connect(&s, &VoiceSession::mutedChanged, &s, [&]() {
+        mirror.syncFrom(s); ++mirrorEmits; });
+    QObject::connect(&s, &VoiceSession::deafenedChanged, &s, [&]() {
+        mirror.syncFrom(s); ++mirrorEmits; });
+    auto teardown = [&]() { mirror.syncFrom(s); };
+    auto inSync = [&]() {
+        return mirror.muted == s.muted() && mirror.deafened == s.deafened();
+    };
+
+    joinTo(s, net, "!a:x");
+    s.toggleMute();
+    net.replyStateOk("!a:x");
+    QVERIFY(mirror.muted);
+    QVERIFY(inSync());
+
+    // Switch: teardown runs between the two rooms.
+    s.requestJoin("!b:x");
+    teardown();
+    QVERIFY(inSync());
+    QVERIFY(mirror.muted);
+    net.replyLeaveOk("!a:x");
+    net.replyJoinOk("!b:x");
+    mirrorEmits = 0;
+    net.replyTurn(turnConfig());
+    // The re-apply on the new engine re-announces both toggles.
+    QVERIFY(mirrorEmits >= 2);
+    QVERIFY(inSync());
+    QVERIFY(mirror.muted);
+    QCOMPARE(engine.gates.last(), true);
+
+    // Leave entirely: still muted, and the display agrees.
+    s.requestLeave();
+    teardown();
+    net.replyLeaveOk("!b:x");
+    QVERIFY(inSync());
+    QVERIFY(mirror.muted);
+
+    // The next click does what the display says it will.
+    s.toggleMute();
+    QVERIFY(!s.muted());
+    QVERIFY(inSync());
+
+    // Deafen across a switch too.
+    joinTo(s, net, "!c:x");
+    s.toggleDeafen();
+    net.replyStateOk("!c:x");
+    s.requestJoin("!d:x");
+    teardown();
+    QVERIFY(inSync());
+    net.replyLeaveOk("!c:x");
+    net.replyJoinOk("!d:x");
+    net.replyTurn(turnConfig());
+    QVERIFY(inSync());
+    QVERIFY(mirror.deafened);
 }
 
 QTEST_MAIN(TestVoiceLifecycle)

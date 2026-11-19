@@ -3069,11 +3069,11 @@ void ServerConnection::setupVoiceSession()
         }
     });
     connect(vs, &VoiceSession::mutedChanged, this, [this]() {
-        m_voiceMuted = m_voiceSession->muted();
+        m_voiceMirror.syncFrom(*m_voiceSession);
         emit voiceMutedChanged();
     });
     connect(vs, &VoiceSession::deafenedChanged, this, [this]() {
-        m_voiceDeafened = m_voiceSession->deafened();
+        m_voiceMirror.syncFrom(*m_voiceSession);
         // The engine is driven by setDeafenGate above — one path, which
         // also covers the join/switch case this handler could not see.
         emit voiceDeafenedChanged();
@@ -3377,10 +3377,12 @@ void ServerConnection::teardownVoiceSession()
     m_voicePollTimer->stop();
     m_activeVoiceRoomId.clear();
     m_voiceMembers = QJsonArray();
-    m_voiceMuted = false;
-    m_voiceDeafened = false;
     emit activeVoiceRoomIdChanged();
     emitVoiceMembersIfChanged(/*force=*/true);
+    // Mute/deafen are NOT reset here: VoiceSession keeps the user's choice
+    // across a leave or switch (V-M7), and the next engine is gated by it.
+    // Resetting only the mirror showed "live" over a shut mic (audit 3 #8).
+    if (m_voiceSession) m_voiceMirror.syncFrom(*m_voiceSession);
     emit voiceMutedChanged();
     emit voiceDeafenedChanged();
     // Ensure UI drops the transmit indicator immediately, bypassing the
@@ -3921,7 +3923,7 @@ void ServerConnection::toggleMute()
 #ifdef BSFCHAT_VOICE_ENABLED
     m_sounds->playMute();
 #endif
-    // The mirror (m_voiceMuted) and the state PUT both follow from the
+    // The mirror (m_voiceMirror) and the state PUT both follow from the
     // session's mutedChanged.
     m_voiceSession->toggleMute();
 }
