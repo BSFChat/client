@@ -369,4 +369,12 @@ TestCase {
         verify(!UF.hasNotes("<!-- nothing to see -->"));
         verify(UF.hasNotes("## Fixes\n- one thing"));
     }
+
+    // Audit 3: an integrity refusal says what happened, not "didn't finish".
+    function test_integrityFailureDetail() {
+        var d = UF.detail(UF.Failed, { integrityFailure: true });
+        verify(d.indexOf("verified") >= 0);
+        verify(d.indexOf("didn't finish") < 0);
+        verify(UF.detail(UF.Failed, {}).indexOf("didn't finish") >= 0);
+    }
 }

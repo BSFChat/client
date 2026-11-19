@@ -445,4 +445,18 @@ inline QString buildChannelLabel(const QString& version)
     return QStringLiteral("PRE");
 }
 
+// A finished download survives a re-check (audit 3). The six-hourly timer
+// and the Beta toggle both re-check, and either used to throw a ReadyToApply
+// download away — the user had asked for it and was one click from
+// installing. It is kept unless the check offers a DIFFERENT build to
+// download instead; a refused or failed check, "up to date" or "ahead of
+// channel" (Beta switched off over a downloaded beta) all keep it.
+inline bool keepReadyDownload(bool wasReady, bool checkSucceeded, Outcome outcome,
+                              const QString& offeredTag, const QString& readyTag)
+{
+    if (!wasReady) return false;
+    if (!checkSucceeded) return true;
+    return !(outcome == Outcome::UpdateAvailable && offeredTag != readyTag);
+}
+
 } // namespace bsfchat::updates

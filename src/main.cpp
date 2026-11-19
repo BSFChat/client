@@ -213,6 +213,12 @@ int main(int argc, char *argv[])
         && application.settings()->autoUpdateCheck()) {
         updater.startAutoCheckSchedule();
     }
+    // The toggle applies now, not at the next launch (audit 3).
+    if (auto* st = application.settings()) {
+        QObject::connect(st, &Settings::autoUpdateCheckChanged, &updater, [st, &updater]() {
+            updater.setAutoCheckEnabled(st->autoUpdateCheck());
+        });
+    }
 #endif
 
     // Android runtime-permission bridge — QML calls

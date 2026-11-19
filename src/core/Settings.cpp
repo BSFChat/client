@@ -1174,6 +1174,18 @@ void Settings::setVideoSmoothingMs(int ms)
     emit videoSmoothingMsChanged();
 }
 
+QString Settings::skippedUpdateVersion() const
+{
+    return m_settings.value(QStringLiteral("skippedUpdateVersion")).toString();
+}
+
+void Settings::setSkippedUpdateVersion(const QString& version)
+{
+    if (version == skippedUpdateVersion()) return;
+    m_settings.setValue(QStringLiteral("skippedUpdateVersion"), version);
+    emit skippedUpdateVersionChanged();
+}
+
 bool Settings::autoUpdateCheck() const
 {
     return m_settings.value(QStringLiteral("autoUpdateCheck"), true).toBool();

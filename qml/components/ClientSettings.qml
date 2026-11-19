@@ -1623,7 +1623,10 @@ Popup {
                         embedded: true
                     }
 
+                    // No updater on mobile (the store owns updates), so
+                    // these switches would do nothing there (audit 3).
                     SettingRow {
+                        visible: typeof updater !== "undefined"
                         title: "Check for updates automatically"
                         // Was: promises a one-click "Restart to install".
                         // True on macOS and Windows, false on Linux —
@@ -1653,7 +1656,10 @@ Popup {
                         }
                     }
 
-                    UpdateChannelSettings { Layout.fillWidth: true }
+                    UpdateChannelSettings {
+                        Layout.fillWidth: true
+                        visible: typeof updater !== "undefined"
+                    }
 
                     // The "Current version" row and the loose Check now /
                     // Download / Restart button row that used to live

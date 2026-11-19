@@ -665,6 +665,23 @@ private slots:
         QVERIFY(buildChannelLabel(QStringLiteral("0.0.45")).isEmpty());
         QVERIFY(buildChannelLabel(QStringLiteral("garbage")).isEmpty());
     }
+
+    // Audit 3: a ReadyToApply download outlives the re-check.
+    void aReadyDownloadSurvivesARecheck()
+    {
+        const QString ready = QStringLiteral("v1.2.0");
+        // Same build offered again, or nothing newer, or the check failed.
+        QVERIFY(keepReadyDownload(true, true, Outcome::UpdateAvailable, ready, ready));
+        QVERIFY(keepReadyDownload(true, true, Outcome::UpToDate, QString(), ready));
+        QVERIFY(keepReadyDownload(true, true, Outcome::AheadOfChannel, QString(), ready));
+        QVERIFY(keepReadyDownload(true, true, Outcome::NoUsableRelease, QString(), ready));
+        QVERIFY(keepReadyDownload(true, false, Outcome::NoUsableRelease, QString(), ready));
+        // A different build on offer replaces it.
+        QVERIFY(!keepReadyDownload(true, true, Outcome::UpdateAvailable,
+                                   QStringLiteral("v1.3.0"), ready));
+        // Nothing to keep.
+        QVERIFY(!keepReadyDownload(false, true, Outcome::UpToDate, QString(), ready));
+    }
 };
 
 QTEST_MAIN(TestUpdateChannel)

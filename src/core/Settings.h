@@ -499,6 +499,12 @@ public:
     // out never downgrades a running prerelease build; see
     // core/ReleaseSelection.h (Outcome::AheadOfChannel).
     Q_PROPERTY(QString updateChannel READ updateChannel WRITE setUpdateChannel NOTIFY updateChannelChanged)
+    // The update the user dismissed with "Skip this version" / Later. Kept
+    // across launches: the in-memory copy re-offered it after every restart.
+    Q_PROPERTY(QString skippedUpdateVersion READ skippedUpdateVersion
+               WRITE setSkippedUpdateVersion NOTIFY skippedUpdateVersionChanged)
+    QString skippedUpdateVersion() const;
+    void setSkippedUpdateVersion(const QString& version);
     QString updateChannel() const;
     void setUpdateChannel(const QString& channel);
 signals:
@@ -520,6 +526,7 @@ signals:
     void pttKeySequenceChanged();
     void voiceRelayModeChanged();
     void autoUpdateCheckChanged();
+    void skippedUpdateVersionChanged();
 public:
 
 signals:

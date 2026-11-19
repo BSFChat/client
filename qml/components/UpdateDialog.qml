@@ -75,9 +75,14 @@ Popup {
         border.width: 1
     }
 
-    // Versions the user has explicitly skipped, so a six-hourly
-    // background check doesn't re-offer the same build all day.
-    property string _dismissedFor: ""
+    // The version the user explicitly skipped, so a six-hourly background
+    // check doesn't re-offer the same build all day. Persisted in Settings
+    // (audit 3): in memory it came back after every restart.
+    readonly property string _dismissedFor:
+        typeof appSettings !== "undefined" ? appSettings.skippedUpdateVersion : ""
+    focus: true
+    // Take focus so Esc and Tab work without a click first (audit 3).
+    onOpened: updatePanelBody.forceActiveFocus()
 
     Connections {
         target: typeof updater !== "undefined" ? updater : null
@@ -110,12 +115,15 @@ Popup {
         if (typeof updater !== "undefined" && updater
             && (updater.state === UF.UpdateAvailable
                 || updater.state === UF.UpdateUnsigned)) {
-            updateDialog._dismissedFor = updater.availableVersion;
+            if (typeof appSettings !== "undefined")
+                appSettings.skippedUpdateVersion = updater.availableVersion;
         }
     }
 
     contentItem: UpdatePanel {
+        id: updatePanelBody
         embedded: false
+        focus: true
         // The panel names itself after the updater state it is
         // reporting; here that panel IS the modal's body, so the role
         // becomes Dialog rather than the panel's default Pane. (The
