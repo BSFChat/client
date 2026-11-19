@@ -101,6 +101,10 @@ private slots:
     void activityHandlesRotationWithoutRecreation();
     void oauthIntentFilterIsBrowsableAndHostScoped();
     void everyServiceClassExistsAndHasItsFgsPermission();
+    void inviteFilterIsHostScopedAndMediaProviderIsPrivate();
+
+    // --- notifications ---------------------------------------------------
+    void qtAndPushNotificationsShareOneRoomTag();
 
     // --- MediaProjection ordering (issue 1) ------------------------------
     void projectionIsOpenedOnlyAfterStartForeground();
@@ -672,6 +676,58 @@ void TestAndroidRuntime::applicationIdComesOnlyFromTheBuild()
                  QStringLiteral("set(BSFCHAT_BUNDLE_ID \"com.bsfchat.app\")")),
              "the Release default application id must stay com.bsfchat.app "
              "— Play locks it permanently at first upload");
+}
+
+void TestAndroidRuntime::inviteFilterIsHostScopedAndMediaProviderIsPrivate()
+{
+    const QString m = readAll(androidDir() + "/AndroidManifest.xml");
+
+    // bsfchat:// is claimed for invites only: a filter on the bare scheme,
+    // or on any other host, would route links nothing here vets.
+    static const QRegularExpression bsfchatData(
+        QStringLiteral("<data android:scheme=\"bsfchat\"([^/]*)/>"));
+    auto it = bsfchatData.globalMatch(m);
+    int count = 0;
+    while (it.hasNext()) {
+        const QString attrs = it.next().captured(1).simplified();
+        QCOMPARE(attrs, QStringLiteral("android:host=\"invite\""));
+        ++count;
+    }
+    QCOMPARE(count, 1);
+
+    // Attachments go out through MediaFileProvider: never exported, so the
+    // only way in is the per-URI read grant on the VIEW intent.
+    static const QRegularExpression provider(
+        QStringLiteral("<provider([^>]*)/>"),
+        QRegularExpression::DotMatchesEverythingOption);
+    const auto pm = provider.match(m);
+    QVERIFY2(pm.hasMatch(), "no <provider> for MediaFileProvider");
+    const QString attrs = pm.captured(1);
+    QVERIFY(attrs.contains(QStringLiteral("com.bsfchat.client.MediaFileProvider")));
+    QVERIFY(attrs.contains(QStringLiteral("android:exported=\"false\"")));
+    QVERIFY(attrs.contains(QStringLiteral("android:grantUriPermissions=\"true\"")));
+    QVERIFY(attrs.contains(QStringLiteral("android:authorities=\"${applicationId}.media\"")));
+    const QString provJava = javaCode(QStringLiteral("MediaFileProvider.java"));
+    QVERIFY(provJava.contains(QStringLiteral("AUTHORITY_SUFFIX = \".media\"")));
+    QVERIFY(provJava.contains(QStringLiteral("FLAG_GRANT_READ_URI_PERMISSION")));
+    QVERIFY(provJava.contains(QStringLiteral("getCanonicalFile()")));
+}
+
+void TestAndroidRuntime::qtAndPushNotificationsShareOneRoomTag()
+{
+    // A /sync-posted notification and a push-posted one for the same room
+    // must replace each other, and one cancel must clear either: same tag,
+    // same id.
+    const QString push = javaCode(QStringLiteral("PushBridge.java"));
+    QVERIFY(push.contains(QStringLiteral("TAG_PREFIX = \"push|\"")));
+    QVERIFY(push.contains(QStringLiteral("nm.notify(TAG_PREFIX + roomId, 1,")));
+    QCOMPARE(AndroidNotifier::roomTag(QStringLiteral("!r:example.org")),
+             QStringLiteral("push|!r:example.org"));
+
+    // No group summary any more: it was posted under a tag nothing
+    // cancelled and outlived the room's notification.
+    const QString notifier = code(readAll(srcDir() + "/core/AndroidNotifier.cpp"));
+    QVERIFY(!notifier.contains(QStringLiteral("setGroupSummary")));
 }
 
 QTEST_GUILESS_MAIN(TestAndroidRuntime)
