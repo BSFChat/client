@@ -263,8 +263,11 @@ uploading it.)
 
 ### Sideloading
 
-The release APK is unsigned. To install it on your own phone, sign it
-with the standard debug key:
+A local release build is unsigned. (The CI artifact is signed with the
+upload key when the signing secrets exist, and installs and signs in as
+it is; see "Sign-in: App Links verification" below.) To install a local
+build on your own phone, sign it with the standard debug key, knowing
+that sign-in will not complete with it:
 
 ```sh
 BT=$HOME/Library/Android/sdk/build-tools/34.0.0
@@ -457,14 +460,22 @@ works on a device.
   voice running in the background"; the sync path has no equivalent, but
   `AndroidNotifier::backgroundSyncUnavailable` is now there for a UI to
   bind to.
-* **External room deep links are not claimed on Android.** The
-  intent-filter is host-scoped to `oauth` on purpose, so
-  `bsfchat://room/...` opened from a browser does nothing here, unlike
-  desktop and iOS. In-app notification taps are unaffected — they use an
-  explicit intent. Deliberate, but it is a platform difference, not a
-  universal truth.
-* **`screenOrientation="unspecified"` and small-screen layout.** Left
-  alone; cross-platform mobile QML is somebody else's change.
+* **External deep links: only invites are claimed on Android.** The
+  manifest claims `https://bsfchat.com/oauth/callback` (the verified App
+  Link) and `bsfchat://invite/...` (host-scoped to `invite`; it only
+  fills in the Add server address, see `src/core/InviteLink.h`).
+  `bsfchat://message/...` and other links opened from a browser do
+  nothing here, unlike desktop and iOS. In-app notification taps are
+  unaffected: they use an explicit intent. Deliberate.
+* **Portrait only, and small-screen layout.** `screenOrientation` is
+  `portrait` (see the manifest comment for why). From Android 16 it is
+  ignored on displays at least 600dp wide, so tablets and unfolded
+  foldables still rotate. No landscape layout exists yet.
+* **System bars.** Edge-to-edge is enforced from Android 15 (targetSdk
+  36 cannot opt out), so the QML takes its top and bottom margins from
+  `SafeArea`; the bar icons follow the app theme, not the system one
+  (`SystemBars.java`, applied from `src/core/SystemBars.cpp`). Check
+  both themes on an Android 15+ device and on an older one.
 * **API 28/29 devices.** The gates are right on paper. Nobody has run
   the app on one.
 
@@ -478,6 +489,20 @@ signed with. With Play App Signing that is **Google's app-signing key**
 (Play Console → Test and release → Setup → App signing), not the upload key;
 list the upload key too if you sideload CI builds. Without a match the
 callback opens in the browser and sign-in does not complete.
+
+The file now lists both: the Play app-signing key and the CI upload key
+(the `ANDROID_KEYSTORE_BASE64` keystore `scripts/sign-android.sh` signs
+the `BSFChat-Android-APK` artifact with). So a CI APK installed by hand
+verifies and can sign in, as a Play install does. Two kinds of build
+still cannot:
+
+* an APK signed with your local debug key (the "Sideloading" recipe
+  above): its certificate is in no assetlinks file;
+* a `.dev` build (`-DBSFCHAT_BUNDLE_ID=com.bsfchat.app.dev`): the file
+  names `com.bsfchat.app` only.
+
+Add their fingerprint (and, for `.dev`, a second statement for that
+package) in the `web` repo if you need them to sign in.
 
 Check on a device after install:
 `adb shell pm get-app-links com.bsfchat.app` should show `bsfchat.com: verified`.

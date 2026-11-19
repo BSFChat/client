@@ -242,7 +242,7 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("urlHandler", &urlHandler);
 
     // When the Android activity gets a fresh intent while already
-    // running (singleTop relaunch), BSFChatActivity.java's
+    // running (singleTask relaunch), BSFChatActivity.java's
     // onNewIntent() calls into nativeOnNewIntent() which surfaces
     // here as AndroidPermissions::newIntentReceived. Re-run the
     // intent extraction so warm shares aren't lost — and, since the

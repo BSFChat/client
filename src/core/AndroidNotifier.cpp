@@ -130,7 +130,7 @@ QJniObject buildTapIntent(const QString& deepLink)
     if (!intent.isValid()) return {};
 
     // Set the BSFChatActivity as target so the intent re-enters the
-    // running process (singleTop) and onNewIntent fires.
+    // running instance (singleTask) and onNewIntent fires.
     QJniEnvironment env;
     jclass act = env->FindClass("com/bsfchat/client/BSFChatActivity");
     if (!act) { env->ExceptionClear(); return {}; }

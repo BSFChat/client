@@ -36,9 +36,12 @@ ApplicationWindow {
     // whole scene for the keyboard, not a missing inset.
     //
     // It stays because it is right rather than because it repaid itself:
-    // Android does not inset for us the same way, a hardcoded zero cannot
-    // be right on both, and the day anything here goes edge-to-edge these
-    // are the numbers that keep the header out of the cutout.
+    // Android does not inset for us the same way, and a hardcoded zero
+    // cannot be right on both. On Android 15+ the app IS edge-to-edge
+    // whether Qt asks for it or not (targetSdk 36; the platform no longer
+    // honours the opt-out), so there these margins are the status and
+    // navigation bar heights, and they are what keep the header out from
+    // under the status bar. Not yet checked on an Android 15 device.
     //
     // The margins are read off a probe Item rather than off the window,
     // because SafeArea reports the margins OF THE ITEM it is attached to:
@@ -63,9 +66,9 @@ ApplicationWindow {
     readonly property int leftInset:   Math.ceil(safeAreaProbe.SafeArea.margins.left)
     readonly property int rightInset:  Math.ceil(safeAreaProbe.SafeArea.margins.right)
     // Bottom inset for the iOS home indicator / Android gesture bar. The
-    // 16px floor on Android is the old hardcoded value, kept because Qt
-    // there does not draw edge-to-edge and so reports 0: dropping it would
-    // change how the shipping Android build looks for no reason.
+    // 16px floor on Android is the old hardcoded value, kept for Android
+    // 14 and older, where the window is laid out above the bars and this
+    // reports 0: dropping it would change how those devices look.
     readonly property int bottomInset:
         Math.max(Math.ceil(safeAreaProbe.SafeArea.margins.bottom),
                  Qt.platform.os === "android" ? 16 : 0)

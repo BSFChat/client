@@ -87,7 +87,7 @@ public:
     //     link.
     //
     // Called once after engine.load() so QML listeners are wired, and again
-    // on every onNewIntent for a singleTop relaunch. Clears the action it
+    // on every onNewIntent (the activity is singleTask). Clears the action it
     // handled so a rotate or resume cannot re-fire it. No-op off Android.
     void checkAndroidLaunchIntent();
 
