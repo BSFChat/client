@@ -89,6 +89,7 @@ Popup {
                 id: cancelBtn
                 text: dlg.cancelText
                 activeFocusOnTab: true
+                Accessible.role: Accessible.Button
                 Accessible.name: text
                 onClicked: dlg.close()
                 Keys.onReturnPressed: dlg.close()
@@ -116,6 +117,7 @@ Popup {
                 id: okBtn
                 text: dlg.confirmText
                 activeFocusOnTab: true
+                Accessible.role: Accessible.Button
                 Accessible.name: text
                 Accessible.description: dlg.message
                 onClicked: dlg.accept()

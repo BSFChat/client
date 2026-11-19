@@ -896,13 +896,27 @@ private slots:
         QVERIFY(!flow.submitPassword());
     }
 
-    void aLateReplyToAnAbandonedAttemptIsIgnored()
+    void aLateRefusalToAnAbandonedAttemptIsIgnored()
     {
         DeactivateFlow flow;
         flow.begin();
         flow.reset();
-        QCOMPARE(flow.onReply(200, QJsonObject()), DeactivateOutcome::Ignored);
+        QCOMPARE(flow.onReply(403, QJsonObject()), DeactivateOutcome::Ignored);
         QCOMPARE(flow.phase(), DeactivatePhase::Idle);
+    }
+
+    // Audit 3, #12: Esc during "Deleting account…" reset the flow, the
+    // server deleted the account anyway, and the late 200 was dropped. The
+    // server's success has to win.
+    void aLateSuccessForAnAbandonedAttemptStillDeletes()
+    {
+        DeactivateFlow flow;
+        flow.begin();
+        flow.reset();
+        QCOMPARE(flow.onReply(200, QJsonObject()), DeactivateOutcome::Succeeded);
+        QCOMPARE(flow.phase(), DeactivatePhase::Deactivated);
+        // Once, not per duplicate.
+        QCOMPARE(flow.onReply(200, QJsonObject()), DeactivateOutcome::Ignored);
     }
 
     void aDeletedAccountIsTerminalAndCannotBeResetBackIntoAUsableFlow()

@@ -57,6 +57,10 @@ class ServerManager : public QObject {
     // a restart (false = no OS keychain; kept for this run only).
     Q_PROPERTY(bool identitySignedIn READ identitySignedIn NOTIFY identityAccountChanged)
     Q_PROPERTY(bool identityRemembered READ identityRemembered NOTIFY identityAccountChanged)
+    // hasIdentityAccount() as a bindable value: "Delete BSFChat ID…" bound
+    // to the invokable stayed hidden until restart after a sign-in (audit 3).
+    Q_PROPERTY(bool identityAccountKnown READ hasIdentityAccount
+               NOTIFY identityAccountKnownChanged)
 
 public:
     explicit ServerManager(Settings* settings, QObject* parent = nullptr);
@@ -309,6 +313,7 @@ signals:
     // dead-end wearing different words.
     void identityHasNoServers();
     void identityAccountChanged();
+    void identityAccountKnownChanged();
     // The provider ended this device's BSFChat ID session (expired, revoked).
     void identitySessionEnded(const QString& reason);
     // Once per run, when a sign-in is held in memory only because the

@@ -38,6 +38,14 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
     , m_serverListModel(new ServerListModel(this))
 {
     m_pttKeys = new PttKeyFilter(this);
+    // Every input of hasIdentityAccount(): the session, the provider URL set
+    // by a sign-in, and the active server's provider.
+    connect(this, &ServerManager::identityAccountChanged,
+            this, &ServerManager::identityAccountKnownChanged);
+    connect(this, &ServerManager::activeServerChanged,
+            this, &ServerManager::identityAccountKnownChanged);
+    connect(this, &ServerManager::identityLoginComplete,
+            this, &ServerManager::identityAccountKnownChanged);
     m_pttKeys->install();
     connect(m_pttKeys, &PttKeyFilter::pressedChanged,
             this, &ServerManager::setPttPressed);

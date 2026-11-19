@@ -454,7 +454,7 @@ Popup {
             id: deleteIdentityBtn
             Layout.fillWidth: true
             Layout.preferredHeight: 32
-            visible: serverManager.hasIdentityAccount()
+            visible: serverManager.identityAccountKnown
             Accessible.role: Accessible.Button
             Accessible.name: qsTr("Delete BSFChat ID")
             Accessible.description: qsTr("Explains what deleting your BSFChat ID removes, then opens your BSFChat ID account page")

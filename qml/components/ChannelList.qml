@@ -3407,10 +3407,13 @@ Rectangle {
         }
         MenuItem {
             text: qsTr("Open")
+            Accessible.role: Accessible.MenuItem
+            Accessible.name: qsTr("Open conversation with %1").arg(dmRowMenu.peerName)
             onTriggered: serverManager.openRoom(dmRowMenu.serverIndex, dmRowMenu.roomId)
         }
         MenuItem {
             text: qsTr("Close conversation…")
+            Accessible.role: Accessible.MenuItem
             Accessible.name: qsTr("Close conversation with %1").arg(dmRowMenu.peerName)
             onTriggered: {
                 leaveConfirm.payload = { serverIndex: dmRowMenu.serverIndex,

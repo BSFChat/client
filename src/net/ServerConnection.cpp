@@ -6367,6 +6367,10 @@ void ServerConnection::onDeactivateResponse(int status, const QJsonObject& body)
     // from. Torn down HERE rather than left to ServerManager's removal so a
     // slow removal cannot leave a poll in flight against a dead account.
     disconnectFromServer();
+    // And what the account left on this device — cache, media, DM list —
+    // exactly as removing the server does. Deactivation skipped it (audit 3,
+    // #12), so a deleted account's messages stayed on disk.
+    forgetLocalData();
     m_accessToken.clear();
     m_client->setAccessToken(QString());
 

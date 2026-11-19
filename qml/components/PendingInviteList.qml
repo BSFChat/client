@@ -100,6 +100,7 @@ ColumnLayout {
                         id: acceptBtn
                         text: qsTr("Accept")
                         activeFocusOnTab: true
+                        Accessible.role: Accessible.Button
                         Accessible.name: qsTr("Accept invite to %1")
                                          .arg(inviteList._label(inviteRow.modelData))
                         onClicked: inviteList.accept(inviteRow.modelData)
@@ -127,6 +128,7 @@ ColumnLayout {
                         text: qsTr("Decline")
                         flat: true
                         activeFocusOnTab: true
+                        Accessible.role: Accessible.Button
                         Accessible.name: qsTr("Decline invite to %1")
                                          .arg(inviteList._label(inviteRow.modelData))
                         onClicked: inviteList.decline(inviteRow.modelData)
