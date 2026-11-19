@@ -1106,9 +1106,48 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
                      QStringLiteral("error"));
     });
 
-    // Handle leave room success
+    // Handle leave room success. Also the end of a declined invite: the
+    // room was never in the sidebar, so only the invite list changes.
     connect(m_client, &MatrixClient::leaveRoomSuccess, this, [this](const QString& roomId) {
+        if (m_inviteAnswersInFlight.remove(roomId)) {
+            m_pendingInviteIds.remove(roomId);
+            m_pendingInvites.erase(
+                std::remove_if(m_pendingInvites.begin(), m_pendingInvites.end(),
+                               [&](const auto& inv) { return inv.roomId == roomId; }),
+                m_pendingInvites.end());
+            emit pendingInvitesChanged();
+        }
         dropRoomsGoneForMe({roomId}, RoomGoneCause::OwnAction);
+    });
+    // A refused leave used to vanish: the room simply stayed with no word.
+    connect(m_client, &MatrixClient::leaveRoomError, this,
+            [this](const QString& roomId, const QString& error) {
+        const bool wasInvite = m_inviteAnswersInFlight.remove(roomId);
+        if (wasInvite) emit pendingInvitesChanged();
+        const QString what = wasInvite ? tr("Could not decline the invite.")
+                                       : tr("Could not leave.");
+        emitFeedback(error.isEmpty() ? what : what + QLatin1Char(' ') + error,
+                     QStringLiteral("error"));
+    });
+    // Accepted: the joined room arrives in the next sync, which opens it
+    // (onLiveSync). The invite entry stays hidden until the server stops
+    // restating it.
+    connect(m_client, &MatrixClient::joinRoomSuccess, this, [this](const QString& roomId) {
+        if (!m_inviteAnswersInFlight.contains(roomId)) return;
+        m_openAfterJoin = roomId;
+        if (m_roomListModel->hasRoom(roomId)) {
+            m_openAfterJoin.clear();
+            setActiveRoom(roomId);
+        }
+    });
+    connect(m_client, &MatrixClient::joinRoomError, this,
+            [this](const QString& roomId, const QString& error) {
+        const bool wasInvite = m_inviteAnswersInFlight.remove(roomId);
+        if (wasInvite) emit pendingInvitesChanged();
+        const QString what = wasInvite ? tr("Could not accept the invite.")
+                                       : tr("Could not join.");
+        emitFeedback(error.isEmpty() ? what : what + QLatin1Char(' ') + error,
+                     QStringLiteral("error"));
     });
 }
 
@@ -2460,7 +2499,50 @@ void ServerConnection::joinRoom(const QString& roomIdOrAlias)
 
 void ServerConnection::leaveRoom(const QString& roomId)
 {
+    if (roomId.isEmpty()) return;
     m_client->leaveRoom(roomId);
+}
+
+void ServerConnection::acceptInvite(const QString& roomId)
+{
+    if (roomId.isEmpty() || !m_pendingInviteIds.contains(roomId)) return;
+    if (m_inviteAnswersInFlight.contains(roomId)) return;
+    // A DM invite is classified before the room arrives, so it lands in the
+    // @ view and never flashes up among the channels.
+    for (const auto& inv : m_pendingInvites) {
+        if (inv.roomId == roomId && inv.isDirect) recordDirectRoom(roomId, inv.inviterId);
+    }
+    m_inviteAnswersInFlight.insert(roomId);
+    emit pendingInvitesChanged();
+    m_client->joinRoom(roomId);
+}
+
+void ServerConnection::declineInvite(const QString& roomId)
+{
+    if (roomId.isEmpty() || !m_pendingInviteIds.contains(roomId)) return;
+    if (m_inviteAnswersInFlight.contains(roomId)) return;
+    m_inviteAnswersInFlight.insert(roomId);
+    emit pendingInvitesChanged();
+    m_client->leaveRoom(roomId);
+}
+
+QVariantList ServerConnection::pendingInvites() const
+{
+    QVariantList out;
+    for (const auto& inv : m_pendingInvites) {
+        if (m_inviteAnswersInFlight.contains(inv.roomId)) continue;
+        QVariantMap m;
+        m[QStringLiteral("roomId")] = inv.roomId;
+        m[QStringLiteral("roomName")] = inv.roomName;
+        m[QStringLiteral("roomType")] = inv.roomType;
+        m[QStringLiteral("inviterId")] = inv.inviterId;
+        m[QStringLiteral("inviterName")] = inv.inviterName.isEmpty()
+            ? m_userDisplayNames.value(inv.inviterId, inv.inviterId)
+            : inv.inviterName;
+        m[QStringLiteral("isDirect")] = inv.isDirect;
+        out.append(m);
+    }
+    return out;
 }
 
 void ServerConnection::deleteChannel(const QString& roomId)

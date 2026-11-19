@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QPointer>
 #include <QString>
@@ -86,4 +87,10 @@ private:
     // wins" — good enough for the usual click-as-it-pops-up case.
     QString m_pendingServerUrl;
     QString m_pendingRoomId;
+    // When the target was stashed; a click on an older notification only
+    // raises the window.
+    QElapsedTimer m_pendingSetAt;
+    static constexpr qint64 kPendingTargetMaxAgeMs = 5 * 60 * 1000;
+    void setPendingTarget(const QString& serverUrl, const QString& roomId);
+    void raiseWindows();
 };

@@ -37,11 +37,16 @@ void ServerConnection::onLiveSync(const bsfchat::SyncResponse& response)
     // emission that brought us here, and processSyncResponse is long.
     const QVector<bsfchat::client::SyncLeave> leaves = m_client->currentSyncLeaves();
 
-    m_pendingInviteIds.clear();
-    for (const auto& [roomId, _unused] : response.rooms.invite)
-        m_pendingInviteIds.insert(QString::fromStdString(roomId));
+    updatePendingInvites(response);
 
     processSyncResponse(response);
+
+    // An accepted invite opens once the joined room is in the list.
+    if (!m_openAfterJoin.isEmpty() && m_roomListModel->hasRoom(m_openAfterJoin)) {
+        const QString roomId = m_openAfterJoin;
+        m_openAfterJoin.clear();
+        setActiveRoom(roomId);
+    }
 
     // AFTER the whole batch, so a room left and re-joined within it is
     // judged on everything the batch says (roomsToDropForSyncLeaves).
@@ -67,6 +72,47 @@ void ServerConnection::onLiveSync(const bsfchat::SyncResponse& response)
     if (!m_reconciledThisSession) {
         m_reconciledThisSession = true;
         requestJoinedRoomsReconcile();
+    }
+}
+
+void ServerConnection::updatePendingInvites(const bsfchat::SyncResponse& response)
+{
+    // The section restates the complete pending set (protocol header), so
+    // this is a rebuild. An invite that stops appearing was answered — here
+    // or on another device.
+    QVector<bsfchat::client::PendingInvite> now;
+    QSet<QString> ids;
+    for (const auto& [rid, room] : response.rooms.invite) {
+        const QString roomId = QString::fromStdString(rid);
+        now.append(bsfchat::client::pendingInviteFrom(roomId, room, m_userId));
+        ids.insert(roomId);
+    }
+    // Answers this device sent and the server has now settled.
+    for (auto it = m_inviteAnswersInFlight.begin(); it != m_inviteAnswersInFlight.end();) {
+        if (!ids.contains(*it) && *it != m_openAfterJoin) it = m_inviteAnswersInFlight.erase(it);
+        else ++it;
+    }
+
+    const QStringList fresh = bsfchat::client::newlyInvited(m_announcedInviteIds, now);
+    const bool changed = ids != m_pendingInviteIds
+        || now.size() != m_pendingInvites.size()
+        || !std::equal(now.begin(), now.end(), m_pendingInvites.begin(),
+                       [](const auto& a, const auto& b) {
+                           return a.roomId == b.roomId && a.roomName == b.roomName
+                               && a.inviterName == b.inviterName && a.isDirect == b.isDirect;
+                       });
+    m_pendingInviteIds = ids;
+    m_pendingInvites = now;
+    // Forget announcements for invites that went away, so a re-invite toasts.
+    m_announcedInviteIds.intersect(ids);
+    if (changed) emit pendingInvitesChanged();
+
+    for (const auto& inv : now) {
+        if (!fresh.contains(inv.roomId)) continue;
+        m_announcedInviteIds.insert(inv.roomId);
+        emit inviteReceived(inv.roomId, inv.roomName,
+                            inv.inviterName.isEmpty() ? inv.inviterId : inv.inviterName,
+                            inv.isDirect);
     }
 }
 
@@ -236,4 +282,11 @@ void ServerConnection::resetRoomReconcile()
     m_joinedRoomsAgain = false;
     m_reconciledThisSession = false;
     m_pendingInviteIds.clear();
+    if (!m_pendingInvites.isEmpty()) {
+        m_pendingInvites.clear();
+        emit pendingInvitesChanged();
+    }
+    m_inviteAnswersInFlight.clear();
+    m_announcedInviteIds.clear();
+    m_openAfterJoin.clear();
 }

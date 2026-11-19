@@ -747,6 +747,24 @@ QVariantList ServerManager::allDirectRooms() const
     return out;
 }
 
+QVariantList ServerManager::allDirectInvites() const
+{
+    QVariantList out;
+    for (int i = 0; i < m_roster.count(); ++i) {
+        ServerConnection* conn = m_roster.connections()[i];
+        if (!conn) continue;
+        for (const QVariant& v : conn->pendingInvites()) {
+            QVariantMap m = v.toMap();
+            if (!m.value(QStringLiteral("isDirect")).toBool()) continue;
+            m[QStringLiteral("serverUrl")] = conn->serverUrl();
+            m[QStringLiteral("serverName")] = conn->serverName();
+            m[QStringLiteral("serverIndex")] = i;
+            out.append(m);
+        }
+    }
+    return out;
+}
+
 QVariantList ServerManager::searchKnownUsers(const QString& query,
                                                int limit) const
 {
@@ -933,6 +951,14 @@ void ServerManager::wireConnection(ServerConnection* conn)
             if (idx < 0) return;
             rebuildConnection(idx, conn->serverUrl(), /*freshSession=*/true);
         }, Qt::QueuedConnection);
+
+    connect(conn, &ServerConnection::inviteReceived, this,
+        [this, conn](const QString& roomId, const QString& roomName,
+                     const QString& inviterName, bool isDirect) {
+            const int idx = m_roster.indexOf(conn);
+            if (idx < 0) return;
+            emit inviteReceived(idx, roomId, roomName, inviterName, isDirect);
+        });
 
     // Settings plumbed in so the mic gate can read voiceMode / PTT.
     conn->setSettings(m_settings);

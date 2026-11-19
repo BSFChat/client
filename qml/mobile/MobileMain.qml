@@ -1183,6 +1183,18 @@ ApplicationWindow {
         }
     }
 
+    // New invites on any server (audit 3, #6).
+    Connections {
+        target: serverManager
+        ignoreUnknownSignals: true
+        function onInviteReceived(serverIndex, roomId, roomName, inviterName, isDirect) {
+            root.toastInfo(isDirect
+                ? qsTr("%1 wants to message you. Accept in Direct Messages.").arg(inviterName)
+                : qsTr("%1 invited you to %2. Accept it in the sidebar.")
+                      .arg(inviterName).arg(roomName ? "#" + roomName : qsTr("a channel")));
+        }
+    }
+
     // Send-side feedback (rate limits, permission errors, …) as
     // toasts. ServerConnection pre-formats the copy + severity.
     Connections {

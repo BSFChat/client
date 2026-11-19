@@ -419,7 +419,7 @@ void MatrixClient::joinRoom(const QString& roomIdOrAlias)
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit joinRoomError(bsfchat::net::replyFailureText(reply, data));
+            emit joinRoomError(roomIdOrAlias, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -427,7 +427,7 @@ void MatrixClient::joinRoom(const QString& roomIdOrAlias)
             QString roomId = QString::fromStdString(j.value("room_id", roomIdOrAlias.toStdString()));
             emit joinRoomSuccess(roomId);
         } catch (const std::exception& e) {
-            emit joinRoomError(QString::fromStdString(e.what()));
+            emit joinRoomError(roomIdOrAlias, QString::fromStdString(e.what()));
         }
     });
 }
@@ -478,7 +478,8 @@ void MatrixClient::leaveRoom(const QString& roomId)
     connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
-            emit leaveRoomError(QString::fromUtf8(reply->readAll()));
+            const QByteArray data = reply->readAll();
+            emit leaveRoomError(roomId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         emit leaveRoomSuccess(roomId);

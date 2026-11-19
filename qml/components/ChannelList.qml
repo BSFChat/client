@@ -216,6 +216,10 @@ Rectangle {
             dmView._gen;  // dep
             return serverManager.allDirectRooms();
         }
+        readonly property var _invites: {
+            dmView._gen;  // dep
+            return serverManager.allDirectInvites();
+        }
 
         Connections {
             target: serverManager
@@ -254,6 +258,9 @@ Rectangle {
                 // N DMs.
                 property var presenceConn: conn
                     ? conn.messageReceived.connect(function() { dmView._gen++; })
+                    : null
+                property var inviteConn: conn
+                    ? conn.pendingInvitesChanged.connect(function() { dmView._gen++; })
                     : null
             }
         }
@@ -477,6 +484,13 @@ Rectangle {
                         }
                     }
                 }
+            }
+
+            PendingInviteList {
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.sp.s2
+                title: qsTr("MESSAGE REQUESTS")
+                invites: dmView._invites
             }
 
             ListView {
@@ -915,6 +929,22 @@ Rectangle {
                 width: parent.width
                 height: 1
                 color: Theme.line
+            }
+        }
+
+        // This server's channel invites (DM invites are in the @ view).
+        PendingInviteList {
+            id: channelInvites
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.sp.s2
+            invites: {
+                var s = serverManager.activeServer;
+                if (!s) return [];
+                var out = [];
+                var all = s.pendingInvites;
+                for (var i = 0; i < all.length; ++i)
+                    if (!all[i].isDirect) out.push(all[i]);
+                return out;
             }
         }
 

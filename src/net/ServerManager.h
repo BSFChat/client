@@ -195,6 +195,9 @@ public:
     //   serverUrl, serverName, serverIndex, unreadCount
     // }
     Q_INVOKABLE QVariantList allDirectRooms() const;
+    // DM invites from every connection, each tagged with serverIndex /
+    // serverName / serverUrl like allDirectRooms. The @ view lists these.
+    Q_INVOKABLE QVariantList allDirectInvites() const;
 
     // Union of searchKnownUsers across every connection with the
     // hosting server's URL + index stamped on each row so the DM
@@ -320,6 +323,10 @@ signals:
     // identityLoginFailed instead (IdentityClient::startLogin).
     void browserOpenFailed(const QString& authUrl);
     void viewingDmsChanged();
+    // A connection learned of a new invite (ServerConnection::inviteReceived),
+    // with its sidebar index. Both shells toast it.
+    void inviteReceived(int serverIndex, const QString& roomId, const QString& roomName,
+                        const QString& inviterName, bool isDirect);
 
 private:
     PttKeyFilter* m_pttKeys = nullptr;

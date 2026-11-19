@@ -573,6 +573,12 @@ ApplicationWindow {
         function onIdentitySessionEnded(reason) { toastWarn(reason); }
         // No OS keychain: sign-ins last until the app quits (ServerSecrets).
         function onCredentialsNotPersisted(message) { toastWarn(message); }
+        function onInviteReceived(serverIndex, roomId, roomName, inviterName, isDirect) {
+            root.toastInfo(isDirect
+                ? qsTr("%1 wants to message you. Accept in Direct Messages.").arg(inviterName)
+                : qsTr("%1 invited you to %2. Accept it in the sidebar.")
+                      .arg(inviterName).arg(roomName ? "#" + roomName : qsTr("a channel")));
+        }
         function onLoginError(serverUrl, error) {
             // The dialog shows the error inline when it is up; toasting
             // the same string at the same moment is the duplicate surface

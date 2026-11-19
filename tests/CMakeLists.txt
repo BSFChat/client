@@ -1115,6 +1115,13 @@ target_link_libraries(test_room_removal PRIVATE
 )
 add_test(NAME test_room_removal COMMAND test_room_removal)
 
+# Pending invites as the sidebar shows them (audit 3, #6): what is read out
+# of rooms.invite's stripped state. Header-only.
+qt_add_executable(test_pending_invites test_pending_invites.cpp)
+target_include_directories(test_pending_invites PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_pending_invites PRIVATE bsfchat_protocol Qt6::Core Qt6::Test)
+add_test(NAME test_pending_invites COMMAND test_pending_invites)
+
 # Media cache identity. The key used to include the access token, so every
 # re-login re-downloaded every image the user had ever seen.
 qt_add_executable(test_media_cache_key

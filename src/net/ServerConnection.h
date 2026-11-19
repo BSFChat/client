@@ -34,6 +34,7 @@
 // start. See src/net/VoiceSession.h.
 #include "net/DeactivateFlow.h"
 #include "net/DirectRooms.h"
+#include "net/PendingInvites.h"
 #include "net/MatrixFailure.h"
 #include "net/VoiceSession.h"
 
@@ -257,6 +258,10 @@ class ServerConnection : public QObject {
     // room only). ServerSettings > Members binds to this so the tab shows
     // the full roster regardless of which channel happens to be active.
     Q_PROPERTY(QVariantList serverMembers READ serverMembers NOTIFY serverMembersChanged)
+    // Invites not yet answered (audit 3, #6): [{roomId, roomName, roomType,
+    // inviterId, inviterName, isDirect}], rebuilt from every live /sync.
+    // Excludes invites with an accept/decline in flight.
+    Q_PROPERTY(QVariantList pendingInvites READ pendingInvites NOTIFY pendingInvitesChanged)
 
 public:
     explicit ServerConnection(const QString& serverUrl, QObject* parent = nullptr);
@@ -610,7 +615,15 @@ public:
     Q_INVOKABLE void sendSharedMediaMessage(const QString& uri);
     Q_INVOKABLE void createRoom(const QString& name, const QString& topic);
     Q_INVOKABLE void joinRoom(const QString& roomIdOrAlias);
+    // Leave a channel or close a DM. The room goes from the sidebar when the
+    // server confirms (leaveRoomSuccess); a refusal is toasted.
     Q_INVOKABLE void leaveRoom(const QString& roomId);
+    // Answer a pending invite. Accept joins and opens the room once the next
+    // sync brings it; decline is a leave. Either hides the invite at once and
+    // brings it back if the server refuses.
+    Q_INVOKABLE void acceptInvite(const QString& roomId);
+    Q_INVOKABLE void declineInvite(const QString& roomId);
+    QVariantList pendingInvites() const;
     // Delete a channel (server-side destructive). Requires MANAGE_CHANNELS;
     // server enforces regardless.
     Q_INVOKABLE void deleteChannel(const QString& roomId);
@@ -1124,6 +1137,11 @@ signals:
     // hook since presenceFor() is a lookup on a regular QMap.
     void presenceChanged();
     void directRoomsChanged();
+    void pendingInvitesChanged();
+    // A new invite arrived (not one already listed). For the toast and the
+    // desktop notification; the sidebar binds pendingInvites.
+    void inviteReceived(const QString& roomId, const QString& roomName,
+                        const QString& inviterName, bool isDirect);
     // Emitted when a peer's screen stream goes live or dark (NOT per
     // frame — frames flow through the VideoStreamRegistry sinks). QML
     // re-evaluates peersCurrentlySharing() off this.
@@ -1388,6 +1406,16 @@ private:
     // Pending invites as of the newest live sync (that section is a complete
     // restatement, see the protocol header). Never dropped by a reconcile.
     QSet<QString> m_pendingInviteIds;
+    // The same invites with what the sidebar shows (PendingInvites.h), in
+    // server order; and those this device is answering right now.
+    QVector<bsfchat::client::PendingInvite> m_pendingInvites;
+    QSet<QString> m_inviteAnswersInFlight;
+    // Accepted invite to open as soon as a sync brings the joined room.
+    QString m_openAfterJoin;
+    // Invites announced this session (inviteReceived), so a restatement
+    // does not toast again.
+    QSet<QString> m_announcedInviteIds;
+    void updatePendingInvites(const bsfchat::SyncResponse& response);
     // The homeserver rejected our bearer token, from /sync or from any other
     // authenticated request. Idempotent: the ten in-flight requests that all
     // 401 at once raise one banner between them.
