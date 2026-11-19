@@ -10,15 +10,29 @@
 
 namespace bsfchat::client::push {
 
-QString normaliseGatewayUrl(const QString& input)
+GatewayUrlProblem gatewayUrlProblem(const QString& input)
 {
     const QString trimmed = input.trimmed();
-    if (trimmed.isEmpty()) return {};
+    if (trimmed.isEmpty()) return GatewayUrlProblem::Empty;
     QUrl url(trimmed, QUrl::StrictMode);
-    if (!url.isValid() || url.host().isEmpty()) return {};
+    if (!url.isValid() || url.host().isEmpty()) return GatewayUrlProblem::NotAUrl;
     const QString scheme = url.scheme().toLower();
-    if (scheme != QLatin1String("https") && scheme != QLatin1String("http")) return {};
-    if (!url.userInfo().isEmpty() || url.hasFragment()) return {};
+    if (scheme != QLatin1String("https") && scheme != QLatin1String("http"))
+        return GatewayUrlProblem::NotAUrl;
+    if (!url.userInfo().isEmpty() || url.hasFragment()) return GatewayUrlProblem::NotAUrl;
+    if (scheme == QLatin1String("http")) {
+        const QString host = url.host().toLower();
+        const bool local = host == QLatin1String("localhost")
+            || host == QLatin1String("127.0.0.1") || host == QLatin1String("::1");
+        if (!local) return GatewayUrlProblem::Insecure;
+    }
+    return GatewayUrlProblem::None;
+}
+
+QString normaliseGatewayUrl(const QString& input)
+{
+    if (gatewayUrlProblem(input) != GatewayUrlProblem::None) return {};
+    QUrl url(input.trimmed(), QUrl::StrictMode);
     // A bare origin means "the Matrix push gateway API on that host".
     if (url.path().isEmpty() || url.path() == QLatin1String("/"))
         url.setPath(QString::fromLatin1(kNotifyPath));

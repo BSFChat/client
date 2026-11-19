@@ -66,8 +66,14 @@ struct PusherIdentity {
 };
 
 // Accepts "https://push.example.com" (adds the notify path) or a full
-// notify URL; returns "" for anything that is not an absolute http(s) URL.
+// notify URL; returns "" for anything else (see gatewayUrlProblem).
 QString normaliseGatewayUrl(const QString& input);
+
+// Why normaliseGatewayUrl refuses `input`. Plain http is refused except
+// for localhost (a gateway on the developer's own machine): the gateway
+// sees every pushkey and the server sends it the notification body.
+enum class GatewayUrlProblem { None, Empty, NotAUrl, Insecure };
+GatewayUrlProblem gatewayUrlProblem(const QString& input);
 
 // The /pushers/set body that registers `pushkey`. Pure, so the wire format
 // is pinned by tests.

@@ -110,6 +110,15 @@ private slots:
         QCOMPARE(normaliseGatewayUrl("ftp://x"), QString());
         QCOMPARE(normaliseGatewayUrl("not a url"), QString());
         QCOMPARE(normaliseGatewayUrl(""), QString());
+        // Plain http only for a gateway on this machine.
+        QCOMPARE(normaliseGatewayUrl("http://push.example.org"), QString());
+        QCOMPARE(gatewayUrlProblem("http://push.example.org"), GatewayUrlProblem::Insecure);
+        QCOMPARE(normaliseGatewayUrl("http://localhost:5000"),
+                 QStringLiteral("http://localhost:5000/_matrix/push/v1/notify"));
+        QCOMPARE(gatewayUrlProblem("http://127.0.0.1:5000/x"), GatewayUrlProblem::None);
+        QCOMPARE(gatewayUrlProblem("  "), GatewayUrlProblem::Empty);
+        QCOMPARE(gatewayUrlProblem("push dot example"), GatewayUrlProblem::NotAUrl);
+        QCOMPARE(gatewayUrlProblem("https://u:p@push.example.org"), GatewayUrlProblem::NotAUrl);
     }
 
     void classify()

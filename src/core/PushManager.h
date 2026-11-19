@@ -54,6 +54,9 @@ public:
     bool backgroundSyncWanted() const;
     bool notificationsBlocked() const;
     Q_INVOKABLE void openNotificationSettings();
+    // Settings' gateway URL field: "" when `url` would be accepted (empty
+    // means "the default"), otherwise why not, for an inline message.
+    Q_INVOKABLE QString gatewayUrlError(const QString& url) const;
 
     // ServerManager::removeServer's hook: the deletion bodies owed for this
     // account, serialised, and the account forgotten.

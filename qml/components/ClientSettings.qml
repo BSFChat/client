@@ -1695,10 +1695,15 @@ Popup {
                                    + appSettings.defaultPushGatewayUrl + "). A server must "
                                    + "allow it in its push settings."
                         visible: appSettings.pushAvailable
+                        ColumnLayout {
+                        spacing: Theme.sp.s1
                         TextField {
                             id: pushGatewayField
+                            // Why the last entry was not saved; "" when it was.
+                            property string error: ""
                             Accessible.role: Accessible.EditableText
                             Accessible.name: qsTr("Push gateway URL")
+                            Accessible.description: error
                             implicitWidth: Theme.isMobile ? 220 : 320
                             text: appSettings.pushGatewayUrl
                             color: Theme.fg0
@@ -1707,18 +1712,38 @@ Popup {
                             background: Rectangle {
                                 color: Theme.bg0
                                 radius: Theme.r2
-                                border.color: parent.activeFocus ? Theme.accent : Theme.line
+                                border.color: pushGatewayField.error.length > 0
+                                    ? Theme.danger
+                                    : (pushGatewayField.activeFocus ? Theme.accent : Theme.line)
                                 border.width: 1
                             }
                             leftPadding: Theme.sp.s3
                             rightPadding: Theme.sp.s3
                             topPadding: Theme.sp.s2
                             bottomPadding: Theme.sp.s2
-                            // Invalid input is not stored; show what is.
+                            onTextEdited: error = ""
+                            // Invalid input is not stored. It used to revert
+                            // silently; now it stays in the field with the
+                            // reason underneath, so it can be corrected.
                             onEditingFinished: {
+                                const why = typeof pushManager !== "undefined"
+                                    ? pushManager.gatewayUrlError(text) : "";
+                                error = why;
+                                if (why.length > 0) return;
                                 appSettings.pushGatewayUrl = text;
                                 text = Qt.binding(function() { return appSettings.pushGatewayUrl; });
                             }
+                        }
+                        Text {
+                            visible: pushGatewayField.error.length > 0
+                            Layout.maximumWidth: pushGatewayField.implicitWidth
+                            text: pushGatewayField.error
+                            textFormat: Text.PlainText
+                            wrapMode: Text.WordWrap
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.sm
+                            color: Theme.danger
+                        }
                         }
                     }
 

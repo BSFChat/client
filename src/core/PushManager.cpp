@@ -171,6 +171,20 @@ void PushManager::openNotificationSettings()
     m_bridge->openNotificationSettings();
 }
 
+QString PushManager::gatewayUrlError(const QString& url) const
+{
+    switch (push::gatewayUrlProblem(url)) {
+    case push::GatewayUrlProblem::None:
+    case push::GatewayUrlProblem::Empty:
+        return {};
+    case push::GatewayUrlProblem::NotAUrl:
+        return tr("Enter a full address, like https://push.example.org");
+    case push::GatewayUrlProblem::Insecure:
+        return tr("The gateway must use https:// (http:// is only allowed for localhost).");
+    }
+    return {};
+}
+
 void PushManager::refreshStatus()
 {
     const bool bg = backgroundSyncWanted();
