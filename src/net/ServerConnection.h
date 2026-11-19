@@ -252,6 +252,9 @@ class ServerConnection : public QObject {
     // QML bindings should reference this so they re-evaluate whenever the
     // effective permission set could have changed.
     Q_PROPERTY(int permissionsGeneration READ permissionsGeneration NOTIFY permissionsChanged)
+    // Bumped on every roomPinnedEventsChanged; read it in a binding that
+    // calls isEventPinned so the binding re-runs.
+    Q_PROPERTY(int pinnedGeneration READ pinnedGeneration NOTIFY pinnedGenerationChanged)
     // Aggregated list of banned users across every room the sync has
     // surfaced. One entry per user: { userId, displayName, rooms[], reason }.
     // The value comes from m_roomMembers (client-side cache), so it only
@@ -283,6 +286,7 @@ public:
         return static_cast<int>(bsfchat::limits::kMaxMessageBodyBytes);
     }
     double maxUploadBytes() const { return double(m_maxUploadBytes); }
+    int pinnedGeneration() const { return m_pinnedGeneration; }
 
     // UTF-8 bytes in `text`, which is what the server counts and what QML
     // cannot work out for itself.
@@ -1307,6 +1311,7 @@ signals:
     void sendFeedback(const QString& text, const QString& kind);
     void roomTypingChanged();
     void roomPinnedEventsChanged(const QString& roomId);
+    void pinnedGenerationChanged();
     void profileFetched(const QString& userId, const QString& displayName, const QString& avatarUrl);
     // Answer to fetchNickname. `nickname` is empty when the user has none, which
     // is how an editor decides whether to offer "Remove nickname".
@@ -1529,6 +1534,7 @@ public:
     // bounded by the roster size rather than growing per event (U-M16).
     QMap<QString, QVector<bsfchat::RoomEvent>> m_roomMembers;
     QMap<QString, QStringList> m_roomPinnedEvents;
+    int m_pinnedGeneration = 0;
     // Whether the timeline view last reported itself parked at the end.
     // Starts true so a room opened and left without the view ever
     // reporting (no rows, model never populated) behaves as before.

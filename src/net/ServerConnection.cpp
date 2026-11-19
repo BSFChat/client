@@ -597,6 +597,13 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     // Surface state-event write failures. Each write path that optimistically
     // updates local caches stashes an undo closure in m_pendingStateUndo;
     // this handler pops and runs the matching one, then tells QML.
+    // The Pin/Unpin label's dependency: isEventPinned is an invokable, so a
+    // binding on it alone never re-ran (a lazily built menu kept the label
+    // it was first opened with).
+    connect(this, &ServerConnection::roomPinnedEventsChanged, this, [this]() {
+        ++m_pinnedGeneration;
+        emit pinnedGenerationChanged();
+    });
     connect(m_client, &MatrixClient::stateEventError, this,
             [this](const QString& roomId, const QString& eventType,
                    const QString& stateKey, int status, const QString& error) {
@@ -614,6 +621,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         else if (eventType == QStringLiteral("bsfchat.channel.permissions")) kind = "channel-override";
         else if (eventType == QStringLiteral("bsfchat.channel.settings")) kind = "channel-settings";
         else if (eventType == QStringLiteral("bsfchat.server.roles")) kind = "server-roles";
+        else if (eventType == QString::fromUtf8(bsfchat::event_type::kRoomPinnedEvents)) kind = "pin";
         else kind = eventType;
         // Only the third argument is a candidate for replacement. `kind` is
         // what both receivers switch on to word the toast ("Couldn't save
@@ -6092,7 +6100,8 @@ bool ServerConnection::isEventPinned(const QString& roomId, const QString& event
 void ServerConnection::togglePinnedEvent(const QString& roomId, const QString& eventId)
 {
     if (roomId.isEmpty() || eventId.isEmpty()) return;
-    QStringList list = m_roomPinnedEvents.value(roomId);
+    const QStringList previous = m_roomPinnedEvents.value(roomId);
+    QStringList list = previous;
     if (list.contains(eventId)) list.removeAll(eventId);
     else list.append(eventId);
     // Optimistic: update the cache immediately so the UI reflects the
@@ -6100,6 +6109,14 @@ void ServerConnection::togglePinnedEvent(const QString& roomId, const QString& e
     // the next m.room.pinned_events event.
     m_roomPinnedEvents[roomId] = list;
     emit roomPinnedEventsChanged(roomId);
+    // A refused write (no permission, or a stale list) used to leave the
+    // optimistic state on screen until the next sync contradicted it. Put it
+    // back; stateEventError's toast ("pin" kind) says why.
+    m_pendingStateUndo[QString::fromUtf8(bsfchat::event_type::kRoomPinnedEvents)
+                       + QStringLiteral("|")] = [this, roomId, previous]() {
+        m_roomPinnedEvents[roomId] = previous;
+        emit roomPinnedEventsChanged(roomId);
+    };
 
     QJsonArray arr;
     for (const auto& id : list) arr.append(id);

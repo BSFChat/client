@@ -661,6 +661,7 @@ ApplicationWindow {
                 case "channel-override": msg = "Couldn't save channel permissions"; break;
                 case "channel-settings": msg = "Couldn't update channel settings"; break;
                 case "server-roles":    msg = "Couldn't save server roles"; break;
+                case "pin":             msg = "Couldn't pin or unpin that message"; break;
                 default:                msg = "Save failed";
             }
             if (status === 403) msg += " — you don't have permission.";

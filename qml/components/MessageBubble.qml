@@ -617,9 +617,11 @@ Item {
         CtxItem {
             text: {
                 var s = serverManager.activeServer;
-                if (s && s.isEventPinned(s.activeRoomId, bubble.eventId))
-                    return "Unpin message";
-                return "Pin message";
+                // pinnedGeneration is the NOTIFY isEventPinned lacks.
+                if (s && s.pinnedGeneration >= 0
+                    && s.isEventPinned(s.activeRoomId, bubble.eventId))
+                    return qsTr("Unpin message");
+                return qsTr("Pin message");
             }
             iconName: "pin"
             enabled: {
