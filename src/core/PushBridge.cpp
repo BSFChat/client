@@ -62,7 +62,7 @@ nativeOnPushMessage(JNIEnv* env, jclass, jstring roomId, jstring eventId, jint u
 
 void registerNatives()
 {
-    JNINativeMethod methods[] = {
+    const JNINativeMethod methods[] = {
         { const_cast<char*>("nativeOnPushToken"),
           const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)V"),
           reinterpret_cast<void*>(nativeOnPushToken) },

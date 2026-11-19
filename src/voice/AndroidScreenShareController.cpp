@@ -112,7 +112,7 @@ void registerNatives()
     static bool registered = false;
     if (registered) return;
 
-    JNINativeMethod methods[] = {
+    const JNINativeMethod methods[] = {
         { const_cast<char*>("nativeOnStarted"),
           const_cast<char*>("(II)V"),
           reinterpret_cast<void*>(nativeOnStarted) },

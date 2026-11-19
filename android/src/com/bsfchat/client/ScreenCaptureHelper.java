@@ -258,6 +258,12 @@ public final class ScreenCaptureHelper {
             stopCapture();
             return;
         }
+        // Deliberately still Display.getRealMetrics (deprecated from API
+        // 30) rather than WindowManager.getMaximumWindowMetrics: this runs
+        // with the projection SERVICE's context, which is not a UI context,
+        // and WindowMetrics from a non-UI context is documented as possibly
+        // smaller than the display (and a StrictMode IncorrectContextUse
+        // violation). The capture needs the whole display, which this gives.
         wm.getDefaultDisplay().getRealMetrics(dm);
         int srcW = dm.widthPixels, srcH = dm.heightPixels;
         int longEdge = Math.max(srcW, srcH);

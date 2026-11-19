@@ -188,7 +188,7 @@ public class VoiceService extends Service {
             wakeLock.release();
         }
         wakeLock = null;
-        stopForeground(true);
+        stopForeground(STOP_FOREGROUND_REMOVE);
         super.onDestroy();
     }
 
@@ -220,12 +220,9 @@ public class VoiceService extends Service {
         PendingIntent tapPi = PendingIntent.getActivity(
             this, 0, launch, flags);
 
-        Notification.Builder b;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            b = new Notification.Builder(this, CHANNEL_ID);
-        } else {
-            b = new Notification.Builder(this);
-        }
+        // minSdk 28: the channel constructor always exists, and the
+        // channel-less one is deprecated.
+        Notification.Builder b = new Notification.Builder(this, CHANNEL_ID);
         b.setContentTitle("BSFChat")
          .setContentText("Connected to voice")
          .setOngoing(true)

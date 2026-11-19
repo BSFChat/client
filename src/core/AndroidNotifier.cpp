@@ -58,7 +58,7 @@ void registerSyncNatives()
 {
     static bool registered = false;
     if (registered) return;
-    JNINativeMethod methods[] = {
+    const JNINativeMethod methods[] = {
         { const_cast<char*>("nativeOnSyncServiceStopped"),
           const_cast<char*>("(Ljava/lang/String;)V"),
           reinterpret_cast<void*>(nativeOnSyncServiceStopped) },
@@ -180,6 +180,16 @@ QJniObject buildTapIntent(const QString& deepLink)
     return pi;
 }
 
+// A Notification.Builder on the chat channel. minSdk is 28, so the channel
+// constructor (API 26) always exists; the channel-less one is deprecated.
+QJniObject chatBuilder(const QJniObject& ctx)
+{
+    return QJniObject("android/app/Notification$Builder",
+        "(Landroid/content/Context;Ljava/lang/String;)V",
+        ctx.object(),
+        QJniObject::fromString(kChannelId).object<jstring>());
+}
+
 // Message text must not be readable on a locked phone (M2-8). VISIBILITY_
 // PRIVATE shows the notification on the lock screen only as its public
 // version, which says that something arrived and nothing else; the full
@@ -191,16 +201,7 @@ void applyLockScreenPrivacy(QJniObject& builder, const QJniObject& ctx)
     builder.callObjectMethod("setVisibility",
         "(I)Landroid/app/Notification$Builder;", kVisibilityPrivate);
 
-    QJniObject pub;
-    if (QNativeInterface::QAndroidApplication::sdkVersion() >= 26) {
-        pub = QJniObject("android/app/Notification$Builder",
-            "(Landroid/content/Context;Ljava/lang/String;)V",
-            ctx.object(),
-            QJniObject::fromString(kChannelId).object<jstring>());
-    } else {
-        pub = QJniObject("android/app/Notification$Builder",
-            "(Landroid/content/Context;)V", ctx.object());
-    }
+    QJniObject pub = chatBuilder(ctx);
     if (!pub.isValid()) return;
     pub.callObjectMethod("setContentTitle",
         "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;",
@@ -381,16 +382,7 @@ void AndroidNotifier::postChatNotification(const QString& tag,
     QJniObject nm = notificationManager();
     if (!nm.isValid()) return;
 
-    QJniObject builder;
-    if (QNativeInterface::QAndroidApplication::sdkVersion() >= 26) {
-        builder = QJniObject("android/app/Notification$Builder",
-            "(Landroid/content/Context;Ljava/lang/String;)V",
-            ctx.object(),
-            QJniObject::fromString(kChannelId).object<jstring>());
-    } else {
-        builder = QJniObject("android/app/Notification$Builder",
-            "(Landroid/content/Context;)V", ctx.object());
-    }
+    QJniObject builder = chatBuilder(ctx);
     if (!builder.isValid()) return;
 
     // Chainable setters — each returns the builder; we ignore the
