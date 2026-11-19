@@ -1,4 +1,5 @@
 #include "net/MatrixClient.h"
+#include "net/VoiceErrorText.h"
 
 #include "net/AuthError.h"
 #include "net/IgnoredUsers.h"
@@ -1729,10 +1730,7 @@ QString MatrixClient::voiceJoinRefusalText(const QByteArray& body)
         != QLatin1String(kVoiceChannelFullCode)) {
         return QString();
     }
-    const int cap = err.value(QStringLiteral("max_participants")).toInt(0);
-    return cap > 0
-        ? QStringLiteral("This voice channel is full (%1 people)").arg(cap)
-        : QStringLiteral("This voice channel is full.");
+    return voice::channelFullText(err.value(QStringLiteral("max_participants")).toInt(0));
 }
 
 void MatrixClient::joinVoice(const QString& roomId, const QString& deviceId)

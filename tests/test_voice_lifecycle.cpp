@@ -14,6 +14,7 @@
 #include "net/VoiceQuit.h"
 #include "net/VoiceSession.h"
 #include "net/VoiceStateMirror.h"
+#include "net/VoiceErrorText.h"
 #include "voice/CallEventOutbox.h"
 #include "voice/TurnCredentials.h"
 #include "voice/NetworkChangeFilter.h"
@@ -291,6 +292,7 @@ private slots:
     void switchIsNeverSeenAsAHangUp();
     void networkChangesAreFiltered();
     void turnReplyFromALeftSessionIsNotTheNextJoins();
+    void voiceErrorsAreSentencesNotJson();
 };
 
 void TestVoiceLifecycle::joinReachesActiveThroughEveryState()
@@ -1991,6 +1993,23 @@ void TestVoiceLifecycle::turnReplyFromALeftSessionIsNotTheNextJoins()
     net.replyTurn(turnConfig());           // B's own
     QCOMPARE(s.state(), VoiceSession::State::Active);
     QCOMPARE(engine.starts, 2);
+}
+
+void TestVoiceLifecycle::voiceErrorsAreSentencesNotJson()
+{
+    using voice::readableVoiceError;
+    QCOMPARE(readableVoiceError(R"({"errcode":"M_FORBIDDEN","error":"not a member of this room"})"),
+             QStringLiteral("Not a member of this room."));
+    QCOMPARE(readableVoiceError(R"({"errcode":"M_FORBIDDEN"})"),
+             QStringLiteral("You don't have permission to do that in this voice channel."));
+    QCOMPARE(readableVoiceError(R"({"errcode":"M_WEIRD"})"),
+             QStringLiteral("The server refused the request (M_WEIRD)."));
+    QCOMPARE(readableVoiceError("{garbage"), QStringLiteral("The server refused the request."));
+    QCOMPARE(readableVoiceError("Microphone access is off."),
+             QStringLiteral("Microphone access is off."));
+    QCOMPARE(voice::channelFullText(1), QStringLiteral("This voice channel is full (1 person)."));
+    QCOMPARE(voice::channelFullText(8), QStringLiteral("This voice channel is full (8 people)."));
+    QCOMPARE(voice::channelFullText(0), QStringLiteral("This voice channel is full."));
 }
 
 QTEST_MAIN(TestVoiceLifecycle)

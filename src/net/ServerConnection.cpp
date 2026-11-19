@@ -1,4 +1,5 @@
 #include "net/ServerConnection.h"
+#include "net/VoiceErrorText.h"
 
 #include <utility>
 #include "net/MatrixClient.h"
@@ -3503,7 +3504,9 @@ void ServerConnection::setVoiceError(const QString& message)
     // {"errcode":"M_UNKNOWN_TOKEN",...} rather than a prompt to sign in.
     // The banner is already saying the true thing.
     if (m_auth.shouldSuppressSubsystemError()) return;
-    m_voiceError = message;
+    // Never the raw body: every voice path's message comes through here.
+    m_voiceError = voice::readableVoiceError(message);
+    if (m_voiceError.isEmpty()) return;
     emit voiceErrorChanged();
     m_voiceErrorTimer->start();
 }
