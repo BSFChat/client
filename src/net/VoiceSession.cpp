@@ -76,7 +76,7 @@ void VoiceSession::setState(State s)
 
 bool VoiceSession::effectiveMuted() const
 {
-    return m_muted || (m_pttMode && !m_pttPressed);
+    return m_muted || m_deafened || (m_pttMode && !m_pttPressed);
 }
 
 void VoiceSession::applyMicGate()
@@ -308,7 +308,7 @@ void VoiceSession::onStateUpdateFailed(const QString& roomId,
         bool changedDeafen = false;
         if (!m_muted && m_ackedManualMuted) { m_muted = true; changedMute = true; }
         if (!m_deafened && m_ackedDeafened) { m_deafened = true; changedDeafen = true; }
-        if (changedMute) emit mutedChanged();
+        if (changedMute || changedDeafen) emit mutedChanged();
         if (changedDeafen) emit deafenedChanged();
         // BOTH gates, every time: the transport must match the toggles
         // whatever moved.
@@ -431,9 +431,18 @@ void VoiceSession::requestLeave()
 
 void VoiceSession::toggleMute()
 {
-    m_muted = !m_muted;
     ++m_userActionSeq;
     m_stateGaveUp = false;
+    if (m_deafened) {
+        // The button shows muted (deafen implies mute); clicking it means
+        // "let me talk", which needs hearing back too.
+        m_deafened = false;
+        m_muted = false;
+        emit deafenedChanged();
+        applyDeafenGate();
+    } else {
+        m_muted = !m_muted;
+    }
     emit mutedChanged();
     applyMicGate();
     maybeSendState();
@@ -445,7 +454,11 @@ void VoiceSession::toggleDeafen()
     ++m_userActionSeq;
     m_stateGaveUp = false;
     emit deafenedChanged();
+    // Deafen gates the mic too; undeafening falls back to m_muted, which
+    // deafening never touched.
+    emit mutedChanged();
     applyDeafenGate();
+    applyMicGate();
     maybeSendState();
 }
 

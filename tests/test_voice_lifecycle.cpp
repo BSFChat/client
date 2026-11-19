@@ -286,6 +286,7 @@ private slots:
     void transportSelectorRefusesMixedRoster();
     // Audit 3 fix-first #8.
     void muteMirrorFollowsTheSessionAcrossLeaveAndSwitch();
+    void deafenImpliesMuteAndRestoresIt();
 };
 
 void TestVoiceLifecycle::joinReachesActiveThroughEveryState()
@@ -913,7 +914,7 @@ void TestVoiceLifecycle::rollbackNeverCrossesANewerAction()
     s.toggleDeafen();                     // newer action while in flight
     QCOMPARE(net.stateUpdates.size(), 2); // coalesced: one PUT at a time
     net.replyStateError("!room:x", "nope");
-    QVERIFY(!s.muted());                  // not rolled back past the deafen
+    QVERIFY(!s.manualMuted());            // not rolled back past the deafen
     QVERIFY(s.deafened());
 }
 
@@ -1829,6 +1830,60 @@ void TestVoiceLifecycle::muteMirrorFollowsTheSessionAcrossLeaveAndSwitch()
     net.replyTurn(turnConfig());
     QVERIFY(inSync());
     QVERIFY(mirror.deafened);
+}
+
+void TestVoiceLifecycle::deafenImpliesMuteAndRestoresIt()
+{
+    // Deafened users used to keep transmitting. Deafen now shuts the mic
+    // and shows as muted; undeafening restores the earlier manual mute.
+    VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
+    s.setLocalUserId("@me:x");
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    joinTo(s, net, "!room:x");
+
+    QSignalSpy muteSpy(&s, &VoiceSession::mutedChanged);
+    s.toggleDeafen();
+    QVERIFY(s.deafened());
+    QVERIFY(s.muted());
+    QVERIFY(!s.manualMuted());
+    QVERIFY(s.effectiveMuted());
+    QCOMPARE(engine.gates.last(), true);
+    QVERIFY(muteSpy.size() >= 1);
+    QCOMPARE(net.stateUpdates.last(), qMakePair(true, true));
+    net.replyStateOk("!room:x");
+
+    // Undeafen: back to live, because the user was not muted before.
+    s.toggleDeafen();
+    QVERIFY(!s.muted());
+    QCOMPARE(engine.gates.last(), false);
+    QCOMPARE(net.stateUpdates.last(), qMakePair(false, false));
+    net.replyStateOk("!room:x");
+
+    // Muted, deafen, undeafen: still muted.
+    s.toggleMute();
+    net.replyStateOk("!room:x");
+    s.toggleDeafen();
+    net.replyStateOk("!room:x");
+    s.toggleDeafen();
+    net.replyStateOk("!room:x");
+    QVERIFY(s.muted());
+    QVERIFY(s.manualMuted());
+    QCOMPARE(engine.gates.last(), true);
+
+    // Clicking mute while deafened means "let me talk": both clear.
+    s.toggleMute();               // unmute
+    net.replyStateOk("!room:x");
+    s.toggleDeafen();
+    net.replyStateOk("!room:x");
+    s.toggleMute();
+    QVERIFY(!s.deafened());
+    QVERIFY(!s.muted());
+    QCOMPARE(engine.gates.last(), false);
+    QCOMPARE(engine.deafenGates.last(), false);
 }
 
 QTEST_MAIN(TestVoiceLifecycle)

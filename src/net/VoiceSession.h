@@ -113,10 +113,15 @@ public:
     // True while a voice/state PUT is outstanding. Test/diagnostic.
     bool statePutInFlight() const { return m_statePut.has_value(); }
 
-    bool muted() const { return m_muted; }
+    // What the mute button shows: the manual toggle, or deafened —
+    // deafening implies mute (the usual convention), without touching the
+    // manual toggle, so undeafening restores whatever mute was before.
+    bool muted() const { return m_muted || m_deafened; }
+    // The manual mute toggle alone.
+    bool manualMuted() const { return m_muted; }
     bool deafened() const { return m_deafened; }
-    // The mic gate we actually apply and announce: manual mute OR
-    // (push-to-talk mode AND the key is not held). V-M7 — the old code
+    // The mic gate we actually apply and announce: manual mute OR deafened
+    // OR (push-to-talk mode AND the key is not held). V-M7 — the old code
     // announced `muted=false` to the roster while PTT held the mic shut,
     // so everyone else saw an unmuted user who was never audible.
     bool effectiveMuted() const;
