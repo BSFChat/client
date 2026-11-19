@@ -88,6 +88,7 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
     case SenderIsBotRole: return msg.senderIsBot;
     case DeliveryStateRole: return static_cast<int>(msg.delivery);
     case PlainBodyRole: return rendersAsPlainText(msg.body, msg.formattedBody, msg.msgtype);
+    case LocalIdRole: return msg.localId;
     case BodyRole: return msg.body;
     case FormattedBodyRole: return msg.formattedBody;
     case TimestampRole: return msg.timestamp;
@@ -157,7 +158,8 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {MentionsRoomRole, "mentionsRoom"},
         {SenderIsBotRole, "senderIsBot"},
         {DeliveryStateRole, "deliveryState"},
-        {PlainBodyRole, "plainBody"}
+        {PlainBodyRole, "plainBody"},
+        {LocalIdRole, "localId"}
     };
 }
 

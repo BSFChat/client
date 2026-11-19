@@ -72,6 +72,10 @@ Item {
     // this client sent in this session — everything that arrived over /sync
     // is on the server by definition.
     property int deliveryState: 0
+    // Transaction id of a row this client sent; the handle for Retry/Discard.
+    property string localId: ""
+    signal retryRequested(string localId)
+    signal discardRequested(string localId)
     // Edit is offered only on prose this client sent and the server has.
     // A media row's body is its file name, and an m.replace carries no
     // url/info, so "editing" an image used to replace it with text (the
@@ -2072,16 +2076,58 @@ Item {
         Accessible.ignored: true
     }
 
-    Text {
+    // "Not sent · Retry · Discard". Retry re-sends the row the way it was
+    // sent (reply, thread, /me); Discard drops it. Both used to be missing,
+    // so a failed message sat there with no way to send or remove it.
+    Row {
         visible: bubble.deliveryState === 2
         anchors.right: parent.right
         anchors.rightMargin: Theme.sp.s3
         anchors.top: parent.top
-        text: qsTr("Not sent")
-        // Already the last clause of the bubble's sentence.
-        Accessible.ignored: true
-        color: Theme.danger
-        font.family: Theme.fontSans
-        font.pixelSize: Theme.fontSize.xs
+        spacing: Theme.sp.s3
+        z: 2
+        Text {
+            text: qsTr("Not sent")
+            // Already the last clause of the bubble's sentence.
+            Accessible.ignored: true
+            color: Theme.danger
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.xs
+            anchors.verticalCenter: parent.verticalCenter
+        }
+        Repeater {
+            model: bubble.localId !== "" ? [
+                { label: qsTr("Retry"), retry: true },
+                { label: qsTr("Discard"), retry: false }
+            ] : []
+            delegate: Text {
+                required property var modelData
+                text: modelData.label
+                color: echoActionMouse.containsMouse || activeFocus ? Theme.fg0 : Theme.accent
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                font.underline: echoActionMouse.containsMouse || activeFocus
+                anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+                activeFocusOnTab: true
+                Accessible.role: Accessible.Button
+                Accessible.name: modelData.retry ? qsTr("Retry sending")
+                                                 : qsTr("Discard unsent message")
+                Accessible.onPressAction: _fire()
+                Keys.onReturnPressed: _fire()
+                Keys.onSpacePressed: _fire()
+                function _fire() {
+                    if (modelData.retry) bubble.retryRequested(bubble.localId);
+                    else bubble.discardRequested(bubble.localId);
+                }
+                MouseArea {
+                    id: echoActionMouse
+                    anchors.fill: parent
+                    anchors.margins: Theme.isMobile ? -10 : -2
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: parent._fire()
+                }
+            }
+        }
     }
 }

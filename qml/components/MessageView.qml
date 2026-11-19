@@ -1796,6 +1796,15 @@ Rectangle {
                         replyPreview: model.replyPreview || ""
                         reactions: model.reactions || []
                         deliveryState: model.deliveryState || 0
+                        localId: model.localId || ""
+                        onRetryRequested: (lid) => {
+                            if (serverManager.activeServer)
+                                serverManager.activeServer.retryLocalEcho(lid);
+                        }
+                        onDiscardRequested: (lid) => {
+                            var s = serverManager.activeServer;
+                            if (s && s.messageModel) s.messageModel.discardLocalEcho(lid);
+                        }
                         threadRootId: model.threadRootId || ""
                         threadReplyCount: model.threadReplyCount || 0
                         // Row-level mention highlight, so a message naming you is

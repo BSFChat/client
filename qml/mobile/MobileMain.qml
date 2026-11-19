@@ -1240,10 +1240,12 @@ ApplicationWindow {
 
     Drawer {
         id: shareSheet
-        // Client-side ceiling, mirrored from SharePolicy::kDefaultMaxUploadBytes
-        // (the server does not advertise its own). sendMediaMessage enforces
-        // it again; this is so the sheet can say so before anything is read.
-        readonly property real maxBytes: 100 * 1024 * 1024
+        // The connection's upload ceiling (the server's m.upload.size, else
+        // SharePolicy::kDefaultMaxUploadBytes). sendMediaMessage enforces it
+        // again; this is so the sheet can say so before anything is read.
+        readonly property real maxBytes: serverManager.activeServer
+            && serverManager.activeServer.maxUploadBytes > 0
+            ? serverManager.activeServer.maxUploadBytes : 50 * 1024 * 1024
         property bool isFile: false
         property string payload: ""
         property string fileName: ""
@@ -1289,7 +1291,9 @@ ApplicationWindow {
                 // starts a composer upload — see MessageInput.noteUploadStarted
                 // (U-H6: the upload's completion reaches the composer's
                 // counter regardless of who started it).
-                s.sendSharedMediaMessage(payload);
+                // fileName is the provider's display name, so the upload
+                // is not named after the content:// id.
+                s.sendSharedMediaMessage(payload, fileName);
                 chatView.noteUploadStarted();
                 root.toast("Uploading shared file…", "info");
             } else {
@@ -1353,7 +1357,7 @@ ApplicationWindow {
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
                 text: shareSheet.tooLarge
-                      ? "This file is larger than the 100 MB upload limit."
+                      ? ("This file is larger than the " + Math.round(shareSheet.maxBytes / (1024 * 1024)) + " MB upload limit.")
                       : "Shared by another app. It will be posted in #"
                         + shareSheet.targetRoomName + " for everyone there to see."
                 font.family: Theme.fontSans

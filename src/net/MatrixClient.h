@@ -4,6 +4,7 @@
 #include <functional>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QHash>
 #include <QPointer>
 #include <QString>
 #include <QJsonArray>
@@ -209,6 +210,12 @@ public:
     // `device` (it is reparented to the reply and freed with it).
     void uploadMedia(const QString& uploadId, QIODevice* device,
                      const QString& contentType, const QString& filename);
+
+    // Abort an upload started with `uploadId`. It then fails through
+    // mediaUploadError ("Upload cancelled"). False when nothing is running.
+    bool cancelMediaUpload(const QString& uploadId);
+    // GET /_matrix/media/v3/config → mediaConfigResult.
+    void getMediaConfig();
 
     // The URL to hand an Image/MediaPlayer for an mxc URI, or "" when there is
     // not yet a ticket for it.
@@ -570,6 +577,12 @@ signals:
     // which upload the tick belongs to when several run at once.
     void mediaUploadProgress(const QString& filename, double progress);
     void mediaUploadError(const QString& uploadId, const QString& error);
+    // The same tick keyed by the upload's token: two files with one name
+    // used to share a progress row.
+    void mediaUploadProgressById(const QString& uploadId, const QString& filename,
+                                 double progress);
+    // Answer to getMediaConfig: the server's m.upload.size, 0 when unknown.
+    void mediaConfigResult(qint64 maxUploadBytes);
 
     void voiceJoined(const QString& roomId, const QJsonArray& members);
     // Same reply, with the server's session token for this membership.
@@ -812,6 +825,8 @@ private:
     // the second of two guards rather than the load-bearing one — but the
     // ordering costs nothing and the failure it prevents is silent.
     QPointer<QNetworkReply> m_syncReply;
+    // Uploads in flight, by token, for cancelMediaUpload.
+    QHash<QString, QPointer<QNetworkReply>> m_uploadReplies;
     QNetworkAccessManager m_nam;
     bsfchat::client::MediaTicketCache m_mediaTickets;
     // See currentSyncLeaves().

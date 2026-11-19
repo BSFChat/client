@@ -778,16 +778,24 @@ void MatrixClient::startMediaUpload(const QString& uploadId, QIODevice* device,
         reply = m_nam.post(request, bytes);
     }
     watchForTokenRejection(reply);
+    m_uploadReplies.insert(uploadId, reply);
     connect(reply, &QNetworkReply::uploadProgress, this,
-        [this, filename](qint64 sent, qint64 total) {
+        [this, filename, uploadId](qint64 sent, qint64 total) {
             if (total <= 0) return;
             emit mediaUploadProgress(filename,
                 double(sent) / double(total));
+            emit mediaUploadProgressById(uploadId, filename, double(sent) / double(total));
         });
     connect(reply, &QNetworkReply::finished, this, [this, reply, filename, uploadId]() {
         reply->deleteLater();
+        m_uploadReplies.remove(uploadId);
         emit mediaUploadProgress(filename, 1.0);
+        emit mediaUploadProgressById(uploadId, filename, 1.0);
         auto data = reply->readAll();
+        if (reply->error() == QNetworkReply::OperationCanceledError) {
+            emit mediaUploadError(uploadId, tr("Upload cancelled"));
+            return;
+        }
         if (reply->error() != QNetworkReply::NoError) {
             emit mediaUploadError(uploadId, bsfchat::net::replyFailureText(reply, data));
             return;
@@ -803,6 +811,38 @@ void MatrixClient::startMediaUpload(const QString& uploadId, QIODevice* device,
         } catch (const std::exception& e) {
             emit mediaUploadError(uploadId, QString::fromStdString(e.what()));
         }
+    });
+}
+
+bool MatrixClient::cancelMediaUpload(const QString& uploadId)
+{
+    // abort() finishes the reply synchronously with OperationCanceledError,
+    // which the handler above reports as mediaUploadError — so the caller's
+    // failure path (and the composer's in-flight count) runs exactly once.
+    const QPointer<QNetworkReply> reply = m_uploadReplies.value(uploadId);
+    if (!reply) return false;
+    reply->abort();
+    return true;
+}
+
+void MatrixClient::getMediaConfig()
+{
+    // GET /_matrix/media/v3/config: the server's upload ceiling as
+    // m.upload.size. A server that does not serve it (404, or no such key)
+    // answers 0, which callers read as "unknown".
+    auto* reply = makeRequest("GET", QStringLiteral("/_matrix/media/v3/config"));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const auto data = reply->readAll();
+        qint64 bytes = 0;
+        if (reply->error() == QNetworkReply::NoError) {
+            const auto j = json::parse(data.toStdString(), nullptr, false);
+            if (j.is_object() && j.contains("m.upload.size")
+                && j["m.upload.size"].is_number_integer()) {
+                bytes = std::max<qint64>(0, j["m.upload.size"].get<qint64>());
+            }
+        }
+        emit mediaConfigResult(bytes);
     });
 }
 

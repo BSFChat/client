@@ -87,7 +87,10 @@ public:
         // instead of RichText, which skips the HTML import for the common
         // case of an ordinary one-line message. Media rows are never plain
         // (they show no body text at all).
-        PlainBodyRole
+        PlainBodyRole,
+        // The transaction id of a row this client sent (empty for anything
+        // from /sync) — the handle Retry and Discard on a "Not sent" row use.
+        LocalIdRole
     };
 
     // Where a row is between "the user pressed Enter" and "the server has

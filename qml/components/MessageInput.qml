@@ -22,9 +22,12 @@ Rectangle {
     // Editing and replying are mutually exclusive; the size warning stacks
     // under whichever of them is up, because you can be editing a message
     // into being too long.
+    // The upload strip counts too: it was left out, so the composer did not
+    // grow for it and the input row covered the strip.
     readonly property real _bannerHeight:
-        (editingHeader.visible ? editingHeader.height
-                               : (replyHeader.visible ? replyHeader.height : 0))
+        uploadBanner.height
+        + (editingHeader.visible ? editingHeader.height
+                                 : (replyHeader.visible ? replyHeader.height : 0))
         + sizeHeader.height
     implicitHeight: inputRoot._bannerHeight > 0
         ? inputRoot._bannerHeight + inputCore.implicitHeight + 8
@@ -245,17 +248,17 @@ Rectangle {
     property string editingEventId: ""
     property string editingOriginalBody: ""
 
-    // Map of filename → progress (0..1) for currently-uploading files.
-    // Kept as a dictionary so multiple simultaneous uploads each get
-    // a row. A finished upload (progress == 1.0) stays in the map for
-    // 400ms so the "complete" state is visible before it disappears.
+    // Map of upload id → { name, p } (p is 0..1) for files in flight. Keyed
+    // by the upload's id, not its file name: two "image.png" uploads used to
+    // share one row. A finished upload (p == 1.0) stays for 400ms so the
+    // "complete" state is visible before it disappears.
     property var _uploads: ({})
     Connections {
         target: serverManager.activeServer
         ignoreUnknownSignals: true
-        function onMediaUploadProgress(filename, progress) {
+        function onMediaUploadProgressed(uploadId, filename, progress) {
             var m = Object.assign({}, inputRoot._uploads);
-            m[filename] = progress;
+            m[uploadId] = { name: filename, p: progress };
             inputRoot._uploads = m;
             if (progress >= 1.0) uploadSweepTimer.start();
         }
@@ -266,7 +269,7 @@ Rectangle {
         onTriggered: {
             var m = {};
             for (var k in inputRoot._uploads) {
-                if (inputRoot._uploads[k] < 1.0) m[k] = inputRoot._uploads[k];
+                if (inputRoot._uploads[k].p < 1.0) m[k] = inputRoot._uploads[k];
             }
             inputRoot._uploads = m;
         }
@@ -490,7 +493,8 @@ Rectangle {
     // prompt text, and a proper X button (not a bare unicode glyph).
     Rectangle {
         id: editingHeader
-        anchors.top: parent.top
+        // Under the upload strip, never on top of it.
+        anchors.top: uploadBanner.visible ? uploadBanner.bottom : parent.top
         anchors.left: parent.left
         anchors.right: parent.right
         height: visible ? 32 : 0
@@ -578,18 +582,21 @@ Rectangle {
             Repeater {
                 model: inputRoot._uploadKeys
                 delegate: Item {
+                    id: uploadRow
                     required property string modelData
                     width: parent.width
                     height: 18
-                    readonly property real p: inputRoot._uploads[modelData] || 0
+                    readonly property var entry: inputRoot._uploads[modelData] || ({ name: "", p: 0 })
+                    readonly property real p: entry.p || 0
+                    readonly property string fileName: entry.name || ""
 
                     // One row, one announcement: the file and where it is up
                     // to. Four rows all saying "Uploading" would be useless.
                     Accessible.role: Accessible.StaticText
                     Accessible.name: p >= 1.0
-                        ? qsTr("%1 uploaded").arg(modelData)
+                        ? qsTr("%1 uploaded").arg(fileName)
                         : qsTr("Uploading %1, %2 percent")
-                          .arg(modelData).arg(Math.round(p * 100))
+                          .arg(fileName).arg(Math.round(p * 100))
 
                     Text {
                         anchors.left: parent.left
@@ -597,17 +604,47 @@ Rectangle {
                         Accessible.ignored: true
                         width: parent.width * 0.5
                         textFormat: Text.PlainText
-                        text: "Uploading " + modelData
+                        text: qsTr("Uploading %1").arg(uploadRow.fileName)
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
                         color: Theme.fg2
                         elide: Text.ElideMiddle
                     }
-                    Rectangle {
+                    // Cancel: the upload then ends through mediaSendFailed,
+                    // which is what brings the in-flight count back down.
+                    Text {
+                        id: cancelUpload
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
+                        visible: uploadRow.p < 1.0
+                        text: "\u2715"
+                        color: cancelUploadMouse.containsMouse || activeFocus ? Theme.danger : Theme.fg2
+                        font.pixelSize: Theme.fontSize.xs
+                        activeFocusOnTab: true
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Cancel uploading %1").arg(uploadRow.fileName)
+                        Accessible.onPressAction: _cancel()
+                        Keys.onReturnPressed: _cancel()
+                        Keys.onSpacePressed: _cancel()
+                        function _cancel() {
+                            if (serverManager.activeServer && serverManager.activeServer.cancelMediaUpload)
+                                serverManager.activeServer.cancelMediaUpload(uploadRow.modelData);
+                        }
+                        MouseArea {
+                            id: cancelUploadMouse
+                            anchors.fill: parent
+                            anchors.margins: Theme.isMobile ? -12 : -4
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: cancelUpload._cancel()
+                        }
+                    }
+                    Rectangle {
+                        anchors.right: cancelUpload.visible ? cancelUpload.left : parent.right
+                        anchors.rightMargin: cancelUpload.visible ? Theme.sp.s3 : 0
+                        anchors.verticalCenter: parent.verticalCenter
                         Accessible.ignored: true
-                        width: parent.width * 0.45
+                        width: parent.width * 0.40
                         height: 4
                         radius: 2
                         color: Theme.bg2
@@ -964,9 +1001,28 @@ Rectangle {
                             event.accepted = true;
                             return;
                         }
-                        if (event.key === Qt.Key_Tab) {
-                            inputRoot._insertSlash(
-                                matches[inputRoot.slashSelected]);
+                        // Enter accepts too, like Tab — it used to send the
+                        // half-typed "/sp" as a message. Except when the word
+                        // is already a complete command that needs no
+                        // argument ("/shrug"): then Enter runs it.
+                        var accept = event.key === Qt.Key_Tab
+                            || ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                                && !Theme.isMobile
+                                && !(event.modifiers & Qt.ShiftModifier));
+                        if (accept) {
+                            var pick = matches[inputRoot.slashSelected];
+                            var typed = inputRoot.slashQuery.toLowerCase();
+                            var exact = [pick.name].concat(pick.aliases || []).indexOf(typed) >= 0;
+                            var needsArg = (pick.usage || "").charAt(0) === "<"
+                                           || (pick.usage || "").charAt(0) === "@";
+                            if (event.key !== Qt.Key_Tab && exact && !needsArg) {
+                                inputRoot.slashQuery = "";
+                                inputRoot.slashAnchor = -1;
+                                sendCurrentMessage();
+                                event.accepted = true;
+                                return;
+                            }
+                            inputRoot._insertSlash(pick);
                             event.accepted = true;
                             return;
                         }
@@ -994,6 +1050,17 @@ Rectangle {
                     }
                 }
                 Keys.onReturnPressed: (event) => {
+                    // An open mention or slash popup owns Enter. Qt runs this
+                    // specific handler BEFORE Keys.onPressed, so without
+                    // handing the event on, Enter sent the half-typed text
+                    // instead of accepting the highlighted entry.
+                    if (!Theme.isMobile && !(event.modifiers & Qt.ShiftModifier)
+                        && (inputRoot.mentionAnchor >= 0
+                            || (inputRoot.slashAnchor >= 0
+                                && inputRoot._slashMatches().length > 0))) {
+                        event.accepted = false;
+                        return;
+                    }
                     // Touch keyboards don't distinguish Shift+Enter
                     // reliably and users expect Enter to insert a
                     // newline the way SMS / WhatsApp do. On mobile,
@@ -1530,6 +1597,7 @@ Rectangle {
             description: "Send an action message",
             usage: "<action>",
             handler: function(rest) {
+                if (!rest || !rest.trim()) return null;
                 return { body: rest, msgtype: "m.emote" };
             }
         },
@@ -1836,6 +1904,24 @@ Rectangle {
                 inputArea.text = "";
                 inputRoot.lastSentAt = Date.now();
                 return;
+            }
+            if (recognised && cmd === null) {
+                // A command that needs an argument and got none (/me, /spoiler,
+                // /dm): say what it wants and keep the text, instead of
+                // silently clearing the composer.
+                var rest0 = text.indexOf(" ") >= 0 ? text.substring(text.indexOf(" ") + 1).trim() : "";
+                var def = null;
+                for (var d = 0; d < slashCatalogue.length; ++d) {
+                    if ([slashCatalogue[d].name].concat(slashCatalogue[d].aliases || [])
+                            .indexOf(lead) >= 0) { def = slashCatalogue[d]; break; }
+                }
+                var u = def ? (def.usage || "") : "";
+                if (rest0 === "" && (u.charAt(0) === "<" || u.charAt(0) === "@")) {
+                    var hw = inputArea.Window.window;
+                    if (hw && hw.toastInfo)
+                        hw.toastInfo(qsTr("Usage: %1 %2").arg(def.name).arg(u));
+                    return;
+                }
             }
             if (recognised) {
                 // Recognised command with a null handler return

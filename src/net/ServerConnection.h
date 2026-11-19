@@ -32,6 +32,7 @@
 // (CallSignal is a plain value type), so it is safe in non-voice builds
 // too — the session runs there as well; it simply has no transport to
 // start. See src/net/VoiceSession.h.
+#include "core/SharePolicy.h"
 #include "net/DeactivateFlow.h"
 #include "net/DirectRooms.h"
 #include "net/MatrixFailure.h"
@@ -97,6 +98,11 @@ class ServerConnection : public QObject {
     // strictly an improvement rather than a new failure mode. It must never be
     // set HIGHER than the protocol default for the same reason.
     Q_PROPERTY(int maxMessageBytes READ maxMessageBytes CONSTANT)
+    // The largest attachment this server takes: its m.upload.size from
+    // GET /_matrix/media/v3/config when it serves one, else
+    // share::kDefaultMaxUploadBytes (the server's own default). Double, not
+    // qint64, so QML compares it without an int overflow.
+    Q_PROPERTY(double maxUploadBytes READ maxUploadBytes NOTIFY maxUploadBytesChanged)
     Q_PROPERTY(RoomListModel* roomListModel READ roomListModel CONSTANT)
     Q_PROPERTY(MessageModel* messageModel READ messageModel CONSTANT)
     Q_PROPERTY(MemberListModel* memberListModel READ memberListModel CONSTANT)
@@ -276,6 +282,7 @@ public:
     int maxMessageBytes() const {
         return static_cast<int>(bsfchat::limits::kMaxMessageBodyBytes);
     }
+    double maxUploadBytes() const { return double(m_maxUploadBytes); }
 
     // UTF-8 bytes in `text`, which is what the server counts and what QML
     // cannot work out for itself.
@@ -615,11 +622,21 @@ public:
     // Safe to call with any event id in the active room — we percent-encode
     // all segments. Returns "" if no active room.
     Q_INVOKABLE QString messageLink(const QString& eventId) const;
-    Q_INVOKABLE void sendMediaMessage(const QString& fileUrl);
+    // Returns the upload's id (the key of mediaUploadProgressed and the
+    // handle for cancelMediaUpload), or "" when a pre-flight check refused it.
+    // `displayName` overrides the name derived from the URL — the share path
+    // passes the provider's DISPLAY_NAME so a content:// upload is not
+    // called "image:1000…".
+    Q_INVOKABLE QString sendMediaMessage(const QString& fileUrl,
+                                         const QString& displayName = QString());
+    // Stop an upload. It then ends through mediaSendFailed ("Upload
+    // cancelled"), so the composer's in-flight count stays right.
+    Q_INVOKABLE void cancelMediaUpload(const QString& uploadId);
     // The Android share target's upload (M-4): sendMediaMessage, but only
     // for a content:// URI — never a path read with this app's permissions.
     // Same mediaSendCompleted/mediaSendFailed contract.
-    Q_INVOKABLE void sendSharedMediaMessage(const QString& uri);
+    Q_INVOKABLE void sendSharedMediaMessage(const QString& uri,
+                                            const QString& displayName = QString());
     Q_INVOKABLE void createRoom(const QString& name, const QString& topic);
     Q_INVOKABLE void joinRoom(const QString& roomIdOrAlias);
     Q_INVOKABLE void leaveRoom(const QString& roomId);
@@ -1148,6 +1165,10 @@ signals:
     // Forwarded from MatrixClient; QML composer binds to this to show
     // a progress bar while a file attachment is uploading.
     void mediaUploadProgress(const QString& filename, double progress);
+    // Same, keyed by upload id (sendMediaMessage's return value).
+    void mediaUploadProgressed(const QString& uploadId, const QString& filename,
+                               double progress);
+    void maxUploadBytesChanged();
     void maxScreenShareQualityChanged();
     void maxScreenSharePolicyChanged();
     void userIdChanged();
@@ -1636,6 +1657,7 @@ public:
     // Forwards awaiting the server, by transaction id → "#destination", for
     // the success toast.
     QHash<QString, QString> m_pendingForwards;
+    qint64 m_maxUploadBytes = bsfchat::client::share::kDefaultMaxUploadBytes;
     // Per-room typing state. Populated for every joined room's
     // ephemeral typing event, not just the active one, so the sidebar
     // can surface a quiet indicator on non-active channels where

@@ -208,6 +208,15 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 
     connect(m_client, &MatrixClient::mediaUploadProgress,
             this, &ServerConnection::mediaUploadProgress);
+    connect(m_client, &MatrixClient::mediaUploadProgressById,
+            this, &ServerConnection::mediaUploadProgressed);
+    // The server's real upload ceiling when it says; otherwise its default.
+    connect(m_client, &MatrixClient::mediaConfigResult, this, [this](qint64 bytes) {
+        const qint64 next = bytes > 0 ? bytes : bsfchat::client::share::kDefaultMaxUploadBytes;
+        if (next == m_maxUploadBytes) return;
+        m_maxUploadBytes = next;
+        emit maxUploadBytesChanged();
+    });
 
     // Hydrate the DM map from QSettings so the "Direct Messages"
     // section survives restart. Empty if first-run. Group is scoped
@@ -1691,6 +1700,7 @@ void ServerConnection::disconnectFromServer()
 
 void ServerConnection::startSync()
 {
+    m_client->getMediaConfig();
     // A new session: no earlier /joined_rooms answer may act on it.
     resetRoomReconcile();
     // Resume where the last session left off when we can. An initial /sync
@@ -2340,7 +2350,7 @@ QString ServerConnection::messageLink(const QString& eventId) const
              QString::fromUtf8(eventEnc));
 }
 
-void ServerConnection::sendMediaMessage(const QString& fileUrl)
+QString ServerConnection::sendMediaMessage(const QString& fileUrl, const QString& displayNameHint)
 {
     if (m_activeRoomId.isEmpty()) {
         // Raw on purpose — see emitMediaSendFailed. This fires before any
@@ -2351,7 +2361,7 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         // Deferred, though, like the other pre-flight check below: see
         // emitPreflightMediaFailure.
         emitPreflightMediaFailure(QStringLiteral("No active room"));
-        return;
+        return {};
     }
 
     // Convert QML URL to something QFile can open. On desktop this is
@@ -2380,6 +2390,10 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         openPath = fileUrl;
         displayName = QFileInfo(fileUrl).fileName();
     }
+    // A name the caller already knows beats one guessed from the URL — a
+    // content:// URI's tail is an opaque id like "image:1000012345".
+    if (!displayNameHint.trimmed().isEmpty())
+        displayName = QFileInfo(displayNameHint.trimmed()).fileName();
 
     auto* file = new QFile(openPath);
     if (!file->open(QIODevice::ReadOnly)) {
@@ -2393,13 +2407,13 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
                                   + friendly + QStringLiteral(" — ")
                                   + file->errorString());
         delete file;
-        return;
+        return {};
     }
 
-    // Size cap before anything is read (M-4). The server does not advertise
-    // its limit, so this is the client's own ceiling; the server still
+    // Size cap before anything is read (M-4): the server's m.upload.size
+    // when it serves /media/v3/config, else its default. The server still
     // enforces its configured one and answers 413 above it.
-    const qint64 maxBytes = bsfchat::client::share::kDefaultMaxUploadBytes;
+    const qint64 maxBytes = m_maxUploadBytes;
     const auto tooLarge = [&]() {
         emitPreflightMediaFailure(QStringLiteral("%1 is too large to upload (the limit is %2 MB).")
                                       .arg(displayName.isEmpty() ? QStringLiteral("That file")
@@ -2416,14 +2430,14 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         if (fileSize > maxBytes) {
             tooLarge();
             delete file;
-            return;
+            return {};
         }
     } else {
         fileData = file->read(maxBytes + 1);
         if (fileData.size() > maxBytes) {
             tooLarge();
             delete file;
-            return;
+            return {};
         }
         fileSize = fileData.size();
     }
@@ -2491,9 +2505,15 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         m_client->uploadMedia(uploadId, file, mimeType, fileName);  // takes ownership
     else
         m_client->uploadMedia(uploadId, fileData, mimeType, fileName);
+    return uploadId;
 }
 
-void ServerConnection::sendSharedMediaMessage(const QString& uri)
+void ServerConnection::cancelMediaUpload(const QString& uploadId)
+{
+    if (!uploadId.isEmpty()) m_client->cancelMediaUpload(uploadId);
+}
+
+void ServerConnection::sendSharedMediaMessage(const QString& uri, const QString& displayName)
 {
     // Belt and braces for M-4: UrlHandler already refused everything but
     // another app's content:// URI, and the user has confirmed. A share must
@@ -2504,7 +2524,7 @@ void ServerConnection::sendSharedMediaMessage(const QString& uri)
         emitPreflightMediaFailure(QStringLiteral("That shared file can't be uploaded."));
         return;
     }
-    sendMediaMessage(uri);
+    sendMediaMessage(uri, displayName);
 }
 
 void ServerConnection::createRoom(const QString& name, const QString& topic)
