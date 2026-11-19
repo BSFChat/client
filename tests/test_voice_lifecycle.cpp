@@ -16,6 +16,7 @@
 #include "net/VoiceStateMirror.h"
 #include "voice/CallEventOutbox.h"
 #include "voice/TurnCredentials.h"
+#include "voice/NetworkChangeFilter.h"
 #include "voice/VoiceRosterReconcile.h"
 #include "voice/VoiceStartPolicy.h"
 #include "voice/VoiceTransportSelector.h"
@@ -288,6 +289,8 @@ private slots:
     void muteMirrorFollowsTheSessionAcrossLeaveAndSwitch();
     void deafenImpliesMuteAndRestoresIt();
     void switchIsNeverSeenAsAHangUp();
+    void networkChangesAreFiltered();
+    void turnReplyFromALeftSessionIsNotTheNextJoins();
 };
 
 void TestVoiceLifecycle::joinReachesActiveThroughEveryState()
@@ -1697,12 +1700,25 @@ void TestVoiceLifecycle::turnScheduleUsesWallClockExpiry()
     // ttl only: expiry counted from receipt, refresh 10 min ahead.
     QCOMPARE(expiresAtMs(cfg, now), now + 24LL * 3600 * 1000);
     QCOMPARE(refreshAtMs(cfg, now), now + 24LL * 3600 * 1000 - kRefreshLeadMs);
-    // A TURN REST username carries the expiry coturn enforces.
-    cfg["username"] = QStringLiteral("1800000600:@me:x");
-    QCOMPARE(expiresAtMs(cfg, now), 1'800'000'600'000LL);
+    // A TURN REST username's timestamp is on the SERVER's clock. With a
+    // ttl, the ttl from receipt wins: here our clock is an hour behind the
+    // server's, and the username would claim 70 minutes of life for a
+    // 10-minute credential (audit 3, clock skew).
+    cfg["ttl"] = 600;
+    cfg["username"] = QStringLiteral("1800004200:@me:x");
+    QCOMPARE(expiresAtMs(cfg, now), now + 600'000);
     QCOMPARE(refreshAtMs(cfg, now), now + 300'000);   // half of a 10 min life
     QVERIFY(!unusableForNewPeer(expiresAtMs(cfg, now), now));
-    QVERIFY(unusableForNewPeer(expiresAtMs(cfg, now), 1'800'000'600'000LL - 30'000));
+    QVERIFY(unusableForNewPeer(expiresAtMs(cfg, now), now + 600'000 - 30'000));
+    // No ttl at all: the username is the only clue.
+    cfg.remove("ttl");
+    cfg["username"] = QStringLiteral("1800000600:@me:x");
+    QCOMPARE(expiresAtMs(cfg, now), 1'800'000'600'000LL);
+    // Rebuilding for fresh credentials waits until the old ones are close.
+    QVERIFY(!dueForRebuild(now + 3600'000, now));
+    QVERIFY(dueForRebuild(now + kRebuildLeadMs, now));
+    QVERIFY(dueForRebuild(now + kRefreshLeadMs, now));   // the scheduled refresh rebuilds
+    QVERIFY(dueForRebuild(0, now));
 
     // The session follows the injected wall clock, so a jump (sleep) is
     // seen by the next check rather than a stretched monotonic timer.
@@ -1925,6 +1941,56 @@ void TestVoiceLifecycle::switchIsNeverSeenAsAHangUp()
     seen.clear();
     s.requestLeave();
     QVERIFY(seen.last().endsWith(QLatin1Char('>')));
+}
+
+void TestVoiceLifecycle::networkChangesAreFiltered()
+{
+    using namespace voice::netchange;
+    auto st = [](Reach r, int m) { State s; s.reach = r; s.medium = m; return s; };
+    constexpr int kWifi = 2, kCell = 3;
+    // The backend's first report / settling: nothing to rebuild.
+    QCOMPARE(classify(st(Reach::Unknown, 0), st(Reach::Online, kWifi)), Action::Ignore);
+    QCOMPARE(classify(st(Reach::Online, 0), st(Reach::Online, kWifi)), Action::Ignore);
+    QCOMPARE(classify(st(Reach::Online, kWifi), st(Reach::Online, kWifi)), Action::Ignore);
+    QCOMPARE(classify(st(Reach::Online, kWifi), st(Reach::Unknown, 0)), Action::Ignore);
+    // Gone: wait, do not rebuild into nothing.
+    QCOMPARE(classify(st(Reach::Online, kWifi), st(Reach::Disconnected, 0)), Action::Offline);
+    QCOMPARE(classify(st(Reach::Disconnected, 0), st(Reach::Disconnected, 0)), Action::Ignore);
+    // Back, or a real move: one rebuild.
+    QCOMPARE(classify(st(Reach::Disconnected, 0), st(Reach::Online, kWifi)), Action::Rebuild);
+    QCOMPARE(classify(st(Reach::Online, kWifi), st(Reach::Online, kCell)), Action::Rebuild);
+    QCOMPARE(classify(st(Reach::Site, kWifi), st(Reach::Online, kWifi)), Action::Rebuild);
+}
+
+void TestVoiceLifecycle::turnReplyFromALeftSessionIsNotTheNextJoins()
+{
+    // A TURN refresh in flight across a channel switch used to be taken as
+    // the new join's config (and a failed one unwound the new join).
+    VoiceSession s;
+    s.setRejoinGraceMs(0);
+    s.setMinStatePutIntervalMs(0);
+    s.setLocalUserId("@me:x");
+    qint64 clock = 1'800'000'000'000LL;
+    s.setClockForTest([&clock]() { return clock; });
+    FakeMatrixClient net(&s);
+    FakeEngine engine;
+    engine.install(&s);
+    joinTo(s, net, "!a:x");
+    clock += 3600LL * 1000;                // expired: wake refetches
+    s.onWakeOrNetworkChange();
+    QCOMPARE(net.turnFetches, 2);
+
+    s.requestJoin("!b:x");                 // the refresh is still out
+    net.replyLeaveOk("!a:x");
+    net.replyJoinOk("!b:x");
+    QCOMPARE(net.turnFetches, 3);
+    QCOMPARE(s.state(), VoiceSession::State::FetchingTurn);
+    net.replyTurnError("stale refresh failed");   // A's refresh answers first
+    QCOMPARE(s.state(), VoiceSession::State::FetchingTurn);
+    QCOMPARE(engine.starts, 1);
+    net.replyTurn(turnConfig());           // B's own
+    QCOMPARE(s.state(), VoiceSession::State::Active);
+    QCOMPARE(engine.starts, 2);
 }
 
 QTEST_MAIN(TestVoiceLifecycle)

@@ -373,6 +373,7 @@ QString VoiceSession::leaveLocally()
     stopEngineOnce();
     m_turnRefreshTimer->stop();
     m_turnRefreshInFlight = false;
+    orphanTurnReplies();
     m_buffered.clear();
 
     if (m_inFlight && m_inFlight->kind == OpKind::Join
@@ -545,7 +546,7 @@ void VoiceSession::onJoinSucceeded(const QString& roomId,
     setState(State::FetchingTurn);
     // TURN is fetched with the join op still in flight, so a leave
     // queued during the round trip cannot overtake it.
-    emit turnConfigRequested();
+    requestTurn();
 }
 
 void VoiceSession::endSession(const QString& message)
@@ -557,6 +558,7 @@ void VoiceSession::endSession(const QString& message)
     m_buffered.clear();
     m_turnRefreshTimer->stop();
     m_turnRefreshInFlight = false;
+    orphanTurnReplies();
     m_pendingRejoinRoom.clear();
     m_rejoinGraceTimer->stop();
     if (m_statePut) {
@@ -624,8 +626,36 @@ void VoiceSession::onLeaveFailed(const QString& roomId, const QString& error)
     completeOp();
 }
 
+void VoiceSession::requestTurn()
+{
+    ++m_turnOutstanding;
+    emit turnConfigRequested();
+}
+
+void VoiceSession::orphanTurnReplies()
+{
+    // Every TURN GET still on the wire belongs to the session being left.
+    // Its answer must not be taken for the NEXT join's (a refresh in flight
+    // across a channel switch used to land in the new join's FetchingTurn,
+    // and a failed one unwound it).
+    m_turnRepliesToDrop = m_turnOutstanding;
+}
+
+bool VoiceSession::takeTurnReply()
+{
+    // False: this reply belongs to an abandoned session, drop it.
+    if (m_turnOutstanding > 0) --m_turnOutstanding;
+    if (m_turnRepliesToDrop > 0) {
+        --m_turnRepliesToDrop;
+        qCInfo(logVoiceSession, "dropping a TURN reply from a previous session");
+        return false;
+    }
+    return true;
+}
+
 void VoiceSession::onTurnConfig(const QJsonObject& config)
 {
+    if (!takeTurnReply()) return;
     if (m_state == State::Active) {
         // A scheduled/wake refresh: hand the new credentials to the
         // running transport and re-arm.
@@ -673,6 +703,7 @@ void VoiceSession::onTurnConfig(const QJsonObject& config)
 
 void VoiceSession::onTurnConfigFailed(const QString& error)
 {
+    if (!takeTurnReply()) return;
     if (m_state == State::Active) {
         // A failed refresh is not fatal: the existing peers keep their
         // allocations. Try again on the next check.
@@ -907,7 +938,7 @@ void VoiceSession::requestTurnRefresh(const char* why)
     qCInfo(logVoiceSession, "refetching TURN credentials (%s)", why);
     m_turnRefreshInFlight = true;
     m_turnRefreshTimer->stop();
-    emit turnConfigRequested();
+    requestTurn();
 }
 
 void VoiceSession::onWakeOrNetworkChange()
@@ -932,6 +963,8 @@ void VoiceSession::abandon()
     m_members = QJsonArray();
     m_turnRefreshTimer->stop();
     m_turnRefreshInFlight = false;
+    m_turnOutstanding = 0;
+    m_turnRepliesToDrop = 0;
     m_pendingRejoinRoom.clear();
     m_rejoinGraceTimer->stop();
     m_statePut.reset();

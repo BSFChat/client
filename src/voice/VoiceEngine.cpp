@@ -4,6 +4,7 @@
 #include "util/JsonSafe.h"
 #include "voice/VoiceStartPolicy.h"
 #include "voice/TurnCredentials.h"
+#include "voice/NetworkChangeFilter.h"
 #include "voice/VoiceRosterReconcile.h"
 #include "voice/VoiceRosterGate.h"
 #include "voice/PeerCaps.h"
@@ -51,8 +52,15 @@ VoiceEngine::VoiceEngine(MatrixClient* client, QObject* parent)
     m_reconnectTimeout.setInterval(kReconnectTimeoutMs);
     connect(&m_reconnectTimeout, &QTimer::timeout, this,
             [this]() { setReconnecting(false); });
+    m_staleCheckTimer.setSingleShot(true);
+    connect(&m_staleCheckTimer, &QTimer::timeout, this, &VoiceEngine::queueStaleRebuilds);
     if (QNetworkInformation::loadDefaultBackend()) {
         if (auto* ni = QNetworkInformation::instance()) {
+            // The state the call starts on. A notification that only
+            // repeats it (or is the backend's first, settling report) is
+            // not a path change.
+            m_netReach = int(ni->reachability());
+            m_netMedium = int(ni->transportMedium());
             connect(ni, &QNetworkInformation::reachabilityChanged,
                     this, &VoiceEngine::onNetworkInformationChanged);
             connect(ni, &QNetworkInformation::transportMediumChanged,
@@ -254,10 +262,13 @@ void VoiceEngine::stop() {
     m_candidateBatchTimer.stop();
     m_staleRebuildTimer.stop();
     m_staleRebuildQueue.clear();
+    m_staleCheckTimer.stop();
     m_peerTurnGeneration.clear();
+    m_peerTurnExpiry.clear();
     m_networkChangeDebounce.stop();
     m_wakeProbe.stop();
     m_reconnectTimeout.stop();
+    m_reconnectWaiting.clear();
     m_reconnecting = false;   // no signal: the session is ending
 
     // Send hangup to all peers. The id comes from the peer object for
@@ -419,12 +430,23 @@ void VoiceEngine::updateTurnConfig(const QJsonObject& turnConfig) {
         reestablishAllPeers("the server changed its peer-to-peer policy");
         return;
     }
-    // V2-6. A peer whose OWN relay allocation was made with the old
+    queueStaleRebuilds();
+}
+
+void VoiceEngine::queueStaleRebuilds() {
+    if (!m_running) return;
+    // V2-6. A peer whose OWN relay allocation was made with older
     // credentials loses it when the TURN server refuses the allocation
     // refresh after they expire (coturn checks the REST timestamp), and
     // one still being set up may be allocating with them right now. Both
     // are rebuilt with the new credentials, one at a time. Peers on a
     // direct path or relaying only on the far side are unaffected.
+    //
+    // Only once THEIR credentials are near expiry (audit 3): a refresh
+    // after a wake or network change, with hours left on the old ones,
+    // used to rebuild every relayed peer for nothing, and compounded.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    qint64 nextDue = 0;
     m_staleRebuildQueue.clear();
     for (auto it = m_peers.constBegin(); it != m_peers.constEnd(); ++it) {
         auto* peer = it.value();
@@ -433,14 +455,25 @@ void VoiceEngine::updateTurnConfig(const QJsonObject& turnConfig) {
         const auto path = peer->selectedPath();
         const bool connected =
             peer->peerState() == PeerConnectionManager::PeerState::Connected;
-        if ((path.known && path.localRelayed) || !connected)
-            m_staleRebuildQueue.append(it.key());
+        if (!((path.known && path.localRelayed) || !connected)) continue;
+        const qint64 expiry = m_peerTurnExpiry.value(it.key(), 0);
+        if (!voice::turn::dueForRebuild(expiry, now)) {
+            const qint64 due = expiry - voice::turn::kRebuildLeadMs;
+            if (nextDue == 0 || due < nextDue) nextDue = due;
+            continue;
+        }
+        m_staleRebuildQueue.append(it.key());
     }
     if (!m_staleRebuildQueue.isEmpty()) {
         qCInfo(logVoice, "TURN refreshed — rebuilding %lld relayed/unsettled "
                "peer(s) one at a time",
                static_cast<long long>(m_staleRebuildQueue.size()));
         m_staleRebuildTimer.start(0);
+    }
+    if (nextDue > 0) {
+        m_staleCheckTimer.start(int(qBound<qint64>(1000, nextDue - now, qint64(kStaleCheckMaxMs))));
+    } else {
+        m_staleCheckTimer.stop();
     }
 }
 
@@ -469,8 +502,40 @@ void VoiceEngine::reestablishPeer(const QString& userId, const char* why) {
 }
 
 void VoiceEngine::onNetworkInformationChanged() {
+    auto* ni = QNetworkInformation::instance();
+    if (!ni) return;
+    using namespace voice::netchange;
+    auto reach = [](QNetworkInformation::Reachability r) {
+        switch (r) {
+        case QNetworkInformation::Reachability::Disconnected: return Reach::Disconnected;
+        case QNetworkInformation::Reachability::Local: return Reach::Local;
+        case QNetworkInformation::Reachability::Site: return Reach::Site;
+        case QNetworkInformation::Reachability::Online: return Reach::Online;
+        case QNetworkInformation::Reachability::Unknown: break;
+        }
+        return Reach::Unknown;
+    };
+    State prev;
+    prev.reach = Reach(m_netReach);
+    prev.medium = m_netMedium;
+    State cur;
+    cur.reach = reach(ni->reachability());
+    cur.medium = int(ni->transportMedium());
+    m_netReach = int(cur.reach);
+    m_netMedium = cur.medium;
     if (!m_running) return;
-    m_networkChangeDebounce.start();
+    switch (classify(prev, cur)) {
+    case Action::Ignore:
+        return;
+    case Action::Offline:
+        // Nothing to rebuild onto; the rebuild happens once, on return.
+        qCInfo(logVoice, "network went away — waiting for it to return");
+        m_networkChangeDebounce.stop();
+        return;
+    case Action::Rebuild:
+        m_networkChangeDebounce.start();
+        return;
+    }
 }
 
 void VoiceEngine::checkWallClockJump() {
@@ -503,11 +568,15 @@ void VoiceEngine::handleNetworkChange(const char* why) {
     m_staleRebuildQueue.clear();
     m_staleRebuildTimer.stop();
     reestablishAllPeers(why);
+    // After the rebuild (which removes and re-adds every peer): these are
+    // the connections the call is waiting on.
+    m_reconnectWaiting = QSet<QString>(m_peers.keyBegin(), m_peers.keyEnd());
 }
 
 void VoiceEngine::setReconnecting(bool on) {
     if (on) m_reconnectTimeout.start();
     else m_reconnectTimeout.stop();
+    if (!on) m_reconnectWaiting.clear();
     if (m_reconnecting == on) return;
     m_reconnecting = on;
     emit reconnectingChanged(on);
@@ -536,6 +605,7 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
     // V2-6: which credentials this peer is built with, and a refetch if
     // they are already past their useful life.
     m_peerTurnGeneration[userId] = m_turnGeneration;
+    m_peerTurnExpiry[userId] = m_turnExpiresAtMs;
     if (!m_turnRefreshAsked
         && voice::turn::unusableForNewPeer(m_turnExpiresAtMs,
                                            QDateTime::currentMSecsSinceEpoch())) {
@@ -638,8 +708,16 @@ void VoiceEngine::wirePeer(PeerConnectionManager* peer, const QString& userId) {
         } else if (s == PeerConnectionManager::PeerState::Connected) {
             cancelDisconnectGrace(userId);
             cancelConnectWatchdog(userId);
-            // Media flows again after a network change.
-            setReconnecting(false);
+            // Media flows again after a network change — once every peer
+            // rebuilt for it is back (or has gone), not at the first.
+            if (m_reconnecting) {
+                m_reconnectWaiting.remove(userId);
+                for (auto it = m_reconnectWaiting.begin(); it != m_reconnectWaiting.end();) {
+                    if (!m_peers.contains(*it)) it = m_reconnectWaiting.erase(it);
+                    else ++it;
+                }
+                if (m_reconnectWaiting.isEmpty()) setReconnecting(false);
+            }
         }
     });
 
@@ -792,6 +870,7 @@ void VoiceEngine::removePeer(const QString& userId) {
     m_callIds.remove(userId);
     m_pendingCandidates.remove(userId);
     m_peerTurnGeneration.remove(userId);
+    m_peerTurnExpiry.remove(userId);
     dropRecvPipelines(userId);
     for (int s = 0; s < kVideoStreamCount; ++s)
         m_rrSnapshots.remove({userId, s});

@@ -369,6 +369,11 @@ private:
     void scheduleTurnRefresh(const QJsonObject& config);
     void checkTurnRefresh();
     void requestTurnRefresh(const char* why);
+    // Every TURN GET goes through requestTurn so replies can be counted;
+    // leaving a session orphans the outstanding ones (takeTurnReply).
+    void requestTurn();
+    void orphanTurnReplies();
+    bool takeTurnReply();
     // True when `op` is the request currently awaiting a reply and it
     // concerns `roomId`. Late replies to superseded requests are dropped.
     bool inFlightIs(OpKind kind, const QString& roomId) const;
@@ -447,6 +452,8 @@ private:
     qint64 m_turnExpiresAtMs = 0;
     qint64 m_turnRefreshAtMs = 0;
     bool m_turnRefreshInFlight = false;
+    int m_turnOutstanding = 0;     // TURN GETs not yet answered
+    int m_turnRepliesToDrop = 0;   // of those, owed to a session we left
     std::function<qint64()> m_clock;
 
     EngineStarter m_startEngine;

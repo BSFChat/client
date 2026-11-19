@@ -307,6 +307,9 @@ private:
     // at once. libdatachannel has no API to hand new credentials to a
     // live PeerConnection (the ICE agent reads them at construction).
     void rebuildNextStalePeer();
+    // Queue the relayed/unsettled peers whose credentials are near expiry
+    // (voice::turn::dueForRebuild) and arm a check for the rest.
+    void queueStaleRebuilds();
     void setReconnecting(bool on);
     void onNetworkInformationChanged();
     void checkWallClockJump();
@@ -367,13 +370,26 @@ private:
     qint64 m_turnExpiresAtMs = 0;
     bool m_turnRefreshAsked = false;
     QMap<QString, quint64> m_peerTurnGeneration;
+    // Expiry of the credentials each peer was built with (ms epoch).
+    QMap<QString, qint64> m_peerTurnExpiry;
     QStringList m_staleRebuildQueue;
     QTimer m_staleRebuildTimer;
+    // Re-runs queueStaleRebuilds when a skipped peer's credentials come
+    // within the rebuild lead. Bounded, so a sleep cannot stretch it far.
+    QTimer m_staleCheckTimer;
+    static constexpr int kStaleCheckMaxMs = 5 * 60 * 1000;
     static constexpr int kPeerRebuildSpacingMs = 4000;
     // Network change / wake (audit 2): debounced, then every peer is
     // rebuilt at once and the call shows "Reconnecting…" until one is up.
     QTimer m_networkChangeDebounce;
     QTimer m_reconnectTimeout;
+    // Peers rebuilt for a network change that have not connected again.
+    // "Reconnecting…" lasts until all are back (or gone), not until the
+    // first one is.
+    QSet<QString> m_reconnectWaiting;
+    // Last QNetworkInformation reading (voice/NetworkChangeFilter.h).
+    int m_netReach = 0;    // voice::netchange::Reach
+    int m_netMedium = 0;
     QTimer m_wakeProbe;
     qint64 m_wakeProbeWallMs = 0;
     qint64 m_wakeProbeMonoMs = 0;
