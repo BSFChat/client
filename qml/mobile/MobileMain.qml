@@ -1183,6 +1183,17 @@ ApplicationWindow {
         }
     }
 
+    // A message in another room while the app is open, where the OS shows
+    // no banner (iOS). NotificationManager decides when; this only shows it.
+    Connections {
+        target: typeof notificationManager !== "undefined" ? notificationManager : null
+        ignoreUnknownSignals: true
+        function onInAppMessage(serverIndex, roomId, title, preview) {
+            toastHostGlobal.actionToast(title + ": " + preview, "info", qsTr("Open"),
+                function() { serverManager.openRoom(serverIndex, roomId); });
+        }
+    }
+
     // New invites on any server (audit 3, #6).
     Connections {
         target: serverManager

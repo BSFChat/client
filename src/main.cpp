@@ -253,6 +253,9 @@ int main(int argc, char *argv[])
         });
 
     engine.rootContext()->setContextProperty("serverManager", application.serverManager());
+    // For inAppMessage (the mobile shell's foreground banner).
+    engine.rootContext()->setContextProperty("notificationManager",
+                                             application.notificationManager());
     engine.rootContext()->setContextProperty("appSettings", application.settings());
     // Mobile push status + settings rows (Settings > Notifications).
     engine.rootContext()->setContextProperty("pushManager", application.pushManager());

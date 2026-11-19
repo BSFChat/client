@@ -36,22 +36,43 @@ Item {
     ListModel { id: toastModel }
     property int _nextId: 1
 
-    function toast(text, kind) {
-        if (!text || text.length === 0) return;
+    function toast(text, kind) { return host._push(text, kind, "", null); }
+
+    // A toast with one action button ("Open"), e.g. an incoming message in
+    // another room on a phone, where there is no OS banner (audit 3). The
+    // function lives here, not in the ListModel, which cannot hold one.
+    property var _actions: ({})
+    function actionToast(text, kind, actionLabel, fn) {
+        return host._push(text, kind, actionLabel || "", fn || null);
+    }
+    function runAction(id) {
+        var fn = host._actions[id];
+        host._dismiss(id);
+        if (fn) fn();
+    }
+
+    function _push(text, kind, actionLabel, fn) {
+        if (!text || text.length === 0) return -1;
         var k = kind || "info";
+        var id = host._nextId++;
+        if (fn) host._actions[id] = fn;
         toastModel.append({
-            toastId:   host._nextId++,
+            toastId:   id,
             toastText: String(text),
             toastKind: k,
-            // Errors + warnings linger; info / success fade sooner.
-            toastDuration: (k === "error" || k === "warn") ? 6000 : 3500
+            toastAction: actionLabel,
+            // Errors + warnings linger; info / success fade sooner. One
+            // with an action gives the reader time to take it.
+            toastDuration: (k === "error" || k === "warn" || fn) ? 6000 : 3500
         });
         // Cap the visible stack at 4 — older toasts drop off when a 5th
         // arrives, so a burst of failures doesn't wallpaper the screen.
-        while (toastModel.count > 4) toastModel.remove(0);
+        while (toastModel.count > 4) host._dismiss(toastModel.get(0).toastId);
+        return id;
     }
 
     function _dismiss(id) {
+        delete host._actions[id];
         for (var i = 0; i < toastModel.count; ++i) {
             if (toastModel.get(i).toastId === id) { toastModel.remove(i); return; }
         }
@@ -73,7 +94,9 @@ Item {
         anchors.rightMargin: Theme.sp.s5
         anchors.bottomMargin: Theme.sp.s5
         spacing: Theme.sp.s3
-        width: 360
+        // Never wider than the window less its margins: a fixed 360 ran off
+        // a 360 dp phone screen (audit 3).
+        width: Math.max(0, Math.min(360, host.width - 32))
 
         Repeater {
             model: toastModel
@@ -84,6 +107,7 @@ Item {
                 required property string toastText
                 required property string toastKind
                 required property int toastDuration
+                required property string toastAction
                 width: stack.width
                 implicitHeight: toastRow.implicitHeight + Theme.sp.s4 * 2
                 radius: Theme.r2
@@ -251,6 +275,31 @@ Item {
                                 // never existed for a screen reader, which
                                 // was handed the whole message up front.
                                 Accessible.ignored: true
+                            }
+                        }
+
+                        Button {
+                            id: actionBtn
+                            visible: card.toastAction.length > 0
+                            text: card.toastAction
+                            flat: true
+                            Layout.topMargin: Theme.sp.s1
+                            Accessible.role: Accessible.Button
+                            Accessible.name: card.toastAction
+                            onClicked: host.runAction(card.toastId)
+                            contentItem: Text {
+                                textFormat: Text.PlainText
+                                text: actionBtn.text
+                                color: card.tintColor
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                font.weight: Theme.fontWeight.semibold
+                                Accessible.ignored: true
+                            }
+                            background: Rectangle {
+                                implicitHeight: 32
+                                radius: Theme.r1
+                                color: actionBtn.hovered ? Theme.bg2 : "transparent"
                             }
                         }
 

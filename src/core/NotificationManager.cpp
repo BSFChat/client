@@ -323,6 +323,16 @@ void NotificationManager::onMessageReceived(const QString& roomId,
     if (m_tray) {
         m_tray->showMessage(title, preview, QSystemTrayIcon::Information, 5000);
     }
+#if defined(Q_OS_IOS)
+    // No tray, no Android shade: in the foreground nothing at all said a
+    // message had arrived elsewhere. Only for rooms not on screen.
+    if (!isActiveRoom && QGuiApplication::applicationState() == Qt::ApplicationActive) {
+        int idx = -1;
+        for (int i = 0; i < m_serverManager->connectionCount(); ++i)
+            if (m_serverManager->connectionAt(i) == sender) { idx = i; break; }
+        if (idx >= 0) emit inAppMessage(idx, roomId, title, preview);
+    }
+#endif
 
     // Android: post a real NotificationManager notification so the
     // user sees it in the shade while the app is backgrounded. The
