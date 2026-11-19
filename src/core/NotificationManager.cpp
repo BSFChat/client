@@ -251,8 +251,12 @@ void NotificationManager::refreshUnreadBadge()
     }
     // Dock / taskbar badge. Qt 6.5+ — setBadgeNumber is an instance
     // method on the application singleton.
+    // Not on iOS: PushManager owns the icon badge there and sets it to the
+    // unread MESSAGE total, the unit APNs pushes use (audit 3).
+#ifndef Q_OS_IOS
     if (auto* app = qobject_cast<QGuiApplication*>(QCoreApplication::instance()))
         app->setBadgeNumber(total);
+#endif
 }
 
 void NotificationManager::onMessageReceived(const QString& roomId,

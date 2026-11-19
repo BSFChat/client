@@ -50,6 +50,11 @@ public:
     void refreshPermission();
     // System settings, at this app's notification page where possible.
     void openNotificationSettings();
+    // iOS: the app icon badge. A push sets it from the server's count while
+    // BSFChat is not running; the client puts it back to its own total
+    // whenever that changes, 0 included. No-op elsewhere (desktop docks
+    // and Android launchers are NotificationManager's).
+    void setBadgeCount(int count);
 
     // A tap that arrived before anyone was listening (cold start).
     bool takePendingTap(QString* roomId, QString* eventId);

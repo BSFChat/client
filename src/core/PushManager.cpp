@@ -6,6 +6,7 @@
 #include "net/MatrixClient.h"
 #include "net/ServerConnection.h"
 #include "net/ServerManager.h"
+#include "model/RoomListModel.h"
 
 #include <QDebug>
 #include <QGuiApplication>
@@ -266,7 +267,13 @@ void PushManager::watch(ServerConnection* conn)
                 recent.append(eventId);
                 if (recent.size() > kRecentEvents) recent.removeFirst();
             });
+    if (kIsIos && conn->roomListModel()) {
+        connect(conn->roomListModel(), &RoomListModel::activityGenerationChanged,
+                this, &PushManager::scheduleBadge);
+        scheduleBadge();
+    }
     connect(conn, &QObject::destroyed, this, [this, conn]() {
+        scheduleBadge();
         m_recent.remove(conn);
         const QString key = m_keys.take(conn);
         // A rebuilt connection or app shutdown: the server-side pusher
@@ -363,6 +370,35 @@ void PushManager::onPushedEvent(const QString& roomId, const QString& eventId, i
     connect(conn, &QObject::destroyed, waiter, [answer]() { answer(false); });
     QTimer::singleShot(kPushedEventWaitMs, waiter, [answer]() { answer(false); });
     conn->resyncNow();
+}
+
+void PushManager::scheduleBadge()
+{
+    if (!kIsIos || m_badgeQueued) return;
+    m_badgeQueued = true;
+    QTimer::singleShot(0, this, [this]() {
+        m_badgeQueued = false;
+        updateBadge();
+    });
+}
+
+void PushManager::updateBadge()
+{
+    // iOS badge reconciliation (audit 3): a push sets the badge from the
+    // server's count; nothing ever set it back, so it stayed after the
+    // messages were read here. The client's own total wins whenever it
+    // changes — 0 included, which is the case that matters most.
+    int total = 0;
+    for (int i = 0; i < m_serverManager->connectionCount(); ++i) {
+        ServerConnection* conn = m_serverManager->connectionAt(i);
+        RoomListModel* rooms = conn ? conn->roomListModel() : nullptr;
+        if (!rooms) continue;
+        for (int r = 0; r < rooms->rowCount(); ++r)
+            total += rooms->data(rooms->index(r), RoomListModel::UnreadCountRole).toInt();
+    }
+    if (total == m_lastBadge) return;
+    m_lastBadge = total;
+    m_bridge->setBadgeCount(total);
 }
 
 void PushManager::onTapped(const QString& roomId, const QString& eventId)

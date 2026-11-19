@@ -260,4 +260,16 @@ void openNotificationSettings()
     });
 }
 
+void setBadgeCount(int count)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (@available(iOS 16.0, *)) {
+            [[UNUserNotificationCenter currentNotificationCenter] setBadgeCount:count
+                                                          withCompletionHandler:nil];
+        } else {
+            [UIApplication sharedApplication].applicationIconBadgeNumber = count;
+        }
+    });
+}
+
 } // namespace bsfchat::push::ios

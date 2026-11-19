@@ -96,4 +96,9 @@ private:
     // start(true) already issued (Android: Firebase asked for a token).
     bool m_bridgeStarted = false;
     void startBridge(bool wanted);
+    // iOS app badge = the client's own unread total (see updateBadge).
+    void scheduleBadge();
+    void updateBadge();
+    bool m_badgeQueued = false;
+    int m_lastBadge = -1;   // -1: never set, so a first 0 is applied too
 };

@@ -271,6 +271,15 @@ void PushBridge::openNotificationSettings()
 #endif
 }
 
+void PushBridge::setBadgeCount(int count)
+{
+#ifdef BSFCHAT_PUSH_IOS
+    bsfchat::push::ios::setBadgeCount(qMax(0, count));
+#else
+    Q_UNUSED(count);
+#endif
+}
+
 void PushBridge::setToken(const QString& token, const QString& deviceName)
 {
     if (!deviceName.isEmpty()) m_deviceName = deviceName;
