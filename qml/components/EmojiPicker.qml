@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtCore
 import BSFChat
 import "../data/EmojiData.js" as EmojiData
 
@@ -20,8 +21,22 @@ Popup {
 
     signal emojiSelected(string emoji)
 
-    // Recently used emoji storage (in-memory for this session)
+    // Recently used emoji, persisted (QtCore Settings, its own group) so the
+    // "frequent" tab survives a restart. Every picker instance shares it.
     property var recentEmoji: []
+    Settings {
+        id: recentStore
+        category: "EmojiPicker"
+        property string recentJson: "[]"
+    }
+    Component.onCompleted: {
+        try {
+            var r = JSON.parse(recentStore.recentJson);
+            if (Array.isArray(r)) recentEmoji = r.filter(function(e) {
+                return e && typeof e.emoji === "string";
+            }).slice(0, maxRecent);
+        } catch (e) { recentEmoji = []; }
+    }
     property int maxRecent: 20
     property string currentCategory: recentEmoji.length > 0 ? "frequent" : "people"
     property string searchQuery: ""
@@ -416,6 +431,7 @@ Popup {
             filtered = filtered.slice(0, maxRecent);
         }
         recentEmoji = filtered;
+        recentStore.recentJson = JSON.stringify(filtered);
     }
 
     function _focusGrid() {

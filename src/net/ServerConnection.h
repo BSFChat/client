@@ -583,6 +583,9 @@ public:
     // user already has a reaction with `emoji` on `targetEventId`, redact it
     // (un-react); otherwise send a new reaction.
     Q_INVOKABLE void toggleReaction(const QString& targetEventId, const QString& emoji);
+    // The picker's verb: react with `emoji`, and do nothing if you already
+    // have. Picking an emoji you had already used used to take it back.
+    Q_INVOKABLE void addReaction(const QString& targetEventId, const QString& emoji);
 
     // Look up a text channel by its display name (case-insensitive) and
     // make it active. No-op if there's no match. Used by the

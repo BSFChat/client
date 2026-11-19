@@ -2329,6 +2329,13 @@ void ServerConnection::toggleReaction(const QString& targetEventId, const QStrin
     }
 }
 
+void ServerConnection::addReaction(const QString& targetEventId, const QString& emoji)
+{
+    if (m_activeRoomId.isEmpty() || targetEventId.isEmpty() || emoji.isEmpty()) return;
+    if (!m_messageModel->ownReactionEventId(targetEventId, emoji, m_userId).isEmpty()) return;
+    m_client->sendReaction(m_activeRoomId, targetEventId, emoji);
+}
+
 void ServerConnection::loadOlderMessages(int limit)
 {
     // The model refuses at the start of history and while a fill is running

@@ -297,6 +297,7 @@ public:
     Q_INVOKABLE void setTimelineAtBottom(bool v) { m_timelineAtBottom = v; }
     Q_INVOKABLE void togglePinnedEvent(const QString& = {}) {}
     Q_INVOKABLE void toggleReaction(const QString& = {}, const QString& = {}) {}
+    Q_INVOKABLE void addReaction(const QString& = {}, const QString& = {}) {}
     Q_INVOKABLE void redactEvent(const QString& = {}, const QString& = {}) {}
     Q_INVOKABLE QString sendMediaMessage(const QString& = {}, const QString& = {})
     {

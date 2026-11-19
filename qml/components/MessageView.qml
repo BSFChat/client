@@ -2585,8 +2585,9 @@ Rectangle {
             modal: true
             onEmojiSelected: function(emoji) {
                 var target = messageViewRoot.reactPickerEventId;
+                // Add, never toggle: the chip under the message is the toggle.
                 if (target && serverManager.activeServer)
-                    serverManager.activeServer.toggleReaction(target, emoji);
+                    serverManager.activeServer.addReaction(target, emoji);
                 sharedReactPicker.close();
             }
             onClosed: {
