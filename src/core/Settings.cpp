@@ -1,4 +1,5 @@
 #include "core/Settings.h"
+#include "net/PttKeyFilter.h"
 #include "core/AppProfile.h"
 #include "core/AudioDeviceStatus.h"
 #include "core/AudioGainSettings.h"
@@ -1247,7 +1248,8 @@ void Settings::setVoiceRelayMode(const QString& mode)
 
 QString Settings::pttKeySequence() const
 {
-    return m_settings.value("pttKeySequence", "Ctrl+Space").toString();
+    // Not Ctrl+Space on macOS, where that is Spotlight (see PttKeyFilter).
+    return m_settings.value("pttKeySequence", PttKeyFilter::defaultSequence()).toString();
 }
 void Settings::setPttKeySequence(const QString& seq)
 {

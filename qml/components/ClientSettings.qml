@@ -52,9 +52,8 @@ Popup {
         outputCombo.selectByDescription(appSettings.audioOutputDevice);
         voiceModeCombo.syncFromSettings();
         videoCodecCombo.syncFromSettings();
-        pttKeyField.text = Qt.binding(function() {
-            return appSettings.pttKeySequence;
-        });
+        pttKeyField.cancelCapture();
+        pttKeyField.error = "";
     }
 
     onOpened: {
@@ -910,29 +909,103 @@ Popup {
                         }
                     }
 
+                    // A capture field, not free text (audit 3): a typo used to
+                    // disable PTT silently. Click (or Enter), press the key you
+                    // want; it is validated before it is stored and the reason
+                    // shown when it is not. PTT itself is paused meanwhile so
+                    // the current key can be chosen again.
                     SettingRow {
                         title: "PTT key"
-                        description: "Hold this shortcut (application-wide) to transmit while push-to-talk is enabled."
+                        description: "Hold this key to transmit while push-to-talk is on. "
+                                   + "It works while BSFChat is focused."
                         visible: appSettings.voiceMode === "ptt"
-                        TextField {
-                            id: pttKeyField
-                            Accessible.role: Accessible.EditableText
-                            Accessible.name: qsTr("Push-to-talk key")
-                            implicitWidth: 220
-                            text: appSettings.pttKeySequence
-                            color: Theme.fg0
-                            placeholderText: "Ctrl+Space"
-                            background: Rectangle {
-                                color: Theme.bg0
+                        ColumnLayout {
+                            spacing: Theme.sp.s1
+                            Rectangle {
+                                id: pttKeyField
+                                property bool capturing: false
+                                // Why the last key pressed was not taken; "" if it was.
+                                property string error: ""
+                                function startCapture() {
+                                    error = "";
+                                    capturing = true;
+                                    forceActiveFocus();
+                                    serverManager.setPttCapturing(true);
+                                }
+                                function cancelCapture() {
+                                    if (!capturing) return;
+                                    capturing = false;
+                                    serverManager.setPttCapturing(false);
+                                }
+                                implicitWidth: 220
+                                implicitHeight: Theme.controlHeight.md
                                 radius: Theme.r2
-                                border.color: parent.activeFocus ? Theme.accent : Theme.line
+                                color: Theme.bg0
                                 border.width: 1
+                                border.color: pttKeyField.error.length > 0
+                                    ? Theme.danger
+                                    : (pttKeyField.capturing || pttKeyField.activeFocus
+                                       ? Theme.accent : Theme.line)
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: qsTr("Push-to-talk key")
+                                Accessible.description: pttKeyField.capturing
+                                    ? qsTr("Press the key you want to use. Escape cancels.")
+                                    : serverManager.pttKeyDisplay(appSettings.pttKeySequence)
+                                Accessible.onPressAction: pttKeyField.startCapture()
+                                onActiveFocusChanged: if (!activeFocus) cancelCapture()
+                                Text {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: Theme.sp.s3
+                                    anchors.rightMargin: Theme.sp.s3
+                                    verticalAlignment: Text.AlignVCenter
+                                    textFormat: Text.PlainText
+                                    elide: Text.ElideRight
+                                    text: pttKeyField.capturing
+                                        ? qsTr("Press a key…")
+                                        : serverManager.pttKeyDisplay(appSettings.pttKeySequence)
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: Theme.fontSize.sm
+                                    color: pttKeyField.capturing ? Theme.fg2 : Theme.fg0
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: pttKeyField.startCapture()
+                                }
+                                Keys.onPressed: (event) => {
+                                    if (!pttKeyField.capturing) {
+                                        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+                                            || event.key === Qt.Key_Space) {
+                                            pttKeyField.startCapture();
+                                            event.accepted = true;
+                                        }
+                                        return;
+                                    }
+                                    event.accepted = true;
+                                    if (event.key === Qt.Key_Escape && event.modifiers === Qt.NoModifier) {
+                                        pttKeyField.cancelCapture();
+                                        return;
+                                    }
+                                    // Modifiers alone: keep waiting for the key.
+                                    const seq = serverManager.pttSequenceFor(event.key, event.modifiers);
+                                    if (seq.length === 0) return;
+                                    const why = serverManager.pttKeyProblem(seq);
+                                    pttKeyField.error = why;
+                                    pttKeyField.cancelCapture();
+                                    if (why.length === 0) appSettings.pttKeySequence = seq;
+                                }
                             }
-                            leftPadding: Theme.sp.s3
-                            rightPadding: Theme.sp.s3
-                            topPadding: Theme.sp.s2
-                            bottomPadding: Theme.sp.s2
-                            onEditingFinished: appSettings.pttKeySequence = text
+                            Text {
+                                visible: pttKeyField.error.length > 0
+                                Layout.maximumWidth: pttKeyField.implicitWidth
+                                text: pttKeyField.error
+                                textFormat: Text.PlainText
+                                wrapMode: Text.WordWrap
+                                font.family: Theme.fontSans
+                                font.pixelSize: Theme.fontSize.sm
+                                color: Theme.danger
+                            }
                         }
                     }
 

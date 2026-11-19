@@ -23,6 +23,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QImage>
+#include <QKeySequence>
 #include <QMimeData>
 #include <QStandardPaths>
 #include <QGuiApplication>
@@ -693,6 +694,27 @@ void ServerManager::showCall()
 void ServerManager::configurePushToTalk(bool enabled, const QString& sequence)
 {
     m_pttKeys->configure(enabled, sequence);
+}
+
+QString ServerManager::pttSequenceFor(int key, int modifiers) const
+{
+    return PttKeyFilter::sequenceFor(key, Qt::KeyboardModifiers(modifiers));
+}
+
+QString ServerManager::pttKeyProblem(const QString& sequence) const
+{
+    return PttKeyFilter::problem(sequence);
+}
+
+QString ServerManager::pttKeyDisplay(const QString& sequence) const
+{
+    return QKeySequence(sequence, QKeySequence::PortableText)
+        .toString(QKeySequence::NativeText);
+}
+
+void ServerManager::setPttCapturing(bool capturing)
+{
+    m_pttKeys->setSuspended(capturing);
 }
 
 void ServerManager::setPttPressed(bool pressed)

@@ -100,6 +100,14 @@ public:
     // and setPttPressed (e.g. a hold-to-talk button) both reach the VOICE
     // server — never activeServer, which is just the one being browsed.
     Q_INVOKABLE void configurePushToTalk(bool enabled, const QString& sequence);
+    // The Settings capture field (see PttKeyFilter): the sequence for a
+    // key just pressed ("" while only modifiers are down), why a sequence
+    // cannot be used ("" if it can), how to show it on this platform, and
+    // a pause in PTT while a new key is being chosen.
+    Q_INVOKABLE QString pttSequenceFor(int key, int modifiers) const;
+    Q_INVOKABLE QString pttKeyProblem(const QString& sequence) const;
+    Q_INVOKABLE QString pttKeyDisplay(const QString& sequence) const;
+    Q_INVOKABLE void setPttCapturing(bool capturing);
     // The dock's hold-to-talk button. Tracked apart from the keyboard key
     // so releasing one while the other is still held does not shut the mic.
     Q_INVOKABLE void setPttPressed(bool pressed);
