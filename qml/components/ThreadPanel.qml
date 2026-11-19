@@ -33,6 +33,35 @@ Item {
     // profile card of its own, so the host (MessageView) opens the one
     // it already owns.
     signal userLinkClicked(string userId, string displayName)
+    // Row actions the drawer delegates to the host, which owns the shared
+    // reaction picker and the delete confirmation.
+    signal reactRequested(string eventId)
+    signal deleteRequested(string eventId, string body, string senderName)
+
+    // The reply being edited from this drawer's composer ("" = none), and
+    // the draft that editing pushed aside.
+    property string editingEventId: ""
+    property string _draftBeforeEdit: ""
+    function beginEditing(eventId, body) {
+        if (editingEventId === "") _draftBeforeEdit = composerField.text;
+        editingEventId = eventId;
+        composerField.text = body;
+        composerField.forceActiveFocus();
+        composerField.cursorPosition = body.length;
+    }
+    function cancelEditing() {
+        editingEventId = "";
+        composerField.text = _draftBeforeEdit;
+        _draftBeforeEdit = "";
+    }
+
+    // Replies older than the loaded timeline are not in the model, and the
+    // server offers no /relations to fetch them, so say so while the room
+    // still has history to load.
+    readonly property bool olderRepliesMayBeMissing: {
+        var s = serverManager.activeServer;
+        return !!(s && s.messageModel && s.messageModel.hasMoreHistory);
+    }
 
     // Live view of this thread over the room's MessageModel (U-M8).
     //
@@ -59,7 +88,16 @@ Item {
     }
     function closePanel() {
         rootEventId = "";
+        editingEventId = "";
+        _draftBeforeEdit = "";
         composerField.text = "";
+    }
+
+    // Esc anywhere in the drawer closes it (an edit is cancelled first).
+    Keys.onEscapePressed: (event) => {
+        if (threadPanel.editingEventId !== "") threadPanel.cancelEditing();
+        else threadPanel.closePanel();
+        event.accepted = true;
     }
 
     // ── Close on room AND server change (U-H4) ───────────────────────
@@ -199,6 +237,40 @@ Item {
                 // assembled by hand falls out of the source order.
                 model: threadPanel.threadModel
 
+                footer: Column {
+                    width: ListView.view ? ListView.view.width : 0
+                    topPadding: Theme.sp.s5
+                    bottomPadding: Theme.sp.s5
+                    spacing: Theme.sp.s2
+                    // Only the root is loaded: say so rather than show a
+                    // lone message.
+                    Text {
+                        visible: threadList.count <= 1
+                        width: parent.width
+                        horizontalAlignment: Text.AlignHCenter
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        text: qsTr("No replies yet. Start the thread below.")
+                        color: Theme.fg3
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.sm
+                    }
+                }
+                header: Text {
+                    visible: threadPanel.olderRepliesMayBeMissing
+                    height: visible ? implicitHeight + Theme.sp.s3 : 0
+                    width: ListView.view ? ListView.view.width : 0
+                    leftPadding: Theme.sp.s5
+                    rightPadding: Theme.sp.s5
+                    topPadding: Theme.sp.s2
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    text: qsTr("Showing replies from the loaded part of the channel. Older replies may not be shown.")
+                    color: Theme.fg3
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fontSize.xs
+                }
+
                 delegate: Item {
                     id: threadRow
                     width: ListView.view.width
@@ -212,6 +284,21 @@ Item {
                     required property double timestamp
                     required property bool mentionsMe
                     required property bool mentionsRoom
+                    required property bool isOwnMessage
+                    required property string msgtype
+                    required property int deliveryState
+                    required property string revealedBody
+                    property bool spoilersRevealed: false
+
+                    HoverHandler { id: rowHover }
+                    TapHandler {
+                        acceptedButtons: Qt.RightButton
+                        onTapped: threadPanel._openRowMenu(threadRow, null)
+                    }
+                    TapHandler {
+                        acceptedDevices: PointerDevice.TouchScreen
+                        onLongPressed: threadPanel._openRowMenu(threadRow, null)
+                    }
 
                     readonly property bool isParent:
                         threadRow.eventId === threadPanel.rootEventId
@@ -305,6 +392,36 @@ Item {
                                     font.pixelSize: Theme.fontSize.xs
                                     color: Theme.fg3
                                 }
+                                // Row actions — the same ones the timeline
+                                // offers (react, copy, edit own, delete).
+                                Rectangle {
+                                    id: rowMoreBtn
+                                    Layout.preferredWidth: Theme.isMobile ? Theme.touchTarget : 22
+                                    Layout.preferredHeight: Theme.isMobile ? Theme.touchTarget : 22
+                                    radius: Theme.r1
+                                    visible: threadRow.eventId !== ""
+                                    color: rowMoreMouse.containsMouse || activeFocus ? Theme.bg3 : "transparent"
+                                    opacity: Theme.isMobile || rowHover.hovered || activeFocus
+                                             || rowMoreMouse.containsMouse ? 1.0 : 0.0
+                                    activeFocusOnTab: true
+                                    Accessible.role: Accessible.Button
+                                    Accessible.name: qsTr("Message actions")
+                                    Accessible.onPressAction: threadPanel._openRowMenu(threadRow, rowMoreBtn)
+                                    Keys.onReturnPressed: threadPanel._openRowMenu(threadRow, rowMoreBtn)
+                                    Keys.onSpacePressed: threadPanel._openRowMenu(threadRow, rowMoreBtn)
+                                    Icon {
+                                        anchors.centerIn: parent
+                                        name: "more-horizontal"; size: 14
+                                        color: Theme.fg2
+                                    }
+                                    MouseArea {
+                                        id: rowMoreMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: threadPanel._openRowMenu(threadRow, rowMoreBtn)
+                                    }
+                                }
                             }
                             Text {
                                 id: bodyText
@@ -316,7 +433,8 @@ Item {
                                 // timeline shows. The parent preview carries
                                 // no markup, so it stays PlainText.
                                 readonly property string html:
-                                    threadRow.formattedBody
+                                    threadRow.spoilersRevealed && threadRow.revealedBody !== ""
+                                    ? threadRow.revealedBody : threadRow.formattedBody
                                 text: html !== "" ? html : threadRow.body
                                 textFormat: html !== "" ? Text.RichText
                                                         : Text.PlainText
@@ -328,7 +446,9 @@ Item {
                                 onLinkActivated: (link) => {
                                     // Same routing MessageBubble does, so a
                                     // link behaves identically in the drawer.
-                                    if (link.indexOf("bsfchat://user/") === 0) {
+                                    if (link === "bsfchat://spoiler") {
+                                        threadRow.spoilersRevealed = true;
+                                    } else if (link.indexOf("bsfchat://user/") === 0) {
                                         var uid = decodeURIComponent(link.substring(
                                             "bsfchat://user/".length));
                                         threadPanel.userLinkClicked(uid, uid);
@@ -395,7 +515,8 @@ Item {
                         id: composerField
                         Layout.fillWidth: true
                         Layout.alignment: Qt.AlignVCenter
-                        placeholderText: "Reply in thread…"
+                        placeholderText: threadPanel.editingEventId !== ""
+                            ? qsTr("Edit your reply…") : qsTr("Reply in thread…")
                         Accessible.role: Accessible.EditableText
                         Accessible.name: qsTr("Reply in thread")
                         Accessible.description: qsTr("Return posts the reply into this thread")
@@ -493,7 +614,108 @@ Item {
         }
     }
 
+    // ── Row menu ──────────────────────────────────────────────────────
+    property var _menuRow: null
+    function _openRowMenu(row, anchorItem) {
+        if (!row || row.eventId === "") return;
+        threadPanel._menuRow = {
+            eventId: row.eventId, body: row.body,
+            senderName: row.senderDisplayName || row.sender,
+            own: row.isOwnMessage,
+            editable: row.isOwnMessage && row.deliveryState === 0
+                      && (row.msgtype === "m.text" || row.msgtype === "m.notice"
+                          || row.msgtype === "m.emote")
+        };
+        if (anchorItem) rowMenu.popup(anchorItem, 0, anchorItem.height);
+        else rowMenu.popup();
+    }
+    Menu {
+        id: rowMenu
+        onClosed: composerField.forceActiveFocus()
+        MenuItem {
+            text: qsTr("Add reaction")
+            onTriggered: if (threadPanel._menuRow)
+                threadPanel.reactRequested(threadPanel._menuRow.eventId)
+        }
+        MenuItem {
+            text: qsTr("Copy text")
+            onTriggered: if (threadPanel._menuRow && serverManager)
+                serverManager.copyToClipboard(threadPanel._menuRow.body)
+        }
+        MenuItem {
+            text: qsTr("Edit")
+            visible: !!(threadPanel._menuRow && threadPanel._menuRow.editable)
+            height: visible ? implicitHeight : 0
+            onTriggered: threadPanel.beginEditing(threadPanel._menuRow.eventId,
+                                                  threadPanel._menuRow.body)
+        }
+        MenuItem {
+            text: qsTr("Delete")
+            readonly property bool allowed: !!threadPanel._menuRow
+                && (threadPanel._menuRow.own
+                    || (serverManager.activeServer
+                        && serverManager.activeServer.permissionsGeneration >= 0
+                        && serverManager.activeServer.canManageMessages(
+                               serverManager.activeServer.activeRoomId)))
+            visible: allowed
+            height: visible ? implicitHeight : 0
+            onTriggered: threadPanel.deleteRequested(threadPanel._menuRow.eventId,
+                                                     threadPanel._menuRow.body,
+                                                     threadPanel._menuRow.senderName)
+        }
+    }
+
+    // Mentions typed as "@Display Name" (or the @-token form the main
+    // composer inserts) against the member list, so a mention in a thread
+    // notifies like one in the channel. Returns { html, uids }; html is ""
+    // when nothing needs formatting.
+    function _richPayload(text) {
+        var s = serverManager.activeServer;
+        var mm = s ? s.memberListModel : null;
+        var esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        var html = esc;
+        var uids = [];
+        function reFor(tok) {
+            return new RegExp("(^|\\s)" + tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+                              + "(?![A-Za-z0-9_-])", "g");
+        }
+        if (mm && text.indexOf("@") >= 0) {
+            for (var i = 0; i < mm.rowCount(); ++i) {
+                var idx = mm.index(i, 0);
+                var uid = mm.data(idx, Qt.UserRole + 1);
+                var dn = mm.data(idx, Qt.UserRole + 2) || "";
+                var tokens = [];
+                if (dn) tokens.push("@" + dn, "@" + dn.replace(/\s+/g, ""));
+                if (uid) tokens.push(uid);
+                for (var t = 0; t < tokens.length; ++t) {
+                    var tokEsc = tokens[t].replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                                          .replace(/>/g, "&gt;");
+                    if (!reFor(tokEsc).test(html)) continue;
+                    var anchor = '<a href="bsfchat://user/' + encodeURIComponent(uid) + '">'
+                                 + tokEsc + '</a>';
+                    html = html.replace(reFor(tokEsc), function(_, lead) { return lead + anchor; });
+                    if (uids.indexOf(uid) < 0) uids.push(uid);
+                    break;
+                }
+            }
+        }
+        if (/(^|\s)@room(?![A-Za-z0-9_])/.test(text)) uids.push("@room");
+        if (uids.length === 0) return { html: "", uids: [] };
+        // With a formatted_body the receiver renders it, not the body's
+        // markdown, so the main composer's markdown-lite goes in too.
+        html = html.replace(/```([\s\S]*?)```/g, "<pre><code>$1</code></pre>")
+                   .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+                   .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+                   .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<i>$2</i>");
+        return { html: html.replace(/\n/g, "<br>"), uids: uids };
+    }
+
     function _send() {
+        // Commit any in-flight IME composition first, as the main composer
+        // does: an Android keyboard holds the last word in preeditText, and
+        // tapping Send used to post the text without it.
+        if (composerField.preeditText && composerField.preeditText.length > 0)
+            Qt.inputMethod.commit();
         var body = composerField.text.trim();
         if (body.length === 0) return;
         if (rootEventId === "") return;
@@ -504,8 +726,24 @@ Item {
             threadPanel.closePanel();
             return;
         }
-        if (!serverManager.activeServer) return;
-        serverManager.activeServer.sendThreadReply(rootEventId, body);
+        var s = serverManager.activeServer;
+        if (!s) return;
+        // Same size rule as the main composer: refuse, keep the text, say why.
+        if (s.maxMessageBytes > 0 && s.messageByteLength(body) > s.maxMessageBytes) {
+            var w = threadPanel.Window.window;
+            if (w && w.toastInfo)
+                w.toastInfo(qsTr("That reply is %1 bytes over the %2-byte limit.")
+                            .arg(s.messageByteLength(body) - s.maxMessageBytes)
+                            .arg(s.maxMessageBytes));
+            return;
+        }
+        var rich = threadPanel._richPayload(body);
+        if (threadPanel.editingEventId !== "") {
+            s.editMessage(threadPanel.editingEventId, body, rich.html, rich.uids);
+            threadPanel.cancelEditing();
+            return;
+        }
+        s.sendThreadReply(rootEventId, body, rich.html, rich.uids);
         composerField.text = "";
     }
 }

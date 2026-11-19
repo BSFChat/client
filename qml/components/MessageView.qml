@@ -2882,5 +2882,13 @@ Rectangle {
             messageProfileCard.profileDisplayName = displayName;
             messageProfileCard.open();
         }
+        // Row actions in the drawer reuse the timeline's picker and confirm.
+        onReactRequested: (eventId) => messageViewRoot.openReactPickerFor(eventId)
+        onDeleteRequested: (eventId, body, senderName) => {
+            deleteConfirm.eventId = eventId;
+            deleteConfirm.preview = (body || "").substring(0, 140);
+            deleteConfirm.senderName = senderName || "";
+            deleteConfirm.open();
+        }
     }
 }

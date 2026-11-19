@@ -1935,6 +1935,54 @@ Item {
                 }
 
             }
+
+            // Thread indicator: "3 replies" under a thread root, opening the
+            // thread. There was none — a thread was findable only through
+            // the context menu of the right message.
+            Rectangle {
+                id: threadChip
+                readonly property bool shown: bubble.threadReplyCount > 0
+                    && (bubble.threadRootId === "" || bubble.threadRootId === bubble.eventId)
+                visible: shown
+                Layout.topMargin: shown ? 4 : 0
+                Layout.preferredHeight: shown ? 24 : 0
+                Layout.preferredWidth: threadChipRow.implicitWidth + 16
+                radius: Theme.r5
+                color: threadChipMouse.containsMouse || activeFocus ? Theme.bg3 : "transparent"
+                border.width: 1
+                border.color: threadChipMouse.containsMouse || activeFocus ? Theme.accent : Theme.line
+                activeFocusOnTab: shown
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("%n reply(s) in thread", "", bubble.threadReplyCount)
+                Accessible.description: qsTr("Open the thread")
+                Accessible.onPressAction: bubble.threadOpenRequested(bubble.eventId)
+                Keys.onReturnPressed: bubble.threadOpenRequested(bubble.eventId)
+                Keys.onSpacePressed: bubble.threadOpenRequested(bubble.eventId)
+                Row {
+                    id: threadChipRow
+                    anchors.centerIn: parent
+                    spacing: 6
+                    Icon { name: "forward"; size: 12; color: Theme.accent
+                           anchors.verticalCenter: parent.verticalCenter }
+                    Text {
+                        textFormat: Text.PlainText
+                        text: qsTr("%n reply(s)", "", bubble.threadReplyCount)
+                        Accessible.ignored: true
+                        color: Theme.accent
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xs
+                        font.weight: Theme.fontWeight.semibold
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+                MouseArea {
+                    id: threadChipMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: bubble.threadOpenRequested(bubble.eventId)
+                }
+            }
         }
     }
 
