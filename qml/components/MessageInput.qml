@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import Qt.labs.platform as Platform
 import BSFChat
 import "../js/UploadTally.js" as UploadTally
+import "../data/EmojiData.js" as EmojiData
 
 // MessageInput is an implicitHeight-driven Rectangle so it can grow the
 // vertical banner strip (when editing) without forcing the parent to
@@ -912,10 +913,12 @@ Rectangle {
                     }
                     inputRoot._refreshMentionQuery();
                     inputRoot._refreshSlashQuery();
+                    inputRoot._refreshEmojiQuery(true);
                 }
                 onCursorPositionChanged: {
                     inputRoot._refreshMentionQuery();
                     inputRoot._refreshSlashQuery();
+                    inputRoot._refreshEmojiQuery(false);
                 }
 
                 Keys.onPressed: (event) => {
@@ -975,6 +978,33 @@ Rectangle {
                             inputRoot.mentionAnchor = -1;
                             event.accepted = true;
                             return;
+                        }
+                    }
+
+                    // And for :shortcode: emoji completion.
+                    if (inputRoot.emojiAnchor >= 0) {
+                        var em = inputRoot._emojiMatches;
+                        if (em.length > 0) {
+                            if (event.key === Qt.Key_Down) {
+                                inputRoot.emojiSelected = (inputRoot.emojiSelected + 1) % em.length;
+                                event.accepted = true; return;
+                            }
+                            if (event.key === Qt.Key_Up) {
+                                inputRoot.emojiSelected =
+                                    (inputRoot.emojiSelected - 1 + em.length) % em.length;
+                                event.accepted = true; return;
+                            }
+                            if (event.key === Qt.Key_Tab
+                                || ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                                    && !Theme.isMobile && !(event.modifiers & Qt.ShiftModifier))) {
+                                inputRoot._insertEmojiShortcode(em[inputRoot.emojiSelected]);
+                                event.accepted = true; return;
+                            }
+                        }
+                        if (event.key === Qt.Key_Escape) {
+                            inputRoot.emojiAnchor = -1;
+                            inputRoot.emojiQuery = "";
+                            event.accepted = true; return;
                         }
                     }
 
@@ -1056,6 +1086,7 @@ Rectangle {
                     // instead of accepting the highlighted entry.
                     if (!Theme.isMobile && !(event.modifiers & Qt.ShiftModifier)
                         && (inputRoot.mentionAnchor >= 0
+                            || (inputRoot.emojiAnchor >= 0 && inputRoot._emojiMatches.length > 0)
                             || (inputRoot.slashAnchor >= 0
                                 && inputRoot._slashMatches().length > 0))) {
                         event.accepted = false;
@@ -1702,6 +1733,117 @@ Rectangle {
             sideEffect: function(rest) { inputArea.text = ""; }
         }
     ]
+
+    // ── :shortcode: emoji completion ─────────────────────────────────
+    //
+    // ":thu" offers 👍 and friends; Tab/Enter (or a click) puts the emoji in
+    // place of the code, and typing the closing colon of an exact code
+    // (":tada:") replaces it straight away.
+    property string emojiQuery: ""
+    property int emojiAnchor: -1
+    property int emojiSelected: 0
+    readonly property var _emojiMatches: emojiAnchor >= 0
+        ? EmojiData.shortcodeMatches(emojiQuery, 6) : []
+    function _refreshEmojiQuery(textChanged) {
+        var cp = inputArea.cursorPosition;
+        var before = inputArea.text.substring(0, cp);
+        if (textChanged) {
+            var done = /(^|\s):([A-Za-z0-9_+-]{2,}):$/.exec(before);
+            if (done) {
+                var e = EmojiData.emojiForShortcode(done[2]);
+                if (e !== "") {
+                    var start = cp - done[2].length - 2;
+                    emojiAnchor = -1;
+                    emojiQuery = "";
+                    inputArea.remove(start, cp);
+                    inputArea.insert(start, e);
+                    return;
+                }
+            }
+        }
+        var m = /(^|\s):([A-Za-z0-9_+-]{2,})$/.exec(before);
+        if (!m) { emojiAnchor = -1; emojiQuery = ""; return; }
+        var anchor = cp - m[2].length - 1;
+        if (anchor !== emojiAnchor || m[2] !== emojiQuery) emojiSelected = 0;
+        emojiAnchor = anchor;
+        emojiQuery = m[2];
+    }
+    function _insertEmojiShortcode(item) {
+        if (!item || emojiAnchor < 0) return;
+        var start = emojiAnchor;
+        var end = inputArea.cursorPosition;
+        emojiAnchor = -1;
+        emojiQuery = "";
+        inputArea.remove(start, end);
+        inputArea.insert(start, item.emoji);
+        inputArea.forceActiveFocus();
+    }
+
+    Popup {
+        id: emojiCodePopup
+        parent: inputRoot
+        y: -height - 4
+        x: Theme.sp.s3
+        width: 280
+        padding: 4
+        modal: false
+        focus: false
+        closePolicy: Popup.NoAutoClose
+        visible: inputRoot.emojiAnchor >= 0 && inputRoot._emojiMatches.length > 0
+        background: Rectangle {
+            Accessible.ignored: true
+            color: Theme.bg1
+            border.color: Theme.line
+            border.width: 1
+            radius: Theme.r2
+        }
+        contentItem: Column {
+            Accessible.role: Accessible.List
+            Accessible.name: qsTr("Emoji")
+            Repeater {
+                model: inputRoot._emojiMatches
+                delegate: Rectangle {
+                    required property int index
+                    required property var modelData
+                    width: emojiCodePopup.width - 8
+                    height: 28
+                    radius: Theme.r1
+                    color: index === inputRoot.emojiSelected || codeHover.containsMouse
+                        ? Theme.bg3 : "transparent"
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: modelData.emoji + " :" + modelData.code + ":"
+                    Row {
+                        anchors.verticalCenter: parent.verticalCenter
+                        leftPadding: Theme.sp.s3
+                        spacing: Theme.sp.s3
+                        Text {
+                            text: modelData.emoji
+                            textFormat: Text.PlainText
+                            font.pixelSize: 16
+                            Accessible.ignored: true
+                        }
+                        Text {
+                            text: ":" + modelData.code + ":"
+                            textFormat: Text.PlainText
+                            color: Theme.fg1
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.sm
+                            elide: Text.ElideRight
+                            width: emojiCodePopup.width - 60
+                            Accessible.ignored: true
+                        }
+                    }
+                    MouseArea {
+                        id: codeHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: inputRoot._insertEmojiShortcode(modelData)
+                    }
+                }
+            }
+        }
+    }
 
     // Active query state. mentionQuery / mentionAnchor have a parallel
     // pair for slash commands; -1 means "no slash popup right now".
