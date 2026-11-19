@@ -1302,6 +1302,22 @@ Item {
                 }
             }
 
+            // Inline player for m.audio messages. Keyed on mediaUrl like the
+            // video card: MediaPlayer needs a URL. The card is a fixed-height
+            // strip, so reserving from the item doesn't move the row later
+            // than a file card would.
+            Loader {
+                Layout.preferredHeight: item ? item.implicitHeight : 0
+                active: bubble.msgtype === "m.audio" && bubble.mediaUrl !== ""
+                sourceComponent: AudioPlayerCard {
+                    source: bubble.mediaUrl
+                    sourceMxc: bubble.mediaMxc
+                    eventId: bubble.eventId
+                    fileName: bubble.mediaFileName
+                    fileSize: bubble.mediaFileSize
+                }
+            }
+
             // Inline image for m.image messages
             Loader {
                 Layout.fillWidth: true

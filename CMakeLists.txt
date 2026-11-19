@@ -1364,6 +1364,7 @@ qt_add_qml_module(bsfchat-lib
         qml/components/SelfRolePicker.qml
         qml/components/ToastHost.qml
         qml/components/VideoPlayerCard.qml
+        qml/components/AudioPlayerCard.qml
         qml/components/LinkPreview.qml
         qml/components/ExternalOpenPrompts.qml
         qml/components/ScreenPickerDialog.qml
