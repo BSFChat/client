@@ -517,6 +517,12 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     // onLiveSync, not processSyncResponse directly: a live reply also
     // carries rooms.leave, and earns the session's /joined_rooms reconcile.
     connect(m_syncLoop, &SyncLoop::syncCompleted, this, &ServerConnection::onLiveSync);
+    // A since token abandoned mid-session (the server now answers a token it
+    // does not know with 400 M_INVALID_PARAM) means the next reply is a full
+    // initial sync: catch-up, not live traffic, so it must not notify for
+    // every unread message on the server.
+    connect(m_syncLoop, &SyncLoop::sinceTokenAbandoned, this,
+            [this] { m_catchUpSyncPending = true; });
     connect(m_client, &MatrixClient::joinedRoomsResult, this,
             &ServerConnection::onJoinedRoomsResult);
 
@@ -5070,7 +5076,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     // badges. Toasts are for messages that arrive live.
                     const qint64 eventTs = static_cast<qint64>(event.origin_server_ts);
                     const qint64 readTs = m_settings ? m_settings->lastReadTs(roomId) : 0;
-                    if (m_firstSyncProcessed && eventTs > readTs) {
+                    if (m_firstSyncProcessed && !m_catchUpSyncPending && eventTs > readTs) {
                         emit messageReceived(roomId, displayName, body, eventId,
                                              mentionsMe);
                     }
@@ -5337,6 +5343,8 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
         // absence of one. See the property's comment in the header.
         emit initialSyncCompleteChanged();
     }
+
+    if (!m_hydratingFromCache) m_catchUpSyncPending = false;
 
     // A restore that had to wait for the channel list gets another go now that
     // this batch (and, on the first pass, the prune above) has been folded in.

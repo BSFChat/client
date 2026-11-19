@@ -839,6 +839,24 @@ target_link_libraries(test_sync_single_flight PRIVATE
 )
 add_test(NAME test_sync_single_flight COMMAND test_sync_single_flight)
 
+# A live since token refused with 400 M_INVALID_PARAM is dropped for a fresh
+# initial sync instead of being retried forever. Loopback server.
+qt_add_executable(test_sync_rejected_since
+    test_sync_rejected_since.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
+)
+target_include_directories(test_sync_rejected_since PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_sync_rejected_since PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Network Qt6::Test
+)
+add_test(NAME test_sync_rejected_since COMMAND test_sync_rejected_since)
+
 qt_add_executable(test_server_roster test_server_roster.cpp)
 target_include_directories(test_server_roster PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_server_roster PRIVATE Qt6::Core Qt6::Test)

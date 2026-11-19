@@ -1524,6 +1524,9 @@ private:
     bool m_forceFullSync = false;
     QString m_syncErrorMessage;
     bool m_hasUnread = false;
+    // The next live sync is a full re-sync after an abandoned since token:
+    // treat it as catch-up (no message notifications).
+    bool m_catchUpSyncPending = false;
     int m_unreadCount = 0;
     int m_mentionCount = 0;
     int m_directUnreadCount = 0;

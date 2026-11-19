@@ -75,4 +75,10 @@ bool isNoProgressReply(bool fastReply, bool tokenAdvanced, int payloadItems);
 // expensive full sync that fails identically.
 bool indicatesRejectedSinceToken(const QString& errorBody);
 
+// The server's explicit "that since token is not one of mine" — a 400
+// M_INVALID_PARAM from /sync. Servers from 2026-11 answer a garbage or
+// foreign token this way instead of quietly doing an initial sync, so it is
+// final for ANY token, live or resumed: retrying it can never succeed.
+bool rejectsSinceTokenOutright(const QString& errorBody);
+
 } // namespace SyncBackoff

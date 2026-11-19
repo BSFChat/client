@@ -237,6 +237,11 @@ void SyncLoop::onSyncError(const QString& error)
         && (SyncBackoff::indicatesRejectedSinceToken(error)
             || m_consecutiveFailures + 1 >= SyncBackoff::kMaxResumeAttempts)) {
         abandonSinceToken();
+    } else if (!m_since.isEmpty() && SyncBackoff::rejectsSinceTokenOutright(error)) {
+        // A LIVE token refused with 400 M_INVALID_PARAM (the server no longer
+        // falls back to an initial sync for a token it does not know). It was
+        // retried forever: only resumed tokens were ever abandoned.
+        abandonSinceToken();
     }
 
     const int delay = SyncBackoff::delayForFailure(
@@ -253,8 +258,8 @@ void SyncLoop::onSyncError(const QString& error)
 
 void SyncLoop::abandonSinceToken()
 {
-    qWarning() << "sync: giving up on the resumed since token"
-               << m_since << "— falling back to a full initial sync";
+    qWarning().noquote() << "sync: giving up on the since token"
+                         << m_since << "— falling back to a full initial sync";
     m_since.clear();
     // Cleared first: the flag is what stops this from firing again and
     // again, which would make every subsequent error re-emit the signal.
