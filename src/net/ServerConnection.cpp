@@ -1965,7 +1965,11 @@ void ServerConnection::setActiveRoom(const QString& roomId)
     // the network without the user asking. A restore is not a no-op guard —
     // setActiveRoom is only reached for a channel the user (or a restore)
     // actually opened, and rewriting the same value is harmless.
-    if (m_settings && !roomId.isEmpty() && !m_roomListModel->isVoiceRoom(roomId))
+    // DMs are excluded too (audit 3): the memory is "which of this server's
+    // channels", and a DM written here replaced it, so the server reopened
+    // on the fallback channel after every DM.
+    if (m_settings && !roomId.isEmpty() && !m_roomListModel->isVoiceRoom(roomId)
+        && !isDirectRoom(roomId))
         m_settings->setLastTextRoomFor(m_serverUrl, roomId);
 
     m_messageModel->clear();
