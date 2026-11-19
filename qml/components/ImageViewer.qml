@@ -270,10 +270,16 @@ Popup {
                 PinchHandler {
                     enabled: Theme.isMobile
                     target: null  // manual — keep our own zoom plumbing
+                    // activeScale is cumulative for the whole gesture, so it
+                    // scales the zoom the gesture STARTED at. Multiplying the
+                    // live zoom by it compounded every frame and a small
+                    // pinch flew to the limit.
+                    property real _startZoom: 1.0
+                    onActiveChanged: if (active) _startZoom = viewer.zoom
                     onActiveScaleChanged: {
                         var newZoom = Math.max(viewer.minZoom,
                             Math.min(viewer.maxZoom,
-                                viewer.zoom * activeScale));
+                                _startZoom * activeScale));
                         if (newZoom === viewer.zoom) return;
                         viewer.zoom = newZoom;
                     }
@@ -321,8 +327,11 @@ Popup {
         RowLayout {
             anchors.top: parent.top
             anchors.right: parent.right
-            anchors.topMargin: Theme.sp.s5
-            anchors.rightMargin: Theme.sp.s5
+            // Out of the notch / status bar / rounded corner (SafeArea, Qt
+            // 6.9+): the viewer fills the whole window, so on a phone the
+            // close button sat under the cutout.
+            anchors.topMargin: Theme.sp.s5 + Math.ceil(viewport.SafeArea.margins.top)
+            anchors.rightMargin: Theme.sp.s5 + Math.ceil(viewport.SafeArea.margins.right)
             spacing: Theme.sp.s2
             // z: keep above the close-MouseArea below.
             z: 2
@@ -398,7 +407,7 @@ Popup {
             visible: viewer.filename.length > 0 || viewer.zoom !== 1.0
             anchors.bottom: parent.bottom
             anchors.horizontalCenter: parent.horizontalCenter
-            anchors.bottomMargin: Theme.sp.s5
+            anchors.bottomMargin: Theme.sp.s5 + Math.ceil(viewport.SafeArea.margins.bottom)
             height: captionRow.implicitHeight + Theme.sp.s3 * 2
             width: Math.min(captionRow.implicitWidth + Theme.sp.s7 * 2,
                             parent.width - Theme.sp.s7 * 2)
