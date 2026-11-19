@@ -1115,6 +1115,12 @@ target_link_libraries(test_room_removal PRIVATE
 )
 add_test(NAME test_room_removal COMMAND test_room_removal)
 
+# Notify-level default shared with the server's push rules (audit 3).
+qt_add_executable(test_notify_level test_notify_level.cpp)
+target_include_directories(test_notify_level PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_notify_level PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_notify_level COMMAND test_notify_level)
+
 # Pending invites as the sidebar shows them (audit 3, #6): what is read out
 # of rooms.invite's stripped state. Header-only.
 qt_add_executable(test_pending_invites test_pending_invites.cpp)

@@ -345,8 +345,14 @@ public:
     //   "mentions" — only when the user is @-mentioned
     //   "none"     — never (equivalent to muted for notification
     //                purposes; the channel row still shows unread)
-    // Stored under notifMode/<roomId>. Empty/missing ⇒ "all".
-    Q_INVOKABLE QString roomNotificationMode(const QString& roomId) const;
+    // Stored under notifMode/<roomId>. Missing ⇒ the server's default:
+    // "all" in a DM, "mentions" in a channel (core/NotifyLevel.h).
+    Q_INVOKABLE QString roomNotificationMode(const QString& roomId,
+                                             bool isDirect = false) const;
+    // The explicit choice only, "" when the room follows the default.
+    Q_INVOKABLE QString roomNotificationChoice(const QString& roomId) const;
+    // Any valid level is stored as a choice ("all" too — it is no longer
+    // the default); anything else, including "", clears the choice.
     Q_INVOKABLE void setRoomNotificationMode(const QString& roomId,
                                              const QString& mode);
 

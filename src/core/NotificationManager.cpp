@@ -293,7 +293,7 @@ void NotificationManager::onMessageReceived(const QString& roomId,
     // routing — we also skip the chat chime, so a "none" room is
     // entirely silent (the unread dot still appears in the channel
     // list; that's a different signal).
-    const QString roomMode = m_settings->roomNotificationMode(roomId);
+    const QString roomMode = m_settings->roomNotificationMode(roomId, sender->isDirectRoom(roomId));
     if (roomMode == QStringLiteral("none")) return;
     if (roomMode == QStringLiteral("mentions") && !mentionsMe) return;
 

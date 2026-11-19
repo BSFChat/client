@@ -1,4 +1,5 @@
 #include "core/Settings.h"
+#include "core/NotifyLevel.h"
 #include "core/AppProfile.h"
 #include "core/AudioDeviceStatus.h"
 #include "core/AudioGainSettings.h"
@@ -867,43 +868,36 @@ void Settings::setRoomMuted(const QString& roomId, bool muted)
     emit mutedRoomsChanged();
 }
 
-QString Settings::roomNotificationMode(const QString& roomId) const
+static QString notifModeKey(const QString& roomId)
 {
-    if (roomId.isEmpty()) return QStringLiteral("all");
     // Hashed key keeps the QSettings group name safe for
     // room-ids containing `!:/` etc. that QSettings would treat
     // as sub-groups.
-    QString key = QStringLiteral("notifMode/")
+    return QStringLiteral("notifMode/")
         + QString::fromLatin1(
-            QCryptographicHash::hash(roomId.toUtf8(),
-                                     QCryptographicHash::Sha1).toHex());
-    QString v = m_settings.value(key).toString();
-    if (v.isEmpty()) return QStringLiteral("all");
-    if (v == QStringLiteral("all")
-        || v == QStringLiteral("mentions")
-        || v == QStringLiteral("none")) return v;
-    return QStringLiteral("all");
+            QCryptographicHash::hash(roomId.toUtf8(), QCryptographicHash::Sha1).toHex());
+}
+
+QString Settings::roomNotificationChoice(const QString& roomId) const
+{
+    if (roomId.isEmpty()) return {};
+    const QString v = m_settings.value(notifModeKey(roomId)).toString();
+    return bsfchat::client::isNotifyLevel(v) ? v : QString();
+}
+
+QString Settings::roomNotificationMode(const QString& roomId, bool isDirect) const
+{
+    return bsfchat::client::effectiveNotifyLevel(roomNotificationChoice(roomId), isDirect);
 }
 
 void Settings::setRoomNotificationMode(const QString& roomId,
                                        const QString& mode)
 {
     if (roomId.isEmpty()) return;
-    QString normalized = mode;
-    if (normalized != QStringLiteral("all")
-        && normalized != QStringLiteral("mentions")
-        && normalized != QStringLiteral("none")) {
-        normalized = QStringLiteral("all");
-    }
-    QString key = QStringLiteral("notifMode/")
-        + QString::fromLatin1(
-            QCryptographicHash::hash(roomId.toUtf8(),
-                                     QCryptographicHash::Sha1).toHex());
-    if (normalized == QStringLiteral("all")) {
-        m_settings.remove(key);
-    } else {
-        m_settings.setValue(key, normalized);
-    }
+    if (bsfchat::client::isNotifyLevel(mode))
+        m_settings.setValue(notifModeKey(roomId), mode);
+    else
+        m_settings.remove(notifModeKey(roomId));
 }
 
 QString Settings::lastTextRoomFor(const QString& serverUrl) const

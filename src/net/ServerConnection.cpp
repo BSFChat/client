@@ -798,14 +798,15 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         if (level.isEmpty()) return;
         if (!m_settings) return;
         // An `is_default` answer is the server saying "no explicit choice
-        // recorded". Mirroring it locally is still right: the local cache exists
-        // to answer "what should I do with this message", and the server's
-        // default is the correct answer to that question. What we must not do is
-        // treat it as a user choice and PUT it back.
-        Q_UNUSED(isDefault);
-        if (m_settings->roomNotificationMode(roomId) == level) return;
-        m_settings->setRoomNotificationMode(roomId, level);
-        emit notifyLevelChanged(roomId, level);
+        // recorded". It used to be stored as one, so merely opening the room
+        // menu turned the default into a pinned choice that no longer
+        // followed the default (audit 3). Now it clears any local choice and
+        // the room falls back to the same default the server applies
+        // (core/NotifyLevel.h).
+        const QString before = m_settings->roomNotificationMode(roomId, isDirectRoom(roomId));
+        m_settings->setRoomNotificationMode(roomId, isDefault ? QString() : level);
+        const QString after = m_settings->roomNotificationMode(roomId, isDirectRoom(roomId));
+        if (after != before) emit notifyLevelChanged(roomId, after);
     });
     connect(m_client, &MatrixClient::roomNotifyLevelError, this,
             [this](const QString& roomId, const QString& error) {
@@ -813,8 +814,10 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         // the server never accepted.
         auto it = m_pendingNotifyLevelRollback.find(roomId);
         if (it != m_pendingNotifyLevelRollback.end()) {
+            // *it is the previous CHOICE, "" for "was following the default".
             if (m_settings) m_settings->setRoomNotificationMode(roomId, *it);
-            const QString restored = *it;
+            const QString restored = m_settings
+                ? m_settings->roomNotificationMode(roomId, isDirectRoom(roomId)) : *it;
             m_pendingNotifyLevelRollback.erase(it);
             emit notifyLevelChanged(roomId, restored);
             // The rollback above is half the message and it used to be all of
@@ -2807,7 +2810,7 @@ void ServerConnection::setRoomNotifyLevel(const QString& roomId, const QString& 
     // exactly that case.
     QString previous = level;
     if (m_settings) {
-        previous = m_settings->roomNotificationMode(roomId);
+        previous = m_settings->roomNotificationChoice(roomId);
         m_settings->setRoomNotificationMode(roomId, level);
     }
     m_pendingNotifyLevelRollback.insert(roomId, previous);
