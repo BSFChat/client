@@ -39,8 +39,10 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
 {
     m_pttKeys = new PttKeyFilter(this);
     m_pttKeys->install();
-    connect(m_pttKeys, &PttKeyFilter::pressedChanged,
-            this, &ServerManager::setPttPressed);
+    connect(m_pttKeys, &PttKeyFilter::pressedChanged, this, [this](bool held) {
+        m_pttKeyHeld = held;
+        applyPtt();
+    });
     connect(this, &ServerManager::serverRemoved,
             this, &ServerManager::voiceServerChanged);
     // Sign-ins finished after process death (Android; M2-5). Wired before
@@ -669,6 +671,13 @@ void ServerManager::configurePushToTalk(bool enabled, const QString& sequence)
 
 void ServerManager::setPttPressed(bool pressed)
 {
+    m_pttButtonHeld = pressed;
+    applyPtt();
+}
+
+void ServerManager::applyPtt()
+{
+    const bool pressed = m_pttKeyHeld || m_pttButtonHeld;
     auto* vs = voiceServer();
     if (vs) vs->setPttPressed(pressed);
     // A release reaches every connection, so a key held across a server

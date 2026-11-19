@@ -84,6 +84,8 @@ public:
     // and setPttPressed (e.g. a hold-to-talk button) both reach the VOICE
     // server — never activeServer, which is just the one being browsed.
     Q_INVOKABLE void configurePushToTalk(bool enabled, const QString& sequence);
+    // The dock's hold-to-talk button. Tracked apart from the keyboard key
+    // so releasing one while the other is still held does not shut the mic.
     Q_INVOKABLE void setPttPressed(bool pressed);
 
     // All four take whatever the user typed. Each resolves it first (see
@@ -323,6 +325,10 @@ signals:
 
 private:
     PttKeyFilter* m_pttKeys = nullptr;
+    // Either source held keeps the mic open.
+    bool m_pttKeyHeld = false;
+    bool m_pttButtonHeld = false;
+    void applyPtt();
     // The bodies of addServer / registerServer / addServerWithOidc, once a
     // homeserver URL has been settled on. Separated so the identity-sync
     // path — which already holds canonical URLs from /api/servers — can add
