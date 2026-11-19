@@ -40,6 +40,10 @@ class PushManager : public QObject, private bsfchat::client::push::PushTransport
     // choice, or the fallback when push cannot work on this device.
     Q_PROPERTY(bool backgroundSyncWanted READ backgroundSyncWanted
                NOTIFY backgroundSyncWantedChanged)
+    // The OS has notifications for BSFChat switched off (Android 13+
+    // POST_NOTIFICATIONS denied, iOS alerts denied). Settings shows a
+    // button to openNotificationSettings().
+    Q_PROPERTY(bool notificationsBlocked READ notificationsBlocked NOTIFY statusChanged)
 public:
     PushManager(ServerManager* serverManager, Settings* settings, QObject* parent = nullptr);
     ~PushManager() override;
@@ -48,6 +52,8 @@ public:
     bool active() const;
     QString statusText() const;
     bool backgroundSyncWanted() const;
+    bool notificationsBlocked() const;
+    Q_INVOKABLE void openNotificationSettings();
 
     // ServerManager::removeServer's hook: the deletion bodies owed for this
     // account, serialised, and the account forgotten.
@@ -71,6 +77,9 @@ private:
     void onPushedEvent(const QString& roomId, const QString& eventId, int unread);
     void onTapped(const QString& roomId, const QString& eventId);
     bool pushWanted() const;
+    bsfchat::client::push::StatusInputs statusInputs() const;
+    // Re-derives backgroundSyncWanted (emitting on change) and statusChanged.
+    void refreshStatus();
 
     QPointer<ServerManager> m_serverManager;
     Settings* m_settings;

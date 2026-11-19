@@ -204,3 +204,47 @@ private:
     QHash<QString, Account> m_accounts;
     quint64 m_nextGeneration = 1;
 };
+
+namespace bsfchat::client::push {
+
+// ---- The settings status line and the Android background decision ----
+// Pure, so both are pinned by tests/test_push_registrar.cpp; PushManager
+// gathers the inputs from the bridge, the settings and the registrar.
+
+struct AccountStatus {
+    QString host;
+    PushRegistrar::State state = PushRegistrar::State::Idle;
+    bool namesRefused = false;
+    QString lastError;
+};
+
+struct StatusInputs {
+    bool compiledIn = false;
+    bool ios = false;
+    bool notificationsOn = false;
+    bool backgroundChosen = false;   // Android: "background connection instead"
+    bool bridgeUnavailable = false;  // the platform said push cannot work here
+    bool tokenRetrying = false;      // a transient token failure, retrying
+    bool hasToken = false;
+    bool permissionBlocked = false;  // OS notification permission denied
+    bool gatewayValid = true;
+    bool showNames = false;
+    // Signed-in accounts the registrar knows (i.e. connected at least once).
+    QList<AccountStatus> accounts;
+};
+
+struct StatusSummary {
+    QString text;
+    // Android: whether SyncService should run. True whenever some
+    // signed-in server cannot reach this device through push (audit 3 #9).
+    bool backgroundSyncWanted = false;
+    // Hosts that rely on the background connection rather than push.
+    QStringList onBackground;
+    int registered = 0;
+    int refused = 0;   // GatewayRefused + Refused
+    int failed = 0;
+};
+
+StatusSummary summariseStatus(const StatusInputs& in);
+
+} // namespace bsfchat::client::push

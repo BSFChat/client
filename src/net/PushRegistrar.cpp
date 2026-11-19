@@ -1,5 +1,6 @@
 #include "net/PushRegistrar.h"
 
+#include <QCoreApplication>
 #include <QDebug>
 #include <QJsonDocument>
 #include <QTimer>
@@ -382,3 +383,129 @@ void PushRegistrar::pump(const QString& account)
     else if (bodyRefused) setState(account, a, State::Refused);
     else setState(account, a, State::Idle);
 }
+
+namespace bsfchat::client::push {
+
+namespace {
+QString trp(const char* text, int n = -1)
+{
+    // Same context as before this moved out of PushManager, so existing
+    // translations still apply.
+    return QCoreApplication::translate("PushManager", text, nullptr, n);
+}
+QString hostWithReason(const AccountStatus& a)
+{
+    return a.lastError.isEmpty() ? a.host
+                                 : QStringLiteral("%1 (%2)").arg(a.host, a.lastError);
+}
+} // namespace
+
+StatusSummary summariseStatus(const StatusInputs& in)
+{
+    using S = PushRegistrar::State;
+    StatusSummary out;
+    const bool pushWanted = in.compiledIn && in.notificationsOn
+                            && (in.ios || !in.backgroundChosen);
+
+    // Per-account tally. An account counts as "on the background
+    // connection" when the server will not (or cannot yet) deliver to us
+    // through the gateway: refused, failing, or nothing registrable at all
+    // (we have a token but no valid gateway).
+    QStringList gatewayRefused, refused, failed, namesOff;
+    int busy = 0;
+    for (const AccountStatus& a : in.accounts) {
+        bool lacksPusher = false;
+        switch (a.state) {
+        case S::Registered: ++out.registered; break;
+        case S::Busy: ++busy; break;
+        case S::GatewayRefused:
+            ++out.refused; gatewayRefused << a.host; lacksPusher = true; break;
+        case S::Refused:
+            ++out.refused; refused << hostWithReason(a); lacksPusher = true; break;
+        case S::Failed:
+            ++out.failed; failed << hostWithReason(a); lacksPusher = true; break;
+        case S::Idle:
+            lacksPusher = in.hasToken;
+            break;
+        }
+        if (lacksPusher) out.onBackground << a.host;
+        if (a.namesRefused) namesOff << a.host;
+    }
+    gatewayRefused.removeDuplicates();
+    namesOff.removeDuplicates();
+    out.onBackground.removeDuplicates();
+
+    // ---- Android background connection ----
+    if (!in.ios) {
+        if (in.backgroundChosen || !in.compiledIn || in.bridgeUnavailable)
+            out.backgroundSyncWanted = true;
+        else if (in.notificationsOn
+                 && (in.tokenRetrying || !in.gatewayValid || !out.onBackground.isEmpty()))
+            out.backgroundSyncWanted = true;
+    }
+    if (in.ios || !pushWanted) out.onBackground.clear();
+
+    // ---- Status line ----
+    if (!in.compiledIn || !in.notificationsOn) return out;
+    if (!pushWanted) {
+        out.text = trp("Using a background connection instead of push.");
+        return out;
+    }
+    if (in.permissionBlocked) {
+        out.text = trp("Notifications are blocked in system settings.");
+        return out;
+    }
+    if (in.bridgeUnavailable) {
+        out.text = in.ios
+            ? trp("Push notifications are not available: allow notifications for BSFChat "
+                  "in iOS Settings.")
+            : trp("Push is not available on this device (no Google Play services?). "
+                  "Using a background connection instead.");
+        return out;
+    }
+    if (in.tokenRetrying) {
+        out.text = in.ios
+            ? trp("Could not reach the push service yet; retrying.")
+            : trp("Could not reach the push service yet; retrying. A background "
+                  "connection keeps notifications coming meanwhile.");
+        return out;
+    }
+    if (!in.hasToken) {
+        out.text = trp("Waiting for the push service…");
+        return out;
+    }
+    if (!in.gatewayValid) {
+        out.text = in.ios
+            ? trp("The push gateway URL in Advanced settings is not valid, so push is off.")
+            : trp("The push gateway URL in Advanced settings is not valid, so BSFChat "
+                  "uses a background connection instead.");
+        return out;
+    }
+
+    const QString sep = QStringLiteral(", ");
+    QStringList parts;
+    if (out.registered > 0 || (out.refused == 0 && out.failed == 0))
+        parts << trp("Push is on for %n server(s).", out.registered);
+    if (busy > 0) parts << trp("Registering with %n server(s)…", busy);
+    if (!gatewayRefused.isEmpty()) {
+        parts << (in.ios
+            ? trp("%1 does not allow this push gateway, so it can only notify you "
+                  "while BSFChat is open.")
+            : trp("%1 does not allow this push gateway."))
+                 .arg(gatewayRefused.join(sep));
+    }
+    if (!refused.isEmpty())
+        parts << trp("%n server(s) refused push: %1.", refused.size()).arg(refused.join(sep));
+    if (!failed.isEmpty())
+        parts << trp("Could not register push with %n server(s), retrying: %1.", failed.size())
+                     .arg(failed.join(sep));
+    if (!out.onBackground.isEmpty())
+        parts << trp("BSFChat keeps a background connection for %1.")
+                     .arg(out.onBackground.join(sep));
+    if (!namesOff.isEmpty() && in.showNames)
+        parts << trp("%1 only sends \"New message\".").arg(namesOff.join(sep));
+    out.text = parts.join(QLatin1Char(' '));
+    return out;
+}
+
+} // namespace bsfchat::client::push

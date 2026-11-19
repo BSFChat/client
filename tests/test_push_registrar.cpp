@@ -47,6 +47,24 @@ QByteArray matrixError(const char* text)
     return QJsonDocument(QJsonObject{{"errcode", "M_INVALID_PARAM"}, {"error", text}}).toJson();
 }
 
+StatusInputs androidReady()
+{
+    StatusInputs in;
+    in.compiledIn = true;
+    in.notificationsOn = true;
+    in.hasToken = true;
+    return in;
+}
+AccountStatus acct(const char* host, PushRegistrar::State st,
+                          const char* err = "")
+{
+    AccountStatus a;
+    a.host = QString::fromLatin1(host);
+    a.state = st;
+    a.lastError = QString::fromLatin1(err);
+    return a;
+}
+
 } // namespace
 
 class TestPushRegistrar : public QObject {
@@ -340,6 +358,111 @@ private slots:
         ca.done({200, "{}", false});
         QCOMPARE(r.state("a"), PushRegistrar::State::Registered);
         QCOMPARE(r.state("b"), PushRegistrar::State::GatewayRefused);
+    }
+
+    // ---- Status line and Android background decision (audit 3 #9) ----
+
+    void backgroundStaysOffWhenEveryServerHasAPusher()
+    {
+        StatusInputs in = androidReady();
+        in.accounts = {acct("a.org", PushRegistrar::State::Registered),
+                       acct("b.org", PushRegistrar::State::Registered)};
+        const auto s = summariseStatus(in);
+        QVERIFY(!s.backgroundSyncWanted);
+        QCOMPARE(s.registered, 2);
+        QCOMPARE(s.text, QStringLiteral("Push is on for 2 server(s)."));
+    }
+
+    void refusedGatewayKeepsTheBackgroundConnection()
+    {
+        // The bug: push replaced SyncService even for a server that
+        // refuses the gateway, which then never notified at all.
+        StatusInputs in = androidReady();
+        in.accounts = {acct("a.org", PushRegistrar::State::Registered),
+                       acct("self.host", PushRegistrar::State::GatewayRefused, "not allowed")};
+        const auto s = summariseStatus(in);
+        QVERIFY(s.backgroundSyncWanted);
+        QCOMPARE(s.onBackground, QStringList{"self.host"});
+        QCOMPARE(s.refused, 1);
+        QVERIFY(s.text.contains("self.host does not allow this push gateway"));
+        QVERIFY(s.text.contains("background connection for self.host"));
+    }
+
+    void refusedAndFailedAreCountedWithReasons()
+    {
+        StatusInputs in = androidReady();
+        in.accounts = {acct("r.org", PushRegistrar::State::Refused, "M_UNKNOWN"),
+                       acct("f.org", PushRegistrar::State::Failed, "network error")};
+        const auto s = summariseStatus(in);
+        QVERIFY(s.backgroundSyncWanted);
+        QCOMPARE(s.refused, 1);
+        QCOMPARE(s.failed, 1);
+        QVERIFY(!s.text.contains("Push is on"));
+        QVERIFY(s.text.contains("1 server(s) refused push: r.org (M_UNKNOWN)."));
+        QVERIFY(s.text.contains("Could not register push with 1 server(s), retrying: "
+                                "f.org (network error)."));
+    }
+
+    void invalidGatewayOrRetryingTokenUsesBackground()
+    {
+        StatusInputs in = androidReady();
+        in.gatewayValid = false;
+        in.accounts = {acct("a.org", PushRegistrar::State::Idle)};
+        auto s = summariseStatus(in);
+        QVERIFY(s.backgroundSyncWanted);
+        QVERIFY(s.text.contains("not valid"));
+
+        in = androidReady();
+        in.hasToken = false;
+        in.tokenRetrying = true;
+        s = summariseStatus(in);
+        QVERIFY(s.backgroundSyncWanted);
+        QVERIFY(s.text.contains("retrying"));
+
+        // Merely waiting for the first token is not a reason to start it.
+        in.tokenRetrying = false;
+        s = summariseStatus(in);
+        QVERIFY(!s.backgroundSyncWanted);
+        QCOMPARE(s.text, QStringLiteral("Waiting for the push service…"));
+    }
+
+    void iosNeverWantsBackgroundAndExplainsRefusal()
+    {
+        StatusInputs in = androidReady();
+        in.ios = true;
+        in.accounts = {acct("self.host", PushRegistrar::State::GatewayRefused)};
+        const auto s = summariseStatus(in);
+        QVERIFY(!s.backgroundSyncWanted);
+        QVERIFY(s.onBackground.isEmpty());
+        QVERIFY(s.text.contains("only notify you while BSFChat is open"));
+    }
+
+    void blockedPermissionIsReportedFirst()
+    {
+        StatusInputs in = androidReady();
+        in.permissionBlocked = true;
+        in.accounts = {acct("a.org", PushRegistrar::State::Registered)};
+        QCOMPARE(summariseStatus(in).text,
+                 QStringLiteral("Notifications are blocked in system settings."));
+    }
+
+    void userChoiceAndOffStates()
+    {
+        StatusInputs in = androidReady();
+        in.backgroundChosen = true;
+        auto s = summariseStatus(in);
+        QVERIFY(s.backgroundSyncWanted);
+        QCOMPARE(s.text, QStringLiteral("Using a background connection instead of push."));
+
+        in = androidReady();
+        in.notificationsOn = false;
+        s = summariseStatus(in);
+        QVERIFY(!s.backgroundSyncWanted);
+        QVERIFY(s.text.isEmpty());
+
+        in = androidReady();
+        in.compiledIn = false;
+        QVERIFY(summariseStatus(in).backgroundSyncWanted);
     }
 
     void backoffGrowsAndCaps()

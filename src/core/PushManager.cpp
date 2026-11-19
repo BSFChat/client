@@ -55,16 +55,17 @@ PushManager::PushManager(ServerManager* serverManager, Settings* settings, QObje
             [this](const QString& account, const QString& pushkey) {
                 m_settings->setRegisteredPusher(account, pushkey);
             });
-    connect(m_registrar, &PushRegistrar::stateChanged, this, &PushManager::statusChanged);
+    // A server refusing (or failing) registration moves it onto the
+    // background connection on Android, so this is more than a label.
+    connect(m_registrar, &PushRegistrar::stateChanged, this, &PushManager::refreshStatus);
 
     connect(m_bridge, &PushBridge::tokenChanged, this, [this]() {
         m_registrar->setToken(m_bridge->token());
-        emit statusChanged();
+        refreshStatus();
     });
-    connect(m_bridge, &PushBridge::unavailableChanged, this, [this]() {
-        applySettings();
-        emit statusChanged();
-    });
+    connect(m_bridge, &PushBridge::unavailableChanged, this, &PushManager::applySettings);
+    connect(m_bridge, &PushBridge::retryingChanged, this, &PushManager::refreshStatus);
+    connect(m_bridge, &PushBridge::permissionChanged, this, &PushManager::refreshStatus);
     connect(m_bridge, &PushBridge::messageReceived, this, &PushManager::onPushedEvent);
     connect(m_bridge, &PushBridge::notificationTapped, this, &PushManager::onTapped);
 
@@ -125,45 +126,59 @@ bool PushManager::active() const
     return pushWanted() && !m_bridge->token().isEmpty();
 }
 
+push::StatusInputs PushManager::statusInputs() const
+{
+    push::StatusInputs in;
+    in.compiledIn = available();
+    in.ios = kIsIos;
+    in.notificationsOn = m_settings->notificationsEnabled();
+    in.backgroundChosen = !kIsIos && m_settings->backgroundConnection();
+    in.bridgeUnavailable = m_bridge->unavailable();
+    in.tokenRetrying = m_bridge->retrying();
+    in.hasToken = !m_bridge->token().isEmpty();
+    in.permissionBlocked = m_bridge->notificationsBlocked();
+    in.gatewayValid = !m_registrar->gatewayUrl().isEmpty();
+    in.showNames = m_settings->pushShowNames();
+    for (const QString& account : m_registrar->accounts()) {
+        push::AccountStatus a;
+        a.host = QUrl(account.section(QLatin1Char('|'), 1)).host();
+        if (a.host.isEmpty()) a.host = account.section(QLatin1Char('|'), 1);
+        a.state = m_registrar->state(account);
+        a.namesRefused = m_registrar->namesRefused(account);
+        a.lastError = m_registrar->lastError(account);
+        in.accounts.append(a);
+    }
+    return in;
+}
+
 bool PushManager::backgroundSyncWanted() const
 {
-    if (kIsIos) return false;   // no such thing on iOS
-    return m_settings->backgroundConnection() || !available() || m_bridge->unavailable();
+    return push::summariseStatus(statusInputs()).backgroundSyncWanted;
 }
 
 QString PushManager::statusText() const
 {
-    if (!available()) return {};
-    if (!m_settings->notificationsEnabled()) return {};
-    if (!pushWanted()) return tr("Using a background connection instead of push.");
-    if (m_bridge->unavailable()) {
-        return kIsIos
-            ? tr("Push notifications are not available: allow notifications for BSFChat "
-                 "in iOS Settings.")
-            : tr("Push is not available on this device (no Google Play services?). "
-                 "Using a background connection instead.");
-    }
-    if (m_bridge->token().isEmpty()) return tr("Waiting for the push service…");
+    return push::summariseStatus(statusInputs()).text;
+}
 
-    int registered = 0;
-    QStringList notAllowed, namesOff;
-    for (const QString& account : m_registrar->accounts()) {
-        const QString host = QUrl(account.section(QLatin1Char('|'), 1)).host();
-        switch (m_registrar->state(account)) {
-        case PushRegistrar::State::Registered: ++registered; break;
-        case PushRegistrar::State::GatewayRefused: notAllowed << host; break;
-        default: break;
-        }
-        if (m_registrar->namesRefused(account)) namesOff << host;
+bool PushManager::notificationsBlocked() const
+{
+    return available() && m_settings->notificationsEnabled() && m_bridge->notificationsBlocked();
+}
+
+void PushManager::openNotificationSettings()
+{
+    m_bridge->openNotificationSettings();
+}
+
+void PushManager::refreshStatus()
+{
+    const bool bg = backgroundSyncWanted();
+    if (bg != m_lastBackgroundSyncWanted) {
+        m_lastBackgroundSyncWanted = bg;
+        emit backgroundSyncWantedChanged();
     }
-    QStringList parts;
-    parts << tr("Push is on for %n server(s).", nullptr, registered);
-    if (!notAllowed.isEmpty())
-        parts << tr("%1 does not allow this push gateway, so it can only notify you "
-                    "while BSFChat is open.").arg(notAllowed.join(QStringLiteral(", ")));
-    if (!namesOff.isEmpty() && m_settings->pushShowNames())
-        parts << tr("%1 only sends \"New message\".").arg(namesOff.join(QStringLiteral(", ")));
-    return parts.join(QLatin1Char(' '));
+    emit statusChanged();
 }
 
 void PushManager::applySettings()
@@ -180,13 +195,7 @@ void PushManager::applySettings()
             m_bridge->start(wanted);
     }
     m_bridge->setPreferences(m_settings->notificationsEnabled(), m_settings->pushShowNames());
-
-    const bool bg = backgroundSyncWanted();
-    if (bg != m_lastBackgroundSyncWanted) {
-        m_lastBackgroundSyncWanted = bg;
-        emit backgroundSyncWantedChanged();
-    }
-    emit statusChanged();
+    refreshStatus();
 }
 
 QString PushManager::accountKey(const ServerConnection* conn)

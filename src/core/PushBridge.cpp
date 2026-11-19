@@ -211,9 +211,43 @@ void PushBridge::deliverTap(const QString& roomId, const QString& eventId)
     }, Qt::QueuedConnection);
 }
 
+void PushBridge::deliverRetrying(const QString& reason)
+{
+    QPointer<PushBridge> self(this);
+    QMetaObject::invokeMethod(this, [self, reason]() {
+        if (!self || self->m_retrying || !self->m_token.isEmpty()) return;
+        qInfo().noquote() << "[push] token request failed, retrying:" << reason;
+        self->m_retrying = true;
+        emit self->retryingChanged();
+    }, Qt::QueuedConnection);
+}
+
+void PushBridge::deliverPermission(bool blocked)
+{
+    QPointer<PushBridge> self(this);
+    QMetaObject::invokeMethod(this, [self, blocked]() {
+        if (!self || self->m_notificationsBlocked == blocked) return;
+        self->m_notificationsBlocked = blocked;
+        emit self->permissionChanged();
+    }, Qt::QueuedConnection);
+}
+
+void PushBridge::refreshPermission()
+{
+    // Platform implementations follow in their own changes.
+}
+
+void PushBridge::openNotificationSettings()
+{
+}
+
 void PushBridge::setToken(const QString& token, const QString& deviceName)
 {
     if (!deviceName.isEmpty()) m_deviceName = deviceName;
+    if (m_retrying && !token.isEmpty()) {
+        m_retrying = false;
+        emit retryingChanged();
+    }
     if (!token.isEmpty() && m_unavailable && bsfchat::push::kCompiledIn) {
         m_unavailable = false;
         m_unavailableReason.clear();
@@ -227,6 +261,10 @@ void PushBridge::setToken(const QString& token, const QString& deviceName)
 void PushBridge::setUnavailable(const QString& reason)
 {
     m_unavailableReason = reason;
+    if (m_retrying) {
+        m_retrying = false;
+        emit retryingChanged();
+    }
     if (m_unavailable) return;
     m_unavailable = true;
     qInfo().noquote() << "[push] unavailable on this device:" << reason;

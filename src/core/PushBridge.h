@@ -40,6 +40,16 @@ public:
     // APNs registration failed, permission denied, not configured).
     bool unavailable() const { return m_unavailable; }
     QString unavailableReason() const { return m_unavailableReason; }
+    // Android: getting a token failed transiently and is being retried
+    // with backoff (FcmPush). Not "unavailable": a token may yet come.
+    bool retrying() const { return m_retrying; }
+    // The OS has notifications for this app switched off.
+    bool notificationsBlocked() const { return m_notificationsBlocked; }
+    // Re-read the permission (on return to the foreground: the user may
+    // have just been to system settings).
+    void refreshPermission();
+    // System settings, at this app's notification page where possible.
+    void openNotificationSettings();
 
     // A tap that arrived before anyone was listening (cold start).
     bool takePendingTap(QString* roomId, QString* eventId);
@@ -47,6 +57,8 @@ public:
     // Fed by the platform code. Any thread.
     void deliverToken(const QString& token, const QString& deviceName);
     void deliverUnavailable(const QString& reason);
+    void deliverRetrying(const QString& reason);
+    void deliverPermission(bool blocked);
     // Returns whether the event was taken (Android: C++ will answer with
     // answerPushedEvent).
     bool deliverMessage(const QString& roomId, const QString& eventId, int unread);
@@ -55,6 +67,8 @@ public:
 signals:
     void tokenChanged();
     void unavailableChanged();
+    void retryingChanged();
+    void permissionChanged();
     void messageReceived(const QString& roomId, const QString& eventId, int unread);
     void notificationTapped(const QString& roomId, const QString& eventId);
 
@@ -66,6 +80,8 @@ private:
     QString m_token;
     QString m_deviceName;
     bool m_unavailable = false;
+    bool m_retrying = false;
+    bool m_notificationsBlocked = false;
     QString m_unavailableReason;
     QString m_pendingTapRoom;
     QString m_pendingTapEvent;
