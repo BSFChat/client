@@ -251,14 +251,30 @@
                  sign-in from the request persisted in SecretStore (ten
                  minutes), or tells the user it was interrupted.
 
-                 bsfchat://room/... deep links are still not claimed on
-                 Android; in-app notification taps use an EXPLICIT intent
-                 (AndroidNotifier, setClass) and need no filter. -->
+                 Other bsfchat:// links are not claimed on Android except
+                 invites (below); in-app notification taps use an EXPLICIT
+                 intent (AndroidNotifier, setClass) and need no filter. -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="https" android:host="bsfchat.com" android:path="/oauth/callback" />
+            </intent-filter>
+
+            <!-- Invite links: bsfchat://invite/<server> (core/InviteLink.h).
+                 Host-scoped to "invite" so no other bsfchat:// link is
+                 claimed. A custom scheme can be claimed by any app, which
+                 is acceptable here and only here: an invite carries
+                 nothing secret, and all it does is fill in the Add server
+                 address; nothing is contacted until the user taps Join.
+                 (The activity is exported, so an explicit intent could
+                 deliver any bsfchat:// URL anyway; this filter only lets
+                 a browser or messenger find us for invites.) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="bsfchat" android:host="invite" />
             </intent-filter>
 
             <!-- Share target: let other apps "Share to BSFChat" a

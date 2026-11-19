@@ -1031,7 +1031,13 @@ ApplicationWindow {
     function openLoginDialog()    { loginDialogGlobal.open(); }
     // The product's central act on a phone: somebody gives you an address,
     // you join their server. Name-for-name with main.qml.
-    function openJoinByAddress() { loginDialogGlobal.openAtAddress(); }
+    function openJoinByAddress(prefill) { loginDialogGlobal.openAtAddress(prefill); }
+    // bsfchat://invite/<server> for a server not in the list
+    // (ServerManager::inviteLinkOpened): Add server with the address typed in.
+    Connections {
+        target: serverManager
+        function onInviteLinkOpened(server) { root.openJoinByAddress(server); }
+    }
     function openClientSettings() { clientSettingsGlobal.open(); }
     function openSearch()         { searchPopupGlobal.open(); }
     function openStatusPicker()   { statusPickerGlobal.open(); }

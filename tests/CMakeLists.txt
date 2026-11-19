@@ -67,6 +67,12 @@ target_include_directories(test_share_policy PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_share_policy PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_share_policy COMMAND test_share_policy)
 
+# bsfchat://invite links: what may be prefilled into Add server. Header-only.
+qt_add_executable(test_invite_link test_invite_link.cpp)
+target_include_directories(test_invite_link PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_invite_link PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_invite_link COMMAND test_invite_link)
+
 # Startup-cost path: the persisted sync token + room snapshot that lets a
 # launch skip the server's initial /sync, and the retry schedule that keeps a
 # downed server from being dialled every 5s forever. Both are deliberately
