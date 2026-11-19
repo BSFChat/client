@@ -285,6 +285,9 @@ qt_add_library(bsfchat-lib STATIC
     $<$<BOOL:${IOS}>:src/core/MobileKeyboardIos.mm>
     src/core/AndroidPermissions.cpp
     src/core/AndroidNotifier.cpp
+    # Bar icon appearance from the app theme; JNI on Android, UIKit on iOS.
+    src/core/SystemBars.cpp
+    $<$<BOOL:${IOS}>:src/core/SystemBarsIos.mm>
     src/core/UrlHandler.cpp
     src/identity/IdentityClient.cpp
     # iOS OIDC sign-in presents ASWebAuthenticationSession instead of handing

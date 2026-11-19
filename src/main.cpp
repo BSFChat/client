@@ -25,6 +25,7 @@
 #include "core/MobileKeyboard.h"
 #include "core/Updater.h"
 #include "core/AndroidPermissions.h"
+#include "core/SystemBars.h"
 #include "util/FileLogger.h"
 // Mirror the platform gate below where these get instantiated.
 // Keep the includes paired with the use sites so a platform-gate
@@ -388,6 +389,11 @@ int main(int argc, char *argv[])
 
     if (engine.rootObjects().isEmpty())
         return -1;
+
+    // Status/navigation bar icons follow the app theme, not the system one
+    // (no-op off Android and iOS). After load, so the window exists.
+    SystemBars systemBars(application.settings());
+    systemBars.apply();
 
     // Teach the NotificationManager which window is "the app" so it can
     // skip notifications when the user is already looking at the active
