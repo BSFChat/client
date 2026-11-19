@@ -59,7 +59,7 @@ Item {
                 return;
             }
             prompts._ask(qsTr("Open this link?"),
-                         qsTr("This link goes to %1, not the address its text shows.\n\n%2")
+                         qsTr("This link really goes to %1. Check that is the site you expect.\n\n%2")
                              .arg(host).arg(shownUrl),
                          qsTr("Open link"),
                          function() { linkOpener.openConfirmed(href); });
@@ -112,6 +112,9 @@ Item {
         property var action: null
 
         onClosed: action = null
+        // Cancel, not the confirm button: a stray Space/Return on a link the
+        // user did not mean to follow must not open it.
+        onOpened: cancelBtn.forceActiveFocus()
 
         background: Rectangle {
             color: Theme.bg1
