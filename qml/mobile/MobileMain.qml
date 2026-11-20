@@ -605,7 +605,9 @@ ApplicationWindow {
                     OverflowItem {
                         text: "Switch server…"
                         iconName: "forward"
-                        onTriggered: root.openLoginDialog()
+                        // The server rail lives in the left drawer; this
+                        // opened the add-a-server dialog instead (audit 3).
+                        onTriggered: leftDrawer.open()
                     }
 
                     // The same act once you already have a server: someone
@@ -1175,10 +1177,12 @@ ApplicationWindow {
         // explanation. Say what is happening before it does.
         function onIdentityLoginComplete(serverUrls) {
             if (serverUrls && serverUrls.length > 0) {
+                // Servers that trust the ID sign in without a browser, so
+                // "approve it in your browser" was usually untrue (audit 3).
+                // The browser opens by itself for any that do need it.
                 root.toastInfo(serverUrls.length === 1
-                    ? "Signing in to your server — approve it in your browser."
-                    : "Signing in to your " + serverUrls.length
-                      + " servers — approve each one in your browser.");
+                    ? "Signed in. Connecting to your server…"
+                    : "Signed in. Connecting to your " + serverUrls.length + " servers…");
             }
         }
     }
