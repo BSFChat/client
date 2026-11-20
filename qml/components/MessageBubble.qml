@@ -1479,6 +1479,7 @@ Item {
                                         // No middle button on a phone.
                                         text: Theme.isMobile ? qsTr("Tap to open it")
                                                              : qsTr("Middle-click to open it")
+                                        textFormat: Text.PlainText
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.xs
                                         color: Theme.fg3
@@ -2173,6 +2174,7 @@ Item {
             delegate: Text {
                 required property var modelData
                 text: modelData.label
+                textFormat: Text.PlainText
                 color: echoActionMouse.containsMouse || activeFocus ? Theme.fg0 : Theme.accent
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.xs

@@ -38,6 +38,7 @@ ColumnLayout {
 
     Text {
         text: inviteList.title
+        textFormat: Text.PlainText
         Layout.fillWidth: true
         Layout.preferredHeight: 32
         Layout.leftMargin: Theme.sp.s7
