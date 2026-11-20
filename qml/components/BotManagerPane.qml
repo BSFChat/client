@@ -747,10 +747,6 @@ Item {
         padding: Theme.sp.s7
         onClosed: botPane.pendingDeactivateId = ""
 
-        Accessible.role: Accessible.Dialog
-        Accessible.name: qsTr("Deactivate %1?").arg(
-            botPane._model ? botPane._model.displayNameFor(botPane.pendingDeactivateId)
-                           : botPane.pendingDeactivateId)
 
         // Destructive confirmation: focus the way out, not the way through.
         onOpened: cancelDeactivateBtn.forceActiveFocus()
@@ -763,6 +759,12 @@ Item {
         }
 
         contentItem: ColumnLayout {
+            // On the contentItem: a Popup is not an Item, so Accessible on the
+            // root reached no screen reader and logged a warning (audit 3).
+            Accessible.role: Accessible.Dialog
+            Accessible.name: qsTr("Deactivate %1?").arg(
+                botPane._model ? botPane._model.displayNameFor(botPane.pendingDeactivateId)
+                               : botPane.pendingDeactivateId)
             spacing: Theme.sp.s4
 
             RowLayout {

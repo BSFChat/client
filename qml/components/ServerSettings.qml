@@ -519,13 +519,12 @@ Popup {
     // children below are ever visible at once — the locked panel replaces
     // the nav AND the pages — and a layout skips invisible children, so
     // `columns: 2` still pairs them the way it always did.
-    // On the Popup, which Qt warns about and supports anyway — see
-    // docs/accessibility.md §11 for why this is the right place and why
-    // the warning in the log is a Qt wart rather than a mistake here.
-    Accessible.role: Accessible.Dialog
-    Accessible.name: qsTr("Server settings")
 
     contentItem: GridLayout {
+        // On the contentItem: a Popup is not an Item, so Accessible on the
+        // root reached no screen reader and logged a warning (audit 3).
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Server settings")
         columns: Theme.isMobile ? 1 : 2
         rowSpacing: 0
         columnSpacing: 0
@@ -3124,9 +3123,6 @@ Popup {
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         padding: Theme.sp.s7
 
-        Accessible.role: Accessible.Dialog
-        Accessible.name: _confirmModDialog.titleText
-        Accessible.description: _confirmModDialog.descText
 
         readonly property bool isDestructive:
             serverSettingsPopup.confirmMod.kind === "kick"
@@ -3161,6 +3157,11 @@ Popup {
         }
 
         contentItem: ColumnLayout {
+            // On the contentItem: a Popup is not an Item, so Accessible on the
+            // root reached no screen reader and logged a warning (audit 3).
+            Accessible.role: Accessible.Dialog
+            Accessible.name: _confirmModDialog.titleText
+            Accessible.description: _confirmModDialog.descText
             spacing: Theme.sp.s4
 
             RowLayout {

@@ -85,13 +85,12 @@ Popup {
     // visible yet — hence a separate onOpened.
     onOpened: channelList.forceActiveFocus()
 
-    // On the Popup, which Qt warns about and supports anyway — see
-    // docs/accessibility.md §11 for why this is the right place and why
-    // the warning in the log is a Qt wart rather than a mistake here.
-    Accessible.role: Accessible.Dialog
-    Accessible.name: qsTr("Forward message")
 
     contentItem: ColumnLayout {
+        // On the contentItem: a Popup is not an Item, so Accessible on the
+        // root reached no screen reader and logged a warning (audit 3).
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Forward message")
         anchors.fill: parent
         anchors.margins: Theme.sp.s7
         spacing: Theme.sp.s3

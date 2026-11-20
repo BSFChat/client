@@ -519,16 +519,15 @@ Dialog {
     // button were below the cut and unreachable, so the app could not be
     // signed into at a size it lets you resize to. It only scrolls when it has
     // to; at any normal window size nothing moves and nothing looks different.
-    // On the Popup, which Qt warns about and supports anyway — see
-    // docs/accessibility.md §11 for why this is the right place and why
-    // the warning in the log is a Qt wart rather than a mistake here.
-    Accessible.role: Accessible.Dialog
-    Accessible.name: dialog.mode === "signedIn" ? qsTr("Signed in")
-        : dialog.mode === "noServers" ? qsTr("Almost there")
-        : dialog.mode === "address" ? qsTr("Join a server")
-        : qsTr("Add a server")
 
     contentItem: Flickable {
+        // On the contentItem: a Popup is not an Item, so Accessible on the
+        // root reached no screen reader and logged a warning (audit 3).
+        Accessible.role: Accessible.Dialog
+        Accessible.name: dialog.mode === "signedIn" ? qsTr("Signed in")
+            : dialog.mode === "noServers" ? qsTr("Almost there")
+            : dialog.mode === "address" ? qsTr("Join a server")
+            : qsTr("Add a server")
         id: contentFlick
         implicitWidth: loginForm.implicitWidth
         implicitHeight: loginForm.implicitHeight
