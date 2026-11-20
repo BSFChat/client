@@ -2320,10 +2320,6 @@ Rectangle {
     // reply-jump. Unpin button (admins/mods only) removes it live.
     Popup {
         id: pinnedPopover
-        // On the Popup, which Qt warns about and supports anyway — see
-        // docs/accessibility.md §11.
-        Accessible.role: Accessible.Dialog
-        Accessible.name: qsTr("Pinned messages")
         parent: Overlay.overlay
         // 380 overflows a phone; clamp to the viewport with a gutter.
         width: Math.min(380, (parent ? parent.width : 380) - 2 * Theme.sp.s7)
@@ -2382,6 +2378,9 @@ Rectangle {
 
         contentItem: ColumnLayout {
             id: contentColumn
+            // On the contentItem: a Popup is not an Item (docs/accessibility.md §11).
+            Accessible.role: Accessible.Dialog
+            Accessible.name: qsTr("Pinned messages")
             spacing: 0
 
             // Header
@@ -2620,10 +2619,6 @@ Rectangle {
     // exactly what's about to be redacted — easy to bail on a misclick.
     Popup {
         id: deleteConfirm
-        // On the Popup, which Qt warns about and supports anyway — see
-        // docs/accessibility.md §11.
-        Accessible.role: Accessible.Dialog
-        Accessible.name: qsTr("Delete this message?")
         // Focus lands on Cancel, not on Delete. §9 says the primary
         // action, but the primary action here is irreversible and
         // destructive, and an initial focus that deletes a message on a
@@ -2649,6 +2644,9 @@ Rectangle {
         }
 
         contentItem: ColumnLayout {
+            // On the contentItem: a Popup is not an Item (docs/accessibility.md §11).
+            Accessible.role: Accessible.Dialog
+            Accessible.name: qsTr("Delete this message?")
             spacing: Theme.sp.s4
 
             RowLayout {
