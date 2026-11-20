@@ -103,7 +103,7 @@ ServerSecrets::Migration ServerSecrets::migrate(QSettings& settings)
     result.rewrote = true;
 
     if (result.moved || result.memoryOnly) {
-        qInfo().nospace() << "[ServerSecrets] moved " << result.moved
+        qInfo().noquote().nospace() << "[ServerSecrets] moved " << result.moved
                           << " access token(s) out of the settings file into the OS keychain"
                           << (result.memoryOnly
                                   ? QStringLiteral("; %1 kept for this run only (no secure store)")

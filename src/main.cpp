@@ -480,11 +480,20 @@ int main(int argc, char *argv[])
     // window lost focus, where marking the room you were just reading is
     // both correct and — because the foreground path has already marked it —
     // very nearly always a no-op that markRoomRead's own dedupe swallows.
+    //
+    // The re-poll needs a REAL resume (audit 3): on a desktop every window
+    // focus is Inactive -> Active, and resyncing on each one threw away the
+    // waiting /sync and reset its backoff — hammering a server that was down
+    // every time the user clicked into the window. Only a return from
+    // Suspended / Hidden (a phone backgrounding) can have left a dead socket.
     QObject::connect(&app, &QGuiApplication::applicationStateChanged, &app,
-        [sm = application.serverManager(),
-         settings = application.settings()](Qt::ApplicationState state) {
+        [sm = application.serverManager(), settings = application.settings(),
+         previous = QGuiApplication::applicationState()](Qt::ApplicationState state) mutable {
+            const Qt::ApplicationState was = previous;
+            previous = state;
             if (state == Qt::ApplicationActive) {
-                if (sm) sm->resyncAll();
+                if (sm && (was == Qt::ApplicationSuspended || was == Qt::ApplicationHidden))
+                    sm->resyncAll();
                 return;
             }
             if (sm) sm->markActiveRoomsRead();
