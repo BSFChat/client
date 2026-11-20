@@ -67,11 +67,20 @@ QString ChannelInviteModel::userIdError(const QString& userId)
     if (colon == userId.size() - 1)
         return QStringLiteral("There's no server after the colon.");
 
-    // A second colon makes the domain ambiguous. Not folded in with the
-    // "no colon" case above because the advice differs: one is "you left
-    // something out", this is "you have one too many".
-    if (userId.indexOf(':', colon + 1) >= 0)
-        return QStringLiteral("A member id has one colon, not two.");
+    // A second colon is legal exactly once: as a port on the server name,
+    // "@alice:chat.example:8448" (audit 3 — it was refused). Anything else
+    // makes the domain ambiguous; the advice differs from "no colon" above
+    // because one is "you left something out", this is "one too many".
+    const int second = userId.indexOf(':', colon + 1);
+    if (second >= 0) {
+        const QString port = userId.mid(second + 1);
+        bool numeric = false;
+        const int p = port.toInt(&numeric);
+        if (second == colon + 1 || !numeric || p <= 0 || p > 65535
+            || userId.indexOf(':', second + 1) >= 0)
+            return QStringLiteral("A member id has one colon, plus an optional "
+                                  ":port — like @alice:chat.example:8448.");
+    }
 
     return {};
 }

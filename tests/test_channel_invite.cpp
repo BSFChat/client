@@ -170,7 +170,9 @@ private slots:
             QStringLiteral("@alice"),                // no server
             QStringLiteral("@:bsfchat.com"),         // no name
             QStringLiteral("@alice:"),               // no server after the colon
-            QStringLiteral("@alice:a:b"),            // two colons
+            QStringLiteral("@alice:a:b"),            // two colons, not a port
+            QStringLiteral("@alice:a:8448:1"),       // three colons
+            QStringLiteral("@alice::8448"),          // port with no host
             QStringLiteral("@alice bsfchat.com"),    // whitespace
         };
         for (const QString& id : bad) {
@@ -189,6 +191,9 @@ private slots:
         QVERIFY(ChannelInviteModel::userIdError(
                     QStringLiteral("@a.b_c-d:bsfchat.com")).isEmpty());
         QVERIFY(ChannelInviteModel::userIdError(QString()).isEmpty());
+        // A server with a port (audit 3).
+        QVERIFY(ChannelInviteModel::userIdError(
+                    QStringLiteral("@alice:chat.example:8448")).isEmpty());
     }
 
     void theForeignHomeserverGuessIsGoneBecauseTheServerAnswersItNow()

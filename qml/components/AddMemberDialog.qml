@@ -100,7 +100,8 @@ Popup {
     onClosed: if (_model) _model.reset()
 
     function submit() {
-        if (!_model || !mayAdd) return;
+        // Enter in the field while a request is out sent a second one (audit 3).
+        if (!_model || !mayAdd || _model.busy) return;
         if (memberIdField.problem.length > 0) return;
         _model.invite(addMemberDialog.roomId, memberIdField.text.trim(),
                       addMemberDialog.roomName);
