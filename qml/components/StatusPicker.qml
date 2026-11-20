@@ -77,9 +77,17 @@ Popup {
             color: picker._selectedPresence === presence
                 ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.18)
                 : (rowMouse.containsMouse ? Theme.bg2 : "transparent")
-            border.color: picker._selectedPresence === presence
+            border.color: picker._selectedPresence === presence || activeFocus
                 ? Theme.accent : Theme.line
-            border.width: 1
+            border.width: activeFocus ? 2 : 1
+            // Keyboard (audit 3): Tab / arrows between the rows, Space or
+            // Enter picks one.
+            activeFocusOnTab: true
+            Keys.onSpacePressed: picker._selectedPresence = row.presence
+            Keys.onReturnPressed: picker._selectedPresence = row.presence
+            Keys.onEnterPressed: picker._selectedPresence = row.presence
+            Keys.onUpPressed: nextItemInFocusChain(false).forceActiveFocus()
+            Keys.onDownPressed: nextItemInFocusChain(true).forceActiveFocus()
             Behavior on color       { ColorAnimation { duration: Theme.motion.fastMs } }
             Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
             // One of a mutually exclusive set, so RadioButton rather than

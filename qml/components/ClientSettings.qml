@@ -260,6 +260,15 @@ Popup {
                         Accessible.checked: isActive
                         Accessible.onPressAction: clientSettingsPopup.section = index
                         Accessible.onToggleAction: clientSettingsPopup.section = index
+                        // Keyboard reachable (audit 3: Client Settings was mouse-only).
+                        activeFocusOnTab: true
+                        Keys.onReturnPressed: clientSettingsPopup.section = index
+                        Keys.onEnterPressed: clientSettingsPopup.section = index
+                        Keys.onSpacePressed: clientSettingsPopup.section = index
+                        Keys.onUpPressed: nextItemInFocusChain(false).forceActiveFocus()
+                        Keys.onDownPressed: nextItemInFocusChain(true).forceActiveFocus()
+                        border.width: activeFocus ? 2 : 0
+                        border.color: Theme.accent
 
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
@@ -383,8 +392,8 @@ Popup {
                                     readonly property bool selected: appSettings.theme === modelData.key
                                     color: selected ? Theme.accent
                                            : (themeMouse.containsMouse ? Theme.bg3 : Theme.bg2)
-                                    border.color: selected ? Theme.accent : Theme.line
-                                    border.width: 1
+                                    border.color: activeFocus ? Theme.fg0 : (selected ? Theme.accent : Theme.line)
+                                    border.width: activeFocus ? 2 : 1
                                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                     // "Dark" / "Light" alone is not
                                     // useful read out of context in a
@@ -396,6 +405,13 @@ Popup {
                                     Accessible.checked: selected
                                     Accessible.onPressAction: appSettings.theme = modelData.key
                                     Accessible.onToggleAction: appSettings.theme = modelData.key
+                                    // Keyboard reachable (audit 3: Client Settings was mouse-only).
+                                    activeFocusOnTab: true
+                                    Keys.onReturnPressed: appSettings.theme = modelData.key
+                                    Keys.onEnterPressed: appSettings.theme = modelData.key
+                                    Keys.onSpacePressed: appSettings.theme = modelData.key
+                                    Keys.onLeftPressed: nextItemInFocusChain(false).forceActiveFocus()
+                                    Keys.onRightPressed: nextItemInFocusChain(true).forceActiveFocus()
                                     Text {
                                         anchors.centerIn: parent
                                         textFormat: Text.PlainText
@@ -444,8 +460,8 @@ Popup {
                                     color: Theme.accentFor(modelData.hue)
                                     readonly property bool selected:
                                         appSettings.accentHue === modelData.hue
-                                    border.color: selected ? Theme.fg0 : Theme.line
-                                    border.width: selected ? 3 : 1
+                                    border.color: selected || activeFocus ? Theme.fg0 : Theme.line
+                                    border.width: selected ? 3 : (activeFocus ? 2 : 1)
                                     Behavior on border.width { NumberAnimation { duration: Theme.motion.fastMs } }
                                     // A bare colour swatch with no text
                                     // at all. The tooltip below already
@@ -457,6 +473,13 @@ Popup {
                                     Accessible.checked: selected
                                     Accessible.onPressAction: appSettings.accentHue = modelData.hue
                                     Accessible.onToggleAction: appSettings.accentHue = modelData.hue
+                                    // Keyboard reachable (audit 3: Client Settings was mouse-only).
+                                    activeFocusOnTab: true
+                                    Keys.onReturnPressed: appSettings.accentHue = modelData.hue
+                                    Keys.onEnterPressed: appSettings.accentHue = modelData.hue
+                                    Keys.onSpacePressed: appSettings.accentHue = modelData.hue
+                                    Keys.onLeftPressed: nextItemInFocusChain(false).forceActiveFocus()
+                                    Keys.onRightPressed: nextItemInFocusChain(true).forceActiveFocus()
                                     MouseArea {
                                         anchors.fill: parent
                                         cursorShape: Qt.PointingHandCursor
@@ -496,8 +519,8 @@ Popup {
                                         appSettings.layoutVariant === modelData.key
                                     color: selected ? Theme.accent
                                            : (variantMouse.containsMouse ? Theme.bg3 : Theme.bg2)
-                                    border.color: selected ? Theme.accent : Theme.line
-                                    border.width: 1
+                                    border.color: activeFocus ? Theme.fg0 : (selected ? Theme.accent : Theme.line)
+                                    border.width: activeFocus ? 2 : 1
                                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                     // "Compact" on its own says nothing
                                     // about what it is compacting.
@@ -507,6 +530,13 @@ Popup {
                                     Accessible.checked: selected
                                     Accessible.onPressAction: appSettings.layoutVariant = modelData.key
                                     Accessible.onToggleAction: appSettings.layoutVariant = modelData.key
+                                    // Keyboard reachable (audit 3: Client Settings was mouse-only).
+                                    activeFocusOnTab: true
+                                    Keys.onReturnPressed: appSettings.layoutVariant = modelData.key
+                                    Keys.onEnterPressed: appSettings.layoutVariant = modelData.key
+                                    Keys.onSpacePressed: appSettings.layoutVariant = modelData.key
+                                    Keys.onLeftPressed: nextItemInFocusChain(false).forceActiveFocus()
+                                    Keys.onRightPressed: nextItemInFocusChain(true).forceActiveFocus()
 
                                     Text {
                                         anchors.centerIn: parent
@@ -1397,12 +1427,23 @@ Popup {
             }
 
             // ---- Notifications ----
+            // Scrolls (audit 3): with the push rows it is taller than a phone,
+            // and the bottom rows were unreachable. Same wrapper as Updates.
             Item {
-                ColumnLayout {
+                Flickable {
+                    id: notifColFlick
                     anchors.fill: parent
                     // 32 pt of gutter on each side is a desktop dialog margin; on a
                     // phone it is a sixth of the screen. See Theme.mobileGutter.
                     anchors.margins: Theme.isMobile ? Theme.mobileGutter : Theme.sp.s7 * 2
+                    contentHeight: notifCol.implicitHeight
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ThemedScrollBar { id: notifScrollBar }
+
+                ColumnLayout {
+                    id: notifCol
+                    width: notifColFlick.width - notifScrollBar.reservedWidth
                     spacing: Theme.sp.s7
 
                     SectionHeader { text: "Notifications" }
@@ -1569,8 +1610,7 @@ Popup {
                         tint: Theme.warn
                         text: "OS-level notification permissions may need to be granted separately in your system preferences."
                     }
-
-                    Item { Layout.fillHeight: true }
+                }
                 }
             }
 
