@@ -58,19 +58,28 @@ Popup {
     // Platform-adaptive modifier — ⌘ on macOS, Ctrl elsewhere. Qt's
     // Shortcut sequences already bind "Ctrl+…" to Cmd on macOS, so the
     // strings here are purely for display.
-    readonly property string modKey: Qt.platform.os === "osx" ? "⌘" : "Ctrl"
-    readonly property string altKey: Qt.platform.os === "osx" ? "⌥" : "Alt"
-    readonly property string shiftKey: "Shift"
+    readonly property bool _mac: Qt.platform.os === "osx" || Qt.platform.os === "macos"
+    readonly property string modKey: _mac ? "⌘" : "Ctrl"
+    readonly property string altKey: _mac ? "⌥" : "Alt"
+    readonly property string shiftKey: _mac ? "⇧" : "Shift"
+    // Server cycling is bound to the PHYSICAL Control key on macOS (Meta+Tab
+    // in Qt), because ⌘Tab belongs to the OS app switcher (main.qml).
+    readonly property string ctrlKey: _mac ? "⌃" : "Ctrl"
 
     readonly property var sections: [
         {
             title: "Navigation",
             entries: [
-                { label: "Cycle servers",           keys: [modKey + " Tab"] },
-                { label: "Previous server",         keys: [modKey + " Shift Tab"] },
+                { label: "Cycle servers",           keys: [ctrlKey + " Tab"] },
+                { label: "Previous server",         keys: [ctrlKey + " " + shiftKey + " Tab"] },
                 { label: "Jump to server N",        keys: [modKey + " 1…9"] },
-                { label: "Previous channel",        keys: [altKey + " ↑"] },
-                { label: "Next channel",            keys: [altKey + " ↓"] }
+                { label: "Previous channel / DM",   keys: [altKey + " ↑"] },
+                { label: "Next channel / DM",       keys: [altKey + " ↓"] },
+                { label: "Search messages",         keys: [modKey + " K"] },
+                { label: "Focus the composer",      keys: [modKey + " L"] },
+                { label: "Move between controls",   keys: ["Tab"] },
+                { label: "Open a focused row",      keys: ["Enter"] },
+                { label: "Row menu (channel, server, member, DM)", keys: [shiftKey + " F10"] }
             ]
         },
         {
@@ -78,7 +87,7 @@ Popup {
             entries: [
                 { label: "Toggle member list",      keys: [modKey + " M"] },
                 { label: "User settings",           keys: [modKey + " ,"] },
-                { label: "Client settings",         keys: [modKey + " Shift ,"] },
+                { label: "Client settings",         keys: [modKey + " " + shiftKey + " ,"] },
                 { label: "Show shortcuts (this)",   keys: [modKey + " /"] }
             ]
         },
@@ -100,7 +109,7 @@ Popup {
                 { label: "Into timeline (empty composer)", keys: ["↑"] },
                 { label: "Previous / next message", keys: ["↑ ↓"] },
                 { label: "Oldest / newest loaded",  keys: ["Home End"] },
-                { label: "Message actions menu",    keys: ["Enter " + shiftKey + "+F10"] },
+                { label: "Message actions menu",    keys: [shiftKey + " F10"] },
                 { label: "Reply",                   keys: ["R"] },
                 { label: "Edit (your message)",     keys: ["E"] },
                 { label: "Delete",                  keys: ["Del"] },
