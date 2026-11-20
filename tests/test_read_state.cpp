@@ -360,8 +360,12 @@ private slots:
                  "marker, so read state does not cross devices at all");
 
         // The gate: the notification suppression that compares an event's
-        // timestamp against the stored marker.
-        const int gate = conn.indexOf(QStringLiteral("m_firstSyncProcessed && eventTs > readTs"));
+        // timestamp against the stored marker. Matched loosely between the
+        // first-sync flag and the comparison, so further session conditions
+        // (e.g. 9085eb9's !m_catchUpSyncPending) don't unpin it.
+        static const QRegularExpression gateRe(QStringLiteral(
+            R"(m_firstSyncProcessed[^;{}]*eventTs\s*>\s*readTs)"));
+        const int gate = static_cast<int>(gateRe.match(conn).capturedStart());
         QVERIFY2(gate >= 0, "the notification read-gate has moved — re-pin this");
         QVERIFY2(applied < gate,
                  "the server's read marker is applied AFTER the notification "
