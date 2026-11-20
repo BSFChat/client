@@ -11,6 +11,7 @@
 #include "net/IgnoredUsers.h"
 #include "net/LinkPreviewCache.h"
 #include "net/MemberJson.h"
+#include "net/MessageContent.h"
 #include "net/RoomRemoval.h"
 #include "model/RoomListModel.h"
 #include "model/MessageModel.h"
@@ -185,6 +186,12 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     connect(m_client, &MatrixClient::messageSendAccepted, this,
         [this](const QString& localId, const QString& eventId) {
             m_messageModel->confirmLocalEcho(localId, eventId);
+            // A forward has no echo (it lands in another room): confirm it.
+            const auto fwd = m_pendingForwards.constFind(localId);
+            if (fwd != m_pendingForwards.cend()) {
+                emitFeedback(tr("Forwarded to %1").arg(*fwd), QStringLiteral("success"));
+                m_pendingForwards.erase(fwd);
+            }
         });
     // Failed: the row stays, marked failed. Previously a failed send left a
     // toast and an empty composer — the text was gone and the user could not
@@ -192,10 +199,25 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     connect(m_client, &MatrixClient::messageSendFailed, this,
         [this](const QString& localId, const QString&) {
             m_messageModel->failLocalEcho(localId);
+            m_pendingForwards.remove(localId);
+            // An edit's echo is the target row itself: put it back, and hand
+            // the text to the composer so it is not lost.
+            QString failedBody;
+            const QString target = m_messageModel->failLocalEdit(localId, &failedBody);
+            if (!target.isEmpty()) emit editSendFailed(target, failedBody);
         });
 
     connect(m_client, &MatrixClient::mediaUploadProgress,
             this, &ServerConnection::mediaUploadProgress);
+    connect(m_client, &MatrixClient::mediaUploadProgressById,
+            this, &ServerConnection::mediaUploadProgressed);
+    // The server's real upload ceiling when it says; otherwise its default.
+    connect(m_client, &MatrixClient::mediaConfigResult, this, [this](qint64 bytes) {
+        const qint64 next = bytes > 0 ? bytes : bsfchat::client::share::kDefaultMaxUploadBytes;
+        if (next == m_maxUploadBytes) return;
+        m_maxUploadBytes = next;
+        emit maxUploadBytesChanged();
+    });
 
     // Hydrate the DM map from QSettings so the "Direct Messages"
     // section survives restart. Empty if first-run. Group is scoped
@@ -255,6 +277,8 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             this, &ServerConnection::linkPreviewResolved);
     connect(m_linkPreviews, &bsfchat::client::LinkPreviewCache::supportedChanged,
             this, &ServerConnection::linkPreviewsSupportedChanged);
+    connect(m_linkPreviews, &bsfchat::client::LinkPreviewCache::enabledChanged,
+            this, &ServerConnection::linkPreviewsEnabledChanged);
 
     m_botAdminModel = new BotAdminModel(this);
     m_botAdminModel->hooks.listBots = [this]() { m_client->listBots(); };
@@ -576,6 +600,13 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     // Surface state-event write failures. Each write path that optimistically
     // updates local caches stashes an undo closure in m_pendingStateUndo;
     // this handler pops and runs the matching one, then tells QML.
+    // The Pin/Unpin label's dependency: isEventPinned is an invokable, so a
+    // binding on it alone never re-ran (a lazily built menu kept the label
+    // it was first opened with).
+    connect(this, &ServerConnection::roomPinnedEventsChanged, this, [this]() {
+        ++m_pinnedGeneration;
+        emit pinnedGenerationChanged();
+    });
     connect(m_client, &MatrixClient::stateEventError, this,
             [this](const QString& roomId, const QString& eventType,
                    const QString& stateKey, int status, const QString& error) {
@@ -593,6 +624,7 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         else if (eventType == QStringLiteral("bsfchat.channel.permissions")) kind = "channel-override";
         else if (eventType == QStringLiteral("bsfchat.channel.settings")) kind = "channel-settings";
         else if (eventType == QStringLiteral("bsfchat.server.roles")) kind = "server-roles";
+        else if (eventType == QString::fromUtf8(bsfchat::event_type::kRoomPinnedEvents)) kind = "pin";
         else kind = eventType;
         // Only the third argument is a candidate for replacement. `kind` is
         // what both receivers switch on to word the toast ("Couldn't save
@@ -780,7 +812,19 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         }
         QVariantList rows;
         rows.reserve(resp.hits.size());
+        int dropped = 0;
         for (const auto& hit : resp.hits) {
+            // A from: name we couldn't resolve to a user: filter here.
+            if (!m_searchSenderNames.isEmpty()) {
+                const QString name = displayNameForSender(hit.sender);
+                const bool any = std::any_of(m_searchSenderNames.cbegin(),
+                                             m_searchSenderNames.cend(),
+                                             [&](const QString& n) {
+                    return name.contains(n, Qt::CaseInsensitive)
+                        || hit.sender.contains(n, Qt::CaseInsensitive);
+                });
+                if (!any) { ++dropped; continue; }
+            }
             QVariantMap row;
             row[QStringLiteral("eventId")] = hit.eventId;
             row[QStringLiteral("roomId")] = hit.roomId;
@@ -789,6 +833,8 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             // a result frequently isn't in the room currently on screen.
             row[QStringLiteral("roomName")] =
                 m_roomListModel->roomDisplayName(hit.roomId);
+            // A DM is named after the person; the view drops the "#".
+            row[QStringLiteral("isDirect")] = isDirectRoom(hit.roomId);
             row[QStringLiteral("sender")] = displayNameForSender(hit.sender);
             row[QStringLiteral("senderId")] = hit.sender;
             row[QStringLiteral("body")] = hit.body;
@@ -796,13 +842,17 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
             row[QStringLiteral("timestamp")] = hit.timestamp;
             rows.append(row);
         }
-        emit searchResultsReady(rows, resp.count, resp.highlights, resp.nextBatch,
+        emit searchResultsReady(rows, std::max(0, resp.count - dropped), resp.highlights,
+                                resp.nextBatch,
                                 /*appended=*/!requestedNextBatch.isEmpty());
     });
     connect(m_client, &MatrixClient::searchFailed, this,
             [this](const QString& term, const QString& error) {
         if (term != m_searchTerm) return;
-        emitSearchError(error);
+        // The transport's own errorString() ("Host … not found", "Connection
+        // refused") meant nothing to anyone; it goes to the log instead.
+        qWarning().noquote() << "[search] transport failure:" << error;
+        emitSearchError(tr("Couldn't reach the server. Check your connection and try again."));
     });
 
     // ── Per-room notify level ─────────────────────────────────────────────
@@ -1679,6 +1729,7 @@ void ServerConnection::disconnectFromServer()
 
 void ServerConnection::startSync()
 {
+    m_client->getMediaConfig();
     // A new session: no earlier /joined_rooms answer may act on it.
     resetRoomReconcile();
     // Resume where the last session left off when we can. An initial /sync
@@ -2064,17 +2115,24 @@ void ServerConnection::sendEmote(const QString& body)
     m_typingTimer->stop();
     m_typingStopTimer->stop();
     m_client->setTyping(m_activeRoomId, m_userId, false);
-    m_client->sendEmote(m_activeRoomId, body);
+    // Echoed like a plain send, so a failed /me keeps its text (Retry).
+    const QString localId = m_client->sendEmote(m_activeRoomId, body);
+    m_messageModel->appendLocalEcho(localId, body, QString(), m_userId, {}, {},
+                                    QStringLiteral("m.emote"));
 }
 
-void ServerConnection::sendThreadReply(const QString& rootEventId, const QString& body)
+void ServerConnection::sendThreadReply(const QString& rootEventId, const QString& body,
+                                       const QString& formattedBody,
+                                       const QStringList& mentionedUserIds)
 {
     if (m_activeRoomId.isEmpty() || rootEventId.isEmpty()
         || body.trimmed().isEmpty()) return;
     m_typingTimer->stop();
     m_typingStopTimer->stop();
     m_client->setTyping(m_activeRoomId, m_userId, false);
-    m_client->sendThreadReply(m_activeRoomId, body, rootEventId);
+    const QString localId = m_client->sendThreadReply(m_activeRoomId, body, rootEventId,
+                                                      formattedBody, mentionedUserIds);
+    m_messageModel->appendLocalEcho(localId, body, formattedBody, m_userId, {}, rootEventId);
 }
 
 void ServerConnection::sendRichMessage(const QString& body,
@@ -2117,8 +2175,29 @@ void ServerConnection::editMessage(const QString& eventId, const QString& newBod
         }
     }
 
-    m_client->editMessage(m_activeRoomId, eventId, newBody, formattedBody,
-                          mentions);
+    // The ORIGINAL's msgtype, so an /me edit stays m.emote — and nothing at
+    // all for media, which an m.replace would replace with its file name.
+    if (!canEditMessage(eventId)) return;
+    const QString msgtype = m_messageModel->data(
+        m_messageModel->index(m_messageModel->indexForEventId(eventId)),
+        MessageModel::MsgtypeRole).toString();
+    const QString localId = m_client->editMessage(m_activeRoomId, eventId, newBody,
+                                                  formattedBody, mentions, msgtype);
+    if (!localId.isEmpty())
+        m_messageModel->applyLocalEdit(localId, eventId, newBody, formattedBody);
+}
+
+bool ServerConnection::canEditMessage(const QString& eventId) const
+{
+    if (!m_messageModel || eventId.isEmpty()) return false;
+    const int row = m_messageModel->indexForEventId(eventId);
+    if (row < 0) return false;
+    const QModelIndex mi = m_messageModel->index(row);
+    if (!m_messageModel->data(mi, MessageModel::IsOwnMessageRole).toBool()) return false;
+    if (m_messageModel->data(mi, MessageModel::DeliveryStateRole).toInt()
+        != MessageModel::DeliveryConfirmed) return false;
+    return bsfchat::client::msgcontent::isEditableMsgtype(
+        m_messageModel->data(mi, MessageModel::MsgtypeRole).toString());
 }
 
 QVariantMap ServerConnection::editLastMessageWithSed(const QString& text)
@@ -2185,8 +2264,27 @@ void ServerConnection::replyToMessage(const QString& targetEventId, const QStrin
     m_typingStopTimer->stop();
     m_client->setTyping(m_activeRoomId, m_userId, false);
 
-    m_client->replyToMessage(m_activeRoomId, body, targetEventId, formattedBody,
-                             mentionedUserIds);
+    const QString localId = m_client->replyToMessage(m_activeRoomId, body, targetEventId,
+                                                     formattedBody, mentionedUserIds);
+    m_messageModel->appendLocalEcho(localId, body, formattedBody, m_userId, targetEventId);
+}
+
+void ServerConnection::retryLocalEcho(const QString& localId)
+{
+    if (!m_messageModel || m_activeRoomId.isEmpty()) return;
+    const QVariantMap p = m_messageModel->localEchoPayload(localId);
+    if (p.isEmpty()) return;
+    const QString body = p.value(QStringLiteral("body")).toString();
+    const QString msgtype = p.value(QStringLiteral("msgtype")).toString();
+    const QString replyTo = p.value(QStringLiteral("replyToEventId")).toString();
+    const QString root = p.value(QStringLiteral("threadRootId")).toString();
+    // The row's formatted body is display markup, not what was sent; re-send
+    // the plain body and let the receivers render it, as for a plain send.
+    m_messageModel->discardLocalEcho(localId);
+    if (msgtype == QLatin1String("m.emote")) sendEmote(body);
+    else if (!root.isEmpty()) sendThreadReply(root, body);
+    else if (!replyTo.isEmpty()) replyToMessage(replyTo, body);
+    else sendMessage(body);
 }
 
 void ServerConnection::forwardMessage(const QString& sourceEventId, const QString& destRoomId)
@@ -2203,12 +2301,21 @@ void ServerConnection::forwardMessage(const QString& sourceEventId, const QStrin
     QModelIndex mi = m_messageModel->index(idx);
     QString body = m_messageModel->data(mi, MessageModel::BodyRole).toString();
     QString sender = m_messageModel->data(mi, MessageModel::SenderDisplayNameRole).toString();
-    QString sourceChannelName = m_roomListModel->roomDisplayName(m_activeRoomId);
+    const QString formatted =
+        m_messageModel->data(mi, MessageModel::RawFormattedBodyRole).toString();
+    // "#general" for a channel; a DM is named after the person, no "#".
+    QString sourceLabel = m_roomListModel->roomDisplayName(m_activeRoomId);
+    if (!isDirectRoom(m_activeRoomId)) sourceLabel.prepend(QLatin1Char('#'));
 
-    // Pass the source location so MatrixClient can embed a clickable link
-    // back to the original event in the forwarded header.
-    m_client->forwardMessage(destRoomId, body, sourceChannelName, sender,
-                             m_serverUrl, m_activeRoomId, sourceEventId);
+    // Pass the source location so the header links back to the original.
+    const QString localId = m_client->forwardMessage(destRoomId, body, sourceLabel, sender,
+                                                     m_serverUrl, m_activeRoomId,
+                                                     sourceEventId, formatted);
+    if (!localId.isEmpty()) {
+        QString dest = m_roomListModel->roomDisplayName(destRoomId);
+        if (!isDirectRoom(destRoomId)) dest.prepend(QLatin1Char('#'));
+        m_pendingForwards.insert(localId, dest);
+    }
 }
 
 void ServerConnection::toggleReaction(const QString& targetEventId, const QString& emoji)
@@ -2221,6 +2328,13 @@ void ServerConnection::toggleReaction(const QString& targetEventId, const QStrin
     } else {
         m_client->sendReaction(m_activeRoomId, targetEventId, emoji);
     }
+}
+
+void ServerConnection::addReaction(const QString& targetEventId, const QString& emoji)
+{
+    if (m_activeRoomId.isEmpty() || targetEventId.isEmpty() || emoji.isEmpty()) return;
+    if (!m_messageModel->ownReactionEventId(targetEventId, emoji, m_userId).isEmpty()) return;
+    m_client->sendReaction(m_activeRoomId, targetEventId, emoji);
 }
 
 void ServerConnection::loadOlderMessages(int limit)
@@ -2272,7 +2386,7 @@ QString ServerConnection::messageLink(const QString& eventId) const
              QString::fromUtf8(eventEnc));
 }
 
-void ServerConnection::sendMediaMessage(const QString& fileUrl)
+QString ServerConnection::sendMediaMessage(const QString& fileUrl, const QString& displayNameHint)
 {
     if (m_activeRoomId.isEmpty()) {
         // Raw on purpose — see emitMediaSendFailed. This fires before any
@@ -2283,7 +2397,7 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         // Deferred, though, like the other pre-flight check below: see
         // emitPreflightMediaFailure.
         emitPreflightMediaFailure(QStringLiteral("No active room"));
-        return;
+        return {};
     }
 
     // Convert QML URL to something QFile can open. On desktop this is
@@ -2312,6 +2426,10 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         openPath = fileUrl;
         displayName = QFileInfo(fileUrl).fileName();
     }
+    // A name the caller already knows beats one guessed from the URL — a
+    // content:// URI's tail is an opaque id like "image:1000012345".
+    if (!displayNameHint.trimmed().isEmpty())
+        displayName = QFileInfo(displayNameHint.trimmed()).fileName();
 
     auto* file = new QFile(openPath);
     if (!file->open(QIODevice::ReadOnly)) {
@@ -2325,13 +2443,13 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
                                   + friendly + QStringLiteral(" — ")
                                   + file->errorString());
         delete file;
-        return;
+        return {};
     }
 
-    // Size cap before anything is read (M-4). The server does not advertise
-    // its limit, so this is the client's own ceiling; the server still
+    // Size cap before anything is read (M-4): the server's m.upload.size
+    // when it serves /media/v3/config, else its default. The server still
     // enforces its configured one and answers 413 above it.
-    const qint64 maxBytes = bsfchat::client::share::kDefaultMaxUploadBytes;
+    const qint64 maxBytes = m_maxUploadBytes;
     const auto tooLarge = [&]() {
         emitPreflightMediaFailure(QStringLiteral("%1 is too large to upload (the limit is %2 MB).")
                                       .arg(displayName.isEmpty() ? QStringLiteral("That file")
@@ -2348,14 +2466,14 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         if (fileSize > maxBytes) {
             tooLarge();
             delete file;
-            return;
+            return {};
         }
     } else {
         fileData = file->read(maxBytes + 1);
         if (fileData.size() > maxBytes) {
             tooLarge();
             delete file;
-            return;
+            return {};
         }
         fileSize = fileData.size();
     }
@@ -2423,9 +2541,15 @@ void ServerConnection::sendMediaMessage(const QString& fileUrl)
         m_client->uploadMedia(uploadId, file, mimeType, fileName);  // takes ownership
     else
         m_client->uploadMedia(uploadId, fileData, mimeType, fileName);
+    return uploadId;
 }
 
-void ServerConnection::sendSharedMediaMessage(const QString& uri)
+void ServerConnection::cancelMediaUpload(const QString& uploadId)
+{
+    if (!uploadId.isEmpty()) m_client->cancelMediaUpload(uploadId);
+}
+
+void ServerConnection::sendSharedMediaMessage(const QString& uri, const QString& displayName)
 {
     // Belt and braces for M-4: UrlHandler already refused everything but
     // another app's content:// URI, and the user has confirmed. A share must
@@ -2436,7 +2560,7 @@ void ServerConnection::sendSharedMediaMessage(const QString& uri)
         emitPreflightMediaFailure(QStringLiteral("That shared file can't be uploaded."));
         return;
     }
-    sendMediaMessage(uri);
+    sendMediaMessage(uri, displayName);
 }
 
 void ServerConnection::createRoom(const QString& name, const QString& topic)
@@ -2644,17 +2768,45 @@ QString ServerConnection::displayNameForSender(const QString& userId) const
 void ServerConnection::searchMessages(const QString& searchTerm, int limit,
                                        const QString& nextBatch)
 {
-    const QString term = searchTerm.trimmed();
+    // `from:` tokens become the server's filter.senders when they name a
+    // user we can resolve; a name we can't resolve filters the hits here
+    // by display name instead. They used to be searched as words.
+    const auto q = bsfchat::client::parseSearchQuery(searchTerm.trimmed());
+    const QString term = q.term;
+    QStringList senders;
+    QStringList unresolved;
+    for (const QString& who : q.fromTokens) {
+        if (who.startsWith(QLatin1Char('@')) && who.contains(QLatin1Char(':'))) {
+            senders.append(who);
+            continue;
+        }
+        const QString bare = who.startsWith(QLatin1Char('@')) ? who.mid(1) : who;
+        QString match;
+        for (const QVariant& v : searchKnownUsers(bare, 20)) {
+            const QVariantMap u = v.toMap();
+            const QString uid = u.value(QStringLiteral("userId")).toString();
+            const QString dn = u.value(QStringLiteral("displayName")).toString();
+            const QString local = uid.mid(1).section(QLatin1Char(':'), 0, 0);
+            if (dn.compare(bare, Qt::CaseInsensitive) == 0
+                || local.compare(bare, Qt::CaseInsensitive) == 0) {
+                match = uid;
+                break;
+            }
+        }
+        if (!match.isEmpty()) senders.append(match);
+        else unresolved.append(bare);
+    }
     // Record the term BEFORE issuing, so the result handler can recognise its
     // own reply and discard anything belonging to an abandoned query.
     m_searchTerm = term;
+    m_searchSenderNames = unresolved;
     if (term.isEmpty()) {
-        // Clearing the box is not an error and not a query — reset to empty
+        // Clearing the box (or only a from:) is not a query — reset to empty
         // rather than asking the server about "".
         emit searchResultsReady({}, 0, {}, QString(), false);
         return;
     }
-    m_client->searchMessages(term, limit, nextBatch);
+    m_client->searchMessages(term, limit, nextBatch, senders);
 }
 
 void ServerConnection::jumpToRoomEvent(const QString& roomId, const QString& eventId)
@@ -4383,6 +4535,11 @@ bool ServerConnection::linkPreviewsSupported() const
     return m_linkPreviews->supported();
 }
 
+bool ServerConnection::linkPreviewsEnabled() const
+{
+    return m_linkPreviews->enabled();
+}
+
 void ServerConnection::openMediaExternally(const QString& mxcUri, bool confirmed,
                                            const QString& eventId)
 {
@@ -6011,7 +6168,8 @@ bool ServerConnection::isEventPinned(const QString& roomId, const QString& event
 void ServerConnection::togglePinnedEvent(const QString& roomId, const QString& eventId)
 {
     if (roomId.isEmpty() || eventId.isEmpty()) return;
-    QStringList list = m_roomPinnedEvents.value(roomId);
+    const QStringList previous = m_roomPinnedEvents.value(roomId);
+    QStringList list = previous;
     if (list.contains(eventId)) list.removeAll(eventId);
     else list.append(eventId);
     // Optimistic: update the cache immediately so the UI reflects the
@@ -6019,6 +6177,14 @@ void ServerConnection::togglePinnedEvent(const QString& roomId, const QString& e
     // the next m.room.pinned_events event.
     m_roomPinnedEvents[roomId] = list;
     emit roomPinnedEventsChanged(roomId);
+    // A refused write (no permission, or a stale list) used to leave the
+    // optimistic state on screen until the next sync contradicted it. Put it
+    // back; stateEventError's toast ("pin" kind) says why.
+    m_pendingStateUndo[QString::fromUtf8(bsfchat::event_type::kRoomPinnedEvents)
+                       + QStringLiteral("|")] = [this, roomId, previous]() {
+        m_roomPinnedEvents[roomId] = previous;
+        emit roomPinnedEventsChanged(roomId);
+    };
 
     QJsonArray arr;
     for (const auto& id : list) arr.append(id);

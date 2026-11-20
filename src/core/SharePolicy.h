@@ -29,8 +29,10 @@
 
 namespace bsfchat::client::share {
 
-// Fallback cap when the server's limit is unknown (it does not advertise one).
-inline constexpr qint64 kDefaultMaxUploadBytes = 100LL * 1024 * 1024;
+// Fallback cap when the server's limit is unknown (it serves no
+// /_matrix/media/v3/config). The server's own default max_upload_size_mb is
+// 50; claiming 100 here let a 70 MB file upload in full and then 413.
+inline constexpr qint64 kDefaultMaxUploadBytes = 50LL * 1024 * 1024;
 
 enum class UriVerdict { Accept, NotContent, OwnProvider };
 

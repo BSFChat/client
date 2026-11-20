@@ -258,6 +258,26 @@ private slots:
                  A::Open);
     }
 
+    void userinfoHrefsAlwaysAsk()
+    {
+        using A = links::Action;
+        QCOMPARE(links::decide("https://www.paypal.com@evil.example/").action, A::Confirm);
+        QCOMPARE(links::decide("https://user:pw@evil.example/", {"click"}).action, A::Confirm);
+        QCOMPARE(links::decide("https://evil.example/", {}).action, A::Open);
+    }
+
+    void aUrlAnywhereInTheTextIsCompared()
+    {
+        using A = links::Action;
+        QCOMPARE(links::decide("https://evil.example/", {"Your bank.example statement"}).action,
+                 A::Confirm);
+        QCOMPARE(links::decide("https://evil.example/", {"log in at https://bank.example/now"})
+                     .action, A::Confirm);
+        QCOMPARE(links::decide("https://bank.example/", {"Your bank.example statement"}).action,
+                 A::Open);
+        QCOMPARE(links::decide("https://ok.example/", {"read the docs here"}).action, A::Open);
+    }
+
     void punctuationAroundTheTextDoesNotHideTheHost()
     {
         using A = links::Action;

@@ -50,4 +50,14 @@ struct SearchResponse {
 // server's SQLite build) — which are very different things to tell a user.
 SearchResponse parseSearchResponse(int httpStatus, const QByteArray& body);
 
+// What the search box typed, split into the full-text part and `from:`
+// filters. `from:@alice:server` (a user id) and `from:alice` (a display name
+// or localpart, resolved by the caller) are both accepted; the tokens are
+// removed from `term`. `from:` with nothing after it is kept as text.
+struct SearchQuery {
+    QString term;
+    QStringList fromTokens;
+};
+SearchQuery parseSearchQuery(const QString& text);
+
 } // namespace bsfchat::client

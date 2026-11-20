@@ -3,6 +3,7 @@
 
 #include "net/AuthError.h"
 #include "net/IgnoredUsers.h"
+#include "net/MessageContent.h"
 #include "net/ReplyFields.h"
 #include "net/ReportRequest.h"
 #include "net/RequestTimeout.h"
@@ -561,29 +562,26 @@ void MatrixClient::getJoinedRooms(const QString& requestId)
     });
 }
 
-QString MatrixClient::sendMessage(const QString& roomId, const QString& body)
+// The one PUT every m.room.message send goes through. Reports the outcome
+// twice: anonymously (messageSent/sendMessageError, for the toast) and against
+// the transaction id (messageSendAccepted/messageSendFailed, for the local
+// echo). Every path now gets both — replies, /me, thread replies and edits used
+// to have neither id nor echo, so a failed send simply lost the text.
+QString MatrixClient::putRoomMessage(const QString& roomId, const json& content,
+                                     QStringView txnPrefix)
 {
-    // Generate a transaction ID
-    static int txnCounter = 0;
-    QString txnId = QString("m%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
-
-    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
-                   + QUrl::toPercentEncoding(roomId)
-                   + "/send/m.room.message/" + txnId;
-
-    json content;
-    content["msgtype"] = "m.text";
-    content["body"] = body.toStdString();
-
-    QByteArray reqBody = QByteArray::fromStdString(content.dump());
-
-    auto* reply = makeRequest("PUT", path, reqBody);
+    const QString txnId = bsfchat::client::msgcontent::nextTxnId(txnPrefix);
+    const QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
+                         + QUrl::toPercentEncoding(roomId)
+                         + "/send/m.room.message/" + txnId;
+    auto* reply = makeRequest("PUT", path, QByteArray::fromStdString(content.dump()));
     connect(reply, &QNetworkReply::finished, this, [this, reply, txnId]() {
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
-            emit messageSendFailed(txnId, bsfchat::net::replyFailureText(reply, data));
+            const QString why = bsfchat::net::replyFailureText(reply, data);
+            emit sendMessageError(why);
+            emit messageSendFailed(txnId, why);
             return;
         }
         try {
@@ -599,334 +597,101 @@ QString MatrixClient::sendMessage(const QString& roomId, const QString& body)
     return txnId;
 }
 
-// Attach the MSC3952 `m.mentions` block to `content`, in place.
-//
-// m.mentions is the modern Matrix mention signal. Servers implementing it
-// elevate push notifications for the listed users regardless of the recipient's
-// notification settings, and BSFChat's server treats it as the ONLY source of
-// mentions (it deliberately does not scrape the body).
-//
-// Shared by the plain-send, reply and edit paths so the three cannot drift on
-// the @room-sentinel handling; the reply and edit paths previously omitted the
-// block entirely, which meant a mention typed into a reply produced no mention
-// row and no badge.
+QString MatrixClient::sendMessage(const QString& roomId, const QString& body)
+{
+    return putRoomMessage(roomId, bsfchat::client::msgcontent::prose(QStringLiteral("m.text"), body),
+                          u"m");
+}
+
+// m.mentions is the modern Matrix mention signal (MSC3952); BSFChat's server
+// treats it as the ONLY source of mentions. The builder lives in
+// MessageContent.h so every send path shares the @room-sentinel handling.
 void MatrixClient::applyMentions(json& content, const QStringList& mentionedUserIds)
 {
-    if (mentionedUserIds.isEmpty()) return;
-    json users = json::array();
-    bool roomMention = false;
-    for (const auto& u : mentionedUserIds) {
-        // "@room" is not a user id — MSC3952 spells a room-wide ping as
-        // the sibling `room` boolean.
-        if (u == kRoomMentionSentinel) { roomMention = true; continue; }
-        users.push_back(u.toStdString());
-    }
-    json mentions = json::object();
-    if (!users.empty()) mentions["user_ids"] = users;
-    // Emitted only when true: an explicit `false` would be noise on every
-    // ordinary mention, and readers treat a missing key as false anyway.
-    if (roomMention) mentions["room"] = true;
-    if (!mentions.empty()) content["m.mentions"] = mentions;
+    bsfchat::client::msgcontent::applyMentions(content, mentionedUserIds);
 }
 
 QString MatrixClient::sendRichMessage(const QString& roomId, const QString& body,
                                     const QString& formattedBody,
                                     const QStringList& mentionedUserIds)
 {
-    static int txnCounter = 0;
-    QString txnId = QString("m%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
-
-    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
-                   + QUrl::toPercentEncoding(roomId)
-                   + "/send/m.room.message/" + txnId;
-
-    json content;
-    content["msgtype"] = "m.text";
-    content["body"] = body.toStdString();
-    if (!formattedBody.isEmpty()) {
-        content["format"] = "org.matrix.custom.html";
-        content["formatted_body"] = formattedBody.toStdString();
-    }
-    applyMentions(content, mentionedUserIds);
-
-    QByteArray reqBody = QByteArray::fromStdString(content.dump());
-    auto* reply = makeRequest("PUT", path, reqBody);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, txnId]() {
-        reply->deleteLater();
-        auto data = reply->readAll();
-        if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
-            emit messageSendFailed(txnId, bsfchat::net::replyFailureText(reply, data));
-            return;
-        }
-        try {
-            auto j = json::parse(data.toStdString());
-            const QString eventId = QString::fromStdString(j.value("event_id", ""));
-            emit messageSent(eventId);
-            emit messageSendAccepted(txnId, eventId);
-        } catch (const std::exception& e) {
-            emit sendMessageError(QString::fromStdString(e.what()));
-            emit messageSendFailed(txnId, QString::fromStdString(e.what()));
-        }
-    });
-    return txnId;
+    return putRoomMessage(roomId,
+                          bsfchat::client::msgcontent::prose(QStringLiteral("m.text"), body,
+                                                             formattedBody, mentionedUserIds),
+                          u"m");
 }
 
-void MatrixClient::editMessage(const QString& roomId, const QString& targetEventId,
-                                const QString& newBody, const QString& formattedBody,
-                                const QStringList& mentionedUserIds)
+QString MatrixClient::editMessage(const QString& roomId, const QString& targetEventId,
+                                  const QString& newBody, const QString& formattedBody,
+                                  const QStringList& mentionedUserIds,
+                                  const QString& msgtype)
 {
-    static int txnCounter = 0;
-    QString txnId = QString("e%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
-
-    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
-                   + QUrl::toPercentEncoding(roomId)
-                   + "/send/m.room.message/" + txnId;
-
-    // Matrix edits: the top-level body/msgtype is a fallback for clients
-    // that don't understand m.replace relations (prefixed with "* " by
-    // convention). The authoritative replacement lives under m.new_content.
-    json newContent;
-    newContent["msgtype"] = "m.text";
-    newContent["body"] = newBody.toStdString();
-    if (!formattedBody.isEmpty()) {
-        newContent["format"] = "org.matrix.custom.html";
-        newContent["formatted_body"] = formattedBody.toStdString();
-    }
-    applyMentions(newContent, mentionedUserIds);
-
-    json content;
-    content["msgtype"] = "m.text";
-    content["body"] = ("* " + newBody).toStdString();
-    content["m.new_content"] = newContent;
-    content["m.relates_to"] = {
-        {"rel_type", "m.replace"},
-        {"event_id", targetEventId.toStdString()},
-    };
-    // m.mentions goes in BOTH places, for two different reasons.
+    // Matrix edits: the top-level body is a "* " fallback for clients that
+    // don't understand m.replace; m.new_content is authoritative, and keeps
+    // the ORIGINAL's msgtype (an /me stays m.emote). m.mentions goes in both
+    // copies: m.new_content because the server folds it in as the event's
+    // content (dropping it blanked the highlight on reload), and the top level
+    // because that is the copy the server validates — so an edit can't paint
+    // an @room pill without MENTION_EVERYONE. The server records no mention
+    // rows for an m.replace, so an edit never retro-pings anyone.
     //
-    // In m.new_content because the server replaces the original event's content
-    // with m.new_content when it folds the edit in, so that copy is what a
-    // client loading the room fresh sees. Dropping it is what used to make an
-    // edited message silently lose its mention highlight.
-    //
-    // At the top level because that is the copy the server VALIDATES: it reads
-    // m.mentions off the event content, not out of m.new_content, and gates
-    // `room: true` on MENTION_EVERYONE. Without the top-level copy an edit
-    // would be a way to paint an @room pill on a message without holding the
-    // permission — no badge or push would fire (the server skips
-    // record_mentions and push evaluation for every m.replace, so an edit can
-    // never retro-ping a message somebody already read), but every reader would
-    // still see the highlight. Mirroring it means such an edit is refused with
-    // 403, exactly as the original send would have been.
-    applyMentions(content, mentionedUserIds);
-
-    QByteArray reqBody = QByteArray::fromStdString(content.dump());
-    auto* reply = makeRequest("PUT", path, reqBody);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        reply->deleteLater();
-        auto data = reply->readAll();
-        if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
-            return;
-        }
-        try {
-            auto j = json::parse(data.toStdString());
-            emit messageSent(QString::fromStdString(j.value("event_id", "")));
-        } catch (const std::exception& e) {
-            emit sendMessageError(QString::fromStdString(e.what()));
-        }
-    });
+    // A media msgtype is refused (empty return): the replacement carries no
+    // url/info, and the server would fold it in over the attachment.
+    const json content = bsfchat::client::msgcontent::edit(
+        targetEventId, msgtype, newBody, formattedBody, mentionedUserIds);
+    if (content.is_null()) return {};
+    return putRoomMessage(roomId, content, u"e");
 }
 
-void MatrixClient::replyToMessage(const QString& roomId, const QString& body,
+QString MatrixClient::replyToMessage(const QString& roomId, const QString& body,
                                     const QString& targetEventId,
                                     const QString& formattedBody,
                                     const QStringList& mentionedUserIds)
 {
-    static int txnCounter = 0;
-    QString txnId = QString("r%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
-
-    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
-                   + QUrl::toPercentEncoding(roomId)
-                   + "/send/m.room.message/" + txnId;
-
-    // Replies are just ordinary m.room.message events carrying a relation
-    // pointer. No m.replace, no m.new_content — those are for edits.
-    json content;
-    content["msgtype"] = "m.text";
-    content["body"] = body.toStdString();
-    if (!formattedBody.isEmpty()) {
-        content["format"] = "org.matrix.custom.html";
-        content["formatted_body"] = formattedBody.toStdString();
-    }
-    content["m.relates_to"] = {
-        {"m.in_reply_to", {{"event_id", targetEventId.toStdString()}}},
-    };
-    // A reply is an ordinary new send as far as the server is concerned, so the
-    // full mention pipeline applies: mention rows, highlight_count, push. This
-    // was previously omitted, which is why mentioning somebody inside a reply
-    // produced no badge for them at all.
-    applyMentions(content, mentionedUserIds);
-
-    QByteArray reqBody = QByteArray::fromStdString(content.dump());
-    auto* reply = makeRequest("PUT", path, reqBody);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        reply->deleteLater();
-        auto data = reply->readAll();
-        if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
-            return;
-        }
-        try {
-            auto j = json::parse(data.toStdString());
-            emit messageSent(QString::fromStdString(j.value("event_id", "")));
-        } catch (const std::exception& e) {
-            emit sendMessageError(QString::fromStdString(e.what()));
-        }
-    });
+    // An ordinary m.room.message carrying an m.in_reply_to pointer, so the
+    // full mention pipeline applies server-side (rows, badge, push).
+    return putRoomMessage(roomId,
+                          bsfchat::client::msgcontent::reply(targetEventId, body,
+                                                             formattedBody, mentionedUserIds),
+                          u"r");
 }
 
-void MatrixClient::sendEmote(const QString& roomId, const QString& body)
+QString MatrixClient::sendEmote(const QString& roomId, const QString& body)
 {
-    static int txnCounter = 0;
-    QString txnId = QString("e%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
-    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
-                   + QUrl::toPercentEncoding(roomId)
-                   + "/send/m.room.message/" + txnId;
-    json content;
-    content["msgtype"] = "m.emote";
-    content["body"] = body.toStdString();
-    QByteArray reqBody = QByteArray::fromStdString(content.dump());
-    auto* reply = makeRequest("PUT", path, reqBody);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        reply->deleteLater();
-        auto data = reply->readAll();
-        if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
-            return;
-        }
-        try {
-            auto j = json::parse(data.toStdString());
-            emit messageSent(QString::fromStdString(j.value("event_id", "")));
-        } catch (const std::exception& e) {
-            emit sendMessageError(QString::fromStdString(e.what()));
-        }
-    });
+    return putRoomMessage(roomId,
+                          bsfchat::client::msgcontent::prose(QStringLiteral("m.emote"), body),
+                          u"me");
 }
 
-void MatrixClient::sendThreadReply(const QString& roomId, const QString& body,
-                                    const QString& threadRootId)
+QString MatrixClient::sendThreadReply(const QString& roomId, const QString& body,
+                                      const QString& threadRootId,
+                                      const QString& formattedBody,
+                                      const QStringList& mentionedUserIds)
 {
-    static int txnCounter = 0;
-    QString txnId = QString("t%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
-
-    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
-                   + QUrl::toPercentEncoding(roomId)
-                   + "/send/m.room.message/" + txnId;
-
-    json content;
-    content["msgtype"] = "m.text";
-    content["body"] = body.toStdString();
-    content["m.relates_to"] = {
-        {"rel_type", "m.thread"},
-        {"event_id", threadRootId.toStdString()}
-    };
-
-    QByteArray reqBody = QByteArray::fromStdString(content.dump());
-    auto* reply = makeRequest("PUT", path, reqBody);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        reply->deleteLater();
-        auto data = reply->readAll();
-        if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
-            return;
-        }
-        try {
-            auto j = json::parse(data.toStdString());
-            emit messageSent(QString::fromStdString(j.value("event_id", "")));
-        } catch (const std::exception& e) {
-            emit sendMessageError(QString::fromStdString(e.what()));
-        }
-    });
+    return putRoomMessage(roomId,
+                          bsfchat::client::msgcontent::threadReply(threadRootId, body,
+                                                                   formattedBody,
+                                                                   mentionedUserIds),
+                          u"t");
 }
 
-void MatrixClient::forwardMessage(const QString& destRoomId, const QString& body,
+QString MatrixClient::forwardMessage(const QString& destRoomId, const QString& body,
                                     const QString& sourceChannelName,
                                     const QString& sourceSenderName,
                                     const QString& sourceServerUrl,
                                     const QString& sourceRoomId,
-                                    const QString& sourceEventId)
+                                    const QString& sourceEventId,
+                                    const QString& sourceFormattedBody)
 {
-    static int txnCounter = 0;
-    QString txnId = QString("f%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
-
-    QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
-                   + QUrl::toPercentEncoding(destRoomId)
-                   + "/send/m.room.message/" + txnId;
-
-    // Build a Markdown-friendly forwarded body. The attribution header
-    // lives on its own quoted line; the original body gets a blockquote
-    // prefix on each line so the client's Markdown renderer produces a
-    // visually distinct quote block.
-    QString channelLabel = sourceChannelName.isEmpty() ? QStringLiteral("unknown")
-                                                        : sourceChannelName;
-    QString senderLabel = sourceSenderName.isEmpty() ? QStringLiteral("unknown")
-                                                      : sourceSenderName;
-    // If we have source coordinates, wrap the "#channel" label in a
-    // Markdown link pointing at the original message. The client's markdown
-    // renderer turns this into a clickable anchor; MessageBubble intercepts
-    // bsfchat://message/... clicks and navigates.
-    QString channelToken;
-    if (!sourceServerUrl.isEmpty() && !sourceRoomId.isEmpty()
-        && !sourceEventId.isEmpty()) {
-        const QByteArray serverEnc = QUrl::toPercentEncoding(sourceServerUrl, "", "/");
-        const QByteArray roomEnc = QUrl::toPercentEncoding(sourceRoomId);
-        const QByteArray eventEnc = QUrl::toPercentEncoding(sourceEventId);
-        channelToken = QStringLiteral("[#%1](bsfchat://message/%2/%3/%4)")
-                           .arg(channelLabel,
-                                QString::fromUtf8(serverEnc),
-                                QString::fromUtf8(roomEnc),
-                                QString::fromUtf8(eventEnc));
-    } else {
-        channelToken = QStringLiteral("#%1").arg(channelLabel);
-    }
-    QString header = QStringLiteral("> **Forwarded from %1 by @%2**")
-                         .arg(channelToken, senderLabel);
-    QString quoted;
-    const QStringList lines = body.split('\n');
-    for (const auto& line : lines) {
-        quoted += QStringLiteral("> ") + line + QStringLiteral("\n");
-    }
-    if (quoted.endsWith('\n')) quoted.chop(1);
-    QString full = header + QStringLiteral("\n") + quoted;
-
-    json content;
-    content["msgtype"] = "m.text";
-    content["body"] = full.toStdString();
-
-    QByteArray reqBody = QByteArray::fromStdString(content.dump());
-    auto* reply = makeRequest("PUT", path, reqBody);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        reply->deleteLater();
-        auto data = reply->readAll();
-        if (reply->error() != QNetworkReply::NoError) {
-            emit sendMessageError(bsfchat::net::replyFailureText(reply, data));
-            return;
-        }
-        try {
-            auto j = json::parse(data.toStdString());
-            emit messageSent(QString::fromStdString(j.value("event_id", "")));
-        } catch (const std::exception& e) {
-            emit sendMessageError(QString::fromStdString(e.what()));
-        }
-    });
+    const json content = bsfchat::client::msgcontent::forward(
+        body, sourceFormattedBody, sourceChannelName, sourceSenderName,
+        sourceServerUrl, sourceRoomId, sourceEventId);
+    return putRoomMessage(destRoomId, content, u"f");
 }
 
 void MatrixClient::sendRoomEvent(const QString& roomId, const QString& eventType, const QByteArray& content)
 {
-    static int txnCounter = 0;
-    QString txnId = QString("m%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
+    const QString txnId = bsfchat::client::msgcontent::nextTxnId(u"ev");
 
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                    + QUrl::toPercentEncoding(roomId)
@@ -952,9 +717,7 @@ void MatrixClient::sendRoomEvent(const QString& roomId, const QString& eventType
 void MatrixClient::sendCallEvent(const QString& roomId, const QString& eventType,
                                  const QByteArray& content, quint64 token)
 {
-    static int txnCounter = 0;
-    QString txnId = QString("v%1.%2").arg(QDateTime::currentMSecsSinceEpoch())
-                        .arg(++txnCounter);
+    const QString txnId = bsfchat::client::msgcontent::nextTxnId(u"v");
 
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                    + QUrl::toPercentEncoding(roomId)
@@ -1016,16 +779,24 @@ void MatrixClient::startMediaUpload(const QString& uploadId, QIODevice* device,
         reply = m_nam.post(request, bytes);
     }
     watchForTokenRejection(reply);
+    m_uploadReplies.insert(uploadId, reply);
     connect(reply, &QNetworkReply::uploadProgress, this,
-        [this, filename](qint64 sent, qint64 total) {
+        [this, filename, uploadId](qint64 sent, qint64 total) {
             if (total <= 0) return;
             emit mediaUploadProgress(filename,
                 double(sent) / double(total));
+            emit mediaUploadProgressById(uploadId, filename, double(sent) / double(total));
         });
     connect(reply, &QNetworkReply::finished, this, [this, reply, filename, uploadId]() {
         reply->deleteLater();
+        m_uploadReplies.remove(uploadId);
         emit mediaUploadProgress(filename, 1.0);
+        emit mediaUploadProgressById(uploadId, filename, 1.0);
         auto data = reply->readAll();
+        if (reply->error() == QNetworkReply::OperationCanceledError) {
+            emit mediaUploadError(uploadId, tr("Upload cancelled"));
+            return;
+        }
         if (reply->error() != QNetworkReply::NoError) {
             emit mediaUploadError(uploadId, bsfchat::net::replyFailureText(reply, data));
             return;
@@ -1041,6 +812,38 @@ void MatrixClient::startMediaUpload(const QString& uploadId, QIODevice* device,
         } catch (const std::exception& e) {
             emit mediaUploadError(uploadId, QString::fromStdString(e.what()));
         }
+    });
+}
+
+bool MatrixClient::cancelMediaUpload(const QString& uploadId)
+{
+    // abort() finishes the reply synchronously with OperationCanceledError,
+    // which the handler above reports as mediaUploadError — so the caller's
+    // failure path (and the composer's in-flight count) runs exactly once.
+    const QPointer<QNetworkReply> reply = m_uploadReplies.value(uploadId);
+    if (!reply) return false;
+    reply->abort();
+    return true;
+}
+
+void MatrixClient::getMediaConfig()
+{
+    // GET /_matrix/media/v3/config: the server's upload ceiling as
+    // m.upload.size. A server that does not serve it (404, or no such key)
+    // answers 0, which callers read as "unknown".
+    auto* reply = makeRequest("GET", QStringLiteral("/_matrix/media/v3/config"));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const auto data = reply->readAll();
+        qint64 bytes = 0;
+        if (reply->error() == QNetworkReply::NoError) {
+            const auto j = json::parse(data.toStdString(), nullptr, false);
+            if (j.is_object() && j.contains("m.upload.size")
+                && j["m.upload.size"].is_number_integer()) {
+                bytes = std::max<qint64>(0, j["m.upload.size"].get<qint64>());
+            }
+        }
+        emit mediaConfigResult(bytes);
     });
 }
 
@@ -1621,7 +1424,7 @@ void MatrixClient::sendReadMarker(const QString& roomId)
 }
 
 void MatrixClient::searchMessages(const QString& searchTerm, int limit,
-                                   const QString& nextBatch)
+                                   const QString& nextBatch, const QStringList& senders)
 {
     // No api_path constant for this yet — protocol/ is owned elsewhere, so the
     // path is spelled here rather than adding one.
@@ -1634,6 +1437,11 @@ void MatrixClient::searchMessages(const QString& searchTerm, int limit,
     json roomEvents;
     roomEvents["search_term"] = searchTerm.toStdString();
     roomEvents["filter"] = json{{"limit", limit}};
+    if (!senders.isEmpty()) {
+        json arr = json::array();
+        for (const auto& u : senders) arr.push_back(u.toStdString());
+        roomEvents["filter"]["senders"] = std::move(arr);
+    }
     body["search_categories"] = json{{"room_events", std::move(roomEvents)}};
     if (!nextBatch.isEmpty()) body["next_batch"] = nextBatch.toStdString();
 
@@ -2205,8 +2013,7 @@ void MatrixClient::redactEvent(const QString& requestId, const QString& roomId,
 void MatrixClient::sendReaction(const QString& roomId, const QString& targetEventId,
                                   const QString& emoji)
 {
-    static int txnCounter = 0;
-    QString txnId = QString("rx%1.%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(++txnCounter);
+    const QString txnId = bsfchat::client::msgcontent::nextTxnId(u"rx");
 
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                    + QUrl::toPercentEncoding(roomId)

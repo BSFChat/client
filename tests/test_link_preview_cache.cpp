@@ -246,6 +246,19 @@ private slots:
         QVERIFY(c->request(kA));
     }
 
+    void togglingAnnouncesItSoCardsCanAskAgain()
+    {
+        // Re-enabling used to be silent, and a card that had seen the
+        // setting flip first had already recorded "no preview".
+        auto* c = make();
+        QSignalSpy changed(c, &LinkPreviewCache::enabledChanged);
+        c->setEnabled(false);
+        c->setEnabled(false);   // no change, no signal
+        c->setEnabled(true);
+        QCOMPARE(changed.count(), 2);
+        QVERIFY(c->enabled());
+    }
+
     void onlyHttpUrlsAreSent()
     {
         auto* c = make();

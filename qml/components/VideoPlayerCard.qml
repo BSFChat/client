@@ -354,7 +354,9 @@ ColumnLayout {
                 }
                 Text {
                     Layout.alignment: Qt.AlignHCenter
-                    text: "Middle-click to open in your browser"
+                    // Mouse advice; a phone has no middle button.
+                    visible: !Theme.isMobile
+                    text: qsTr("Middle-click to open in your browser")
                     color: Theme.fg3
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.xs

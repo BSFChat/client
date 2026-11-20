@@ -131,6 +131,25 @@ inline QString hostShownBy(const QString& text)
 // mailto: keeps only the recipient, subject and body. Everything else a
 // handler may honour — attach=, cc/bcc, custom headers — is a sender's
 // instruction to the viewer's mail client and is dropped.
+// Every host the text presents, wherever it appears: the whole text, and
+// each whitespace-separated word in it. "Your bank.example statement" is as
+// much a claim about where the link goes as "bank.example" alone, and only
+// the latter used to be checked.
+inline QStringList hostsShownBy(const QString& text)
+{
+    QStringList out;
+    const QString whole = hostShownBy(text);
+    if (!whole.isEmpty()) out << whole;
+    const QStringList words = text.split(QRegularExpression(QStringLiteral("\\s+")),
+                                         Qt::SkipEmptyParts);
+    if (words.size() < 2) return out;
+    for (const QString& w : words) {
+        const QString h = hostShownBy(w);
+        if (!h.isEmpty() && !out.contains(h)) out << h;
+    }
+    return out;
+}
+
 inline QUrl trimmedMailto(const QUrl& url)
 {
     QUrl out(url);
@@ -195,12 +214,20 @@ inline Decision decide(const QString& href, const QStringList& anchorTexts = {})
     }
     d.host = url.host(QUrl::EncodeUnicode);
     d.shown = url.toString(QUrl::FullyEncoded);
+    // https://www.bank.example@evil.example/ goes to evil.example; the part
+    // before the "@" is only there to be read as the site. Nobody puts
+    // credentials in a chat link, so a userinfo href is always asked about.
+    if (!url.userInfo().isEmpty()) {
+        d.action = Action::Confirm;
+        return d;
+    }
     const QString real = normalisedHost(d.host);
     for (const QString& text : anchorTexts) {
-        const QString shown = hostShownBy(text);
-        if (!shown.isEmpty() && normalisedHost(shown) != real) {
-            d.action = Action::Confirm;
-            return d;
+        for (const QString& shown : hostsShownBy(text)) {
+            if (normalisedHost(shown) != real) {
+                d.action = Action::Confirm;
+                return d;
+            }
         }
     }
     d.action = Action::Open;

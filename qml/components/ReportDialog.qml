@@ -46,6 +46,15 @@ Popup {
     // NEW report had been filed when it was the old one.
     property string requestId: ""
     property int _seq: 0
+    // "Also block" for a report still in flight when the dialog was closed
+    // (Esc while Sending…). The block used to be dropped with the dialog.
+    property bool _blockOnFiled: false
+    property string _blockTarget: ""
+    // What the server counts: UTF-8 bytes, not UTF-16 units.
+    readonly property int reasonBytes: serverManager.activeServer
+        ? serverManager.activeServer.messageByteLength(reasonField.text)
+        : reasonField.text.length
+    readonly property int maxReasonBytes: 1024
 
     readonly property string targetName:
         targetDisplayName.length > 0 ? targetDisplayName : targetUserId
@@ -74,9 +83,20 @@ Popup {
     }
 
     parent: Overlay.overlay
-    anchors.centerIn: Overlay.overlay
+    // Centred in the part of the window the keyboard leaves free, and inside
+    // the safe area: on a phone the reason field used to open under the
+    // keyboard. iOS only: Android's adjustResize already shrinks the window
+    // (and with it the overlay) for the keyboard, so subtracting it there
+    // would count it twice.
+    readonly property real _kbHeight: Qt.platform.os === "ios" && Qt.inputMethod.visible
+        ? Math.max(0, Qt.inputMethod.keyboardRectangle.height) : 0
+    readonly property real _safeTop: _overlayProbe.SafeArea.margins.top
+    readonly property real _freeHeight: (parent ? parent.height : 800) - _kbHeight - _safeTop
     width: Math.min(460, (parent ? parent.width : 460) - 32)
-    height: Math.min(implicitHeight, (parent ? parent.height : 800) - 32)
+    height: Math.min(implicitHeight, _freeHeight - 32)
+    x: parent ? (parent.width - width) / 2 : 0
+    y: _safeTop + Math.max(16, (_freeHeight - height) / 2)
+    Item { id: _overlayProbe; parent: Overlay.overlay; anchors.fill: parent; enabled: false }
     modal: true
     closePolicy: Popup.CloseOnEscape
     padding: Theme.sp.s7
@@ -102,6 +122,7 @@ Popup {
         reportDialog.busy = false;
         reportDialog.errorMessage = "";
         reportDialog.requestId = "";
+        reportDialog._blockOnFiled = false;
         reasonField.text = "";
         // Ticked by default only when it would change something. Pre-ticking
         // it for somebody already blocked would make the checkbox read as
@@ -110,7 +131,14 @@ Popup {
     }
     onOpened: reasonField.forceActiveFocus()
     onClosed: {
-        reportDialog.requestId = "";
+        // Closed mid-send: keep listening for this request so a ticked
+        // "Also block" still happens once the report is accepted.
+        if (reportDialog.busy && alsoBlockCheck.checked && !reportDialog.alreadyBlocked) {
+            reportDialog._blockOnFiled = true;
+            reportDialog._blockTarget = reportDialog.targetUserId;
+        } else {
+            reportDialog.requestId = "";
+        }
         reasonField.text = "";
     }
 
@@ -142,6 +170,16 @@ Popup {
             if (id !== reportDialog.requestId) return;
             reportDialog.busy = false;
             var s = serverManager.activeServer;
+            if (reportDialog._blockOnFiled) {
+                reportDialog._blockOnFiled = false;
+                reportDialog.requestId = "";
+                if (s && !s.isUserBlocked(reportDialog._blockTarget))
+                    s.blockUser(reportDialog._blockTarget);
+                var hw = contentFlick.hostWindow;
+                if (hw && hw.toastSuccess)
+                    hw.toastSuccess(qsTr("Report sent to the server administrators."));
+                return;
+            }
             if (alsoBlockCheck.checked && s && !reportDialog.alreadyBlocked)
                 s.blockUser(reportDialog.targetUserId);
             var w = contentFlick.hostWindow;
@@ -153,6 +191,14 @@ Popup {
         function onReportRejected(id, message) {
             if (id !== reportDialog.requestId) return;
             reportDialog.busy = false;
+            if (reportDialog._blockOnFiled) {
+                // The dialog is gone; say it where the user can see it.
+                reportDialog._blockOnFiled = false;
+                reportDialog.requestId = "";
+                var hw = contentFlick.hostWindow;
+                if (hw && hw.toastError) hw.toastError(message);
+                return;
+            }
             // Kept inside the dialog rather than raised as a toast that
             // outlives it: the rate-limit refusal is the common one and it
             // says WHEN to try again, which is only useful next to the button
@@ -230,11 +276,11 @@ Popup {
             Text {
                 Layout.fillWidth: true
                 textFormat: Text.PlainText
-                text: "This goes to the administrators of this server. They "
-                    + "can read the message and decide what to do. Nothing "
-                    + "changes right away, and "
-                    + reportDialog.targetName
-                    + " is not told that you reported them."
+                text: (reportDialog.kind === "message"
+                        ? qsTr("This goes to the administrators of this server. They can read the message and decide what to do.")
+                        : qsTr("This goes to the administrators of this server. They can look at this account and decide what to do."))
+                    + " " + qsTr("Nothing changes right away, and %1 is not told that you reported them.")
+                              .arg(reportDialog.targetName)
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
                 color: Theme.fg2
@@ -326,14 +372,14 @@ Popup {
             // would be worse.
             Text {
                 Layout.fillWidth: true
-                visible: reasonField.text.length > 700
+                visible: reportDialog.reasonBytes > 700
                 textFormat: Text.PlainText
-                text: reasonField.text.length > 1024
-                    ? "That is too long to send — shorten it a little."
-                    : reasonField.text.length + " / 1024"
+                text: reportDialog.reasonBytes > reportDialog.maxReasonBytes
+                    ? qsTr("That is too long to send — shorten it a little.")
+                    : qsTr("%1 / %2 bytes").arg(reportDialog.reasonBytes).arg(reportDialog.maxReasonBytes)
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.xs
-                color: reasonField.text.length > 1024 ? Theme.danger : Theme.fg3
+                color: reportDialog.reasonBytes > reportDialog.maxReasonBytes ? Theme.danger : Theme.fg3
                 horizontalAlignment: Text.AlignRight
             }
 
@@ -425,7 +471,8 @@ Popup {
 
                 Button {
                     id: reportSendBtn
-                    enabled: !reportDialog.busy && reasonField.text.length <= 1024
+                    enabled: !reportDialog.busy
+                             && reportDialog.reasonBytes <= reportDialog.maxReasonBytes
                     Accessible.role: Accessible.Button
                     Accessible.name: qsTr("Send report")
                     Accessible.description: qsTr("Sends this to the administrators of this server")

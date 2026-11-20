@@ -75,6 +75,13 @@
 // have left nothing worth asserting.
 #include "model/MemberListModel.h"
 
+// The REAL blocked-users model: MessageBubble's senderBlocked binding reads
+// `blockedUsersModel.users`, and a null here threw a TypeError per row.
+#include "model/BlockedUsersModel.h"
+// The REAL tinted-icon provider, registered as src/main.cpp does, so Icon.qml's
+// image://tinted/… sources resolve instead of logging per icon.
+#include "core/TintedIconProvider.h"
+
 #include <bsfchat/Constants.h>
 #include <bsfchat/MatrixTypes.h>
 
@@ -155,10 +162,16 @@ class FakeServerConnection : public QObject
     Q_PROPERTY(int mediaTicketEpoch READ mediaTicketEpoch
                NOTIFY permissionsGenerationChanged)
     Q_PROPERTY(QVariantList serverRoles READ serverRoles CONSTANT)
-    Q_PROPERTY(bool canManageRoles READ canManageRoles CONSTANT)
-    Q_PROPERTY(bool canManageChannel READ canManageChannel CONSTANT)
-    Q_PROPERTY(bool canChangeNickname READ canChangeNickname CONSTANT)
-    Q_PROPERTY(bool canManageNicknames READ canManageNicknames CONSTANT)
+    // canManageChannel / canManageRoles / canChangeNickname /
+    // canManageNicknames are Q_INVOKABLEs on the real class (see below);
+    // they were Q_PROPERTYs here, so every `s.canManageChannel(room)` threw
+    // "is not a function".
+
+    // ── messaging surface added with the r4 chat work ────────────────
+    Q_PROPERTY(int pinnedGeneration READ pinnedGeneration CONSTANT)
+    Q_PROPERTY(double maxUploadBytes READ maxUploadBytes CONSTANT)
+    Q_PROPERTY(bool linkPreviewsEnabled READ linkPreviewsEnabled CONSTANT)
+    Q_PROPERTY(bool linkPreviewsSupported READ linkPreviewsSupported CONSTANT)
     // ServerConnection::membersStatus — 0 ready, 1 loading, 2 failed. Writable
     // here so tst_memberlist_real can drive the list's empty states (U-4).
     Q_PROPERTY(int membersStatus READ membersStatus WRITE setMembersStatus
@@ -284,8 +297,12 @@ public:
     Q_INVOKABLE void setTimelineAtBottom(bool v) { m_timelineAtBottom = v; }
     Q_INVOKABLE void togglePinnedEvent(const QString& = {}) {}
     Q_INVOKABLE void toggleReaction(const QString& = {}, const QString& = {}) {}
+    Q_INVOKABLE void addReaction(const QString& = {}, const QString& = {}) {}
     Q_INVOKABLE void redactEvent(const QString& = {}, const QString& = {}) {}
-    Q_INVOKABLE void sendMediaMessage(const QString& = {}) {}
+    Q_INVOKABLE QString sendMediaMessage(const QString& = {}, const QString& = {})
+    {
+        return {};
+    }
     Q_INVOKABLE void activateRoomByName(const QString& = {}) {}
     Q_INVOKABLE QString messageLink(const QString& eventId) const
     {
@@ -312,10 +329,41 @@ public:
     {
         return body.toUtf8().size();
     }
-    Q_INVOKABLE void sendTypingNotification(bool) {}
-    Q_INVOKABLE void editMessage(const QString& = {}, const QString& = {}) {}
-    Q_INVOKABLE void replyToMessage(const QString& = {}, const QString& = {}) {}
+    // Zero arguments, as on ServerConnection.
+    Q_INVOKABLE void sendTypingNotification() {}
+    Q_INVOKABLE void editMessage(const QString& = {}, const QString& = {},
+                                 const QString& = {}, const QStringList& = {}) {}
+    Q_INVOKABLE void replyToMessage(const QString& = {}, const QString& = {},
+                                    const QString& = {}, const QStringList& = {}) {}
+    Q_INVOKABLE void sendThreadReply(const QString& = {}, const QString& = {},
+                                     const QString& = {}, const QStringList& = {}) {}
     Q_INVOKABLE void createDirectMessage(const QString& = {}) {}
+    Q_INVOKABLE QVariantMap editLastMessageWithSed(const QString&)
+    {
+        return {{QStringLiteral("isSed"), false}};
+    }
+    Q_INVOKABLE bool canEditMessage(const QString& = {}) const { return true; }
+    Q_INVOKABLE void retryLocalEcho(const QString& = {}) {}
+    Q_INVOKABLE void cancelMediaUpload(const QString& = {}) {}
+    Q_INVOKABLE bool isEventPinned(const QString& = {}, const QString& = {}) const
+    {
+        return false;
+    }
+    Q_INVOKABLE bool canManageMessages(const QString& = {}) const { return false; }
+    Q_INVOKABLE bool isDirectRoom(const QString& = {}) const { return false; }
+    Q_INVOKABLE QVariantList directRooms() const { return {}; }
+    Q_INVOKABLE void forwardMessage(const QString& = {}, const QString& = {}) {}
+    Q_INVOKABLE bool requestLinkPreview(const QString& = {}) { return false; }
+    Q_INVOKABLE QVariantMap linkPreview(const QString& = {}) const
+    {
+        return {{QStringLiteral("state"), QStringLiteral("none")}};
+    }
+    Q_INVOKABLE void openMediaExternally(const QString& = {}, bool = false,
+                                         const QString& = {}) {}
+    int pinnedGeneration() const { return 0; }
+    double maxUploadBytes() const { return 50.0 * 1024 * 1024; }
+    bool linkPreviewsEnabled() const { return false; }
+    bool linkPreviewsSupported() const { return false; }
 
     // The three the composer's send path can land on. Recorded, because
     // "pressing the shipped control reaches the shipped send" is the whole
@@ -328,7 +376,7 @@ public:
         emit sendRecordChanged();
     }
     Q_INVOKABLE void sendRichMessage(const QString& body, const QString&,
-                                     const QVariantList& = {})
+                                     const QStringList& = {})
     {
         ++m_sendCalls;
         m_lastSentBody = body;
@@ -385,7 +433,7 @@ public:
 
     // ── member list ─────────────────────────────────────────────────────
 
-    QObject* blockedUsersModel() const { return nullptr; }
+    QObject* blockedUsersModel() const { return m_blocked; }
 
     QString userId() const { return m_userId; }
     void setUserId(const QString& v)
@@ -398,10 +446,10 @@ public:
     int botFlagsGeneration() const { return 0; }
     int mediaTicketEpoch() const { return 0; }
     QVariantList serverRoles() const { return {}; }
-    bool canManageRoles() const { return false; }
-    bool canManageChannel() const { return false; }
-    bool canChangeNickname() const { return false; }
-    bool canManageNicknames() const { return false; }
+    Q_INVOKABLE bool canManageRoles(const QString& = {}) const { return false; }
+    Q_INVOKABLE bool canManageChannel(const QString& = {}) const { return false; }
+    Q_INVOKABLE bool canChangeNickname() const { return false; }
+    Q_INVOKABLE bool canManageNicknames() const { return false; }
 
     // Constants rather than recorders: none of these is what a member-list
     // test is about, and a row whose bindings throw is a row whose
@@ -556,6 +604,7 @@ private:
     int m_sendCalls = 0;
     QString m_lastSentBody;
     MemberListModel* m_members = new MemberListModel(this);
+    BlockedUsersModel* m_blocked = new BlockedUsersModel(this);
     QString m_userId = QStringLiteral("@me:test");
     QHash<QString, QString> m_presence;
     float m_micLevel = 0.0f;
@@ -815,6 +864,9 @@ public slots:
         auto* haptics = new FakeHaptics(this);
         QQmlEngine::setObjectOwnership(haptics, QQmlEngine::CppOwnership);
         engine->rootContext()->setContextProperty("haptics", haptics);
+
+        // src/main.cpp's provider, the real class.
+        engine->addImageProvider(QStringLiteral("tinted"), new TintedIconProvider);
 
         auto* appSettings = new FakeAppSettingsContext(this);
         QQmlEngine::setObjectOwnership(appSettings, QQmlEngine::CppOwnership);

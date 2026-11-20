@@ -1384,6 +1384,7 @@ qt_add_qml_module(bsfchat-lib
         qml/components/SelfRolePicker.qml
         qml/components/ToastHost.qml
         qml/components/VideoPlayerCard.qml
+        qml/components/AudioPlayerCard.qml
         qml/components/LinkPreview.qml
         qml/components/ExternalOpenPrompts.qml
         qml/components/ScreenPickerDialog.qml
@@ -1436,6 +1437,8 @@ qt_add_qml_module(bsfchat-lib
         # MessageInput.qml so tests/qml/tst_uploadtally.qml can pin the rules
         # instead of a C++ transcription of them.
         qml/js/UploadTally.js
+        qml/js/SearchHighlight.js
+        qml/js/LinkExtract.js
         # Row + closed-field label resolution for ThemedComboBox: the one
         # place that knows textRole does not resolve against a QJsonArray
         # Q_PROPERTY (blank Role-overrides dropdown) and that the older

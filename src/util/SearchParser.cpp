@@ -132,4 +132,21 @@ SearchResponse parseSearchResponse(int httpStatus, const QByteArray& body)
     return out;
 }
 
+SearchQuery parseSearchQuery(const QString& text)
+{
+    SearchQuery q;
+    QStringList kept;
+    const QStringList words = text.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    for (const QString& w : words) {
+        if (w.startsWith(QLatin1String("from:"), Qt::CaseInsensitive) && w.size() > 5) {
+            const QString who = w.mid(5);
+            if (!q.fromTokens.contains(who)) q.fromTokens.append(who);
+            continue;
+        }
+        kept.append(w);
+    }
+    q.term = kept.join(QLatin1Char(' ')).trimmed();
+    return q;
+}
+
 } // namespace bsfchat::client

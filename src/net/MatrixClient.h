@@ -4,6 +4,7 @@
 #include <functional>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QHash>
 #include <QPointer>
 #include <QString>
 #include <QJsonArray>
@@ -141,10 +142,15 @@ public:
     // fix is the reverse: the server folds an edit's m.new_content in as the
     // event's current content, so a payload that dropped m.mentions made the
     // original's highlight vanish for anyone loading the room fresh.
-    void editMessage(const QString& roomId, const QString& targetEventId,
-                      const QString& newBody,
-                      const QString& formattedBody = QString(),
-                      const QStringList& mentionedUserIds = {});
+    //
+    // `msgtype` is the ORIGINAL's: an /me edit stays m.emote. A media msgtype
+    // is refused (returns "" and sends nothing) — see msgcontent::edit.
+    // Returns the transaction id, the handle for the edit's local echo.
+    QString editMessage(const QString& roomId, const QString& targetEventId,
+                        const QString& newBody,
+                        const QString& formattedBody = QString(),
+                        const QStringList& mentionedUserIds = {},
+                        const QString& msgtype = QStringLiteral("m.text"));
     // Send a new m.room.message with m.relates_to.m.in_reply_to.event_id
     // pointing at targetEventId. Server needs no special support — it's
     // just content metadata.
@@ -152,7 +158,7 @@ public:
     // A reply is an ordinary new message as far as mentions go, so
     // `m.mentions` here is fully honoured server-side: mention rows, badge and
     // push all fire exactly as they do for a plain send.
-    void replyToMessage(const QString& roomId, const QString& body,
+    QString replyToMessage(const QString& roomId, const QString& body,
                          const QString& targetEventId,
                          const QString& formattedBody = QString(),
                          const QStringList& mentionedUserIds = {});
@@ -160,10 +166,14 @@ public:
     // with rel_type="m.thread" and event_id pointing at the thread
     // root. Clients that don't understand threads see it as a
     // standalone message (acceptable fallback).
-    void sendThreadReply(const QString& roomId, const QString& body,
-                          const QString& threadRootId);
+    // Carries formatted_body and m.mentions like a main-timeline send, so a
+    // mention inside a thread notifies.
+    QString sendThreadReply(const QString& roomId, const QString& body,
+                            const QString& threadRootId,
+                            const QString& formattedBody = QString(),
+                            const QStringList& mentionedUserIds = {});
     // Send an m.room.message with msgtype=m.emote (the /me command).
-    void sendEmote(const QString& roomId, const QString& body);
+    QString sendEmote(const QString& roomId, const QString& body);
     // Send an m.reaction event annotating targetEventId with `emoji`.
     // Server treats it as a normal event and distributes it through /sync;
     // the client aggregates state in MessageModel.
@@ -177,12 +187,16 @@ public:
     // The source{ServerUrl,RoomId,EventId} trio lets us embed a
     // bsfchat://message/... link in the header so recipients can click
     // through to the original message & context.
-    void forwardMessage(const QString& destRoomId, const QString& body,
-                         const QString& sourceChannelName,
-                         const QString& sourceSenderName,
-                         const QString& sourceServerUrl = {},
-                         const QString& sourceRoomId = {},
-                         const QString& sourceEventId = {});
+    // `sourceChannelName` is display-ready ("#general" or a DM's name);
+    // `sourceFormattedBody` is the source row's sanitised markup, if any.
+    // Names are escaped by msgcontent::forward.
+    QString forwardMessage(const QString& destRoomId, const QString& body,
+                           const QString& sourceChannelName,
+                           const QString& sourceSenderName,
+                           const QString& sourceServerUrl = {},
+                           const QString& sourceRoomId = {},
+                           const QString& sourceEventId = {},
+                           const QString& sourceFormattedBody = {});
 
     // Media
     // `uploadId` correlates this upload with its mediaUploaded/
@@ -196,6 +210,12 @@ public:
     // `device` (it is reparented to the reply and freed with it).
     void uploadMedia(const QString& uploadId, QIODevice* device,
                      const QString& contentType, const QString& filename);
+
+    // Abort an upload started with `uploadId`. It then fails through
+    // mediaUploadError ("Upload cancelled"). False when nothing is running.
+    bool cancelMediaUpload(const QString& uploadId);
+    // GET /_matrix/media/v3/config → mediaConfigResult.
+    void getMediaConfig();
 
     // The URL to hand an Image/MediaPlayer for an mxc URI, or "" when there is
     // not yet a ticket for it.
@@ -375,8 +395,11 @@ public:
     // "you typed a funny character".
     //
     // `nextBatch` is the opaque token from a previous page; empty for page one.
+    // `senders` narrows to those user ids (filter.senders; the server
+    // honours it).
     void searchMessages(const QString& searchTerm, int limit,
-                         const QString& nextBatch = QString());
+                         const QString& nextBatch = QString(),
+                         const QStringList& senders = {});
 
     // ── Per-room notification level ───────────────────────────────────────
     //
@@ -557,6 +580,12 @@ signals:
     // which upload the tick belongs to when several run at once.
     void mediaUploadProgress(const QString& filename, double progress);
     void mediaUploadError(const QString& uploadId, const QString& error);
+    // The same tick keyed by the upload's token: two files with one name
+    // used to share a progress row.
+    void mediaUploadProgressById(const QString& uploadId, const QString& filename,
+                                 double progress);
+    // Answer to getMediaConfig: the server's m.upload.size, 0 when unknown.
+    void mediaConfigResult(qint64 maxUploadBytes);
 
     void voiceJoined(const QString& roomId, const QJsonArray& members);
     // Same reply, with the server's session token for this membership.
@@ -773,6 +802,10 @@ private:
     // definition for why the @room sentinel is handled here and not by callers.
     static void applyMentions(nlohmann::json& content,
                                const QStringList& mentionedUserIds);
+    // PUT one m.room.message under a fresh transaction id (shared generator,
+    // msgcontent::nextTxnId) and report it on both signal pairs. Returns the id.
+    QString putRoomMessage(const QString& roomId, const nlohmann::json& content,
+                           QStringView txnPrefix);
 
     // POST /_matrix/media/v3/ticket for one object, feeding the reply back
     // into m_mediaTickets. Driven by MediaTicketCache::mintRequested.
@@ -795,6 +828,8 @@ private:
     // the second of two guards rather than the load-bearing one — but the
     // ordering costs nothing and the failure it prevents is silent.
     QPointer<QNetworkReply> m_syncReply;
+    // Uploads in flight, by token, for cancelMediaUpload.
+    QHash<QString, QPointer<QNetworkReply>> m_uploadReplies;
     QNetworkAccessManager m_nam;
     bsfchat::client::MediaTicketCache m_mediaTickets;
     // See currentSyncLeaves().

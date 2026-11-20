@@ -1,22 +1,42 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtCore
 import BSFChat
 import "../data/EmojiData.js" as EmojiData
 
 Popup {
     id: emojiPicker
 
-    // Cap to viewport on narrow phone screens.
-    width: Math.min(350, (parent ? parent.width : 350) - 24)
-    height: Math.min(400, (parent ? parent.height : 400) - 48)
+    // Cap to the window, not the parent: the composer parents this to its
+    // 28 px smiley button, which made the picker 4 px wide. The overlay is
+    // the window's content area, so this caps on narrow phone screens too.
+    readonly property Item _host: Overlay.overlay
+    width: Math.min(350, (_host ? _host.width : 374) - 24)
+    height: Math.min(400, (_host ? _host.height : 448) - 48)
+    // Keep it inside the window wherever the opener positions it.
+    margins: 8
     padding: 0
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     signal emojiSelected(string emoji)
 
-    // Recently used emoji storage (in-memory for this session)
+    // Recently used emoji, persisted (QtCore Settings, its own group) so the
+    // "frequent" tab survives a restart. Every picker instance shares it.
     property var recentEmoji: []
+    Settings {
+        id: recentStore
+        category: "EmojiPicker"
+        property string recentJson: "[]"
+    }
+    Component.onCompleted: {
+        try {
+            var r = JSON.parse(recentStore.recentJson);
+            if (Array.isArray(r)) recentEmoji = r.filter(function(e) {
+                return e && typeof e.emoji === "string";
+            }).slice(0, maxRecent);
+        } catch (e) { recentEmoji = []; }
+    }
     property int maxRecent: 20
     property string currentCategory: recentEmoji.length > 0 ? "frequent" : "people"
     property string searchQuery: ""
@@ -411,6 +431,7 @@ Popup {
             filtered = filtered.slice(0, maxRecent);
         }
         recentEmoji = filtered;
+        recentStore.recentJson = JSON.stringify(filtered);
     }
 
     function _focusGrid() {

@@ -3,6 +3,8 @@
 #include <QStringList>
 #include <QVector>
 
+#include <algorithm>
+
 namespace bsfchat::client {
 namespace {
 
@@ -419,6 +421,13 @@ QString sanitizeHtml(const QString& html)
             // Inside a <pre> the block already carries the background.
             if (inside("pre")) out += QLatin1String("<code>");
             else out += QLatin1String("<code style=\"") + QLatin1String(kCodeStyle) + QLatin1String("\">");
+        } else if (name == QLatin1String("span")
+                   && std::any_of(tag.attrs.cbegin(), tag.attrs.cend(), [](const Attr& a) {
+                          return a.name == QLatin1String("data-mx-spoiler");
+                      })) {
+            // The spoiler marker is the one attribute kept, in a fixed form
+            // and with no value (the reason is not shown).
+            out += QLatin1String(kSpoilerOpen);
         } else if (name == QLatin1String("blockquote")) {
             out += QLatin1String("<blockquote style=\"") + QLatin1String(kQuoteStyle)
                  + QLatin1String("\">");
@@ -430,6 +439,101 @@ QString sanitizeHtml(const QString& html)
     flushText(n);
 
     while (!open.isEmpty()) out += QLatin1String("</") + open.takeLast() + QLatin1Char('>');
+    return out;
+}
+
+namespace {
+
+// Index just past the </span> closing the span opened at `open` (whose '<' is
+// at `open`), in sanitised markup — balanced, canonical tags only — or -1.
+int matchingSpanEnd(const QString& html, int open)
+{
+    int depth = 0;
+    int i = open;
+    const int n = html.size();
+    while (i < n) {
+        const int lt = html.indexOf(QLatin1Char('<'), i);
+        if (lt < 0) return -1;
+        const int gt = html.indexOf(QLatin1Char('>'), lt);
+        if (gt < 0) return -1;
+        const QStringView tag = QStringView(html).mid(lt, gt - lt + 1);
+        if (tag.startsWith(QLatin1String("<span"))) ++depth;
+        else if (tag == QLatin1String("</span>") && --depth == 0) return gt + 1;
+        i = gt + 1;
+    }
+    return -1;
+}
+
+// Visible characters in a run of markup: tags skipped, an entity counts once.
+int visibleLength(QStringView html)
+{
+    int count = 0;
+    for (int i = 0; i < html.size(); ++i) {
+        const QChar c = html[i];
+        if (c == QLatin1Char('<')) {
+            const int gt = html.indexOf(QLatin1Char('>'), i);
+            if (gt < 0) break;
+            i = gt;
+            continue;
+        }
+        if (c == QLatin1Char('&')) {
+            const int semi = html.indexOf(QLatin1Char(';'), i);
+            if (semi > i) i = semi;
+        }
+        if (!c.isLowSurrogate()) ++count;
+    }
+    return count;
+}
+
+// Whether position `at` in sanitised markup is inside an <a>.
+bool insideAnchor(const QString& html, int at)
+{
+    const int open = html.lastIndexOf(QLatin1String("<a "), at);
+    if (open < 0) return false;
+    const int close = html.lastIndexOf(QLatin1String("</a>"), at);
+    return close < open;
+}
+
+} // namespace
+
+QString hideSpoilers(const QString& sanitized)
+{
+    const QLatin1String opener(kSpoilerOpen);
+    if (!sanitized.contains(opener)) return sanitized;
+    QString out;
+    out.reserve(sanitized.size());
+    int pos = 0;
+    while (true) {
+        const int at = sanitized.indexOf(opener, pos);
+        if (at < 0) break;
+        const int end = matchingSpanEnd(sanitized, at);
+        if (end < 0) break; // not well-formed: leave the rest to revealSpoilers' treatment
+        out += QStringView(sanitized).mid(pos, at - pos);
+        const QStringView inner =
+            QStringView(sanitized).mid(at + opener.size(), end - at - opener.size() - 7);
+        const int blocks = std::clamp(visibleLength(inner), 3, 24);
+        const QString bar(blocks, QChar(0x2588));
+        const QString style = QStringLiteral("color:#4e5058; text-decoration:none;");
+        if (insideAnchor(sanitized, at)) {
+            out += QStringLiteral("<span style=\"%1\">%2</span>").arg(style, bar);
+        } else {
+            out += QStringLiteral("<a href=\"%1\" style=\"%2\">%3</a>")
+                       .arg(QLatin1String(kSpoilerHref), style, bar);
+        }
+        pos = end;
+    }
+    out += QStringView(sanitized).mid(pos);
+    // Anything left that could not be matched is still not shown openly.
+    out.replace(opener, QStringLiteral("<span style=\"color:#4e5058; background-color:#4e5058;\">"));
+    return out;
+}
+
+QString revealSpoilers(const QString& sanitized)
+{
+    const QLatin1String opener(kSpoilerOpen);
+    if (!sanitized.contains(opener)) return sanitized;
+    QString out = sanitized;
+    out.replace(opener, QStringLiteral("<span style=\"background-color:#3f4147;\">"));
     return out;
 }
 

@@ -29,8 +29,11 @@ Rectangle {
     property string ogSiteName: ""
 
     readonly property var _server: serverManager.activeServer
-    readonly property bool _enabled: appSettings.showLinkPreviews
-        && !!_server && _server.linkPreviewsSupported
+    // The connection's cache state, not the setting: the setting can flip
+    // before the cache does, and a request made in between is a no-op that
+    // read as "no preview" — so re-enabling never brought the cards back.
+    readonly property bool _enabled: !!_server && _server.linkPreviewsEnabled
+        && _server.linkPreviewsSupported
 
     // For known video platforms (YouTube for now) we use a landscape
     // "video embed" layout with a hero thumbnail; the thumbnail is the
@@ -107,6 +110,21 @@ Rectangle {
         ? preview.ogDescription
         : qsTr("Opens the link in your browser")
     Accessible.onPressAction: linkOpener.open(preview.url)
+    // Reachable from the keyboard: Tab to the card, Return/Space opens it.
+    activeFocusOnTab: visible
+    Keys.onReturnPressed: linkOpener.open(preview.url)
+    Keys.onEnterPressed: linkOpener.open(preview.url)
+    Keys.onSpacePressed: linkOpener.open(preview.url)
+    Rectangle {
+        anchors.fill: parent
+        z: 10
+        visible: preview.activeFocus
+        color: "transparent"
+        radius: parent.radius
+        border.width: 2
+        border.color: Theme.accent
+        Accessible.ignored: true
+    }
 
     // Left accent stripe — mirrors the reply-preamble chrome so
     // "quoted content" reads consistently whether it's another
@@ -367,6 +385,11 @@ Rectangle {
         ignoreUnknownSignals: true
         function onLinkPreviewResolved(u) {
             if (u === String(preview.url)) preview._load();
+        }
+        // A thumbnail that failed (usually an expired ticket) gets another
+        // try once a fresh ticket exists, instead of staying hidden.
+        function onMediaTicketEpochChanged() {
+            preview._imageFailed = false;
         }
     }
 

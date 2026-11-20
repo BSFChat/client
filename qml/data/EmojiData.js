@@ -795,3 +795,53 @@ function search(query) {
     var q = query.toLowerCase();
     return emojiData.filter(function(e) { return e.name.indexOf(q) !== -1; });
 }
+
+// ── :shortcode: completion (MessageInput) ─────────────────────────────
+//
+// A shortcode is the emoji's name with spaces as underscores
+// (":thumbs_up:"), plus the handful of short forms people type from other
+// chat apps. Matches that START with the typed code come first, then ones
+// that merely contain it.
+var shortcodeAliases = {
+    "+1": "\u{1F44D}", "thumbsup": "\u{1F44D}", "-1": "\u{1F44E}", "thumbsdown": "\u{1F44E}",
+    "smile": "\u{1F604}", "joy": "\u{1F602}", "heart": "❤️", "fire": "\u{1F525}",
+    "tada": "\u{1F389}", "eyes": "\u{1F440}", "wave": "\u{1F44B}", "pray": "\u{1F64F}",
+    "ok": "\u{1F44C}", "laughing": "\u{1F606}", "cry": "\u{1F622}", "thinking": "\u{1F914}"
+};
+
+function shortcodeFor(e) {
+    return e.name.toLowerCase().replace(/[^a-z0-9+-]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+// [{ emoji, code }], at most `max`, for the typed code (without colons).
+function shortcodeMatches(typed, max) {
+    var q = String(typed || "").toLowerCase();
+    if (q.length < 2) return [];
+    var starts = [], contains = [], seen = {};
+    for (var a in shortcodeAliases) {
+        if (a.indexOf(q) === 0 && !seen[shortcodeAliases[a]]) {
+            seen[shortcodeAliases[a]] = true;
+            starts.push({ emoji: shortcodeAliases[a], code: a });
+        }
+    }
+    for (var i = 0; i < emojiData.length; ++i) {
+        var e = emojiData[i];
+        if (seen[e.emoji]) continue;
+        var code = shortcodeFor(e);
+        var at = code.indexOf(q);
+        if (at < 0) continue;
+        seen[e.emoji] = true;
+        (at === 0 ? starts : contains).push({ emoji: e.emoji, code: code });
+        if (starts.length >= max) break;
+    }
+    return starts.concat(contains).slice(0, max);
+}
+
+// The emoji for an exact code, or "".
+function emojiForShortcode(code) {
+    var q = String(code || "").toLowerCase();
+    if (shortcodeAliases[q]) return shortcodeAliases[q];
+    for (var i = 0; i < emojiData.length; ++i)
+        if (shortcodeFor(emojiData[i]) === q) return emojiData[i].emoji;
+    return "";
+}

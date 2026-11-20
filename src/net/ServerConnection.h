@@ -32,6 +32,7 @@
 // (CallSignal is a plain value type), so it is safe in non-voice builds
 // too — the session runs there as well; it simply has no transport to
 // start. See src/net/VoiceSession.h.
+#include "core/SharePolicy.h"
 #include "net/DeactivateFlow.h"
 #include "net/DirectRooms.h"
 #include "net/MatrixFailure.h"
@@ -84,6 +85,10 @@ class ServerConnection : public QObject {
     // endpoint". Previews are then off for the rest of the session — there is
     // no client-side fallback, by design (audit Q-S4).
     Q_PROPERTY(bool linkPreviewsSupported READ linkPreviewsSupported NOTIFY linkPreviewsSupportedChanged)
+    // The cache's own enabled state (follows "Show link previews"). Cards
+    // bind to this, not to the setting, so they re-request only once the
+    // cache will actually fetch.
+    Q_PROPERTY(bool linkPreviewsEnabled READ linkPreviewsEnabled NOTIFY linkPreviewsEnabledChanged)
     Q_PROPERTY(QString userId READ userId NOTIFY userIdChanged)
     // The composer's character... BYTE budget. See messageByteLength() below
     // for why the composer has to count in bytes, and Constants.h for why the
@@ -98,6 +103,11 @@ class ServerConnection : public QObject {
     // strictly an improvement rather than a new failure mode. It must never be
     // set HIGHER than the protocol default for the same reason.
     Q_PROPERTY(int maxMessageBytes READ maxMessageBytes CONSTANT)
+    // The largest attachment this server takes: its m.upload.size from
+    // GET /_matrix/media/v3/config when it serves one, else
+    // share::kDefaultMaxUploadBytes (the server's own default). Double, not
+    // qint64, so QML compares it without an int overflow.
+    Q_PROPERTY(double maxUploadBytes READ maxUploadBytes NOTIFY maxUploadBytesChanged)
     Q_PROPERTY(RoomListModel* roomListModel READ roomListModel CONSTANT)
     Q_PROPERTY(MessageModel* messageModel READ messageModel CONSTANT)
     Q_PROPERTY(MemberListModel* memberListModel READ memberListModel CONSTANT)
@@ -247,6 +257,9 @@ class ServerConnection : public QObject {
     // QML bindings should reference this so they re-evaluate whenever the
     // effective permission set could have changed.
     Q_PROPERTY(int permissionsGeneration READ permissionsGeneration NOTIFY permissionsChanged)
+    // Bumped on every roomPinnedEventsChanged; read it in a binding that
+    // calls isEventPinned so the binding re-runs.
+    Q_PROPERTY(int pinnedGeneration READ pinnedGeneration NOTIFY pinnedGenerationChanged)
     // Aggregated list of banned users across every room the sync has
     // surfaced. One entry per user: { userId, displayName, rooms[], reason }.
     // The value comes from m_roomMembers (client-side cache), so it only
@@ -277,6 +290,8 @@ public:
     int maxMessageBytes() const {
         return static_cast<int>(bsfchat::limits::kMaxMessageBodyBytes);
     }
+    double maxUploadBytes() const { return double(m_maxUploadBytes); }
+    int pinnedGeneration() const { return m_pinnedGeneration; }
 
     // UTF-8 bytes in `text`, which is what the server counts and what QML
     // cannot work out for itself.
@@ -498,7 +513,11 @@ public:
     Q_INVOKABLE void sendEmote(const QString& body);
     // Send a threaded reply. The message carries m.relates_to with
     // rel_type=m.thread and event_id=rootEventId. Uses the active room.
-    Q_INVOKABLE void sendThreadReply(const QString& rootEventId, const QString& body);
+    // formattedBody/mentionedUserIds as for sendRichMessage — a mention in a
+    // thread notifies like one in the channel.
+    Q_INVOKABLE void sendThreadReply(const QString& rootEventId, const QString& body,
+                                     const QString& formattedBody = QString(),
+                                     const QStringList& mentionedUserIds = {});
     // Rich variant used when the composer has tracked @mention or #channel
     // tokens. `formattedBody` is the sender-generated HTML (with <a>
     // anchors for mentions/channels); `mentionedUserIds` goes into
@@ -536,7 +555,15 @@ public:
     // Forward the message identified by sourceEventId (in the active room)
     // into destRoomId on this server. Builds the attribution prefix from
     // the message model + RoomListModel.
+    // Confirms with a "Forwarded to …" success toast once the server has it.
     Q_INVOKABLE void forwardMessage(const QString& sourceEventId, const QString& destRoomId);
+    // Re-send a failed local echo the way it was sent (reply, thread, /me),
+    // replacing the failed row with a fresh echo. No-op for an unknown id.
+    Q_INVOKABLE void retryLocalEcho(const QString& localId);
+    // Whether an edit may be sent for `eventId` — own, delivered prose
+    // (m.text/m.notice/m.emote). Media is never editable: an m.replace has
+    // no url/info, and the server would fold it in over the attachment.
+    Q_INVOKABLE bool canEditMessage(const QString& eventId) const;
 
     // Back-pagination. Issues GET /rooms/{id}/messages?from=<prev_batch>&dir=b
     // — as many pages as it takes to add kHistoryMoreTargetRows VISIBLE rows,
@@ -557,6 +584,9 @@ public:
     // user already has a reaction with `emoji` on `targetEventId`, redact it
     // (un-react); otherwise send a new reaction.
     Q_INVOKABLE void toggleReaction(const QString& targetEventId, const QString& emoji);
+    // The picker's verb: react with `emoji`, and do nothing if you already
+    // have. Picking an emoji you had already used used to take it back.
+    Q_INVOKABLE void addReaction(const QString& targetEventId, const QString& emoji);
 
     // Look up a text channel by its display name (case-insensitive) and
     // make it active. No-op if there's no match. Used by the
@@ -604,11 +634,21 @@ public:
     // Safe to call with any event id in the active room — we percent-encode
     // all segments. Returns "" if no active room.
     Q_INVOKABLE QString messageLink(const QString& eventId) const;
-    Q_INVOKABLE void sendMediaMessage(const QString& fileUrl);
+    // Returns the upload's id (the key of mediaUploadProgressed and the
+    // handle for cancelMediaUpload), or "" when a pre-flight check refused it.
+    // `displayName` overrides the name derived from the URL — the share path
+    // passes the provider's DISPLAY_NAME so a content:// upload is not
+    // called "image:1000…".
+    Q_INVOKABLE QString sendMediaMessage(const QString& fileUrl,
+                                         const QString& displayName = QString());
+    // Stop an upload. It then ends through mediaSendFailed ("Upload
+    // cancelled"), so the composer's in-flight count stays right.
+    Q_INVOKABLE void cancelMediaUpload(const QString& uploadId);
     // The Android share target's upload (M-4): sendMediaMessage, but only
     // for a content:// URI — never a path read with this app's permissions.
     // Same mediaSendCompleted/mediaSendFailed contract.
-    Q_INVOKABLE void sendSharedMediaMessage(const QString& uri);
+    Q_INVOKABLE void sendSharedMediaMessage(const QString& uri,
+                                            const QString& displayName = QString());
     Q_INVOKABLE void createRoom(const QString& name, const QString& topic);
     Q_INVOKABLE void joinRoom(const QString& roomIdOrAlias);
     Q_INVOKABLE void leaveRoom(const QString& roomId);
@@ -1103,10 +1143,15 @@ public:
     Q_INVOKABLE bool requestLinkPreview(const QString& url);
     Q_INVOKABLE QVariantMap linkPreview(const QString& url) const;
     bool linkPreviewsSupported() const;
+    bool linkPreviewsEnabled() const;
 
 signals:
+    // An edit's PUT failed; the row is back to its previous text. `body`
+    // is what was typed, so the composer can offer it again.
+    void editSendFailed(const QString& eventId, const QString& body);
     void linkPreviewResolved(QString url);
     void linkPreviewsSupportedChanged();
+    void linkPreviewsEnabledChanged();
     void displayNameChanged();
     void serverNameChanged();
     void serverAvatarUrlChanged();
@@ -1134,6 +1179,10 @@ signals:
     // Forwarded from MatrixClient; QML composer binds to this to show
     // a progress bar while a file attachment is uploading.
     void mediaUploadProgress(const QString& filename, double progress);
+    // Same, keyed by upload id (sendMediaMessage's return value).
+    void mediaUploadProgressed(const QString& uploadId, const QString& filename,
+                               double progress);
+    void maxUploadBytesChanged();
     void maxScreenShareQualityChanged();
     void maxScreenSharePolicyChanged();
     void userIdChanged();
@@ -1272,6 +1321,7 @@ signals:
     void sendFeedback(const QString& text, const QString& kind);
     void roomTypingChanged();
     void roomPinnedEventsChanged(const QString& roomId);
+    void pinnedGenerationChanged();
     void profileFetched(const QString& userId, const QString& displayName, const QString& avatarUrl);
     // Answer to fetchNickname. `nickname` is empty when the user has none, which
     // is how an editor decides whether to offer "Remove nickname".
@@ -1494,6 +1544,7 @@ public:
     // bounded by the roster size rather than growing per event (U-M16).
     QMap<QString, QVector<bsfchat::RoomEvent>> m_roomMembers;
     QMap<QString, QStringList> m_roomPinnedEvents;
+    int m_pinnedGeneration = 0;
     // Whether the timeline view last reported itself parked at the end.
     // Starts true so a room opened and left without the view ever
     // reporting (no rows, model never populated) behaves as before.
@@ -1619,6 +1670,10 @@ public:
     QString m_typingDisplay;
     QTimer* m_typingTimer = nullptr;
     QTimer* m_typingStopTimer = nullptr;
+    // Forwards awaiting the server, by transaction id → "#destination", for
+    // the success toast.
+    QHash<QString, QString> m_pendingForwards;
+    qint64 m_maxUploadBytes = bsfchat::client::share::kDefaultMaxUploadBytes;
     // Per-room typing state. Populated for every joined room's
     // ephemeral typing event, not just the active one, so the sidebar
     // can surface a quiet indicator on non-active channels where
@@ -1674,6 +1729,8 @@ public:
     // term; a response naming anything else is stale and dropped (the search box
     // fires per keystroke and replies can complete out of order).
     QString m_searchTerm;
+    // from: names that matched no known user; hits are filtered on them.
+    QStringList m_searchSenderNames;
     // @mxid → display name for a search hit, falling back to the localpart.
     // Search spans rooms, so MemberListModel (active room only) can't serve it.
     QString displayNameForSender(const QString& userId) const;

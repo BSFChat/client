@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import QtQuick.Window
 import BSFChat
 import "../js/PlaybackMath.js" as PlaybackMath
+import "../js/LinkExtract.js" as LinkExtract
 
 Item {
     id: bubble
@@ -26,6 +27,10 @@ Item {
     property bool senderIsBot: false
     property string body
     property string formattedBody
+    // formattedBody with spoilers shown; swapped in once the user clicks a
+    // hidden spoiler (model role revealedBody). Per row, not persisted.
+    property string revealedBody: ""
+    property bool spoilersRevealed: false
     // The model's plainBody role: formattedBody is nothing but the escaped
     // body (no markdown, links, mentions or sender formatting), so the body
     // can be shown as plain text without changing a pixel of meaning.
@@ -72,6 +77,18 @@ Item {
     // this client sent in this session — everything that arrived over /sync
     // is on the server by definition.
     property int deliveryState: 0
+    // Transaction id of a row this client sent; the handle for Retry/Discard.
+    property string localId: ""
+    signal retryRequested(string localId)
+    signal discardRequested(string localId)
+    // Edit is offered only on prose this client sent and the server has.
+    // A media row's body is its file name, and an m.replace carries no
+    // url/info, so "editing" an image used to replace it with text (the
+    // server folds m.new_content in as the event's content). No caption
+    // editing either: nothing in this client renders a media caption.
+    readonly property bool canEdit: isOwnMessage && deliveryState === 0
+        && eventId !== ""
+        && (msgtype === "m.text" || msgtype === "m.notice" || msgtype === "m.emote")
 
     signal senderClicked(string userId, string displayName)
     // Emitted when the user clicks a reaction chip (toggle) or picks an
@@ -208,7 +225,7 @@ Item {
     Accessible.focusable: true
     Accessible.focused: bubble.activeFocus
     Accessible.description: bubble.activeFocus && !Theme.isMobile
-        ? (bubble.isOwnMessage
+        ? (bubble.canEdit
            ? qsTr("Return for actions. R to reply, E to edit, Delete to delete, plus to react. Escape returns to the composer.")
            : (bubble.canDelete
               ? qsTr("Return for actions. R to reply, Delete to delete, plus to react. Escape returns to the composer.")
@@ -244,23 +261,9 @@ Item {
         // video) already carry their own preview chrome; a URL buried
         // in an image caption isn't worth fetching.
         if (bubble.msgtype !== "m.text") return [];
-        if (!bubble.body) return [];
-        // Match http(s) URLs anywhere in the body. Stops at whitespace
-        // or closing punctuation commonly seen at the end of a prose
-        // sentence (`.`, `)`, `]`, `!`, `?`, `,`, `"`, `'`).
-        var re = /\bhttps?:\/\/[^\s<>"'()\[\]]+[^\s<>"'()\[\].,!?]/gi;
-        var matches = bubble.body.match(re);
-        if (!matches) return [];
-        // Dedupe + cap.
-        var seen = {};
-        var out = [];
-        for (var i = 0; i < matches.length && out.length < 2; i++) {
-            var u = matches[i];
-            if (seen[u]) continue;
-            seen[u] = true;
-            out.push(u);
-        }
-        return out;
+        // Balanced parentheses stay in the URL (wiki links), prose
+        // punctuation at the end does not — see js/LinkExtract.js.
+        return LinkExtract.previewUrls(bubble.body, 2);
     }
 
     implicitHeight: contentLayout.implicitHeight + (showSender ? Theme.sp.s7 : 2)
@@ -514,14 +517,14 @@ Item {
         }
 
         CtxItem {
-            text: "Reply"
+            text: qsTr("Reply")
             iconName: "reply"
             shortcut: Theme.isMobile ? "" : "R"
             onTriggered: bubble.replyRequested(bubble.eventId, bubble.body,
                                                bubble.senderDisplayName)
         }
         CtxItem {
-            text: "Forward"
+            text: qsTr("Forward")
             iconName: "forward"
             onTriggered: bubble.forwardRequested(bubble.eventId, bubble.body,
                                                  bubble.senderDisplayName)
@@ -531,9 +534,9 @@ Item {
             // to its root; otherwise "Reply in Thread" starts a new
             // thread with this message as the root.
             text: bubble.threadRootId !== ""
-                  ? "Open Thread"
-                  : (bubble.threadReplyCount > 0 ? "Open Thread"
-                                                 : "Reply in Thread")
+                  ? qsTr("Open Thread")
+                  : (bubble.threadReplyCount > 0 ? qsTr("Open Thread")
+                                                 : qsTr("Reply in Thread"))
             iconName: "forward"
             onTriggered: {
                 var target = bubble.threadRootId !== ""
@@ -542,10 +545,10 @@ Item {
             }
         }
         CtxItem {
-            text: "Edit"
+            text: qsTr("Edit")
             iconName: "edit"
             shortcut: Theme.isMobile ? "" : "E"
-            visible: bubble.isOwnMessage
+            visible: bubble.canEdit
             onTriggered: bubble.editRequested(bubble.eventId, bubble.body)
         }
 
@@ -558,7 +561,7 @@ Item {
         }
 
         CtxItem {
-            text: "Show edit history"
+            text: qsTr("Show edit history")
             iconName: "edit"
             visible: bubble.edited
             onTriggered: bubble.editHistoryRequested(bubble.eventId)
@@ -569,13 +572,13 @@ Item {
         // hover bar; we show this on both platforms so the context
         // menu is a complete surface.
         CtxItem {
-            text: "Add reaction"
+            text: qsTr("Add reaction")
             iconName: "smile-plus"
             shortcut: Theme.isMobile ? "" : "+"
             onTriggered: bubble.openReactPicker()
         }
         CtxItem {
-            text: "Copy text"
+            text: qsTr("Copy text")
             iconName: "copy"
             onTriggered: {
                 if (serverManager) serverManager.copyToClipboard(bubble.body);
@@ -587,13 +590,13 @@ Item {
         // a sheet with the message body inside a selectable TextEdit
         // so native copy/share gestures work.
         CtxItem {
-            text: "Select text"
+            text: qsTr("Select text")
             iconName: "annotate"
             visible: Theme.isMobile
             onTriggered: bubble.openTextSelectionSheet()
         }
         CtxItem {
-            text: "Copy message link"
+            text: qsTr("Copy message link")
             iconName: "link"
             onTriggered: bubble.copyLinkRequested(bubble.eventId)
         }
@@ -601,9 +604,11 @@ Item {
         CtxItem {
             text: {
                 var s = serverManager.activeServer;
-                if (s && s.isEventPinned(s.activeRoomId, bubble.eventId))
-                    return "Unpin message";
-                return "Pin message";
+                // pinnedGeneration is the NOTIFY isEventPinned lacks.
+                if (s && s.pinnedGeneration >= 0
+                    && s.isEventPinned(s.activeRoomId, bubble.eventId))
+                    return qsTr("Unpin message");
+                return qsTr("Pin message");
             }
             iconName: "pin"
             enabled: {
@@ -631,7 +636,7 @@ Item {
         // which is the only case the server would happily accept and no
         // administrator could act on.
         CtxItem {
-            text: "Report message…"
+            text: qsTr("Report message…")
             iconName: "bolt"
             visible: !bubble.senderIsSelf
             onTriggered: Window.window.openReportDialog(
@@ -641,7 +646,7 @@ Item {
         }
 
         CtxItem {
-            text: "Delete message"
+            text: qsTr("Delete message")
             iconName: "x"
             shortcut: Theme.isMobile ? "" : "Del"
             labelColor: Theme.danger
@@ -676,13 +681,13 @@ Item {
         }
 
         CtxItem {
-            text: "View profile"
+            text: qsTr("View profile")
             iconName: "at"
             onTriggered: bubble.senderClicked(bubble.sender,
                                               bubble.senderDisplayName)
         }
         CtxItem {
-            text: "Copy user ID"
+            text: qsTr("Copy user ID")
             iconName: "copy"
             onTriggered: {
                 if (serverManager) serverManager.copyToClipboard(bubble.sender);
@@ -718,7 +723,7 @@ Item {
             }
         }
         CtxItem {
-            text: "Report user…"
+            text: qsTr("Report user…")
             iconName: "bolt"
             visible: !userContextMenu.isSelfUser
             onTriggered: Window.window.openReportDialog(
@@ -734,7 +739,7 @@ Item {
             }
         }
         CtxItem {
-            text: "Manage roles…"
+            text: qsTr("Manage roles…")
             iconName: "shield"
             visible: userContextMenu.canManageRoles
             onTriggered: Window.window.openRoleAssignment(
@@ -812,7 +817,9 @@ Item {
         // The per-button MouseAreas OR'd in (through `anyButtonHovered`)
         // keep the bar up while the cursor has travelled off the bubble
         // onto a button itself.
-        active: bubble.msgtype === "m.text" && (bubble.bubbleHovered
+        // Every message kind, not just m.text: an image or a file can be
+        // replied to, reacted to and forwarded just the same.
+        active: bubble.eventId !== "" && (bubble.bubbleHovered
                  || (hoverActionsLoader.item !== null
                      && hoverActionsLoader.item.anyButtonHovered === true))
         sourceComponent: hoverActionsComponent
@@ -943,7 +950,7 @@ Item {
             }
         }
 
-        // Edit — only on your own messages.
+        // Edit — only on your own prose messages (see canEdit).
         Rectangle {
             width: 28; height: 24
             radius: Theme.r1
@@ -953,7 +960,7 @@ Item {
             color: editMouse.containsMouse ? Theme.bg3 : Theme.bg1
             border.color: Theme.line
             border.width: 1
-            visible: bubble.isOwnMessage
+            visible: bubble.canEdit
             Icon {
                 anchors.centerIn: parent
                 name: "edit"
@@ -1153,14 +1160,16 @@ Item {
                         var today = new Date();
                         var yesterday = new Date();
                         yesterday.setDate(yesterday.getDate() - 1);
-                        var timeStr = date.toLocaleTimeString(Qt.locale(), "HH:mm");
+                        // The user's locale for both halves: MM/dd/yyyy and a
+                        // 24-hour clock were hard-coded.
+                        var timeStr = date.toLocaleTimeString(Qt.locale(), Locale.ShortFormat);
                         if (date.toDateString() === today.toDateString()) {
-                            return "Today at " + timeStr;
+                            return qsTr("Today at %1").arg(timeStr);
                         }
                         if (date.toDateString() === yesterday.toDateString()) {
-                            return "Yesterday at " + timeStr;
+                            return qsTr("Yesterday at %1").arg(timeStr);
                         }
-                        return date.toLocaleDateString(Qt.locale(), "MM/dd/yyyy") + " " + timeStr;
+                        return date.toLocaleDateString(Qt.locale(), Locale.ShortFormat) + " " + timeStr;
                     }
                     Accessible.ignored: true
                     font.family: Theme.fontMono
@@ -1225,8 +1234,11 @@ Item {
                     Text {
                         textFormat: Text.PlainText
                         text: bubble.replyToSender !== ""
-                              ? bubble.replyToSender : "unknown"
+                              ? bubble.replyToSender : qsTr("unknown")
                         Accessible.ignored: true
+                        // A long display name must not push the quote away.
+                        elide: Text.ElideRight
+                        Layout.maximumWidth: 180
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm
                         font.weight: Theme.fontWeight.semibold
@@ -1237,7 +1249,7 @@ Item {
                         textFormat: Text.PlainText
                         text: bubble.replyPreview !== ""
                               ? bubble.replyPreview
-                              : "(message unavailable)"
+                              : qsTr("(message unavailable)")
                         Accessible.ignored: true
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm
@@ -1287,6 +1299,22 @@ Item {
                     fileSize: bubble.mediaFileSize
                     mediaWidth: bubble.mediaWidth
                     mediaHeight: bubble.mediaHeight
+                }
+            }
+
+            // Inline player for m.audio messages. Keyed on mediaUrl like the
+            // video card: MediaPlayer needs a URL. The card is a fixed-height
+            // strip, so reserving from the item doesn't move the row later
+            // than a file card would.
+            Loader {
+                Layout.preferredHeight: item ? item.implicitHeight : 0
+                active: bubble.msgtype === "m.audio" && bubble.mediaUrl !== ""
+                sourceComponent: AudioPlayerCard {
+                    source: bubble.mediaUrl
+                    sourceMxc: bubble.mediaMxc
+                    eventId: bubble.eventId
+                    fileName: bubble.mediaFileName
+                    fileSize: bubble.mediaFileSize
                 }
             }
 
@@ -1390,7 +1418,7 @@ Item {
                                     Text {
                                         Layout.alignment: Qt.AlignHCenter
                                         Accessible.ignored: true
-                                        text: "Loading…"
+                                        text: qsTr("Loading…")
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.sm
                                         color: Theme.fg2
@@ -1439,7 +1467,7 @@ Item {
                                     Text {
                                         Layout.alignment: Qt.AlignHCenter
                                         Accessible.ignored: true
-                                        text: "Couldn't load image"
+                                        text: qsTr("Couldn't load image")
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.sm
                                         font.weight: Theme.fontWeight.semibold
@@ -1448,7 +1476,9 @@ Item {
                                     Text {
                                         Layout.alignment: Qt.AlignHCenter
                                         Accessible.ignored: true
-                                        text: "Middle-click to open it"
+                                        // No middle button on a phone.
+                                        text: Theme.isMobile ? qsTr("Tap to open it")
+                                                             : qsTr("Middle-click to open it")
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.xs
                                         color: Theme.fg3
@@ -1688,7 +1718,9 @@ Item {
                                                && bubble.msgtype !== "m.emote"
                 text: {
                     if (_plain) return bubble.body;
-                    var base = bubble.formattedBody !== "" ? bubble.formattedBody : bubble.body;
+                    var fb = bubble.spoilersRevealed && bubble.revealedBody !== ""
+                        ? bubble.revealedBody : bubble.formattedBody;
+                    var base = fb !== "" ? fb : bubble.body;
                     var suffix = '<span style="color:#8e9297;font-size:small"> (edited)</span>';
                     // m.emote ("/me foo") renders as "<sender> foo" in italics
                     // and with accent colour, same convention Element / Fluffy
@@ -1703,7 +1735,7 @@ Item {
                             .replace(/>/g, "&gt;");
                         var out = '<span style="color:' + Theme.accent
                             + ';font-weight:600">* ' + senderEsc
-                            + '</span> <i>' + bubble.formattedBody + '</i>';
+                            + '</span> <i>' + fb + '</i>';
                         if (bubble.edited) out += suffix;
                         return out;
                     }
@@ -1731,7 +1763,9 @@ Item {
                 onLinkActivated: (link) => {
                     // Intercept internal scheme; everything else goes through
                     // LinkOpener (scheme allowlist + spoofed-text check).
-                    if (link.indexOf("bsfchat://channel/") === 0) {
+                    if (link === "bsfchat://spoiler") {
+                        bubble.spoilersRevealed = true;
+                    } else if (link.indexOf("bsfchat://channel/") === 0) {
                         bubble.channelLinkClicked(
                             link.substring("bsfchat://channel/".length));
                     } else if (link.indexOf("bsfchat://message/") === 0) {
@@ -1899,6 +1933,54 @@ Item {
                 }
 
             }
+
+            // Thread indicator: "3 replies" under a thread root, opening the
+            // thread. There was none — a thread was findable only through
+            // the context menu of the right message.
+            Rectangle {
+                id: threadChip
+                readonly property bool shown: bubble.threadReplyCount > 0
+                    && (bubble.threadRootId === "" || bubble.threadRootId === bubble.eventId)
+                visible: shown
+                Layout.topMargin: shown ? 4 : 0
+                Layout.preferredHeight: shown ? 24 : 0
+                Layout.preferredWidth: threadChipRow.implicitWidth + 16
+                radius: Theme.r5
+                color: threadChipMouse.containsMouse || activeFocus ? Theme.bg3 : "transparent"
+                border.width: 1
+                border.color: threadChipMouse.containsMouse || activeFocus ? Theme.accent : Theme.line
+                activeFocusOnTab: shown
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("%n reply(s) in thread", "", bubble.threadReplyCount)
+                Accessible.description: qsTr("Open the thread")
+                Accessible.onPressAction: bubble.threadOpenRequested(bubble.eventId)
+                Keys.onReturnPressed: bubble.threadOpenRequested(bubble.eventId)
+                Keys.onSpacePressed: bubble.threadOpenRequested(bubble.eventId)
+                Row {
+                    id: threadChipRow
+                    anchors.centerIn: parent
+                    spacing: 6
+                    Icon { name: "forward"; size: 12; color: Theme.accent
+                           anchors.verticalCenter: parent.verticalCenter }
+                    Text {
+                        textFormat: Text.PlainText
+                        text: qsTr("%n reply(s)", "", bubble.threadReplyCount)
+                        Accessible.ignored: true
+                        color: Theme.accent
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fontSize.xs
+                        font.weight: Theme.fontWeight.semibold
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+                MouseArea {
+                    id: threadChipMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: bubble.threadOpenRequested(bubble.eventId)
+                }
+            }
         }
     }
 
@@ -1952,7 +2034,7 @@ Item {
             Text {
                 Accessible.role: Accessible.StaticText
                 Accessible.name: qsTr("Select text")
-                text: "Select text"
+                text: qsTr("Select text")
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.md
                 font.weight: Theme.fontWeight.semibold
@@ -1987,7 +2069,7 @@ Item {
                 // obvious on first use. An explicit button gives
                 // new users a clear affordance.
                 Button {
-                    text: "Copy"
+                    text: qsTr("Copy")
                     Accessible.role: Accessible.Button
                     Accessible.name: qsTr("Copy")
                     Accessible.description: qsTr("Copies the selection, or the whole message if nothing is selected")
@@ -2023,7 +2105,7 @@ Item {
 
                 Button {
                     id: selectionDoneButton
-                    text: "Done"
+                    text: qsTr("Done")
                     Accessible.role: Accessible.Button
                     Accessible.name: qsTr("Done")
                     Accessible.description: qsTr("Closes the text selection sheet")
@@ -2064,16 +2146,58 @@ Item {
         Accessible.ignored: true
     }
 
-    Text {
+    // "Not sent · Retry · Discard". Retry re-sends the row the way it was
+    // sent (reply, thread, /me); Discard drops it. Both used to be missing,
+    // so a failed message sat there with no way to send or remove it.
+    Row {
         visible: bubble.deliveryState === 2
         anchors.right: parent.right
         anchors.rightMargin: Theme.sp.s3
         anchors.top: parent.top
-        text: qsTr("Not sent")
-        // Already the last clause of the bubble's sentence.
-        Accessible.ignored: true
-        color: Theme.danger
-        font.family: Theme.fontSans
-        font.pixelSize: Theme.fontSize.xs
+        spacing: Theme.sp.s3
+        z: 2
+        Text {
+            text: qsTr("Not sent")
+            // Already the last clause of the bubble's sentence.
+            Accessible.ignored: true
+            color: Theme.danger
+            font.family: Theme.fontSans
+            font.pixelSize: Theme.fontSize.xs
+            anchors.verticalCenter: parent.verticalCenter
+        }
+        Repeater {
+            model: bubble.localId !== "" ? [
+                { label: qsTr("Retry"), retry: true },
+                { label: qsTr("Discard"), retry: false }
+            ] : []
+            delegate: Text {
+                required property var modelData
+                text: modelData.label
+                color: echoActionMouse.containsMouse || activeFocus ? Theme.fg0 : Theme.accent
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontSize.xs
+                font.underline: echoActionMouse.containsMouse || activeFocus
+                anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+                activeFocusOnTab: true
+                Accessible.role: Accessible.Button
+                Accessible.name: modelData.retry ? qsTr("Retry sending")
+                                                 : qsTr("Discard unsent message")
+                Accessible.onPressAction: _fire()
+                Keys.onReturnPressed: _fire()
+                Keys.onSpacePressed: _fire()
+                function _fire() {
+                    if (modelData.retry) bubble.retryRequested(bubble.localId);
+                    else bubble.discardRequested(bubble.localId);
+                }
+                MouseArea {
+                    id: echoActionMouse
+                    anchors.fill: parent
+                    anchors.margins: Theme.isMobile ? -10 : -2
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: parent._fire()
+                }
+            }
+        }
     }
 }

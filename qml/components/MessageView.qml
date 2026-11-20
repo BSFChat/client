@@ -124,6 +124,7 @@ Rectangle {
         onDropped: (drop) => {
             if (!canUploadHere) { drop.accepted = false; return; }
             var uploaded = 0;
+            var webLinks = [];
             for (var i = 0; i < drop.urls.length; ++i) {
                 var u = drop.urls[i];
                 if (!u) continue;
@@ -134,7 +135,19 @@ Rectangle {
                 if (s.indexOf("file://") === 0) {
                     serverManager.activeServer.sendMediaMessage(s);
                     uploaded++;
+                } else if (/^https?:\/\//i.test(s)) {
+                    // A link dragged from a browser: it was silently
+                    // ignored. Put it in the composer as text instead.
+                    webLinks.push(s);
                 }
+            }
+            if (webLinks.length > 0 && messageInput && messageInput.inputArea) {
+                var ta = messageInput.inputArea;
+                var pos = ta.cursorPosition;
+                var before = ta.text.substring(0, pos);
+                var sep = before.length > 0 && !/\s$/.test(before) ? " " : "";
+                ta.insert(pos, sep + webLinks.join(" "));
+                ta.forceActiveFocus();
             }
             // One per file, so the composer stays locked until the LAST
             // of a multi-file drop lands (U-H6). Counting after the sends
@@ -156,7 +169,7 @@ Rectangle {
             // mixing a readable and an unreadable file counts both, and both
             // report back. tests/test_composer_upload_lock.cpp holds this.
             for (var j = 0; j < uploaded; ++j) messageInput.noteUploadStarted();
-            drop.accepted = uploaded > 0;
+            drop.accepted = uploaded > 0 || webLinks.length > 0;
         }
     }
 
@@ -198,7 +211,7 @@ Rectangle {
             }
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text: "Drop to upload"
+                text: qsTr("Drop to upload")
                 color: Theme.fg0
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.lg
@@ -208,9 +221,14 @@ Rectangle {
             Text {
                 Layout.alignment: Qt.AlignHCenter
                 textFormat: Text.PlainText
-                text: "Files dropped here are sent to #"
-                    + (serverManager.activeServer
-                        ? serverManager.activeServer.activeRoomName : "")
+                // A DM is named after the person, not "#name".
+                text: {
+                    var s = serverManager.activeServer;
+                    if (!s) return "";
+                    return s.isDirectRoom && s.isDirectRoom(s.activeRoomId)
+                        ? qsTr("Files dropped here are sent to %1").arg(s.activeRoomName)
+                        : qsTr("Files dropped here are sent to #%1").arg(s.activeRoomName);
+                }
                 color: Theme.fg2
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
@@ -1121,6 +1139,16 @@ Rectangle {
                         }
                         console.warn("MessageView: target event not in loaded history:",
                                      eventId);
+                        // Say so rather than doing nothing: either the budget
+                        // ran out or the start of the room was reached.
+                        var w = messageListView.Window.window;
+                        if (w && w.toastInfo) {
+                            w.toastInfo(mm.hasMoreHistory
+                                ? qsTr("That message is too far back — open search to find it.")
+                                : qsTr("That message isn't in this channel any more."));
+                        }
+                        _jumpPendingEventId = "";
+                        _jumpAttemptsLeft = 10;
                         return false;
                     }
                     // Disable auto-scroll-to-bottom so the jump sticks even if
@@ -1210,8 +1238,16 @@ Rectangle {
                 function _kbMove(fromIdx, delta) {
                     var target = fromIdx + delta;
                     if (target < 0) {
+                        // A page jump from row 3 lands on row 0 first; only
+                        // a move FROM the top asks for more (it used to stall
+                        // on row 3 and load instead).
+                        if (fromIdx > 0) { _kbFocusIndex(0); return; }
                         // Off the top of what is loaded: ask for more, stay put.
                         _maybeLoadOlder();
+                        return;
+                    }
+                    if (target >= count && fromIdx < count - 1) {
+                        _kbFocusIndex(count - 1);
                         return;
                     }
                     if (target >= count) return;
@@ -1274,7 +1310,7 @@ Rectangle {
                                               bubble.senderDisplayName);
                         return;
                     }
-                    if (mods === 0 && k === Qt.Key_E && bubble.isOwnMessage) {
+                    if (mods === 0 && k === Qt.Key_E && bubble.canEdit) {
                         bubble.editRequested(bubble.eventId, bubble.body);
                         return;
                     }
@@ -1779,6 +1815,7 @@ Rectangle {
                         senderIsBot: model.senderIsBot === true
                         body: model.body
                         formattedBody: model.formattedBody
+                        revealedBody: model.revealedBody || ""
                         plainBody: model.plainBody === true
                         timestamp: model.timestamp
                         msgtype: model.msgtype
@@ -1796,6 +1833,15 @@ Rectangle {
                         replyPreview: model.replyPreview || ""
                         reactions: model.reactions || []
                         deliveryState: model.deliveryState || 0
+                        localId: model.localId || ""
+                        onRetryRequested: (lid) => {
+                            if (serverManager.activeServer)
+                                serverManager.activeServer.retryLocalEcho(lid);
+                        }
+                        onDiscardRequested: (lid) => {
+                            var s = serverManager.activeServer;
+                            if (s && s.messageModel) s.messageModel.discardLocalEcho(lid);
+                        }
                         threadRootId: model.threadRootId || ""
                         threadReplyCount: model.threadReplyCount || 0
                         // Row-level mention highlight, so a message naming you is
@@ -2557,8 +2603,9 @@ Rectangle {
             modal: true
             onEmojiSelected: function(emoji) {
                 var target = messageViewRoot.reactPickerEventId;
+                // Add, never toggle: the chip under the message is the toggle.
                 if (target && serverManager.activeServer)
-                    serverManager.activeServer.toggleReaction(target, emoji);
+                    serverManager.activeServer.addReaction(target, emoji);
                 sharedReactPicker.close();
             }
             onClosed: {
@@ -2871,6 +2918,14 @@ Rectangle {
             messageProfileCard.userId = userId;
             messageProfileCard.profileDisplayName = displayName;
             messageProfileCard.open();
+        }
+        // Row actions in the drawer reuse the timeline's picker and confirm.
+        onReactRequested: (eventId) => messageViewRoot.openReactPickerFor(eventId)
+        onDeleteRequested: (eventId, body, senderName) => {
+            deleteConfirm.eventId = eventId;
+            deleteConfirm.preview = (body || "").substring(0, 140);
+            deleteConfirm.senderName = senderName || "";
+            deleteConfirm.open();
         }
     }
 }

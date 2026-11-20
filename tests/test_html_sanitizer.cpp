@@ -341,6 +341,61 @@ private slots:
         QCOMPARE(sanitizeHtml("<b>x<a href=\"y"), QStringLiteral("<b>x&lt;a href=\"y</b>"));
     }
 
+    // ── Spoilers (/spoiler) ──────────────────────────────────────────
+
+    void theSpoilerMarkerIsTheOneAttributeKept()
+    {
+        using bsfchat::client::kSpoilerOpen;
+        // Any value (the reason) is dropped; the marker is canonical.
+        QCOMPARE(sanitizeHtml("<span data-mx-spoiler>x</span>"),
+                 QString::fromLatin1(kSpoilerOpen) + "x</span>");
+        QCOMPARE(sanitizeHtml("<SPAN DATA-MX-SPOILER=\"why\" style=\"color:red\">x</SPAN>"),
+                 QString::fromLatin1(kSpoilerOpen) + "x</span>");
+        // Other data- attributes still go.
+        QCOMPARE(sanitizeHtml("<span data-mx-color=red>x</span>"), QStringLiteral("<span>x</span>"));
+        // The attribute on another element is not a spoiler.
+        QCOMPARE(sanitizeHtml("<b data-mx-spoiler>x</b>"), QStringLiteral("<b>x</b>"));
+        // And it carries no active content past the rule.
+        verifyNoActiveContent(sanitizeHtml("<span data-mx-spoiler onclick=alert(1)>x</span>"));
+    }
+
+    void hiddenSpoilersDoNotShowTheirText()
+    {
+        using bsfchat::client::hideSpoilers;
+        const QString in = sanitizeHtml("before <span data-mx-spoiler>Snape <b>kills</b> &amp; Dumbledore</span> after");
+        const QString out = hideSpoilers(in);
+        QVERIFY2(!out.contains("Snape") && !out.contains("kills") && !out.contains("Dumbledore"),
+                 qPrintable(out));
+        QVERIFY(out.startsWith("before "));
+        QVERIFY(out.endsWith(" after"));
+        QVERIFY(out.contains("href=\"bsfchat://spoiler\""));
+        QVERIFY(!out.contains("data-mx-spoiler"));
+        // Nested spans close at the right place.
+        const QString nested = hideSpoilers(sanitizeHtml(
+            "<span data-mx-spoiler>a<span>b</span>c</span>tail"));
+        QVERIFY2(nested.endsWith("</a>tail"), qPrintable(nested));
+        QVERIFY(!nested.contains("b</span>"));
+        // Inside a link the block is not a second anchor.
+        const QString inLink = hideSpoilers(sanitizeHtml(
+            "<a href=\"https://x/\">see <span data-mx-spoiler>secret</span></a>"));
+        QCOMPARE(inLink.count("<a "), 1);
+        QVERIFY(!inLink.contains("secret"));
+        // Unterminated input is still never shown openly.
+        QVERIFY(!hideSpoilers(QString::fromLatin1(bsfchat::client::kSpoilerOpen) + "open")
+                     .contains("data-mx-spoiler"));
+        // No spoiler: unchanged.
+        QCOMPARE(hideSpoilers("<b>x</b>"), QStringLiteral("<b>x</b>"));
+    }
+
+    void revealedSpoilersShowTheirText()
+    {
+        using bsfchat::client::revealSpoilers;
+        const QString out = revealSpoilers(sanitizeHtml("<span data-mx-spoiler>Snape</span>"));
+        QVERIFY(out.contains("Snape"));
+        QVERIFY(!out.contains("data-mx-spoiler"));
+        QVERIFY(out.startsWith("<span style="));
+    }
+
     void theHrefRuleOnItsOwn()
     {
         QVERIFY(isAllowedLinkHref("https://x/"));

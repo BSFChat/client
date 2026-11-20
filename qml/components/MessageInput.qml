@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import Qt.labs.platform as Platform
 import BSFChat
 import "../js/UploadTally.js" as UploadTally
+import "../data/EmojiData.js" as EmojiData
 
 // MessageInput is an implicitHeight-driven Rectangle so it can grow the
 // vertical banner strip (when editing) without forcing the parent to
@@ -22,9 +23,12 @@ Rectangle {
     // Editing and replying are mutually exclusive; the size warning stacks
     // under whichever of them is up, because you can be editing a message
     // into being too long.
+    // The upload strip counts too: it was left out, so the composer did not
+    // grow for it and the input row covered the strip.
     readonly property real _bannerHeight:
-        (editingHeader.visible ? editingHeader.height
-                               : (replyHeader.visible ? replyHeader.height : 0))
+        uploadBanner.height
+        + (editingHeader.visible ? editingHeader.height
+                                 : (replyHeader.visible ? replyHeader.height : 0))
         + sizeHeader.height
     implicitHeight: inputRoot._bannerHeight > 0
         ? inputRoot._bannerHeight + inputCore.implicitHeight + 8
@@ -196,6 +200,10 @@ Rectangle {
             for (var k in inputRoot._drafts) d[k] = inputRoot._drafts[k];
             if (inputRoot.editingEventId === "" && inputArea.text.length > 0) {
                 d[prev] = { text: inputArea.text, tokens: inputRoot.mentionTokens };
+            } else if (inputRoot.editingEventId !== "" && inputRoot._preEditDraft
+                       && inputRoot._preEditDraft.text.length > 0) {
+                // Mid-edit: the draft the edit pushed aside is the room's.
+                d[prev] = inputRoot._preEditDraft;
             } else {
                 delete d[prev];
             }
@@ -206,6 +214,7 @@ Rectangle {
         // Nothing that named something in the old room may survive.
         inputRoot.editingEventId = "";
         inputRoot.editingOriginalBody = "";
+        inputRoot._preEditDraft = null;
         inputRoot.replyToEventId = "";
         inputRoot.replyToSenderName = "";
         inputRoot.replyToPreview = "";
@@ -240,17 +249,17 @@ Rectangle {
     property string editingEventId: ""
     property string editingOriginalBody: ""
 
-    // Map of filename → progress (0..1) for currently-uploading files.
-    // Kept as a dictionary so multiple simultaneous uploads each get
-    // a row. A finished upload (progress == 1.0) stays in the map for
-    // 400ms so the "complete" state is visible before it disappears.
+    // Map of upload id → { name, p } (p is 0..1) for files in flight. Keyed
+    // by the upload's id, not its file name: two "image.png" uploads used to
+    // share one row. A finished upload (p == 1.0) stays for 400ms so the
+    // "complete" state is visible before it disappears.
     property var _uploads: ({})
     Connections {
         target: serverManager.activeServer
         ignoreUnknownSignals: true
-        function onMediaUploadProgress(filename, progress) {
+        function onMediaUploadProgressed(uploadId, filename, progress) {
             var m = Object.assign({}, inputRoot._uploads);
-            m[filename] = progress;
+            m[uploadId] = { name: filename, p: progress };
             inputRoot._uploads = m;
             if (progress >= 1.0) uploadSweepTimer.start();
         }
@@ -261,14 +270,20 @@ Rectangle {
         onTriggered: {
             var m = {};
             for (var k in inputRoot._uploads) {
-                if (inputRoot._uploads[k] < 1.0) m[k] = inputRoot._uploads[k];
+                if (inputRoot._uploads[k].p < 1.0) m[k] = inputRoot._uploads[k];
             }
             inputRoot._uploads = m;
         }
     }
     readonly property var _uploadKeys: Object.keys(inputRoot._uploads)
+    // The draft an edit pushed aside ({text, tokens}), put back when the edit
+    // is saved or cancelled. Editing used to overwrite the composer and then
+    // clear it, so starting an edit threw away whatever you were typing.
+    property var _preEditDraft: null
     function beginEditing(eventId, currentBody) {
         if (replyToEventId !== "") cancelReplying();
+        if (editingEventId === "")
+            _preEditDraft = { text: inputArea.text, tokens: inputRoot.mentionTokens };
         editingEventId = eventId;
         editingOriginalBody = currentBody;
         inputArea.text = currentBody;
@@ -286,7 +301,24 @@ Rectangle {
     function cancelEditing() {
         editingEventId = "";
         editingOriginalBody = "";
-        inputArea.text = "";
+        var d = _preEditDraft;
+        _preEditDraft = null;
+        inputArea.text = d ? d.text : "";
+        inputRoot.mentionTokens = (d && d.tokens) ? d.tokens : [];
+        inputArea.cursorPosition = inputArea.text.length;
+    }
+    // An edit's PUT failed and the row went back to its old text. Offer the
+    // typed text again rather than losing it — unless the user is already
+    // busy with another edit.
+    Connections {
+        target: serverManager.activeServer
+        ignoreUnknownSignals: true
+        function onEditSendFailed(eventId, body) {
+            if (inputRoot.editingEventId !== "" || !body) return;
+            inputRoot.beginEditing(eventId, body);
+            // Any text counts as a change: the message never took this one.
+            inputRoot.editingOriginalBody = "";
+        }
     }
 
     // Reply state. When replyToEventId is non-empty, sendCurrentMessage()
@@ -462,7 +494,8 @@ Rectangle {
     // prompt text, and a proper X button (not a bare unicode glyph).
     Rectangle {
         id: editingHeader
-        anchors.top: parent.top
+        // Under the upload strip, never on top of it.
+        anchors.top: uploadBanner.visible ? uploadBanner.bottom : parent.top
         anchors.left: parent.left
         anchors.right: parent.right
         height: visible ? 32 : 0
@@ -550,18 +583,21 @@ Rectangle {
             Repeater {
                 model: inputRoot._uploadKeys
                 delegate: Item {
+                    id: uploadRow
                     required property string modelData
                     width: parent.width
                     height: 18
-                    readonly property real p: inputRoot._uploads[modelData] || 0
+                    readonly property var entry: inputRoot._uploads[modelData] || ({ name: "", p: 0 })
+                    readonly property real p: entry.p || 0
+                    readonly property string fileName: entry.name || ""
 
                     // One row, one announcement: the file and where it is up
                     // to. Four rows all saying "Uploading" would be useless.
                     Accessible.role: Accessible.StaticText
                     Accessible.name: p >= 1.0
-                        ? qsTr("%1 uploaded").arg(modelData)
+                        ? qsTr("%1 uploaded").arg(fileName)
                         : qsTr("Uploading %1, %2 percent")
-                          .arg(modelData).arg(Math.round(p * 100))
+                          .arg(fileName).arg(Math.round(p * 100))
 
                     Text {
                         anchors.left: parent.left
@@ -569,17 +605,47 @@ Rectangle {
                         Accessible.ignored: true
                         width: parent.width * 0.5
                         textFormat: Text.PlainText
-                        text: "Uploading " + modelData
+                        text: qsTr("Uploading %1").arg(uploadRow.fileName)
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.xs
                         color: Theme.fg2
                         elide: Text.ElideMiddle
                     }
-                    Rectangle {
+                    // Cancel: the upload then ends through mediaSendFailed,
+                    // which is what brings the in-flight count back down.
+                    Text {
+                        id: cancelUpload
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
+                        visible: uploadRow.p < 1.0
+                        text: "\u2715"
+                        color: cancelUploadMouse.containsMouse || activeFocus ? Theme.danger : Theme.fg2
+                        font.pixelSize: Theme.fontSize.xs
+                        activeFocusOnTab: true
+                        Accessible.role: Accessible.Button
+                        Accessible.name: qsTr("Cancel uploading %1").arg(uploadRow.fileName)
+                        Accessible.onPressAction: _cancel()
+                        Keys.onReturnPressed: _cancel()
+                        Keys.onSpacePressed: _cancel()
+                        function _cancel() {
+                            if (serverManager.activeServer && serverManager.activeServer.cancelMediaUpload)
+                                serverManager.activeServer.cancelMediaUpload(uploadRow.modelData);
+                        }
+                        MouseArea {
+                            id: cancelUploadMouse
+                            anchors.fill: parent
+                            anchors.margins: Theme.isMobile ? -12 : -4
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: cancelUpload._cancel()
+                        }
+                    }
+                    Rectangle {
+                        anchors.right: cancelUpload.visible ? cancelUpload.left : parent.right
+                        anchors.rightMargin: cancelUpload.visible ? Theme.sp.s3 : 0
+                        anchors.verticalCenter: parent.verticalCenter
                         Accessible.ignored: true
-                        width: parent.width * 0.45
+                        width: parent.width * 0.40
                         height: 4
                         radius: 2
                         color: Theme.bg2
@@ -847,10 +913,12 @@ Rectangle {
                     }
                     inputRoot._refreshMentionQuery();
                     inputRoot._refreshSlashQuery();
+                    inputRoot._refreshEmojiQuery(true);
                 }
                 onCursorPositionChanged: {
                     inputRoot._refreshMentionQuery();
                     inputRoot._refreshSlashQuery();
+                    inputRoot._refreshEmojiQuery(false);
                 }
 
                 Keys.onPressed: (event) => {
@@ -913,6 +981,33 @@ Rectangle {
                         }
                     }
 
+                    // And for :shortcode: emoji completion.
+                    if (inputRoot.emojiAnchor >= 0) {
+                        var em = inputRoot._emojiMatches;
+                        if (em.length > 0) {
+                            if (event.key === Qt.Key_Down) {
+                                inputRoot.emojiSelected = (inputRoot.emojiSelected + 1) % em.length;
+                                event.accepted = true; return;
+                            }
+                            if (event.key === Qt.Key_Up) {
+                                inputRoot.emojiSelected =
+                                    (inputRoot.emojiSelected - 1 + em.length) % em.length;
+                                event.accepted = true; return;
+                            }
+                            if (event.key === Qt.Key_Tab
+                                || ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                                    && !Theme.isMobile && !(event.modifiers & Qt.ShiftModifier))) {
+                                inputRoot._insertEmojiShortcode(em[inputRoot.emojiSelected]);
+                                event.accepted = true; return;
+                            }
+                        }
+                        if (event.key === Qt.Key_Escape) {
+                            inputRoot.emojiAnchor = -1;
+                            inputRoot.emojiQuery = "";
+                            event.accepted = true; return;
+                        }
+                    }
+
                     // Same nav semantics for the slash-command popup.
                     // Up/Down change selection, Tab/Enter accept,
                     // Esc dismisses without submitting. We don't
@@ -936,9 +1031,28 @@ Rectangle {
                             event.accepted = true;
                             return;
                         }
-                        if (event.key === Qt.Key_Tab) {
-                            inputRoot._insertSlash(
-                                matches[inputRoot.slashSelected]);
+                        // Enter accepts too, like Tab — it used to send the
+                        // half-typed "/sp" as a message. Except when the word
+                        // is already a complete command that needs no
+                        // argument ("/shrug"): then Enter runs it.
+                        var accept = event.key === Qt.Key_Tab
+                            || ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                                && !Theme.isMobile
+                                && !(event.modifiers & Qt.ShiftModifier));
+                        if (accept) {
+                            var pick = matches[inputRoot.slashSelected];
+                            var typed = inputRoot.slashQuery.toLowerCase();
+                            var exact = [pick.name].concat(pick.aliases || []).indexOf(typed) >= 0;
+                            var needsArg = (pick.usage || "").charAt(0) === "<"
+                                           || (pick.usage || "").charAt(0) === "@";
+                            if (event.key !== Qt.Key_Tab && exact && !needsArg) {
+                                inputRoot.slashQuery = "";
+                                inputRoot.slashAnchor = -1;
+                                sendCurrentMessage();
+                                event.accepted = true;
+                                return;
+                            }
+                            inputRoot._insertSlash(pick);
                             event.accepted = true;
                             return;
                         }
@@ -966,6 +1080,18 @@ Rectangle {
                     }
                 }
                 Keys.onReturnPressed: (event) => {
+                    // An open mention or slash popup owns Enter. Qt runs this
+                    // specific handler BEFORE Keys.onPressed, so without
+                    // handing the event on, Enter sent the half-typed text
+                    // instead of accepting the highlighted entry.
+                    if (!Theme.isMobile && !(event.modifiers & Qt.ShiftModifier)
+                        && (inputRoot.mentionAnchor >= 0
+                            || (inputRoot.emojiAnchor >= 0 && inputRoot._emojiMatches.length > 0)
+                            || (inputRoot.slashAnchor >= 0
+                                && inputRoot._slashMatches().length > 0))) {
+                        event.accepted = false;
+                        return;
+                    }
                     // Touch keyboards don't distinguish Shift+Enter
                     // reliably and users expect Enter to insert a
                     // newline the way SMS / WhatsApp do. On mobile,
@@ -1502,6 +1628,7 @@ Rectangle {
             description: "Send an action message",
             usage: "<action>",
             handler: function(rest) {
+                if (!rest || !rest.trim()) return null;
                 return { body: rest, msgtype: "m.emote" };
             }
         },
@@ -1606,6 +1733,117 @@ Rectangle {
             sideEffect: function(rest) { inputArea.text = ""; }
         }
     ]
+
+    // ── :shortcode: emoji completion ─────────────────────────────────
+    //
+    // ":thu" offers 👍 and friends; Tab/Enter (or a click) puts the emoji in
+    // place of the code, and typing the closing colon of an exact code
+    // (":tada:") replaces it straight away.
+    property string emojiQuery: ""
+    property int emojiAnchor: -1
+    property int emojiSelected: 0
+    readonly property var _emojiMatches: emojiAnchor >= 0
+        ? EmojiData.shortcodeMatches(emojiQuery, 6) : []
+    function _refreshEmojiQuery(textChanged) {
+        var cp = inputArea.cursorPosition;
+        var before = inputArea.text.substring(0, cp);
+        if (textChanged) {
+            var done = /(^|\s):([A-Za-z0-9_+-]{2,}):$/.exec(before);
+            if (done) {
+                var e = EmojiData.emojiForShortcode(done[2]);
+                if (e !== "") {
+                    var start = cp - done[2].length - 2;
+                    emojiAnchor = -1;
+                    emojiQuery = "";
+                    inputArea.remove(start, cp);
+                    inputArea.insert(start, e);
+                    return;
+                }
+            }
+        }
+        var m = /(^|\s):([A-Za-z0-9_+-]{2,})$/.exec(before);
+        if (!m) { emojiAnchor = -1; emojiQuery = ""; return; }
+        var anchor = cp - m[2].length - 1;
+        if (anchor !== emojiAnchor || m[2] !== emojiQuery) emojiSelected = 0;
+        emojiAnchor = anchor;
+        emojiQuery = m[2];
+    }
+    function _insertEmojiShortcode(item) {
+        if (!item || emojiAnchor < 0) return;
+        var start = emojiAnchor;
+        var end = inputArea.cursorPosition;
+        emojiAnchor = -1;
+        emojiQuery = "";
+        inputArea.remove(start, end);
+        inputArea.insert(start, item.emoji);
+        inputArea.forceActiveFocus();
+    }
+
+    Popup {
+        id: emojiCodePopup
+        parent: inputRoot
+        y: -height - 4
+        x: Theme.sp.s3
+        width: 280
+        padding: 4
+        modal: false
+        focus: false
+        closePolicy: Popup.NoAutoClose
+        visible: inputRoot.emojiAnchor >= 0 && inputRoot._emojiMatches.length > 0
+        background: Rectangle {
+            Accessible.ignored: true
+            color: Theme.bg1
+            border.color: Theme.line
+            border.width: 1
+            radius: Theme.r2
+        }
+        contentItem: Column {
+            Accessible.role: Accessible.List
+            Accessible.name: qsTr("Emoji")
+            Repeater {
+                model: inputRoot._emojiMatches
+                delegate: Rectangle {
+                    required property int index
+                    required property var modelData
+                    width: emojiCodePopup.width - 8
+                    height: 28
+                    radius: Theme.r1
+                    color: index === inputRoot.emojiSelected || codeHover.containsMouse
+                        ? Theme.bg3 : "transparent"
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: modelData.emoji + " :" + modelData.code + ":"
+                    Row {
+                        anchors.verticalCenter: parent.verticalCenter
+                        leftPadding: Theme.sp.s3
+                        spacing: Theme.sp.s3
+                        Text {
+                            text: modelData.emoji
+                            textFormat: Text.PlainText
+                            font.pixelSize: 16
+                            Accessible.ignored: true
+                        }
+                        Text {
+                            text: ":" + modelData.code + ":"
+                            textFormat: Text.PlainText
+                            color: Theme.fg1
+                            font.family: Theme.fontSans
+                            font.pixelSize: Theme.fontSize.sm
+                            elide: Text.ElideRight
+                            width: emojiCodePopup.width - 60
+                            Accessible.ignored: true
+                        }
+                    }
+                    MouseArea {
+                        id: codeHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: inputRoot._insertEmojiShortcode(modelData)
+                    }
+                }
+            }
+        }
+    }
 
     // Active query state. mentionQuery / mentionAnchor have a parallel
     // pair for slash commands; -1 means "no slash popup right now".
@@ -1809,6 +2047,24 @@ Rectangle {
                 inputRoot.lastSentAt = Date.now();
                 return;
             }
+            if (recognised && cmd === null) {
+                // A command that needs an argument and got none (/me, /spoiler,
+                // /dm): say what it wants and keep the text, instead of
+                // silently clearing the composer.
+                var rest0 = text.indexOf(" ") >= 0 ? text.substring(text.indexOf(" ") + 1).trim() : "";
+                var def = null;
+                for (var d = 0; d < slashCatalogue.length; ++d) {
+                    if ([slashCatalogue[d].name].concat(slashCatalogue[d].aliases || [])
+                            .indexOf(lead) >= 0) { def = slashCatalogue[d]; break; }
+                }
+                var u = def ? (def.usage || "") : "";
+                if (rest0 === "" && (u.charAt(0) === "<" || u.charAt(0) === "@")) {
+                    var hw = inputArea.Window.window;
+                    if (hw && hw.toastInfo)
+                        hw.toastInfo(qsTr("Usage: %1 %2").arg(def.name).arg(u));
+                    return;
+                }
+            }
             if (recognised) {
                 // Recognised command with a null handler return
                 // (e.g. /clear, /dm). Side-effects already ran;
@@ -1838,8 +2094,9 @@ Rectangle {
             // everyone but will never badge or notify Alice.
             serverManager.activeServer.editMessage(
                 inputRoot.editingEventId, text, rich.html, rich.uids);
-            inputRoot.cancelEditing();
+            // Clear the edit's tokens, then put the pushed-aside draft back.
             inputRoot._clearMentionState();
+            inputRoot.cancelEditing();
             return;
         }
 
