@@ -612,11 +612,11 @@ ApplicationWindow {
             // attempt it is showing: it drops every other server's (U-5),
             // and those still have to be said somewhere.
             if (!loginDialog.opened || !loginDialog.ownsServerUrl(serverUrl))
-                toastError("Login failed: " + error);
+                toastError("Sign-in failed: " + error);
         }
         function onIdentityLoginFailed(error) {
             // The dialog shows this one inline too; same one-message rule.
-            if (!loginDialog.opened) toastError("Identity login failed: " + error);
+            if (!loginDialog.opened) toastError("BSFChat ID sign-in failed: " + error);
         }
         // The link itself is too long for a toast, so the toast says what
         // happened and puts the link where a browser can take it. The

@@ -214,7 +214,13 @@ Dialog {
 
     // Every fresh probe starts from "we know nothing" — a stale outcome
     // from the previous URL must never decide what this URL is offered.
-    function beginCheck(url) {
+    function beginCheck(url, force) {
+        // Return fires both Keys.onReturnPressed and editingFinished, so one
+        // Enter probed twice (audit 3). The same address already in flight,
+        // or already answered, is not asked again.
+        // The Check button passes `force`: pressing it is asking again.
+        if (url === dialog.probeRequest && (dialog.checkingFlows || (dialog.probed && !force)))
+            return;
         dialog.checkingFlows = true;
         dialog.probed = false;
         dialog.oidcAvailable = false;
@@ -996,7 +1002,7 @@ Dialog {
                             // Signed in: check AND join in one press when the
                             // server uses this BSFChat ID (onLoginFlowsChecked).
                             dialog.joinRequested = serverManager.identitySignedIn;
-                            dialog.beginCheck(urlField.text.trim());
+                            dialog.beginCheck(urlField.text.trim(), true);
                         }
                     }
                 }
@@ -1423,11 +1429,11 @@ Dialog {
                     Layout.fillWidth: true
                     enabled: !dialog.isConnecting && !dialog.oidcInProgress
                     Accessible.role: Accessible.Button
-                    Accessible.name: qsTr("Login")
+                    Accessible.name: qsTr("Sign in")
                     Accessible.onPressAction: if (loginButton.enabled)
                                                   loginButton.clicked()
                     contentItem: Text {
-                        text: "Login"
+                        text: "Sign in"
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.md
                         font.weight: Theme.fontWeight.semibold
