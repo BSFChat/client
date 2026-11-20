@@ -231,16 +231,38 @@ private slots:
     void healthySearchFailureKeepsTheParsersPlainLanguage()
     {
         // SearchParser already maps errcodes into human wording; a live
-        // session must still get it rather than a session sentence.
+        // session must still get it rather than a session sentence. That
+        // wording travels on the error PAYLOAD (searchResult, ok=false);
+        // searchFailed is transport-only since 7510505 and carries the raw
+        // errorString(), which is logged and replaced by a plain sentence.
         auto conn = liveSession();
         QSignalSpy spy(conn.get(), &ServerConnection::searchErrored);
 
         const auto reason = QStringLiteral("Search is taking too long — try a narrower term");
         conn->searchMessages(QStringLiteral("standup"));
-        emit conn->client()->searchFailed(QStringLiteral("standup"), reason);
+        bsfchat::client::SearchResponse resp;
+        resp.ok = false;
+        resp.errorMessage = reason;
+        emit conn->client()->searchResult(QStringLiteral("standup"), QString(), resp);
 
         QCOMPARE(spy.count(), 1);
         QCOMPARE(spy.first().at(0).toString(), reason);
+    }
+
+    void healthySearchTransportFailureHidesErrorString()
+    {
+        auto conn = liveSession();
+        QSignalSpy spy(conn.get(), &ServerConnection::searchErrored);
+
+        const auto raw = QStringLiteral("Host bsfchat.example not found");
+        conn->searchMessages(QStringLiteral("standup"));
+        emit conn->client()->searchFailed(QStringLiteral("standup"), raw);
+
+        QCOMPARE(spy.count(), 1);
+        const auto msg = spy.first().at(0).toString();
+        QVERIFY(!msg.isEmpty());
+        QVERIFY(msg != raw);
+        QVERIFY(!msg.contains(QStringLiteral("not found")));
     }
 
     // ── notifyLevelFailed ─────────────────────────────────────────────────
