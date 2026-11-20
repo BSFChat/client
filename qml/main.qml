@@ -298,9 +298,13 @@ ApplicationWindow {
     // Cmd+1..9 (Ctrl+1..9 on Win/Linux) selects servers 0..8.
     // Qt maps "Ctrl+N" to the platform's primary modifier automatically,
     // so a single sequence works cross-platform.
+    // Both leave the @ view: picking a server is what leaves it with the
+    // mouse, and the keyboard used to switch the server underneath an @ view
+    // that stayed up (audit 3).
     function activateServer(index) {
         if (!serverManager.servers) return;
         if (index < 0 || index >= serverManager.servers.rowCount()) return;
+        serverManager.setViewingDms(false);
         serverManager.setActiveServer(index);
     }
     // Ctrl+Tab / Ctrl+Shift+Tab — cycle servers forward/backward.
@@ -310,6 +314,11 @@ ApplicationWindow {
     function cycleServer(dir) {
         if (!serverManager.servers) return;
         var count = serverManager.servers.rowCount();
+        if (serverManager.viewingDms) {
+            // From the @ view the first step lands on the server underneath.
+            serverManager.setViewingDms(false);
+            return;
+        }
         if (count < 2) return;
         var next = (serverManager.activeServerIndex + dir + count) % count;
         serverManager.setActiveServer(next);
@@ -340,10 +349,25 @@ ApplicationWindow {
         onActivated: root.cycleTextChannel(1)
     }
 
-    // Flattens the currently visible categorized channel list into an
-    // ordered array of text channels, locates the active room, and hops
-    // `dir` (-1 / +1) with wrap.
+    // Flattens what the sidebar shows into an ordered array of text rooms —
+    // the server's text channels, or in the @ view every DM — locates the
+    // active room, and hops `dir` (-1 / +1) with wrap. The @ view used to be
+    // skipped: Alt+Up/Down walked the hidden server's channels instead.
     function cycleTextChannel(dir) {
+        if (serverManager.viewingDms) {
+            var dms = serverManager.allDirectRooms();
+            if (dms.length === 0) return;
+            var cur = serverManager.activeServer;
+            var at = -1;
+            for (var d = 0; d < dms.length; d++) {
+                if (cur && dms[d].serverUrl === cur.serverUrl
+                    && dms[d].roomId === cur.activeRoomId) { at = d; break; }
+            }
+            if (at < 0) at = dir > 0 ? -1 : dms.length;
+            var pick = dms[(at + dir + dms.length) % dms.length];
+            serverManager.openRoom(pick.serverIndex, pick.roomId);
+            return;
+        }
         if (!serverManager.activeServer) return;
         var groups = serverManager.activeServer.categorizedRooms;
         var flat = [];
@@ -588,6 +612,12 @@ ApplicationWindow {
             toastError(here || !serverName ? "Voice: " + message
                                            : "Voice (" + serverName + "): " + message);
         }
+        function onInviteReceived(serverIndex, roomId, roomName, inviterName, isDirect) {
+            root.toastInfo(isDirect
+                ? qsTr("%1 wants to message you. Accept in Direct Messages.").arg(inviterName)
+                : qsTr("%1 invited you to %2. Accept it in the sidebar.")
+                      .arg(inviterName).arg(roomName ? "#" + roomName : qsTr("a channel")));
+        }
         function onLoginError(serverUrl, error) {
             // The dialog shows the error inline when it is up; toasting
             // the same string at the same moment is the duplicate surface
@@ -597,11 +627,11 @@ ApplicationWindow {
             // attempt it is showing: it drops every other server's (U-5),
             // and those still have to be said somewhere.
             if (!loginDialog.opened || !loginDialog.ownsServerUrl(serverUrl))
-                toastError("Login failed: " + error);
+                toastError("Sign-in failed: " + error);
         }
         function onIdentityLoginFailed(error) {
             // The dialog shows this one inline too; same one-message rule.
-            if (!loginDialog.opened) toastError("Identity login failed: " + error);
+            if (!loginDialog.opened) toastError("BSFChat ID sign-in failed: " + error);
         }
         // The link itself is too long for a toast, so the toast says what
         // happened and puts the link where a browser can take it. The

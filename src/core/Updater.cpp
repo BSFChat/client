@@ -87,8 +87,24 @@ void Updater::setState(State s)
 
 void Updater::setError(const QString& msg)
 {
+    // A check that failed while a download was ready keeps the download.
+    if (m_state == Checking && restoreReadyDownload(false, 0, QString())) return;
     m_lastError = msg;
+    m_integrityFailure = false;
     setState(Failed);
+}
+
+bool Updater::restoreReadyDownload(bool checkSucceeded, int outcome, const QString& offeredTag)
+{
+    const bool wasReady = m_readyBeforeCheck;
+    m_readyBeforeCheck = false;
+    if (!bsfchat::updates::keepReadyDownload(
+            wasReady, checkSucceeded, static_cast<bsfchat::updates::Outcome>(outcome),
+            offeredTag, m_readyVersion))
+        return false;
+    m_availableVersion = m_readyVersion;
+    setState(ReadyToApply);
+    return true;
 }
 
 bool Updater::prereleaseBuild() const
@@ -127,8 +143,22 @@ void Updater::startAutoCheckSchedule()
 {
     // 30s delay so the launch race (login, first /sync, QML compile)
     // is well clear of our network jitter.
-    QTimer::singleShot(30 * 1000, this, &Updater::checkNow);
+    m_firstCheckTimer.setSingleShot(true);
+    m_firstCheckTimer.setInterval(30 * 1000);
+    connect(&m_firstCheckTimer, &QTimer::timeout, this, &Updater::checkNow,
+            Qt::UniqueConnection);
+    m_firstCheckTimer.start();
     m_recheckTimer.start();
+}
+
+void Updater::setAutoCheckEnabled(bool enabled)
+{
+    if (enabled) {
+        if (!m_recheckTimer.isActive()) startAutoCheckSchedule();
+    } else {
+        m_firstCheckTimer.stop();
+        m_recheckTimer.stop();
+    }
 }
 
 void Updater::checkNow()
@@ -136,6 +166,8 @@ void Updater::checkNow()
     if (m_state == Checking || m_state == Downloading
         || m_state == Applying) return;
 
+    m_readyBeforeCheck = (m_state == ReadyToApply);
+    if (m_readyBeforeCheck) m_readyVersion = m_availableVersion;
     setState(Checking);
     // One GET per check, as before — the list endpoint just returns a
     // bigger body than /releases/latest did. per_page=30 is GitHub's
@@ -188,6 +220,7 @@ void Updater::onCheckReply()
     const QString suffix = platformAssetSuffix();
     const Selection sel = selectRelease(releases, ch, m_currentVersion, suffix);
     m_latestStableVersion = sel.newestStableTag;
+    if (restoreReadyDownload(true, static_cast<int>(sel.outcome), sel.release.tag)) return;
 
     switch (sel.outcome) {
     case Outcome::NoUsableRelease:
@@ -334,6 +367,8 @@ void Updater::failIntegrity(const QString& why)
     // were tampered with, so is the file a browser would download (C2-2).
     setError(QStringLiteral("The update failed its integrity check and was "
                             "not installed (%1).").arg(why));
+    m_integrityFailure = true;
+    emit stateChanged();
 }
 
 void Updater::fetchSmall(const QString& url,

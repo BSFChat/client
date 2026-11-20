@@ -44,13 +44,12 @@ Popup {
     property string _initialMessage: ""
     property string _selectedPresence: "online"
 
-    // On the Popup, which Qt warns about and supports anyway — see
-    // docs/accessibility.md §11 for why this is the right place and why
-    // the warning in the log is a Qt wart rather than a mistake here.
-    Accessible.role: Accessible.Dialog
-    Accessible.name: qsTr("Set your status")
 
     contentItem: ColumnLayout {
+        // On the contentItem: a Popup is not an Item, so Accessible on the
+        // root reached no screen reader and logged a warning (audit 3).
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Set your status")
         id: contentColumn
         spacing: Theme.sp.s4
 
@@ -78,9 +77,17 @@ Popup {
             color: picker._selectedPresence === presence
                 ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.18)
                 : (rowMouse.containsMouse ? Theme.bg2 : "transparent")
-            border.color: picker._selectedPresence === presence
+            border.color: picker._selectedPresence === presence || activeFocus
                 ? Theme.accent : Theme.line
-            border.width: 1
+            border.width: activeFocus ? 2 : 1
+            // Keyboard (audit 3): Tab / arrows between the rows, Space or
+            // Enter picks one.
+            activeFocusOnTab: true
+            Keys.onSpacePressed: picker._selectedPresence = row.presence
+            Keys.onReturnPressed: picker._selectedPresence = row.presence
+            Keys.onEnterPressed: picker._selectedPresence = row.presence
+            Keys.onUpPressed: nextItemInFocusChain(false).forceActiveFocus()
+            Keys.onDownPressed: nextItemInFocusChain(true).forceActiveFocus()
             Behavior on color       { ColorAnimation { duration: Theme.motion.fastMs } }
             Behavior on border.color { ColorAnimation { duration: Theme.motion.fastMs } }
             // One of a mutually exclusive set, so RadioButton rather than

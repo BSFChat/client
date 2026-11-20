@@ -9,6 +9,7 @@
 #include "core/App.h"
 #include "core/AppProfile.h"
 #include "core/NotificationManager.h"
+#include "core/EnglishPlurals.h"
 #include "core/PushManager.h"
 #include "core/Settings.h"
 #include "core/UrlHandler.h"
@@ -101,6 +102,9 @@ int main(int argc, char *argv[])
     // integration. Everything else continues to use the QGuiApplication
     // API surface via QApplication's inheritance.
     QApplication app(argc, argv);
+    // English plurals for every tr()/qsTr() "%n thing(s)" (core/EnglishPlurals.h).
+    static bsfchat::client::EnglishPluralTranslator englishPlurals;
+    app.installTranslator(&englishPlurals);
     // Both are "BSFChat" unless --profile/$BSFCHAT_PROFILE was given, in
     // which case the application name carries a "-<profile>" suffix. That
     // one suffix namespaces QSettings, QStandardPaths::AppDataLocation
@@ -214,6 +218,12 @@ int main(int argc, char *argv[])
         && application.settings()->autoUpdateCheck()) {
         updater.startAutoCheckSchedule();
     }
+    // The toggle applies now, not at the next launch (audit 3).
+    if (auto* st = application.settings()) {
+        QObject::connect(st, &Settings::autoUpdateCheckChanged, &updater, [st, &updater]() {
+            updater.setAutoCheckEnabled(st->autoUpdateCheck());
+        });
+    }
 #endif
 
     // Android runtime-permission bridge — QML calls
@@ -254,6 +264,9 @@ int main(int argc, char *argv[])
         });
 
     engine.rootContext()->setContextProperty("serverManager", application.serverManager());
+    // For inAppMessage (the mobile shell's foreground banner).
+    engine.rootContext()->setContextProperty("notificationManager",
+                                             application.notificationManager());
     engine.rootContext()->setContextProperty("appSettings", application.settings());
     // Mobile push status + settings rows (Settings > Notifications).
     engine.rootContext()->setContextProperty("pushManager", application.pushManager());
@@ -477,11 +490,20 @@ int main(int argc, char *argv[])
     // window lost focus, where marking the room you were just reading is
     // both correct and — because the foreground path has already marked it —
     // very nearly always a no-op that markRoomRead's own dedupe swallows.
+    //
+    // The re-poll needs a REAL resume (audit 3): on a desktop every window
+    // focus is Inactive -> Active, and resyncing on each one threw away the
+    // waiting /sync and reset its backoff — hammering a server that was down
+    // every time the user clicked into the window. Only a return from
+    // Suspended / Hidden (a phone backgrounding) can have left a dead socket.
     QObject::connect(&app, &QGuiApplication::applicationStateChanged, &app,
-        [sm = application.serverManager(),
-         settings = application.settings()](Qt::ApplicationState state) {
+        [sm = application.serverManager(), settings = application.settings(),
+         previous = QGuiApplication::applicationState()](Qt::ApplicationState state) mutable {
+            const Qt::ApplicationState was = previous;
+            previous = state;
             if (state == Qt::ApplicationActive) {
-                if (sm) sm->resyncAll();
+                if (sm && (was == Qt::ApplicationSuspended || was == Qt::ApplicationHidden))
+                    sm->resyncAll();
                 return;
             }
             if (sm) sm->markActiveRoomsRead();

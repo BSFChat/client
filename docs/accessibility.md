@@ -258,32 +258,30 @@ saying "rect_14". Names come from `Accessible.name`. If a future UI test needs
 handles, add `objectName` for that purpose, separately, and do not let it
 become the accessible name.
 
-## 11. Popups, dialogs and drawers: the attachment warning is a Qt wart
+## 11. Popups, dialogs and drawers: name the contentItem
 
-`Accessible.role` and `Accessible.name` go on the `Popup` / `Dialog` / `Drawer`
-itself, and Qt will log
+`Accessible.role` and `Accessible.name` go on the popup's `contentItem`, not
+on the `Popup` / `Dialog` root. A `QQuickPopup` is a `QObject`, not an Item,
+and attached accessibility on it logs
 
     Accessible must be attached to an Item
 
-every time one is created. That warning is wrong about this case, and the
-placement is right. `QQuickPopup` does derive from `QObject` rather than
-`QQuickItem`, which is what the warning is reacting to — but Qt Quick Controls
-reads the attached properties off the popup anyway and forwards them to the
-popup *item*, which is the node a screen reader actually meets:
+for every instance at startup. Audit 3 (2026-11-19) found about 22 dialogs
+whose name and role did not reach the screen reader from the root, and moved
+them all onto the contentItem. (An earlier pass had tried the contentItem
+and reverted it on the reasoning that `QQuickPopupItem` forwards the
+attached name; that forwarding is not what the audit observed.)
 
-- `QQuickPopupItem::accessibleRole()` returns
-  `QQuickPopup::effectiveAccessibleRole()`, which reads the role from the
-  popup's attached object;
-- `QQuickPopupItem::accessibilityActiveChanged()` contains a branch whose own
-  comment reads "The user set Accessible.name on the Popup", and copies that
-  name onto the popup item.
+The convention, then:
 
-(Both in `qtdeclarative/src/quicktemplates/qquickpopupitem.cpp`.)
+- `contentItem: ColumnLayout { Accessible.role: Accessible.Dialog;
+  Accessible.name: … }` — and `Accessible.description` for a confirmation's
+  question.
+- Initial focus in `onOpened`, on Cancel for anything destructive (§9).
+- `ConfirmDialog.qml` is the shared yes/no shape and already does both.
 
-Putting the name on the popup's `contentItem` instead leaves the dialog node
-itself unnamed — a screen reader announces an anonymous dialog — and adds a
-second, redundant node inside it. So: on the popup, warning and all. This was
-tried the other way round during the annotation pass and reverted.
+Hand-check with Orca / VoiceOver / NVDA when touching this: the dialog should
+be announced once, by name, as a dialog.
 
 A `Window` is a different matter: attached accessibility genuinely does nothing
 there, and `QAccessibleQuickWindow` reads the window's `title` instead. Name

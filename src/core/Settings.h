@@ -337,14 +337,22 @@ public:
     // unread dot. Stored as a QStringList under mutedRooms.
     Q_INVOKABLE bool isRoomMuted(const QString& roomId) const;
     Q_INVOKABLE void setRoomMuted(const QString& roomId, bool muted);
+    // Every muted room, for the unread totals that leave them out.
+    QSet<QString> mutedRooms() const { loadMutedRooms(); return m_mutedRooms; }
 
     // Per-room notification mode.
     //   "all"      — notify for every inbound message (default)
     //   "mentions" — only when the user is @-mentioned
     //   "none"     — never (equivalent to muted for notification
     //                purposes; the channel row still shows unread)
-    // Stored under notifMode/<roomId>. Empty/missing ⇒ "all".
-    Q_INVOKABLE QString roomNotificationMode(const QString& roomId) const;
+    // Stored under notifMode/<roomId>. Missing ⇒ the server's default:
+    // "all" in a DM, "mentions" in a channel (core/NotifyLevel.h).
+    Q_INVOKABLE QString roomNotificationMode(const QString& roomId,
+                                             bool isDirect = false) const;
+    // The explicit choice only, "" when the room follows the default.
+    Q_INVOKABLE QString roomNotificationChoice(const QString& roomId) const;
+    // Any valid level is stored as a choice ("all" too — it is no longer
+    // the default); anything else, including "", clears the choice.
     Q_INVOKABLE void setRoomNotificationMode(const QString& roomId,
                                              const QString& mode);
 
@@ -491,6 +499,12 @@ public:
     // out never downgrades a running prerelease build; see
     // core/ReleaseSelection.h (Outcome::AheadOfChannel).
     Q_PROPERTY(QString updateChannel READ updateChannel WRITE setUpdateChannel NOTIFY updateChannelChanged)
+    // The update the user dismissed with "Skip this version" / Later. Kept
+    // across launches: the in-memory copy re-offered it after every restart.
+    Q_PROPERTY(QString skippedUpdateVersion READ skippedUpdateVersion
+               WRITE setSkippedUpdateVersion NOTIFY skippedUpdateVersionChanged)
+    QString skippedUpdateVersion() const;
+    void setSkippedUpdateVersion(const QString& version);
     QString updateChannel() const;
     void setUpdateChannel(const QString& channel);
 signals:
@@ -512,6 +526,7 @@ signals:
     void pttKeySequenceChanged();
     void voiceRelayModeChanged();
     void autoUpdateCheckChanged();
+    void skippedUpdateVersionChanged();
 public:
 
 signals:

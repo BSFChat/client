@@ -329,6 +329,29 @@ Rectangle {
                     radius: Theme.r1
                     color: memberMouse.containsMouse ? Theme.bg3 : "transparent"
                     Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
+                    // Keyboard: Tab to a row, Enter opens the profile, the
+                    // Menu key (or Shift+F10) the member menu (audit 3).
+                    activeFocusOnTab: true
+                    border.width: activeFocus ? 2 : 0
+                    border.color: Theme.accent
+                    Keys.onReturnPressed: {
+                        memberProfileCard.userId = model.userId;
+                        memberProfileCard.profileDisplayName = model.displayName;
+                        memberProfileCard.open();
+                    }
+                    Keys.onMenuPressed: {
+                        memberContextMenu.userId = model.userId;
+                        memberContextMenu.displayName = model.displayName || model.userId;
+                        memberContextMenu.popup(this, 0, height);
+                    }
+                    Keys.onPressed: (event) => {
+                        if (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier)) {
+                            memberContextMenu.userId = model.userId;
+                            memberContextMenu.displayName = model.displayName || model.userId;
+                            memberContextMenu.popup(this, 0, height);
+                            event.accepted = true;
+                        }
+                    }
 
                     // One announcement for the whole row (docs/accessibility
                     // §7): name, speaking, bot-ness, presence, hoisted role,
@@ -374,6 +397,9 @@ Rectangle {
                         var p = s ? s.presenceFor(model.userId) : "offline";
                         if (p === "online")      out = qsTr("%1, online").arg(out);
                         else if (p === "idle")   out = qsTr("%1, idle").arg(out);
+                        // Matrix "unavailable" is the status picker's Away; it
+                        // fell through to "offline" here (audit 3).
+                        else if (p === "unavailable") out = qsTr("%1, away").arg(out);
                         else if (p === "dnd")    out = qsTr("%1, do not disturb").arg(out);
                         else                     out = qsTr("%1, offline").arg(out);
                         var r = memberDelegate._role;
@@ -413,7 +439,7 @@ Rectangle {
                                     textFormat: Text.PlainText
                                     text: {
                                         var n = model.displayName || "?";
-                                        var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                        var stripped = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                                         return (stripped.length > 0
                                                 ? stripped.charAt(0)
                                                 : "?").toUpperCase();
@@ -476,6 +502,7 @@ Rectangle {
                                     switch (_state) {
                                     case "online": return Theme.online;
                                     case "idle":   return Theme.warn;
+                                    case "unavailable": return Theme.warn;
                                     case "dnd":    return Theme.danger;
                                     default:       return Theme.bg1;
                                     }
@@ -661,6 +688,17 @@ Rectangle {
         parent: Overlay.overlay
     }
 
+    ConfirmDialog {
+        id: memberConfirm
+        onConfirmed: (p) => {
+            var s = serverManager.activeServer;
+            if (!s || !p) return;
+            if (p.action === "block") s.blockUser(p.userId);
+            else if (p.action === "kick") s.kickFromServer(p.userId);
+            else if (p.action === "ban") s.banFromServer(p.userId);
+        }
+    }
+
     // Right-click member-context menu. Permission-gated: Manage Roles
     // only shown to users with MANAGE_ROLES; self is filtered out of
     // destructive actions.
@@ -676,9 +714,23 @@ Rectangle {
         // Probe a real roomId for the permission check — Members list is
         // channel-scoped (its model is the active-room's roster), so
         // activeRoomId is always populated here.
-        readonly property bool canManageRoles: serverManager.activeServer
-            && serverManager.activeServer.canManageRoles(
-                   serverManager.activeServer.activeRoomId)
+        // Each reads permissionsGeneration first: the calls are invokables
+        // and cannot notify, so a role change left the menu stale (audit 3).
+        readonly property bool canManageRoles: {
+            var s = serverManager.activeServer;
+            if (!s || s.permissionsGeneration < 0) return false;
+            return s.canManageRoles(s.activeRoomId);
+        }
+        readonly property bool canKick: {
+            var s = serverManager.activeServer;
+            if (!s || s.permissionsGeneration < 0 || memberContextMenu.isSelf) return false;
+            return s.canKick(s.activeRoomId);
+        }
+        readonly property bool canBan: {
+            var s = serverManager.activeServer;
+            if (!s || s.permissionsGeneration < 0 || memberContextMenu.isSelf) return false;
+            return s.canBan(s.activeRoomId);
+        }
         // Reading `users` is what subscribes this to the model's change
         // signal — isUserBlocked() is a plain invokable and cannot notify on
         // its own, so a binding that only called it would be evaluated once
@@ -878,8 +930,15 @@ Rectangle {
             onTriggered: {
                 var s = serverManager.activeServer;
                 if (!s) return;
-                if (memberContextMenu.isBlocked) s.unblockUser(memberContextMenu.userId);
-                else s.blockUser(memberContextMenu.userId);
+                if (memberContextMenu.isBlocked) { s.unblockUser(memberContextMenu.userId); return; }
+                // Blocking is confirmed (audit 3); unblocking is not — it only
+                // gives back what the user chose to hide.
+                memberConfirm.payload = { action: "block", userId: memberContextMenu.userId };
+                memberConfirm.title = qsTr("Block %1?").arg(memberContextMenu.displayName);
+                memberConfirm.message = qsTr(
+                    "You stop seeing their messages and mentions, and they are not told.");
+                memberConfirm.confirmText = qsTr("Block");
+                memberConfirm.open();
             }
         }
         MemberCtxItem {
@@ -890,6 +949,42 @@ Rectangle {
             onTriggered: Window.window.openReportDialog(
                 "user", memberContextMenu.userId,
                 memberContextMenu.displayName, "", "", "")
+        }
+
+        // Moderation, for those allowed it (audit 3: only reachable from
+        // Server Settings before). Server-wide, like Server Settings' own
+        // kick and ban, and confirmed.
+        MemberCtxItem {
+            text: qsTr("Kick from server…")
+            iconName: "x"
+            labelColor: Theme.danger
+            visible: memberContextMenu.canKick
+            Accessible.name: qsTr("Kick %1 from the server").arg(memberContextMenu.displayName)
+            onTriggered: {
+                memberConfirm.payload = { action: "kick", userId: memberContextMenu.userId };
+                memberConfirm.title = qsTr("Kick %1?").arg(memberContextMenu.displayName);
+                memberConfirm.message = qsTr(
+                    "They are removed from every channel on this server. They can come back "
+                    + "if they are invited again.");
+                memberConfirm.confirmText = qsTr("Kick");
+                memberConfirm.open();
+            }
+        }
+        MemberCtxItem {
+            text: qsTr("Ban from server…")
+            iconName: "x"
+            labelColor: Theme.danger
+            visible: memberContextMenu.canBan
+            Accessible.name: qsTr("Ban %1 from the server").arg(memberContextMenu.displayName)
+            onTriggered: {
+                memberConfirm.payload = { action: "ban", userId: memberContextMenu.userId };
+                memberConfirm.title = qsTr("Ban %1?").arg(memberContextMenu.displayName);
+                memberConfirm.message = qsTr(
+                    "They are removed from every channel on this server and cannot rejoin "
+                    + "until they are unbanned in Server Settings.");
+                memberConfirm.confirmText = qsTr("Ban");
+                memberConfirm.open();
+            }
         }
 
         MenuSeparator {

@@ -129,6 +129,11 @@ function message(view) {
         // a red strip with nothing written in it next to a "Sign in again"
         // button — which reads as a bug in the app rather than as an expired
         // session.
+        // While the round trip runs, the button already says "Signing in…",
+        // and ServerConnection writes the same words into syncErrorMessage —
+        // so the strip read "Signing in… Signing in…" (audit 3). Say what
+        // happened instead; the button says what is being done about it.
+        if (reauthBusy(view)) return "Session expired";
         return _text(view && view.syncErrorMessage)
             || "Session expired — sign in again to reconnect";
     case Disconnected:

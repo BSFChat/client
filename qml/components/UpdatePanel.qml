@@ -227,7 +227,8 @@ Rectangle {
                             availableVersion: panel._u.availableVersion,
                             latestStableVersion: panel._u.latestStableVersion,
                             channel: panel._u.channel,
-                            osName: panel._osName
+                            osName: panel._osName,
+                            integrityFailure: !!panel._u.integrityFailure
                         })
                     font.family: Theme.fontSans
                     font.pixelSize: Theme.fontSize.sm

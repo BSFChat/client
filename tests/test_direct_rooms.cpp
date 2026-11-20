@@ -340,6 +340,15 @@ private slots:
 
         m.setUnreadCount("!general:x", 1);
         QCOMPARE(m.totalUnreadCount(), 1);
+
+        // The @ chip's number is the other half of the split (audit 3, #11).
+        QCOMPARE(m.totalDirectUnreadCount(), 3);
+        // And a muted room counts toward neither (no rail dot for it).
+        QCOMPARE(m.totalUnreadCount(QSet<QString>{"!general:x"}), 0);
+        QCOMPARE(m.totalDirectUnreadCount(QSet<QString>{"!dm:x"}), 0);
+        // Reading the DM clears what the @ chip shows.
+        m.resetUnreadCount("!dm:x");
+        QCOMPARE(m.totalDirectUnreadCount(), 0);
     }
 
     // The classification and the room arrive in either order: m.direct is
@@ -424,6 +433,47 @@ private slots:
         m.updateRoomName("!dm:x", QString());
         QVERIFY(m.isDirect("!dm:x"));
         QVERIFY(m.getCategoriesWithChannels().isEmpty());
+    }
+
+    // ── audit 3, #11: DMs leaked between accounts and never went away ──
+
+    void theSettingsGroupIsPerAccount()
+    {
+        using bsfchat::net::directRoomsSettingsGroup;
+        const QString a = directRoomsSettingsGroup(QStringLiteral("https://chat.example"),
+                                                   QStringLiteral("@alice:chat.example"));
+        const QString b = directRoomsSettingsGroup(QStringLiteral("https://chat.example"),
+                                                   QStringLiteral("@bob:chat.example"));
+        const QString c = directRoomsSettingsGroup(QStringLiteral("https://chat.example:8448"),
+                                                   QStringLiteral("@alice:chat.example"));
+        QVERIFY(!a.isEmpty());
+        QVERIFY(a != b);
+        QVERIFY(a != c);
+        // Exactly two separators: "dm2/<server>/<user>". Nothing in either
+        // part may open a nested group.
+        QCOMPARE(a.count(QLatin1Char('/')), 2);
+        QVERIFY(directRoomsSettingsGroup(QStringLiteral("https://x"), QString()).isEmpty());
+    }
+
+    void aGoneRoomStopsBeingADm()
+    {
+        bsfchat::net::DirectRooms dm;
+        dm.record(QStringLiteral("!dm:h"), QStringLiteral("@bob:h"));
+        QVERIFY(dm.remove(QStringLiteral("!dm:h")));
+        QVERIFY(!dm.contains(QStringLiteral("!dm:h")));
+        QVERIFY(!dm.remove(QStringLiteral("!dm:h")));
+        QVERIFY(dm.roomWith(QStringLiteral("@bob:h"), [](const QString&) { return true; })
+                    .isEmpty());
+    }
+
+    void clearForgetsPeersAndInFlightCreates()
+    {
+        bsfchat::net::DirectRooms dm;
+        dm.record(QStringLiteral("!dm:h"), QStringLiteral("@bob:h"));
+        QVERIFY(dm.beginCreate(QStringLiteral("@carol:h")));
+        dm.clear();
+        QVERIFY(dm.peers().isEmpty());
+        QVERIFY(!dm.isCreating(QStringLiteral("@carol:h")));
     }
 };
 

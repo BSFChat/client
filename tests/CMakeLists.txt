@@ -845,6 +845,24 @@ target_link_libraries(test_sync_single_flight PRIVATE
 )
 add_test(NAME test_sync_single_flight COMMAND test_sync_single_flight)
 
+# A live since token refused with 400 M_INVALID_PARAM is dropped for a fresh
+# initial sync instead of being retried forever. Loopback server.
+qt_add_executable(test_sync_rejected_since
+    test_sync_rejected_since.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncLoop.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/SyncBackoff.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
+)
+target_include_directories(test_sync_rejected_since PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_sync_rejected_since PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Network Qt6::Test
+)
+add_test(NAME test_sync_rejected_since COMMAND test_sync_rejected_since)
+
 qt_add_executable(test_server_roster test_server_roster.cpp)
 target_include_directories(test_server_roster PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_server_roster PRIVATE Qt6::Core Qt6::Test)
@@ -1121,6 +1139,25 @@ target_link_libraries(test_room_removal PRIVATE
 )
 add_test(NAME test_room_removal COMMAND test_room_removal)
 
+# English plural forms for "%n thing(s)" strings (audit 3). Header-only.
+qt_add_executable(test_english_plurals test_english_plurals.cpp)
+target_include_directories(test_english_plurals PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_english_plurals PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_english_plurals COMMAND test_english_plurals)
+
+# Notify-level default shared with the server's push rules (audit 3).
+qt_add_executable(test_notify_level test_notify_level.cpp)
+target_include_directories(test_notify_level PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_notify_level PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_notify_level COMMAND test_notify_level)
+
+# Pending invites as the sidebar shows them (audit 3, #6): what is read out
+# of rooms.invite's stripped state. Header-only.
+qt_add_executable(test_pending_invites test_pending_invites.cpp)
+target_include_directories(test_pending_invites PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_pending_invites PRIVATE bsfchat_protocol Qt6::Core Qt6::Test)
+add_test(NAME test_pending_invites COMMAND test_pending_invites)
+
 # Media cache identity. The key used to include the access token, so every
 # re-login re-downloaded every image the user had ever seen.
 qt_add_executable(test_media_cache_key
@@ -1182,6 +1219,21 @@ target_include_directories(test_token_rejection PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_token_rejection
     PRIVATE Qt6::Core Qt6::Network Qt6::Test bsfchat_protocol nlohmann_json::nlohmann_json)
 add_test(NAME test_token_rejection COMMAND test_token_rejection)
+
+# Channel reorder keeps the channel in its category (audit 3, #7): the
+# request setChannelOrder sends, against a capturing stub server.
+qt_add_executable(test_channel_order
+    test_channel_order.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MatrixClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/TimelineTrace.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/MediaTicketCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/net/AuthError.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/SearchParser.cpp
+)
+target_include_directories(test_channel_order PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_channel_order
+    PRIVATE Qt6::Core Qt6::Network Qt6::Test bsfchat_protocol nlohmann_json::nlohmann_json)
+add_test(NAME test_channel_order COMMAND test_channel_order)
 
 # 401 classification: the client had no dead-token handling at all, so an
 # expired access token showed as a permanent "Reconnecting…".

@@ -25,12 +25,10 @@ Dialog {
     standardButtons: Dialog.NoButton
     closePolicy: Popup.CloseOnEscape
 
-    // docs/accessibility.md §9. Initial focus is set where the dialog is
-    // opened from — onReauthPasswordRequired below fills the username in and
-    // then puts the caret in the password field, which is the only thing
-    // there is left to type.
-    Accessible.role: Accessible.Dialog
-    Accessible.name: qsTr("Sign in again")
+    // docs/accessibility.md §9. Initial focus goes to the password field,
+    // the only thing left to type — in onOpened, because forcing it right
+    // after open() lost it to the popup's own focus handling (audit 3).
+    onOpened: passwordField.forceActiveFocus()
 
     // Which sidebar row we are signing back in to. Set from the signal
     // rather than by the caller: the dialog subscribes to ServerManager once
@@ -38,8 +36,26 @@ Dialog {
     // needs it has started. Both entry points — the banner button and the
     // server rail's context menu — just call reauthenticateServer(index).
     property int serverIndex: -1
-    readonly property var conn: serverIndex >= 0
-        ? serverManager.connectionAt(serverIndex) : null
+    // Resolved by ADDRESS, not by the index the prompt was opened with: the
+    // roster renumbers when another server is added or removed, and a stale
+    // index sent this password to a different server (audit 3).
+    property string serverUrl: ""
+    property int _rosterGen: 0
+    Connections {
+        target: serverManager
+        function onServerAdded() { dialog._rosterGen++; }
+        function onServerRemoved() { dialog._rosterGen++; }
+    }
+    readonly property var conn: {
+        dialog._rosterGen;
+        if (dialog.serverUrl.length === 0) return null;
+        var n = serverManager.servers ? serverManager.servers.rowCount() : 0;
+        for (var i = 0; i < n; ++i) {
+            var c = serverManager.connectionAt(i);
+            if (c && c.serverUrl === dialog.serverUrl) return c;
+        }
+        return null;
+    }
 
     property string errorMessage: ""
     property bool busy: false
@@ -60,16 +76,16 @@ Dialog {
         // Only ever emitted for a server with a password flow and no OIDC.
         function onReauthPasswordRequired(index, serverUrl, userId) {
             dialog.serverIndex = index;
+            dialog.serverUrl = serverUrl;
             dialog.errorMessage = "";
             dialog.busy = false;
             dialog._signedIn = false;
             usernameField.text = dialog.localpartOf(userId);
             passwordField.text = "";
             dialog.open();
-            passwordField.forceActiveFocus();
         }
         function onReauthFailed(index, serverUrl, error) {
-            if (index !== dialog.serverIndex) return;
+            if (serverUrl !== dialog.serverUrl) return;
             dialog.busy = false;
             // Only meaningful while the dialog is up; the OIDC path reports
             // its failures through the toast surface in main.qml.
@@ -106,9 +122,12 @@ Dialog {
                                        passwordField.text);
     }
 
-    Flickable {
+    contentItem: Flickable {
         id: contentFlick
-        anchors.fill: parent
+        // On the contentItem: a Popup is not an Item (audit 3).
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Sign in again")
+        implicitHeight: form.implicitHeight
         contentWidth: width
         contentHeight: form.implicitHeight
         clip: true

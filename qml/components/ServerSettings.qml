@@ -519,13 +519,12 @@ Popup {
     // children below are ever visible at once — the locked panel replaces
     // the nav AND the pages — and a layout skips invisible children, so
     // `columns: 2` still pairs them the way it always did.
-    // On the Popup, which Qt warns about and supports anyway — see
-    // docs/accessibility.md §11 for why this is the right place and why
-    // the warning in the log is a Qt wart rather than a mistake here.
-    Accessible.role: Accessible.Dialog
-    Accessible.name: qsTr("Server settings")
 
     contentItem: GridLayout {
+        // On the contentItem: a Popup is not an Item, so Accessible on the
+        // root reached no screen reader and logged a warning (audit 3).
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Server settings")
         columns: Theme.isMobile ? 1 : 2
         rowSpacing: 0
         columnSpacing: 0
@@ -833,7 +832,7 @@ Popup {
                                 text: {
                                     var n = serverManager.activeServer
                                         ? serverManager.activeServer.serverName : "?";
-                                    var stripped = (n || "?").replace(/^[^a-zA-Z0-9]+/, "");
+                                    var stripped = (n || "?").replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                                     return (stripped.charAt(0) || "?").toUpperCase();
                                 }
                                 font.family: Theme.fontSans
@@ -2116,7 +2115,7 @@ Popup {
                                             textFormat: Text.PlainText
                                             text: {
                                                 var n = modelData.displayName || modelData.userId || "?";
-                                                var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                                var s = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                                                 return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
                                             }
                                             font.family: Theme.fontSans
@@ -2978,7 +2977,7 @@ Popup {
                                         textFormat: Text.PlainText
                                         text: {
                                             var n = modelData.displayName || modelData.userId || "?";
-                                            var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                            var s = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                                             return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
                                         }
                                         font.family: Theme.fontSans
@@ -3117,6 +3116,8 @@ Popup {
     // destructive actions, ghost Cancel + filled primary action.
     Popup {
         id: _confirmModDialog
+        // Focus on Cancel (audit 3: no initial focus); Tab reaches the reason.
+        onOpened: cancelModBtn.forceActiveFocus()
         parent: Overlay.overlay
         anchors.centerIn: Overlay.overlay
         width: 420
@@ -3124,9 +3125,6 @@ Popup {
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         padding: Theme.sp.s7
 
-        Accessible.role: Accessible.Dialog
-        Accessible.name: _confirmModDialog.titleText
-        Accessible.description: _confirmModDialog.descText
 
         readonly property bool isDestructive:
             serverSettingsPopup.confirmMod.kind === "kick"
@@ -3161,6 +3159,11 @@ Popup {
         }
 
         contentItem: ColumnLayout {
+            // On the contentItem: a Popup is not an Item, so Accessible on the
+            // root reached no screen reader and logged a warning (audit 3).
+            Accessible.role: Accessible.Dialog
+            Accessible.name: _confirmModDialog.titleText
+            Accessible.description: _confirmModDialog.descText
             spacing: Theme.sp.s4
 
             RowLayout {

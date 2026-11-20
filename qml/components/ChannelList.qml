@@ -66,6 +66,16 @@ Rectangle {
         }
     }
 
+    // selfPresence()/selfStatusMessage() are invokables; this is the
+    // dependency that makes the user menu's status label follow them
+    // (audit 3: it never updated).
+    property int _presenceGen: 0
+    Connections {
+        target: serverManager.activeServer
+        ignoreUnknownSignals: true
+        function onPresenceChanged() { channelListRoot._presenceGen++; }
+    }
+
     // The server is the authority on per-room notify level now, so its answer
     // can disagree with the local cache (level set from another device) or undo
     // a write it refused. Either way the cached QSettings value has already been
@@ -216,6 +226,10 @@ Rectangle {
             dmView._gen;  // dep
             return serverManager.allDirectRooms();
         }
+        readonly property var _invites: {
+            dmView._gen;  // dep
+            return serverManager.allDirectInvites();
+        }
 
         Connections {
             target: serverManager
@@ -254,6 +268,16 @@ Rectangle {
                 // N DMs.
                 property var presenceConn: conn
                     ? conn.messageReceived.connect(function() { dmView._gen++; })
+                    : null
+                property var inviteConn: conn
+                    ? conn.pendingInvitesChanged.connect(function() { dmView._gen++; })
+                    : null
+                // Reading a DM clears its pill: hasUnreadChanged fires when
+                // any unread count moves, DMs included. It used to be
+                // messageReceived alone, so the pill outlived the read
+                // (a regression from 247ad33).
+                property var unreadConn: conn
+                    ? conn.hasUnreadChanged.connect(function() { dmView._gen++; })
                     : null
             }
         }
@@ -427,7 +451,7 @@ Rectangle {
                                         text: {
                                             var n = modelData.displayName
                                                   || modelData.userId;
-                                            var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                            var s = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                                             return (s.length > 0 ? s.charAt(0) : "?")
                                                 .toUpperCase();
                                         }
@@ -477,6 +501,13 @@ Rectangle {
                         }
                     }
                 }
+            }
+
+            PendingInviteList {
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.sp.s2
+                title: qsTr("MESSAGE REQUESTS")
+                invites: dmView._invites
             }
 
             ListView {
@@ -543,13 +574,21 @@ Rectangle {
                                       .arg(out);
                         return out;
                     }
-                    Accessible.onPressAction: {
-                        serverManager.setActiveServer(modelData.serverIndex);
-                        if (serverManager.activeServer) {
-                            serverManager.activeServer
-                                .setActiveRoom(modelData.roomId);
-                        }
-                    }
+                    Accessible.onPressAction: serverManager.openRoom(modelData.serverIndex,
+                                                                     modelData.roomId)
+                    activeFocusOnTab: true
+                    Keys.onReturnPressed: serverManager.openRoom(modelData.serverIndex,
+                                                                 modelData.roomId)
+                    Keys.onEnterPressed: serverManager.openRoom(modelData.serverIndex,
+                                                                modelData.roomId)
+                    Keys.onSpacePressed: serverManager.openRoom(modelData.serverIndex,
+                                                                modelData.roomId)
+                    Keys.onMenuPressed: dmRowMenu.openFor(modelData.serverIndex,
+                                                          modelData.roomId,
+                                                          modelData.peerDisplayName
+                                                              || modelData.peerId)
+                    border.width: activeFocus ? 2 : 0
+                    border.color: Theme.accent
 
                     RowLayout {
                         anchors.fill: parent
@@ -570,7 +609,7 @@ Rectangle {
                                     text: {
                                         var n = modelData.peerDisplayName
                                               || modelData.peerId;
-                                        var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                        var s = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                                         return (s.length > 0 ? s.charAt(0) : "?")
                                             .toUpperCase();
                                     }
@@ -713,16 +752,25 @@ Rectangle {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: {
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onPressAndHold: dmRowMenu.openFor(modelData.serverIndex,
+                                                          modelData.roomId,
+                                                          modelData.peerDisplayName
+                                                              || modelData.peerId)
+                        onClicked: (mouse) => {
+                            if (mouse.button === Qt.RightButton) {
+                                dmRowMenu.openFor(modelData.serverIndex, modelData.roomId,
+                                                  modelData.peerDisplayName || modelData.peerId);
+                                return;
+                            }
                             // Switch to the owning server without
                             // clearing DM mode, then select the DM
                             // room. The @ chip stays highlighted.
-                            serverManager.setActiveServer(
-                                modelData.serverIndex);
-                            if (serverManager.activeServer) {
-                                serverManager.activeServer
-                                    .setActiveRoom(modelData.roomId);
-                            }
+                            // openRoom skips that server's channel
+                            // restore, which history-filled a channel
+                            // nobody asked for.
+                            serverManager.openRoom(modelData.serverIndex,
+                                                   modelData.roomId);
                         }
                     }
                 }
@@ -918,6 +966,22 @@ Rectangle {
             }
         }
 
+        // This server's channel invites (DM invites are in the @ view).
+        PendingInviteList {
+            id: channelInvites
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.sp.s2
+            invites: {
+                var s = serverManager.activeServer;
+                if (!s) return [];
+                var out = [];
+                var all = s.pendingInvites;
+                for (var i = 0; i < all.length; ++i)
+                    if (!all[i].isDirect) out.push(all[i]);
+                return out;
+            }
+        }
+
         // Direct Messages section — rendered above the channel list.
         // Uses ServerConnection.directRooms() which returns one entry
         // per 1:1 room the current user has ever created/persisted on
@@ -974,13 +1038,17 @@ Rectangle {
                         id: dmPlus
                         text: "+"
                         font.pixelSize: Theme.fontSize.xl
-                        color: dmPlusMouse.containsMouse ? Theme.fg0 : Theme.fg2
+                        color: dmPlusMouse.containsMouse || activeFocus ? Theme.accent : Theme.fg2
                         Layout.alignment: Qt.AlignVCenter
                         // A "+" is not a name. This is the control, so it
                         // carries one; the glyph is what it looks like.
                         Accessible.role: Accessible.Button
                         Accessible.name: qsTr("New direct message")
                         Accessible.onPressAction: newDmPrompt.open()
+                        activeFocusOnTab: true
+                        Keys.onReturnPressed: newDmPrompt.open()
+                        Keys.onEnterPressed: newDmPrompt.open()
+                        Keys.onSpacePressed: newDmPrompt.open()
                         MouseArea {
                             id: dmPlusMouse
                             anchors.fill: parent
@@ -1051,7 +1119,7 @@ Rectangle {
                                             textFormat: Text.PlainText
                                             text: {
                                                 var n = (modelData.peerDisplayName || modelData.peerId || "?");
-                                                var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                                var stripped = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                                                 return (stripped.charAt(0) || "?").toUpperCase();
                                             }
                                             font.family: Theme.fontSans
@@ -1091,12 +1159,35 @@ Rectangle {
                                 }
                             }
 
+                            activeFocusOnTab: true
+                            border.width: activeFocus ? 2 : 0
+                            border.color: Theme.accent
+                            Keys.onReturnPressed: serverManager.activeServer
+                                && serverManager.activeServer.setActiveRoom(modelData.roomId)
+                            Keys.onEnterPressed: serverManager.activeServer
+                                && serverManager.activeServer.setActiveRoom(modelData.roomId)
+                            Keys.onSpacePressed: serverManager.activeServer
+                                && serverManager.activeServer.setActiveRoom(modelData.roomId)
+                            Keys.onMenuPressed: dmRowMenu.openFor(
+                                serverManager.activeServerIndex, modelData.roomId,
+                                modelData.peerDisplayName || modelData.peerId)
+
                             MouseArea {
                                 id: dmRowMouse
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: {
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                onPressAndHold: dmRowMenu.openFor(
+                                    serverManager.activeServerIndex, modelData.roomId,
+                                    modelData.peerDisplayName || modelData.peerId)
+                                onClicked: (mouse) => {
+                                    if (mouse.button === Qt.RightButton) {
+                                        dmRowMenu.openFor(
+                                            serverManager.activeServerIndex, modelData.roomId,
+                                            modelData.peerDisplayName || modelData.peerId);
+                                        return;
+                                    }
                                     if (serverManager.activeServer)
                                         serverManager.activeServer.setActiveRoom(modelData.roomId);
                                 }
@@ -1147,7 +1238,7 @@ Rectangle {
                     id: topPlus
                     text: "+"
                     font.pixelSize: Theme.fontSize.xl
-                    color: topPlusMouse.containsMouse ? Theme.fg0 : Theme.fg2
+                    color: topPlusMouse.containsMouse || activeFocus ? Theme.accent : Theme.fg2
                     Layout.alignment: Qt.AlignVCenter
 
                     // Opens the create menu (category / text / voice), the
@@ -1160,6 +1251,15 @@ Rectangle {
                         var p = topPlus.mapToItem(channelListRoot, 0, topPlus.height);
                         channelListRoot.openCreateMenu(p.x, p.y, "");
                     }
+                    // Keyboard reachable (audit 3: the "+" buttons were mouse-only).
+                    activeFocusOnTab: true
+                    function activate() {
+                        var p = topPlus.mapToItem(channelListRoot, 0, topPlus.height);
+                        channelListRoot.openCreateMenu(p.x, p.y, "");
+                    }
+                    Keys.onReturnPressed: activate()
+                    Keys.onEnterPressed: activate()
+                    Keys.onSpacePressed: activate()
 
                     MouseArea {
                         id: topPlusMouse
@@ -1260,6 +1360,10 @@ Rectangle {
                                 channelListRoot.toggleCategoryCollapsed(modelData.categoryId)
                             Accessible.onPressAction:
                                 channelListRoot.toggleCategoryCollapsed(modelData.categoryId)
+                            activeFocusOnTab: true
+                            Keys.onReturnPressed: channelListRoot.toggleCategoryCollapsed(modelData.categoryId)
+                            Keys.onEnterPressed: channelListRoot.toggleCategoryCollapsed(modelData.categoryId)
+                            Keys.onSpacePressed: channelListRoot.toggleCategoryCollapsed(modelData.categoryId)
 
                             // Backdrop click handler — left-click toggles
                             // collapse/expand; right-click opens the
@@ -1346,14 +1450,15 @@ Rectangle {
                                         ? Theme.touchTarget : 22
                                     Layout.alignment: Qt.AlignVCenter
                                     radius: Theme.r1
-                                    color: catPlusMouse.containsMouse
+                                    color: catPlusMouse.containsMouse || activeFocus
                                         ? Theme.bg3 : "transparent"
                                     // Reveal-on-hover keeps the desktop list
                                     // quiet at rest; on touch there is no hover,
                                     // so an opacity-0 control is an absent one.
                                     opacity: Theme.isMobile
                                           || catHeaderMouse.containsMouse
-                                          || catPlusMouse.containsMouse ? 1.0 : 0.0
+                                          || catPlusMouse.containsMouse
+                                          || activeFocus ? 1.0 : 0.0
                                     Behavior on color   { ColorAnimation { duration: Theme.motion.fastMs } }
                                     Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
 
@@ -1370,6 +1475,16 @@ Rectangle {
                                         channelListRoot.openCreateMenu(
                                             p.x, p.y, modelData.categoryId);
                                     }
+                                    activeFocusOnTab: true
+                                    function activate() {
+                                        var p = catPlus.mapToItem(channelListRoot,
+                                                                  0, catPlus.height);
+                                        channelListRoot.openCreateMenu(
+                                            p.x, p.y, modelData.categoryId);
+                                    }
+                                    Keys.onReturnPressed: activate()
+                                    Keys.onEnterPressed: activate()
+                                    Keys.onSpacePressed: activate()
 
                                     Icon {
                                         anchors.centerIn: parent
@@ -1563,9 +1678,9 @@ Rectangle {
                                             if (channelItemMouse.containsMouse) return Theme.bg2;
                                             return "transparent";
                                         }
-                                        border.color: channelDelegate.dragging
+                                        border.color: channelDelegate.dragging || activeFocus
                                             ? Theme.accent : "transparent"
-                                        border.width: 1
+                                        border.width: activeFocus ? 2 : 1
 
                                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                         Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
@@ -1632,6 +1747,27 @@ Rectangle {
                                             else
                                                 srv.joinVoiceChannel(modelData.roomId);
                                         }
+                                        // Keyboard: Tab to a channel, Enter/Space opens it,
+                                        // Menu opens its context menu (audit 3: mouse-only).
+                                        // Voice on mobile keeps its tap-only permission
+                                        // chain, as above.
+                                        activeFocusOnTab: true
+                                        function activateFromKeyboard() {
+                                            var srv = serverManager.activeServer;
+                                            if (!srv) return;
+                                            if (!modelData.isVoice) { srv.setActiveRoom(modelData.roomId); return; }
+                                            if (Theme.isMobile) return;
+                                            if (srv.activeVoiceRoomId === modelData.roomId) srv.showVoiceRoom();
+                                            else srv.joinVoiceChannel(modelData.roomId);
+                                        }
+                                        Keys.onReturnPressed: activateFromKeyboard()
+                                        Keys.onEnterPressed: activateFromKeyboard()
+                                        Keys.onSpacePressed: activateFromKeyboard()
+                                        Keys.onMenuPressed: {
+                                            roomContextMenu.roomId = modelData.roomId;
+                                            roomContextMenu.roomName = modelData.displayName;
+                                            roomContextMenu.popup(channelItemBg, 0, channelItemBg.height);
+                                        }
 
                                         // Invisible proxy for MouseArea.drag.target. We don't
                                         // actually move this item (it's unanchored, stays at
@@ -1697,15 +1833,19 @@ Rectangle {
                                                     text: modelData.displayName
                                                     font.family: Theme.fontSans
                                                     font.pixelSize: Theme.fontSize.base
+                                                    // Muted: not bold for plain unread,
+                                                    // still bold for a mention.
+                                                    readonly property bool _loud:
+                                                        (channelDelegate.unreadCount > 0
+                                                         && !channelDelegate.isMuted)
+                                                        || channelDelegate.mentionCount > 0
                                                     font.weight: (channelItemContent.parent.parent.isActive
-                                                                  || channelDelegate.unreadCount > 0)
+                                                                  || _loud)
                                                                  ? Theme.fontWeight.medium
                                                                  : Theme.fontWeight.regular
                                                     color: channelItemContent.parent.parent.isActive
                                                            ? Theme.fg0
-                                                           : (channelDelegate.unreadCount > 0
-                                                              ? Theme.fg0
-                                                              : Theme.fg1)
+                                                           : (_loud ? Theme.fg0 : Theme.fg1)
                                                     elide: Text.ElideRight
                                                     Layout.fillWidth: true
                                                     Accessible.ignored: true
@@ -2788,6 +2928,7 @@ Rectangle {
                 // text label so it doubles as a state indicator.
                 ThemedUserItem {
                     text: {
+                        channelListRoot._presenceGen;  // dep, see above
                         var s = serverManager.activeServer;
                         if (!s) return "Set status…";
                         var msg = s.selfStatusMessage();
@@ -3257,6 +3398,27 @@ Rectangle {
             }
         }
 
+        // Leaving is open to anyone in the channel (audit 3: there was no
+        // way to leave one at all). Confirmed, because coming back to a
+        // private channel takes a new invite.
+        ThemedRoomItem {
+            text: qsTr("Leave Channel…")
+            iconName: "x"
+            labelColor: Theme.danger
+            Accessible.name: qsTr("Leave %1").arg(roomContextMenu.roomName)
+            onTriggered: {
+                var s = serverManager.activeServer;
+                leaveConfirm.payload = { serverIndex: serverManager.activeServerIndex,
+                                         roomId: roomContextMenu.roomId };
+                leaveConfirm.title = qsTr("Leave #%1?").arg(roomContextMenu.roomName);
+                leaveConfirm.message = qsTr(
+                    "It leaves your sidebar and you stop getting its messages. "
+                    + "To come back to a private channel you need a new invite.");
+                leaveConfirm.confirmText = qsTr("Leave channel");
+                leaveConfirm.open();
+            }
+        }
+
         ThemedRoomItem {
             text: "Delete Channel"
             iconName: "x"
@@ -3271,6 +3433,58 @@ Rectangle {
                 deleteChannelConfirm.roomId = roomContextMenu.roomId;
                 deleteChannelConfirm.roomName = roomContextMenu.roomName;
                 deleteChannelConfirm.open();
+            }
+        }
+    }
+
+    // Leave a channel / close a DM. One dialog for both; `payload` says which
+    // connection and room.
+    ConfirmDialog {
+        id: leaveConfirm
+        onConfirmed: (p) => {
+            var c = p ? serverManager.connectionAt(p.serverIndex) : null;
+            if (c) c.leaveRoom(p.roomId);
+        }
+    }
+
+    // Right-click / long-press / Menu key on a DM row, in either list.
+    Menu {
+        id: dmRowMenu
+        property int serverIndex: -1
+        property string roomId: ""
+        property string peerName: ""
+        function openFor(serverIndex, roomId, peerName) {
+            dmRowMenu.serverIndex = serverIndex;
+            dmRowMenu.roomId = roomId;
+            dmRowMenu.peerName = peerName || "";
+            dmRowMenu.popup();
+        }
+        background: Rectangle {
+            color: Theme.bg1
+            radius: Theme.r2
+            border.color: Theme.line
+            border.width: 1
+            implicitWidth: 200
+        }
+        MenuItem {
+            text: qsTr("Open")
+            Accessible.role: Accessible.MenuItem
+            Accessible.name: qsTr("Open conversation with %1").arg(dmRowMenu.peerName)
+            onTriggered: serverManager.openRoom(dmRowMenu.serverIndex, dmRowMenu.roomId)
+        }
+        MenuItem {
+            text: qsTr("Close conversation…")
+            Accessible.role: Accessible.MenuItem
+            Accessible.name: qsTr("Close conversation with %1").arg(dmRowMenu.peerName)
+            onTriggered: {
+                leaveConfirm.payload = { serverIndex: dmRowMenu.serverIndex,
+                                         roomId: dmRowMenu.roomId };
+                leaveConfirm.title = qsTr("Close the conversation with %1?")
+                                         .arg(dmRowMenu.peerName);
+                leaveConfirm.message = qsTr(
+                    "You leave it and it is removed from your direct messages.");
+                leaveConfirm.confirmText = qsTr("Close conversation");
+                leaveConfirm.open();
             }
         }
     }
@@ -3297,6 +3511,8 @@ Rectangle {
 
         property string roomId: ""
         property string roomName: ""
+        // Focus on Cancel (audit 3: confirmations had no initial focus).
+        onOpened: deleteCancelBtn.forceActiveFocus()
 
         // Match the rest of the dialog vocabulary: bg1 body + r3 + line
         // border, not the older bg2/bg3/r2 treatment this used to use.
@@ -3308,6 +3524,8 @@ Rectangle {
         }
 
         contentItem: ColumnLayout {
+            Accessible.role: Accessible.Dialog
+            Accessible.name: qsTr("Delete #%1?").arg(deleteChannelConfirm.roomName)
             spacing: Theme.sp.s4
 
             // Danger icon + title, so a destructive confirmation reads at a

@@ -82,13 +82,12 @@ Popup {
         return hours + (hours === 1 ? " hour ago" : " hours ago");
     }
 
-    // On the Popup, which Qt warns about and supports anyway — see
-    // docs/accessibility.md §11 for why this is the right place and why
-    // the warning in the log is a Qt wart rather than a mistake here.
-    Accessible.role: Accessible.Dialog
-    Accessible.name: qsTr("Blocked accounts")
 
     contentItem: ColumnLayout {
+        // On the contentItem: a Popup is not an Item, so Accessible on the
+        // root reached no screen reader and logged a warning (audit 3).
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Blocked accounts")
         spacing: Theme.sp.s4
 
         // ── Header ──

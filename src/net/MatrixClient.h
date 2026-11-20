@@ -510,11 +510,11 @@ signals:
     void createRoomError(const QString& requestId, const QString& error);
 
     void joinRoomSuccess(const QString& roomId);
-    void joinRoomError(const QString& error);
+    void joinRoomError(const QString& roomIdOrAlias, const QString& error);
 
     void logoutFinished(bool ok);
     void leaveRoomSuccess(const QString& roomId);
-    void leaveRoomError(const QString& error);
+    void leaveRoomError(const QString& roomId, const QString& error);
 
     // DELETE /rooms/{id} used to be fire-and-forget, so a refused delete
     // looked exactly like one that worked.
@@ -758,6 +758,9 @@ signals:
     void categoryRoomCreated(const QString& roomId);
     void channelMoved();
     void channelOrderSet();
+    void channelOrderFailed(const QString& roomId, const QString& error);
+    void displayNameUpdateFailed(const QString& error);
+    void presenceUpdateFailed(const QString& error);
     void roomStateResult(const QString& roomId, const QString& eventType, const QJsonObject& content);
     void displayNameUpdated();
     void avatarUrlUpdated();

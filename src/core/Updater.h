@@ -110,6 +110,10 @@ class Updater : public QObject {
     // The channel the last check actually used ("stable" / "beta"),
     // read from the same QSettings key Settings::updateChannel writes.
     Q_PROPERTY(QString channel READ channel NOTIFY stateChanged)
+    // The last Failed was a refusal (signature, checksum, codesign) rather
+    // than a network error: the UI says nothing was installed and why,
+    // instead of "the last attempt didn't finish" (audit 3).
+    Q_PROPERTY(bool integrityFailure READ integrityFailure NOTIFY stateChanged)
 
 public:
     // QML compares these as bare integers (see ClientSettings.qml and
@@ -173,6 +177,10 @@ public:
     // a check 30 seconds after launch (so we don't compete with
     // first-paint / login / sync) and every 6 hours thereafter.
     void startAutoCheckSchedule();
+    // Start or stop that schedule, for the Settings toggle: it used to take
+    // effect only at the next launch (audit 3).
+    void setAutoCheckEnabled(bool enabled);
+    bool integrityFailure() const { return m_integrityFailure; }
 
     // Network inactivity timeouts. checkNow() and downloadUpdate() both
     // refuse to start while a check/download is in flight, so a request
@@ -235,4 +243,12 @@ private:
     QString m_latestStableVersion;
     QString m_channel;        // channel used by the most recent check
     QTimer  m_recheckTimer;
+    QTimer  m_firstCheckTimer;
+    bool    m_integrityFailure = false;
+    // ReadyToApply when the running check started: kept unless the check
+    // offers something else (keepReadyDownload).
+    bool    m_readyBeforeCheck = false;
+    QString m_readyVersion;
+    // Restore ReadyToApply if keepReadyDownload says so; true when it did.
+    bool restoreReadyDownload(bool checkSucceeded, int outcome, const QString& offeredTag);
 };

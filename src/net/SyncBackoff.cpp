@@ -52,4 +52,12 @@ bool indicatesRejectedSinceToken(const QString& errorBody)
         || code == QStringLiteral("M_BAD_JSON");
 }
 
+bool rejectsSinceTokenOutright(const QString& errorBody)
+{
+    const QJsonDocument doc = QJsonDocument::fromJson(errorBody.toUtf8());
+    if (!doc.isObject()) return false;
+    return doc.object().value(QStringLiteral("errcode")).toString()
+        == QStringLiteral("M_INVALID_PARAM");
+}
+
 } // namespace SyncBackoff

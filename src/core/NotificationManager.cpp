@@ -90,11 +90,14 @@ NotificationManager::NotificationManager(ServerManager* serverManager,
         connect(m_tray.get(), &QSystemTrayIcon::messageClicked,
                 this, &NotificationManager::onNotificationClicked);
         // Single left-click raises the app, matching most chat apps.
+        // It only raises: the icon is not a notification, and jumping to
+        // whichever room last notified — however long ago — took people
+        // away from what they were reading (audit 3).
         connect(m_tray.get(), &QSystemTrayIcon::activated, this,
             [this](QSystemTrayIcon::ActivationReason r) {
                 if (r == QSystemTrayIcon::Trigger
                     || r == QSystemTrayIcon::DoubleClick) {
-                    onNotificationClicked();
+                    raiseWindows();
                 }
             });
     }
@@ -171,6 +174,26 @@ void NotificationManager::wireConnection(ServerConnection* conn)
     connect(conn, &ServerConnection::voiceDeafenedChanged, this,
             &NotificationManager::rebuildTrayMenu, Qt::UniqueConnection);
 
+    // An invite is a notification of its own (audit 3, #6): the invitee is
+    // not in the room, so no message event will ever announce it. The toast
+    // covers a focused window; this covers everything else.
+    connect(conn, &ServerConnection::inviteReceived, this,
+        [this, conn](const QString&, const QString& roomName,
+                     const QString& inviterName, bool isDirect) {
+            if (!m_settings || !m_settings->notificationsEnabled()) return;
+            const bool windowFocused = QGuiApplication::focusWindow() != nullptr;
+            if (windowFocused) return;
+            const QString title = isDirect ? tr("New message request")
+                                           : tr("New channel invite");
+            const QString body = isDirect
+                ? tr("%1 wants to message you").arg(inviterName)
+                : tr("%1 invited you to %2").arg(inviterName,
+                      roomName.isEmpty() ? tr("a channel") : QStringLiteral("#") + roomName);
+            // Clicking opens the server it is on; the invite is in its sidebar.
+            setPendingTarget(conn->serverUrl(), QString());
+            if (m_tray) m_tray->showMessage(title, body, QSystemTrayIcon::Information, 5000);
+        });
+
     // When the user opens a room, clear any Android notifications
     // we'd posted for that room — they're already seeing the
     // messages, so leaving the shade entry would be redundant.
@@ -196,8 +219,7 @@ void NotificationManager::rebuildTrayMenu()
     m_trayMenu->clear();
 
     QAction* showAct = m_trayMenu->addAction(tr("Show BSFChat"));
-    connect(showAct, &QAction::triggered, this,
-            &NotificationManager::onNotificationClicked);
+    connect(showAct, &QAction::triggered, this, &NotificationManager::raiseWindows);
 
     m_trayMenu->addSeparator();
 
@@ -273,7 +295,7 @@ void NotificationManager::onMessageReceived(const QString& roomId,
     // routing — we also skip the chat chime, so a "none" room is
     // entirely silent (the unread dot still appears in the channel
     // list; that's a different signal).
-    const QString roomMode = m_settings->roomNotificationMode(roomId);
+    const QString roomMode = m_settings->roomNotificationMode(roomId, sender->isDirectRoom(roomId));
     if (roomMode == QStringLiteral("none")) return;
     if (roomMode == QStringLiteral("mentions") && !mentionsMe) return;
 
@@ -291,8 +313,7 @@ void NotificationManager::onMessageReceived(const QString& roomId,
     if (isActiveRoom && windowFocused && !mentionsMe) return;
 
     // Stash routing target for messageClicked (see onNotificationClicked).
-    m_pendingServerUrl = sender->serverUrl();
-    m_pendingRoomId = roomId;
+    setPendingTarget(sender->serverUrl(), roomId);
 
     // Shared notification text for both desktop tray + Android.
     const QString title = mentionsMe
@@ -304,6 +325,16 @@ void NotificationManager::onMessageReceived(const QString& roomId,
     if (m_tray) {
         m_tray->showMessage(title, preview, QSystemTrayIcon::Information, 5000);
     }
+#if defined(Q_OS_IOS)
+    // No tray, no Android shade: in the foreground nothing at all said a
+    // message had arrived elsewhere. Only for rooms not on screen.
+    if (!isActiveRoom && QGuiApplication::applicationState() == Qt::ApplicationActive) {
+        int idx = -1;
+        for (int i = 0; i < m_serverManager->connectionCount(); ++i)
+            if (m_serverManager->connectionAt(i) == sender) { idx = i; break; }
+        if (idx >= 0) emit inAppMessage(idx, roomId, title, preview);
+    }
+#endif
 
     // Android: post a real NotificationManager notification so the
     // user sees it in the shade while the app is backgrounded. The
@@ -329,7 +360,14 @@ void NotificationManager::onMessageReceived(const QString& roomId,
     }
 }
 
-void NotificationManager::onNotificationClicked()
+void NotificationManager::setPendingTarget(const QString& serverUrl, const QString& roomId)
+{
+    m_pendingServerUrl = serverUrl;
+    m_pendingRoomId = roomId;
+    m_pendingSetAt.start();
+}
+
+void NotificationManager::raiseWindows()
 {
     // Raise + activate the main window. We loop top-level windows because
     // m_window may not have been set yet on very early notifications.
@@ -337,17 +375,35 @@ void NotificationManager::onNotificationClicked()
         w->raise();
         w->requestActivate();
     }
+}
 
-    if (m_pendingServerUrl.isEmpty() || m_pendingRoomId.isEmpty()) return;
+void NotificationManager::onNotificationClicked()
+{
+    raiseWindows();
+
+    // One click per notification, and only while it can still be the one on
+    // screen: a balloon clicked minutes later is not, and the old target
+    // used to be followed forever.
+    const bool fresh = m_pendingSetAt.isValid()
+        && m_pendingSetAt.elapsed() < kPendingTargetMaxAgeMs;
+    const QString serverUrl = m_pendingServerUrl;
+    const QString roomId = m_pendingRoomId;
+    m_pendingServerUrl.clear();
+    m_pendingRoomId.clear();
+    m_pendingSetAt.invalidate();
+    if (!fresh || serverUrl.isEmpty()) return;
 
     // Locate the connection by URL and switch to it + the target room.
     for (int i = 0; i < m_serverManager->connectionCount(); ++i) {
         ServerConnection* conn = m_serverManager->connectionAt(i);
-        if (!conn || conn->serverUrl() != m_pendingServerUrl) continue;
-        if (m_serverManager->activeServerIndex() != i)
+        if (!conn || conn->serverUrl() != serverUrl) continue;
+        if (!roomId.isEmpty()) {
+            if (conn->activeRoomId() != roomId || m_serverManager->activeServerIndex() != i)
+                m_serverManager->openRoom(i, roomId);
+        } else if (m_serverManager->activeServerIndex() != i) {
+            m_serverManager->setViewingDms(false);
             m_serverManager->setActiveServer(i);
-        if (conn->activeRoomId() != m_pendingRoomId)
-            conn->setActiveRoom(m_pendingRoomId);
+        }
         break;
     }
 }

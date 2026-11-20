@@ -300,15 +300,14 @@ Popup {
 
     // ----- Layout -----
 
-    // On the Popup, which Qt warns about and supports anyway — see
-    // docs/accessibility.md §11 for why this is the right place and why
-    // the warning in the log is a Qt wart rather than a mistake here.
-    Accessible.role: Accessible.Dialog
-    Accessible.name: channelSettings.liveRoomName
-        ? qsTr("Channel settings for %1").arg(channelSettings.liveRoomName)
-        : qsTr("Channel settings")
 
     contentItem: ColumnLayout {
+        // On the contentItem: a Popup is not an Item, so Accessible on the
+        // root reached no screen reader and logged a warning (audit 3).
+        Accessible.role: Accessible.Dialog
+        Accessible.name: channelSettings.liveRoomName
+            ? qsTr("Channel settings for %1").arg(channelSettings.liveRoomName)
+            : qsTr("Channel settings")
         anchors.fill: parent
         spacing: 0
 
@@ -699,6 +698,11 @@ Popup {
                             if (checked) deny |= 0x1; else deny &= ~0x1;
                             serverManager.activeServer.setChannelOverride(
                                 channelSettings.roomId, "role:everyone", ov.allow, deny);
+                            // Follow the stored override again rather than
+                            // the click: a refused write (403) left the
+                            // switch showing a privacy the channel did not
+                            // have (audit 3). It flips when the change lands.
+                            checked = Qt.binding(function() { return privateRow.isPrivate; });
                         }
                     }
                 }

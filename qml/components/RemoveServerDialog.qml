@@ -50,7 +50,24 @@ Dialog {
         if (idx >= 0) serverManager.leaveServer(idx);
     }
 
-    readonly property string _name: serverLabel.length > 0 ? serverLabel : "this server"
+    readonly property string _name: serverLabel.length > 0 ? serverLabel : qsTr("this server")
+    // With a BSFChat ID signed in, leaveServer also takes the server off the
+    // ID's server list — on every device (audit 3). "Untouched" said
+    // otherwise.
+    readonly property string _body: {
+        var first = removeServerDialog.signOut
+            ? qsTr("You'll be signed out of %1 and it will be removed from this "
+                   + "device, along with its saved login.").arg(removeServerDialog._name)
+            : qsTr("This removes %1 and its saved login from this device.")
+                  .arg(removeServerDialog._name);
+        if (serverManager.identitySignedIn)
+            return first + " " + qsTr("It is also removed from your BSFChat ID's server "
+                                      + "list, so your other devices stop offering it. "
+                                      + "Your account on the server itself is kept — "
+                                      + "you can add it again later.");
+        return first + " " + qsTr("Your account on the server is kept — you can add "
+                                  + "it again later.");
+    }
 
     parent: Overlay.overlay
     anchors.centerIn: parent
@@ -58,8 +75,8 @@ Dialog {
     modal: true
     title: ""
 
-    Accessible.role: Accessible.Dialog
-    Accessible.name: signOut ? qsTr("Sign out?") : qsTr("Remove server?")
+    // Cancel first: Enter on a dialog opened by accident must not remove.
+    onOpened: removeCancelBtn.forceActiveFocus()
 
     background: Rectangle {
         color: Theme.bg1
@@ -70,6 +87,10 @@ Dialog {
 
     contentItem: ColumnLayout {
         spacing: Theme.sp.s4
+        // On the contentItem: on the Dialog root it reached no screen reader.
+        Accessible.role: Accessible.Dialog
+        Accessible.name: removeServerDialog.signOut ? qsTr("Sign out?") : qsTr("Remove server?")
+        Accessible.description: removeServerDialog._body
 
         Text {
             Layout.fillWidth: true
@@ -84,14 +105,7 @@ Dialog {
         Text {
             Layout.fillWidth: true
             textFormat: Text.PlainText
-            text: removeServerDialog.signOut
-                  ? "You'll be signed out of " + removeServerDialog._name
-                    + " and it will be removed from this device, along with "
-                    + "its saved login. Your account on the server is "
-                    + "untouched — you can add it again later."
-                  : "This removes " + removeServerDialog._name
-                    + " and its saved login from this device. Your account "
-                    + "on the server is untouched — you can add it again later."
+            text: removeServerDialog._body
             wrapMode: Text.Wrap
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.sm
@@ -103,6 +117,7 @@ Dialog {
             spacing: Theme.sp.s3
 
             Button {
+                id: removeCancelBtn
                 text: "Cancel"
                 flat: true
                 Accessible.role: Accessible.Button

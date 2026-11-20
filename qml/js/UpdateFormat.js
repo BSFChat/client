@@ -186,7 +186,11 @@ function detail(state, ctx) {
         return "Handing the download to the installer.";
     case Failed:
         // The verbatim message gets its own banner underneath; repeating
-        // it here would print it twice.
+        // it here would print it twice. A refusal is not "didn't finish":
+        // the download completed and was rejected (audit 3).
+        if (ctx.integrityFailure)
+            return "The download could not be verified, so it was deleted "
+                + "and nothing was installed. Trying again downloads it afresh.";
         return "The last attempt didn't finish.";
     case AheadOfChannel:
         var stable = vtag(ctx.latestStableVersion);

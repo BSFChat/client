@@ -35,6 +35,7 @@
 #include "core/SharePolicy.h"
 #include "net/DeactivateFlow.h"
 #include "net/DirectRooms.h"
+#include "net/PendingInvites.h"
 #include "net/MatrixFailure.h"
 #include "net/VoiceSession.h"
 #include "net/VoiceStateMirror.h"
@@ -181,6 +182,12 @@ class ServerConnection : public QObject {
     Q_PROPERTY(bool needsReauth READ needsReauth NOTIFY sessionAuthChanged)
     Q_PROPERTY(bool reauthInProgress READ reauthInProgress NOTIFY sessionAuthChanged)
     Q_PROPERTY(bool hasUnread READ hasUnread NOTIFY hasUnreadChanged)
+    // The rail's numbers (audit 3): unread in unmuted channels, mentions in
+    // channels, and unread across this server's DMs. All on hasUnreadChanged,
+    // which fires whenever any of them moves.
+    Q_PROPERTY(int unreadCount READ unreadCount NOTIFY hasUnreadChanged)
+    Q_PROPERTY(int mentionCount READ mentionCount NOTIFY hasUnreadChanged)
+    Q_PROPERTY(int directUnreadCount READ directUnreadCount NOTIFY hasUnreadChanged)
     Q_PROPERTY(QString activeVoiceRoomId READ activeVoiceRoomId NOTIFY activeVoiceRoomIdChanged)
     Q_PROPERTY(bool voiceMuted READ voiceMuted NOTIFY voiceMutedChanged)
     Q_PROPERTY(bool voiceDeafened READ voiceDeafened NOTIFY voiceDeafenedChanged)
@@ -271,6 +278,10 @@ class ServerConnection : public QObject {
     // room only). ServerSettings > Members binds to this so the tab shows
     // the full roster regardless of which channel happens to be active.
     Q_PROPERTY(QVariantList serverMembers READ serverMembers NOTIFY serverMembersChanged)
+    // Invites not yet answered (audit 3, #6): [{roomId, roomName, roomType,
+    // inviterId, inviterName, isDirect}], rebuilt from every live /sync.
+    // Excludes invites with an accept/decline in flight.
+    Q_PROPERTY(QVariantList pendingInvites READ pendingInvites NOTIFY pendingInvitesChanged)
 
 public:
     explicit ServerConnection(const QString& serverUrl, QObject* parent = nullptr);
@@ -338,6 +349,9 @@ public:
         return m_auth.actionForReconnect(QDateTime::currentMSecsSinceEpoch());
     }
     bool hasUnread() const { return m_hasUnread; }
+    int unreadCount() const { return m_unreadCount; }
+    int mentionCount() const { return m_mentionCount; }
+    int directUnreadCount() const { return m_directUnreadCount; }
 
     QString activeVoiceRoomId() const { return m_activeVoiceRoomId; }
     QString voiceError() const { return m_voiceError; }
@@ -651,7 +665,20 @@ public:
                                             const QString& displayName = QString());
     Q_INVOKABLE void createRoom(const QString& name, const QString& topic);
     Q_INVOKABLE void joinRoom(const QString& roomIdOrAlias);
+    // Leave a channel or close a DM. The room goes from the sidebar when the
+    // server confirms (leaveRoomSuccess); a refusal is toasted.
     Q_INVOKABLE void leaveRoom(const QString& roomId);
+    // Answer a pending invite. Accept joins and opens the room once the next
+    // sync brings it; decline is a leave. Either hides the invite at once and
+    // brings it back if the server refuses.
+    Q_INVOKABLE void acceptInvite(const QString& roomId);
+    Q_INVOKABLE void declineInvite(const QString& roomId);
+    QVariantList pendingInvites() const;
+    // Leaving the @ view: if a DM is the open room, open this server's
+    // remembered (or first) text channel instead.
+    void showChannelInsteadOfDirectRoom();
+    // Pending DM invites not being answered: counted on the @ chip.
+    int directInviteCount() const;
     // Delete a channel (server-side destructive). Requires MANAGE_CHANNELS;
     // server enforces regardless.
     Q_INVOKABLE void deleteChannel(const QString& roomId);
@@ -808,6 +835,10 @@ public:
     Q_INVOKABLE bool canEmbed(const QString& roomId) const;
     Q_INVOKABLE bool canManageChannel(const QString& roomId) const;
     Q_INVOKABLE bool canManageRoles(const QString& roomId) const;
+    // Whether the server will let us hand out `roleId` (may_assign_roles):
+    // administrators any role; others only roles ranked below their own
+    // highest non-self-assignable role. The popup offers just those.
+    Q_INVOKABLE bool canAssignRole(const QString& roleId) const;
     // Server-wide, as on the server: the room id is accepted for call-site
     // uniformity but ignored. See the definitions.
     Q_INVOKABLE bool canKick(const QString& roomId = QString()) const;
@@ -1170,6 +1201,11 @@ signals:
     // hook since presenceFor() is a lookup on a regular QMap.
     void presenceChanged();
     void directRoomsChanged();
+    void pendingInvitesChanged();
+    // A new invite arrived (not one already listed). For the toast and the
+    // desktop notification; the sidebar binds pendingInvites.
+    void inviteReceived(const QString& roomId, const QString& roomName,
+                        const QString& inviterName, bool isDirect);
     // Emitted when a peer's screen stream goes live or dark (NOT per
     // frame — frames flow through the VideoStreamRegistry sinks). QML
     // re-evaluates peersCurrentlySharing() off this.
@@ -1439,6 +1475,16 @@ private:
     // Pending invites as of the newest live sync (that section is a complete
     // restatement, see the protocol header). Never dropped by a reconcile.
     QSet<QString> m_pendingInviteIds;
+    // The same invites with what the sidebar shows (PendingInvites.h), in
+    // server order; and those this device is answering right now.
+    QVector<bsfchat::client::PendingInvite> m_pendingInvites;
+    QSet<QString> m_inviteAnswersInFlight;
+    // Accepted invite to open as soon as a sync brings the joined room.
+    QString m_openAfterJoin;
+    // Invites announced this session (inviteReceived), so a restatement
+    // does not toast again.
+    QSet<QString> m_announcedInviteIds;
+    void updatePendingInvites(const bsfchat::SyncResponse& response);
     // The homeserver rejected our bearer token, from /sync or from any other
     // authenticated request. Idempotent: the ten in-flight requests that all
     // 401 at once raise one banner between them.
@@ -1533,6 +1579,14 @@ private:
     bool m_forceFullSync = false;
     QString m_syncErrorMessage;
     bool m_hasUnread = false;
+    // The next live sync is a full re-sync after an abandoned since token:
+    // treat it as catch-up (no message notifications).
+    bool m_catchUpSyncPending = false;
+    int m_unreadCount = 0;
+    int m_mentionCount = 0;
+    int m_directUnreadCount = 0;
+    // Recompute the four above and emit hasUnreadChanged if any moved.
+    void refreshUnreadState();
     bool m_viewingVoiceRoom = false;
 
 public:
@@ -1582,6 +1636,11 @@ public:
     // setup and extended by m.direct on sync.
     bsfchat::net::DirectRooms m_directRooms;
     void persistDirectRoom(const QString& roomId);
+    void forgetDirectRoom(const QString& roomId);
+    // (Re)load the DM map for the account now in m_userId; a no-op when it
+    // is the one already loaded.
+    void loadDirectRoomsForAccount();
+    QString m_directRoomsGroup;
     // The one way a room becomes a DM. Flags it in RoomListModel (which is
     // what keeps it out of this server's channels) and, when the peer is
     // known, records and persists it. `peer` may be empty: the isolation half

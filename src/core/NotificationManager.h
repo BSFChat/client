@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QPointer>
 #include <QString>
@@ -40,6 +41,14 @@ public:
     // the device. Call refreshBackgroundSync() when the answer changes.
     void setBackgroundSyncPolicy(std::function<bool()> policy);
     void refreshBackgroundSync();
+
+signals:
+    // A message for a room other than the one on screen, while the app is
+    // in the foreground on a platform with no OS banner for that (iOS:
+    // QSystemTrayIcon is unavailable, so nothing showed at all — audit 3).
+    // The mobile shell shows it as a tappable in-app toast.
+    void inAppMessage(int serverIndex, const QString& roomId,
+                      const QString& title, const QString& preview);
 
 private slots:
     void onServerAdded(int index);
@@ -86,4 +95,10 @@ private:
     // wins" — good enough for the usual click-as-it-pops-up case.
     QString m_pendingServerUrl;
     QString m_pendingRoomId;
+    // When the target was stashed; a click on an older notification only
+    // raises the window.
+    QElapsedTimer m_pendingSetAt;
+    static constexpr qint64 kPendingTargetMaxAgeMs = 5 * 60 * 1000;
+    void setPendingTarget(const QString& serverUrl, const QString& roomId);
+    void raiseWindows();
 };

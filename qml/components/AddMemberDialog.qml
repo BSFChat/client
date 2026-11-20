@@ -100,7 +100,8 @@ Popup {
     onClosed: if (_model) _model.reset()
 
     function submit() {
-        if (!_model || !mayAdd) return;
+        // Enter in the field while a request is out sent a second one (audit 3).
+        if (!_model || !mayAdd || _model.busy) return;
         if (memberIdField.problem.length > 0) return;
         _model.invite(addMemberDialog.roomId, memberIdField.text.trim(),
                       addMemberDialog.roomName);
@@ -113,13 +114,12 @@ Popup {
         border.width: 1
     }
 
-    // On the Popup, which Qt warns about and supports anyway — see
-    // docs/accessibility.md §11 for why this is the right place and why
-    // the warning in the log is a Qt wart rather than a mistake here.
-    Accessible.role: Accessible.Dialog
-    Accessible.name: qsTr("Add someone to %1").arg(addMemberDialog._channelPhrase)
 
     contentItem: ColumnLayout {
+        // On the contentItem: a Popup is not an Item, so Accessible on the
+        // root reached no screen reader and logged a warning (audit 3).
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Add someone to %1").arg(addMemberDialog._channelPhrase)
         spacing: Theme.sp.s4
 
         // ── Title ─────────────────────────────────────────────────────────

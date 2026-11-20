@@ -113,7 +113,7 @@ void SyncLoop::doSync()
     if (m_inFlight) return;
     m_inFlight = true;
     m_requestTimer.start();
-    qCDebug(logSync).nospace()
+    qCDebug(logSync).noquote().nospace()
         << "/sync -> since=" << (m_since.isEmpty() ? QStringLiteral("(full)") : m_since)
         << " timeout=" << kSyncTimeoutMs << "ms";
     m_client->sync(m_since, kSyncTimeoutMs);
@@ -193,7 +193,7 @@ void SyncLoop::onSyncSuccess(const bsfchat::SyncResponse& response)
         // already queued). Fast with nothing and no token movement is the
         // shape that costs real latency: it is what triggers the no-progress
         // backoff below, so log the two apart rather than as one "empty".
-        qCDebug(logSync).nospace()
+        qCDebug(logSync).noquote().nospace()
             << "/sync rt=" << elapsed << "ms rooms=" << response.rooms.join.size()
             << " events=" << events << " ephemeral=" << ephemeral
             << " presence=" << presence
@@ -237,11 +237,16 @@ void SyncLoop::onSyncError(const QString& error)
         && (SyncBackoff::indicatesRejectedSinceToken(error)
             || m_consecutiveFailures + 1 >= SyncBackoff::kMaxResumeAttempts)) {
         abandonSinceToken();
+    } else if (!m_since.isEmpty() && SyncBackoff::rejectsSinceTokenOutright(error)) {
+        // A LIVE token refused with 400 M_INVALID_PARAM (the server no longer
+        // falls back to an initial sync for a token it does not know). It was
+        // retried forever: only resumed tokens were ever abandoned.
+        abandonSinceToken();
     }
 
     const int delay = SyncBackoff::delayForFailure(
         m_consecutiveFailures++, QRandomGenerator::global()->generateDouble());
-    qCDebug(logSync).nospace()
+    qCDebug(logSync).noquote().nospace()
         << "/sync failed after "
         << (m_requestTimer.isValid() ? m_requestTimer.elapsed() : -1)
         << "ms, retry in " << delay << "ms (failure #" << m_consecutiveFailures
@@ -253,8 +258,8 @@ void SyncLoop::onSyncError(const QString& error)
 
 void SyncLoop::abandonSinceToken()
 {
-    qWarning() << "sync: giving up on the resumed since token"
-               << m_since << "— falling back to a full initial sync";
+    qWarning().noquote() << "sync: giving up on the since token"
+                         << m_since << "— falling back to a full initial sync";
     m_since.clear();
     // Cleared first: the flag is what stops this from firing again and
     // again, which would make every subsequent error re-emit the signal.

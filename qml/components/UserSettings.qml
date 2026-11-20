@@ -45,9 +45,16 @@ Popup {
         }
     }
 
+    // Take focus on open, so Esc closes it and Tab starts inside it without a
+    // click first (audit 3).
+    focus: true
+    onOpened: displayNameField.forceActiveFocus()
+
     contentItem: ColumnLayout {
         id: contentCol
         spacing: Theme.sp.s7
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Profile settings")
 
         // Title — SPEC §3.10 section-header convention (24px semibold +
         // a 1px divider rule below).
@@ -108,7 +115,7 @@ Popup {
                         if (!serverManager.activeServer) return "?";
                         var n = serverManager.activeServer.displayName
                              || serverManager.activeServer.userId;
-                        var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                        var s = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                         return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
                     }
                     font.family: Theme.fontSans
@@ -208,6 +215,9 @@ Popup {
                     // nothing to announce without this.
                     Accessible.role: Accessible.EditableText
                     Accessible.name: qsTr("Display name")
+                    // The server's limit is 256 bytes (InputLimits.h); 64
+                    // characters stays inside it for any script.
+                    maximumLength: 64
                     placeholderText: "Enter display name"
                     placeholderTextColor: Theme.fg3
                     color: Theme.fg0
@@ -454,7 +464,7 @@ Popup {
             id: deleteIdentityBtn
             Layout.fillWidth: true
             Layout.preferredHeight: 32
-            visible: serverManager.hasIdentityAccount()
+            visible: serverManager.identityAccountKnown
             Accessible.role: Accessible.Button
             Accessible.name: qsTr("Delete BSFChat ID")
             Accessible.description: qsTr("Explains what deleting your BSFChat ID removes, then opens your BSFChat ID account page")

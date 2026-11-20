@@ -207,15 +207,14 @@ Popup {
         }
     }
 
-    // On the Popup, which Qt warns about and supports anyway — see
-    // docs/accessibility.md §11 for why this is the right place and why
-    // the warning in the log is a Qt wart rather than a mistake here.
-    Accessible.role: Accessible.Dialog
-    Accessible.name: reportDialog.kind === "message"
-        ? qsTr("Report this message")
-        : qsTr("Report %1").arg(reportDialog.targetName)
 
     contentItem: Flickable {
+        // On the contentItem: a Popup is not an Item, so Accessible on the
+        // root reached no screen reader and logged a warning (audit 3).
+        Accessible.role: Accessible.Dialog
+        Accessible.name: reportDialog.kind === "message"
+            ? qsTr("Report this message")
+            : qsTr("Report %1").arg(reportDialog.targetName)
         id: contentFlick
         // The Popup takes its implicitHeight from this, and a Flickable's own
         // is 0 — without this line the dialog clamps to nothing and opens

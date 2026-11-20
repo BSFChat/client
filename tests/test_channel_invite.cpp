@@ -170,7 +170,9 @@ private slots:
             QStringLiteral("@alice"),                // no server
             QStringLiteral("@:bsfchat.com"),         // no name
             QStringLiteral("@alice:"),               // no server after the colon
-            QStringLiteral("@alice:a:b"),            // two colons
+            QStringLiteral("@alice:a:b"),            // two colons, not a port
+            QStringLiteral("@alice:a:8448:1"),       // three colons
+            QStringLiteral("@alice::8448"),          // port with no host
             QStringLiteral("@alice bsfchat.com"),    // whitespace
         };
         for (const QString& id : bad) {
@@ -189,6 +191,9 @@ private slots:
         QVERIFY(ChannelInviteModel::userIdError(
                     QStringLiteral("@a.b_c-d:bsfchat.com")).isEmpty());
         QVERIFY(ChannelInviteModel::userIdError(QString()).isEmpty());
+        // A server with a port (audit 3).
+        QVERIFY(ChannelInviteModel::userIdError(
+                    QStringLiteral("@alice:chat.example:8448")).isEmpty());
     }
 
     void theForeignHomeserverGuessIsGoneBecauseTheServerAnswersItNow()
@@ -288,6 +293,10 @@ private slots:
         QVERIFY(m.errorText().isEmpty());
         QVERIFY(m.noticeText().contains(QStringLiteral("Bob")));
         QVERIFY2(!m.noticeText().contains(QStringLiteral("sees the invite")),
+                 qPrintable(m.noticeText()));
+        QVERIFY2(!m.noticeText().startsWith(QStringLiteral("Invited")),
+                 qPrintable(m.noticeText()));
+        QVERIFY2(m.noticeText().contains(QStringLiteral("already in")),
                  qPrintable(m.noticeText()));
 
         // A membership the client has NOT seen behaves identically; there is
@@ -391,6 +400,9 @@ private slots:
 
         QVERIFY(m.noticeText().contains(who));
         QVERIFY(m.noticeText().contains(QStringLiteral("#general")));
+        // A person holds an invite until they accept: not "Added".
+        QVERIFY2(m.noticeText().startsWith(QStringLiteral("Invited")),
+                 qPrintable(m.noticeText()));
         // Nothing about what happens next, because whatever it said would be
         // false for one of the three.
         for (const char* claim : {"sees the invite", "next time they connect",

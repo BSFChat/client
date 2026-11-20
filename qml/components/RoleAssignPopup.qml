@@ -56,13 +56,12 @@ Popup {
         border.width: 1
     }
 
-    // On the Popup, which Qt warns about and supports anyway — see
-    // docs/accessibility.md §11 for why this is the right place and why
-    // the warning in the log is a Qt wart rather than a mistake here.
-    Accessible.role: Accessible.Dialog
-    Accessible.name: qsTr("Manage roles for %1").arg(popup.displayName)
 
     contentItem: ColumnLayout {
+        // On the contentItem: a Popup is not an Item, so Accessible on the
+        // root reached no screen reader and logged a warning (audit 3).
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Manage roles for %1").arg(popup.displayName)
         anchors.fill: parent
         spacing: 0
 
@@ -88,7 +87,7 @@ Popup {
                         textFormat: Text.PlainText
                         text: {
                             var n = popup.displayName || popup.userId || "?";
-                            var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                            var s = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                             return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
                         }
                         font.family: Theme.fontSans
@@ -188,7 +187,25 @@ Popup {
                         readonly property string roleId: role.id || role.name
                         readonly property bool isChecked:
                             popup.assignedSet[roleId] === true
-                        visible: roleId !== "everyone"
+                        // Only roles the server will let us hand out
+                        // (audit 3); a role the member already holds stays
+                        // listed (ticked) so the list says what they have.
+                        readonly property bool assignable: {
+                            var s = serverManager.activeServer;
+                            if (!s || s.permissionsGeneration < 0) return false;
+                            return s.canAssignRole(roleId);
+                        }
+                        visible: roleId !== "everyone" && (assignable || isChecked)
+                        enabled: assignable
+                        opacity: assignable ? 1.0 : 0.5
+                        function toggle() {
+                            if (!assignable) return;
+                            var m = {};
+                            for (var k in popup.assignedSet) m[k] = popup.assignedSet[k];
+                            if (m[roleId]) delete m[roleId];
+                            else m[roleId] = true;
+                            popup.assignedSet = m;
+                        }
                         Layout.fillWidth: true
                         Layout.leftMargin: Theme.sp.s5
                         Layout.rightMargin: Theme.sp.s5
@@ -202,8 +219,8 @@ Popup {
                         Accessible.checkable: true
                         Accessible.checked: isChecked
                         Accessible.name: role.name || roleId
-                        Accessible.onPressAction: roleHover.clicked(null)
-                        Accessible.onToggleAction: roleHover.clicked(null)
+                        Accessible.onPressAction: toggle()
+                        Accessible.onToggleAction: toggle()
 
                         RowLayout {
                             anchors.fill: parent
@@ -215,6 +232,14 @@ Popup {
                                 id: roleCheckbox
                                 checked: parent.parent.isChecked
                                 Accessible.ignored: true
+                                // Space on the focused box used to tick it on
+                                // screen only; Save never saw it (audit 3).
+                                onToggled: {
+                                    parent.parent.toggle();
+                                    checked = Qt.binding(function() {
+                                        return roleCheckbox.parent.parent.isChecked;
+                                    });
+                                }
                             }
                             Rectangle {
                                 Layout.alignment: Qt.AlignVCenter
@@ -262,14 +287,7 @@ Popup {
                             // Click anywhere on the row toggles the role.
                             // Mirrors the Members-tab behaviour so muscle
                             // memory carries across.
-                            onClicked: {
-                                var m = {};
-                                for (var k in popup.assignedSet) m[k] = popup.assignedSet[k];
-                                var rid = parent.roleId;
-                                if (m[rid]) delete m[rid];
-                                else m[rid] = true;
-                                popup.assignedSet = m;
-                            }
+                            onClicked: parent.toggle()
                         }
                     }
                 }

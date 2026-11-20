@@ -421,7 +421,7 @@ void MatrixClient::joinRoom(const QString& roomIdOrAlias)
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit joinRoomError(bsfchat::net::replyFailureText(reply, data));
+            emit joinRoomError(roomIdOrAlias, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         try {
@@ -429,7 +429,7 @@ void MatrixClient::joinRoom(const QString& roomIdOrAlias)
             QString roomId = QString::fromStdString(j.value("room_id", roomIdOrAlias.toStdString()));
             emit joinRoomSuccess(roomId);
         } catch (const std::exception& e) {
-            emit joinRoomError(QString::fromStdString(e.what()));
+            emit joinRoomError(roomIdOrAlias, QString::fromStdString(e.what()));
         }
     });
 }
@@ -480,7 +480,8 @@ void MatrixClient::leaveRoom(const QString& roomId)
     connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
-            emit leaveRoomError(QString::fromUtf8(reply->readAll()));
+            const QByteArray data = reply->readAll();
+            emit leaveRoomError(roomId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         emit leaveRoomSuccess(roomId);
@@ -1269,7 +1270,11 @@ void MatrixClient::setDisplayName(const QString& userId, const QString& displayN
     auto* reply = makeRequest("PUT", path, reqBody);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
-        if (reply->error() != QNetworkReply::NoError) return;
+        const QByteArray data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit displayNameUpdateFailed(bsfchat::net::replyFailureText(reply, data));
+            return;
+        }
         emit displayNameUpdated();
     });
 }
@@ -1353,11 +1358,14 @@ void MatrixClient::putPresence(const QString& userId,
     QByteArray reqBody = QByteArray::fromStdString(body.dump());
 
     auto* reply = makeRequest("PUT", path, reqBody);
-    // Fire-and-forget — server-side write failures aren't worth
-    // surfacing as toasts (presence is best-effort), but we still
-    // delete the reply so it doesn't leak.
-    connect(reply, &QNetworkReply::finished, this, [reply]() {
+    // Only ever sent for the user's own choice (status picker), so a refusal
+    // is reported: the picker showed the new state while the server kept the
+    // old one (audit 3).
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
+        const QByteArray data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError)
+            emit presenceUpdateFailed(bsfchat::net::replyFailureText(reply, data));
     });
 }
 
@@ -1880,19 +1888,23 @@ void MatrixClient::moveChannel(const QString& roomId, const QString& categoryId)
 
 void MatrixClient::setChannelOrder(const QString& roomId, int order)
 {
-    // Set the sort order via bsfchat.room.category state event
+    // PUT /rooms/{id}/order, not a raw bsfchat.room.category state write: the
+    // state event holds parent_id AND order, and writing {"order":N} on its
+    // own un-filed every dragged channel from its category (audit 3, #7). The
+    // server's endpoint keeps the stored parent_id and replaces only the order.
     json content;
     content["order"] = order;
     QByteArray body = QByteArray::fromStdString(content.dump());
 
     QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
-                   + QUrl::toPercentEncoding(roomId) + "/state/"
-                   + QString::fromUtf8(bsfchat::event_type::kRoomCategory) + "/";
+                   + QUrl::toPercentEncoding(roomId) + "/order";
 
     auto* reply = makeRequest("PUT", path, body);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
         reply->deleteLater();
+        const QByteArray data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
+            emit channelOrderFailed(roomId, bsfchat::net::replyFailureText(reply, data));
             return;
         }
         emit channelOrderSet();

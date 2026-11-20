@@ -275,6 +275,26 @@ int RoomListModel::totalUnreadCount() const
     return total;
 }
 
+int RoomListModel::totalUnreadCount(const QSet<QString>& excluded) const
+{
+    int total = 0;
+    for (const auto& room : m_rooms) {
+        if (m_directRoomIds.contains(room.roomId) || excluded.contains(room.roomId)) continue;
+        total += room.unreadCount;
+    }
+    return total;
+}
+
+int RoomListModel::totalDirectUnreadCount(const QSet<QString>& excluded) const
+{
+    int total = 0;
+    for (const auto& room : m_rooms) {
+        if (!m_directRoomIds.contains(room.roomId) || excluded.contains(room.roomId)) continue;
+        total += room.unreadCount;
+    }
+    return total;
+}
+
 QString RoomListModel::roomDisplayName(const QString& roomId) const
 {
     int idx = findRoom(roomId);
@@ -388,18 +408,31 @@ int RoomListModel::voiceMemberCount(const QString& roomId) const
 ChannelRestoreChoice RoomListModel::restoreChoice(const QString& remembered,
                                            bool syncComplete) const
 {
+    // In SIDEBAR order (audit 3): the fallback is "the first text channel",
+    // and first has to mean the one at the top of the list the user sees,
+    // not whichever room the server happened to send first.
     QVector<ChannelRestoreCandidate> candidates;
     candidates.reserve(m_rooms.size());
-    for (const auto& r : m_rooms) {
+    QSet<QString> seen;
+    auto add = [&](const RoomEntry& r) {
         // "Which channel does this server open on" — a DM is not an answer,
         // including as the remembered one: bringing a server to the
         // foreground must not reopen a private conversation as if it were one
         // of that server's rooms.
-        if (m_directRoomIds.contains(r.roomId)) continue;
+        if (m_directRoomIds.contains(r.roomId) || seen.contains(r.roomId)) return;
+        seen.insert(r.roomId);
         candidates.append({r.roomId, r.isVoice,
                            r.roomType == QStringLiteral("category")
                                || r.roomType == QStringLiteral("m.space")});
+    };
+    for (const QVariant& g : getCategoriesWithChannels()) {
+        for (const QVariant& c : g.toMap().value(QStringLiteral("channels")).toList()) {
+            const int idx = findRoom(c.toMap().value(QStringLiteral("roomId")).toString());
+            if (idx >= 0) add(m_rooms[idx]);
+        }
     }
+    // Anything the tree did not place (categories themselves, spaces).
+    for (const auto& r : m_rooms) add(r);
     return bsfchat::client::chooseChannelToRestore(remembered, candidates,
                                                  syncComplete);
 }

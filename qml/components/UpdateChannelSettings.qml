@@ -120,6 +120,9 @@ ColumnLayout {
             onToggled: {
                 if (typeof appSettings === "undefined") return;
                 appSettings.updateChannel = checked ? "beta" : "stable";
+                // The click replaced the binding; put it back so the switch
+                // keeps following the setting (audit 3).
+                checked = Qt.binding(function() { return root._onBeta; });
                 // Re-check immediately: the answer to "is there an
                 // update" changes with the channel, and leaving the
                 // previous channel's verdict on screen for up to six

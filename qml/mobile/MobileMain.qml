@@ -608,7 +608,9 @@ ApplicationWindow {
                     OverflowItem {
                         text: "Switch server…"
                         iconName: "forward"
-                        onTriggered: root.openLoginDialog()
+                        // The server rail lives in the left drawer; this
+                        // opened the add-a-server dialog instead (audit 3).
+                        onTriggered: leftDrawer.open()
                     }
 
                     // The same act once you already have a server: someone
@@ -1184,11 +1186,36 @@ ApplicationWindow {
         // explanation. Say what is happening before it does.
         function onIdentityLoginComplete(serverUrls) {
             if (serverUrls && serverUrls.length > 0) {
+                // Servers that trust the ID sign in without a browser, so
+                // "approve it in your browser" was usually untrue (audit 3).
+                // The browser opens by itself for any that do need it.
                 root.toastInfo(serverUrls.length === 1
-                    ? "Signing in to your server — approve it in your browser."
-                    : "Signing in to your " + serverUrls.length
-                      + " servers — approve each one in your browser.");
+                    ? "Signed in. Connecting to your server…"
+                    : "Signed in. Connecting to your " + serverUrls.length + " servers…");
             }
+        }
+    }
+
+    // A message in another room while the app is open, where the OS shows
+    // no banner (iOS). NotificationManager decides when; this only shows it.
+    Connections {
+        target: typeof notificationManager !== "undefined" ? notificationManager : null
+        ignoreUnknownSignals: true
+        function onInAppMessage(serverIndex, roomId, title, preview) {
+            toastHostGlobal.actionToast(title + ": " + preview, "info", qsTr("Open"),
+                function() { serverManager.openRoom(serverIndex, roomId); });
+        }
+    }
+
+    // New invites on any server (audit 3, #6).
+    Connections {
+        target: serverManager
+        ignoreUnknownSignals: true
+        function onInviteReceived(serverIndex, roomId, roomName, inviterName, isDirect) {
+            root.toastInfo(isDirect
+                ? qsTr("%1 wants to message you. Accept in Direct Messages.").arg(inviterName)
+                : qsTr("%1 invited you to %2. Accept it in the sidebar.")
+                      .arg(inviterName).arg(roomName ? "#" + roomName : qsTr("a channel")));
         }
     }
 

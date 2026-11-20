@@ -22,6 +22,7 @@ QVariant ServerListModel::data(const QModelIndex& index, int role) const
     case ServerUrlRole: return server.serverUrl;
     case IconUrlRole: return server.iconUrl;
     case UnreadCountRole: return server.unreadCount;
+    case MentionCountRole: return server.mentionCount;
     default: return {};
     }
 }
@@ -32,14 +33,15 @@ QHash<int, QByteArray> ServerListModel::roleNames() const
         {DisplayNameRole, "displayName"},
         {ServerUrlRole, "serverUrl"},
         {IconUrlRole, "iconUrl"},
-        {UnreadCountRole, "unreadCount"}
+        {UnreadCountRole, "unreadCount"},
+        {MentionCountRole, "mentionCount"}
     };
 }
 
 void ServerListModel::addServer(const QString& displayName, const QString& serverUrl)
 {
     beginInsertRows(QModelIndex(), m_servers.size(), m_servers.size());
-    m_servers.append({displayName, serverUrl, {}, 0});
+    m_servers.append({displayName, serverUrl, {}, 0, 0});
     endInsertRows();
 }
 
@@ -68,6 +70,14 @@ void ServerListModel::setUnreadCount(int index, int count)
     if (m_servers[index].unreadCount == count) return;
     m_servers[index].unreadCount = count;
     emit dataChanged(this->index(index), this->index(index), {UnreadCountRole});
+}
+
+void ServerListModel::setMentionCount(int index, int count)
+{
+    if (index < 0 || index >= m_servers.size()) return;
+    if (m_servers[index].mentionCount == count) return;
+    m_servers[index].mentionCount = count;
+    emit dataChanged(this->index(index), this->index(index), {MentionCountRole});
 }
 
 void ServerListModel::setIconUrl(int index, const QString& iconUrl)

@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
 import BSFChat
+import "../js/UserIdentity.js" as UserIdentity
 
 // Delete this account, permanently. Apple App Store guideline 5.1.1(v).
 //
@@ -55,14 +56,24 @@ Popup {
 
     // What the user must type. The localpart, not the full mxid: "@amy:h" has
     // punctuation that is easy to get wrong and proves nothing extra.
+    //
+    // Unless the localpart is opaque: a BSFChat ID account is
+    // "@oidc_<uuid>:host", and asking someone to type a UUID they have never
+    // seen proves nothing but patience (audit 3). Those confirm with their
+    // display name, or the word DELETE when they have none.
     readonly property string confirmWord: {
         if (!deleteDialog.conn) return "";
         var id = deleteDialog.conn.userId;
+        var local = id;
         if (id.length > 1 && id.charAt(0) === "@") {
             var colon = id.indexOf(":");
-            if (colon > 1) return id.substring(1, colon);
+            if (colon > 1) local = id.substring(1, colon);
         }
-        return id;
+        if (!UserIdentity.isOpaqueLocalpart(local)) return local;
+        var dn = (deleteDialog.conn.displayName || "").trim();
+        if (dn.length > 0 && dn !== id && dn !== local && !UserIdentity.isOpaqueLocalpart(dn))
+            return dn;
+        return "DELETE";
     }
     readonly property bool confirmed:
         confirmField.text.trim() === deleteDialog.confirmWord
@@ -87,7 +98,14 @@ Popup {
     // No CloseOnPressOutside: a stray click outside a half-typed
     // confirmation should not be how this dialog goes away, because the user
     // has to find it again and retype. Escape and Cancel are the ways out.
-    closePolicy: Popup.CloseOnEscape
+    //
+    // And nothing at all while a request is out (audit 3, #12): Esc — or
+    // Android's Back, which Popup treats as Esc — used to cancel the flow on
+    // the client while the server went on to delete the account, leaving the
+    // app holding an account that no longer existed.
+    readonly property bool _busy: deleteDialog.conn !== null
+                                  && deleteDialog.conn.accountDeletionBusy
+    closePolicy: deleteDialog._busy ? Popup.NoAutoClose : Popup.CloseOnEscape
     padding: Theme.sp.s7
 
 
@@ -175,15 +193,13 @@ Popup {
         }
     }
 
-    // On the Popup, which Qt warns about and supports anyway — see
-    // docs/accessibility.md §11 for why this is the right place and why
-    // the warning in the log is a Qt wart rather than a mistake here.
-    Accessible.role: Accessible.Dialog
-    Accessible.name: deleteDialog.identityMode ? qsTr("Delete your BSFChat ID")
-                                               : qsTr("Delete your account on this server")
-
     contentItem: Flickable {
         id: contentFlick
+        // On the contentItem: a Popup is not an Item, so Accessible on the
+        // root reached no screen reader and logged a warning (audit 3).
+        Accessible.role: Accessible.Dialog
+        Accessible.name: deleteDialog.identityMode ? qsTr("Delete your BSFChat ID")
+                                                   : qsTr("Delete your account on this server")
         // The Popup takes its implicitHeight from this, and a Flickable's own
         // is 0 — without this line the dialog clamps to nothing and opens
         // invisible. Tracking the form means the dialog is exactly as tall as

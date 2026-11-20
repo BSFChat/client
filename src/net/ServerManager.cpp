@@ -40,6 +40,14 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
     , m_serverListModel(new ServerListModel(this))
 {
     m_pttKeys = new PttKeyFilter(this);
+    // Every input of hasIdentityAccount(): the session, the provider URL set
+    // by a sign-in, and the active server's provider.
+    connect(this, &ServerManager::identityAccountChanged,
+            this, &ServerManager::identityAccountKnownChanged);
+    connect(this, &ServerManager::activeServerChanged,
+            this, &ServerManager::identityAccountKnownChanged);
+    connect(this, &ServerManager::identityLoginComplete,
+            this, &ServerManager::identityAccountKnownChanged);
     m_pttKeys->install();
     connect(m_pttKeys, &PttKeyFilter::pressedChanged, this, [this](bool held) {
         m_pttKeyHeld = held;
@@ -79,7 +87,7 @@ ServerManager::ServerManager(Settings* settings, QObject* parent)
         // one that happened to be syncing at launch landed on the "Pick a
         // channel" empty state. No-op when that server already has a channel
         // open, and defers itself if its channel list hasn't arrived yet.
-        if (m_roster.active()) m_roster.active()->restoreLastTextRoom();
+        if (m_roster.active() && !m_switchingForRoom) m_roster.active()->restoreLastTextRoom();
     };
     m_roster.hooks.serverRemoved = [this](int index) {
         emit serverRemoved(index);
@@ -742,6 +750,20 @@ void ServerManager::setViewingDms(bool v)
     if (m_viewingDms == v) return;
     m_viewingDms = v;
     emit viewingDmsChanged();
+    // Leaving the @ view while a DM is open: the server view shows that
+    // server's channel, not the DM highlighted in its sidebar.
+    if (!v && m_roster.active()) m_roster.active()->showChannelInsteadOfDirectRoom();
+}
+
+void ServerManager::openRoom(int serverIndex, const QString& roomId)
+{
+    if (serverIndex < 0 || serverIndex >= m_roster.count() || roomId.isEmpty()) return;
+    // The switch must not restore (and history-fill) that server's last
+    // channel first, only to leave it again for `roomId` (audit 3).
+    m_switchingForRoom = true;
+    setActiveServer(serverIndex);
+    m_switchingForRoom = false;
+    if (auto* conn = m_roster.active()) conn->setActiveRoom(roomId);
 }
 
 // Called on every wired connection's activeRoomIdChanged — keeps
@@ -805,6 +827,34 @@ QVariantList ServerManager::allDirectRooms() const
     return out;
 }
 
+void ServerManager::recomputeDirectUnread()
+{
+    int total = 0;
+    for (auto* conn : m_roster.connections())
+        if (conn) total += conn->directUnreadCount() + conn->directInviteCount();
+    if (total == m_directUnreadCount) return;
+    m_directUnreadCount = total;
+    emit directUnreadCountChanged();
+}
+
+QVariantList ServerManager::allDirectInvites() const
+{
+    QVariantList out;
+    for (int i = 0; i < m_roster.count(); ++i) {
+        ServerConnection* conn = m_roster.connections()[i];
+        if (!conn) continue;
+        for (const QVariant& v : conn->pendingInvites()) {
+            QVariantMap m = v.toMap();
+            if (!m.value(QStringLiteral("isDirect")).toBool()) continue;
+            m[QStringLiteral("serverUrl")] = conn->serverUrl();
+            m[QStringLiteral("serverName")] = conn->serverName();
+            m[QStringLiteral("serverIndex")] = i;
+            out.append(m);
+        }
+    }
+    return out;
+}
+
 QVariantList ServerManager::searchKnownUsers(const QString& query,
                                                int limit) const
 {
@@ -835,10 +885,14 @@ void ServerManager::wireConnection(ServerConnection* conn)
     // Keep the sidebar's per-server unread dot in sync with this
     // connection's hasUnread. The index can shift as servers are added or
     // removed, so resolve it at signal-emission time.
+    // Real counts now, not 0/1: the rail's screen-reader name reads them
+    // ("3 unread"), and mentions get their own badge (audit 3).
     auto pushUnread = [this, conn]() {
         int idx = m_roster.indexOf(conn);
         if (idx < 0) return;
-        m_serverListModel->setUnreadCount(idx, conn->hasUnread() ? 1 : 0);
+        m_serverListModel->setUnreadCount(idx, conn->unreadCount());
+        m_serverListModel->setMentionCount(idx, conn->mentionCount());
+        recomputeDirectUnread();
     };
     connect(conn, &ServerConnection::hasUnreadChanged, this, pushUnread);
     pushUnread();
@@ -999,6 +1053,20 @@ void ServerManager::wireConnection(ServerConnection* conn)
             if (idx < 0) return;
             rebuildConnection(idx, conn->serverUrl(), /*freshSession=*/true);
         }, Qt::QueuedConnection);
+
+    connect(conn, &ServerConnection::pendingInvitesChanged, this,
+            [this]() { recomputeDirectUnread(); });
+    connect(conn, &ServerConnection::destroyed, this,
+            [this]() { QMetaObject::invokeMethod(this, [this]() { recomputeDirectUnread(); },
+                                                 Qt::QueuedConnection); });
+
+    connect(conn, &ServerConnection::inviteReceived, this,
+        [this, conn](const QString& roomId, const QString& roomName,
+                     const QString& inviterName, bool isDirect) {
+            const int idx = m_roster.indexOf(conn);
+            if (idx < 0) return;
+            emit inviteReceived(idx, roomId, roomName, inviterName, isDirect);
+        });
 
     // Settings plumbed in so the mic gate can read voiceMode / PTT.
     conn->setSettings(m_settings);

@@ -152,14 +152,19 @@ public:
     // an HTML error page from a proxy must not read as a UIA challenge).
     DeactivateOutcome onReply(int status, const QJsonObject& body)
     {
-        if (!busy()) return DeactivateOutcome::Ignored;
-        const bool sentPassword = (m_phase == DeactivatePhase::Authenticating);
-
+        // A success is the server saying the account is GONE, and that is
+        // true whether or not this flow was still waiting: a dialog closed
+        // mid-request (Esc, Back) reset it, and ignoring the late 200 left
+        // the app holding an account that no longer existed (audit 3, #12).
+        // So the server's success always wins; only refusals are dropped.
         if (status >= 200 && status < 300) {
+            if (m_phase == DeactivatePhase::Deactivated) return DeactivateOutcome::Ignored;
             m_phase = DeactivatePhase::Deactivated;
             m_errorText.clear();
             return DeactivateOutcome::Succeeded;
         }
+        if (!busy()) return DeactivateOutcome::Ignored;
+        const bool sentPassword = (m_phase == DeactivatePhase::Authenticating);
 
         if (status == 401 && offersPasswordStage(body)) {
             m_session = body.value(QStringLiteral("session")).toString();

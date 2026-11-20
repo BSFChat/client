@@ -150,13 +150,12 @@ Popup {
         }
     }
 
-    // On the Popup, which Qt warns about and supports anyway — see
-    // docs/accessibility.md §11 for why this is the right place and why
-    // the warning in the log is a Qt wart rather than a mistake here.
-    Accessible.role: Accessible.Dialog
-    Accessible.name: qsTr("Profile for %1").arg(profileCard.effectiveName)
 
     contentItem: ColumnLayout {
+        // On the contentItem: a Popup is not an Item, so Accessible on the
+        // root reached no screen reader and logged a warning (audit 3).
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Profile for %1").arg(profileCard.effectiveName)
         id: cardContent
         anchors.fill: parent
         anchors.margins: Theme.sp.s7
@@ -523,9 +522,13 @@ Popup {
             visible: serverManager.activeServer !== null
                 && profileCard.userId !== serverManager.activeServer.userId
 
-            readonly property bool canManageRoles: serverManager.activeServer
-                && serverManager.activeServer.canManageRoles(
-                       serverManager.activeServer.activeRoomId)
+            // permissionsGeneration first: canManageRoles is an invokable
+            // and cannot notify (audit 3).
+            readonly property bool canManageRoles: {
+                var s = serverManager.activeServer;
+                if (!s || s.permissionsGeneration < 0) return false;
+                return s.canManageRoles(s.activeRoomId);
+            }
 
             Button {
                 id: messageBtn

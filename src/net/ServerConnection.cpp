@@ -61,6 +61,7 @@
 #include <QUrl>
 
 #include <bsfchat/Constants.h>
+#include <bsfchat/Permissions.h>
 #include <nlohmann/json.hpp>
 
 // Every read of event content goes through these (util/JsonSafe.h): the
@@ -219,22 +220,9 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         emit maxUploadBytesChanged();
     });
 
-    // Hydrate the DM map from QSettings so the "Direct Messages"
-    // section survives restart. Empty if first-run. Group is scoped
-    // by homeserver host so two servers don't clobber each other.
-    {
-        QSettings s;
-        s.beginGroup(QStringLiteral("dm/") + QUrl(serverUrl).host());
-        for (const auto& rid : s.childKeys()) {
-            if (m_directRooms.record(rid, s.value(rid).toString())) {
-                // Flag it in the model too, so a DM restored from the cached
-                // room snapshot is out of the channel tree from the first
-                // frame rather than from the first sync.
-                m_roomListModel->markDirect(rid);
-            }
-        }
-        s.endGroup();
-    }
+    // The DM map is hydrated per ACCOUNT once the user id is known
+    // (loadDirectRoomsForAccount), not here: the server address alone does
+    // not say whose conversations they are (audit 3, #11).
     m_messageModel->setDisplayNameCache(&m_userDisplayNames);
     m_memberListModel->setDisplayNameCache(&m_userDisplayNames);
     m_messageModel->setAccessTokenSource(&m_accessToken);
@@ -555,6 +543,12 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     // onLiveSync, not processSyncResponse directly: a live reply also
     // carries rooms.leave, and earns the session's /joined_rooms reconcile.
     connect(m_syncLoop, &SyncLoop::syncCompleted, this, &ServerConnection::onLiveSync);
+    // A since token abandoned mid-session (the server now answers a token it
+    // does not know with 400 M_INVALID_PARAM) means the next reply is a full
+    // initial sync: catch-up, not live traffic, so it must not notify for
+    // every unread message on the server.
+    connect(m_syncLoop, &SyncLoop::sinceTokenAbandoned, this,
+            [this] { m_catchUpSyncPending = true; });
     connect(m_client, &MatrixClient::joinedRoomsResult, this,
             &ServerConnection::onJoinedRoomsResult);
 
@@ -862,14 +856,15 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         if (level.isEmpty()) return;
         if (!m_settings) return;
         // An `is_default` answer is the server saying "no explicit choice
-        // recorded". Mirroring it locally is still right: the local cache exists
-        // to answer "what should I do with this message", and the server's
-        // default is the correct answer to that question. What we must not do is
-        // treat it as a user choice and PUT it back.
-        Q_UNUSED(isDefault);
-        if (m_settings->roomNotificationMode(roomId) == level) return;
-        m_settings->setRoomNotificationMode(roomId, level);
-        emit notifyLevelChanged(roomId, level);
+        // recorded". It used to be stored as one, so merely opening the room
+        // menu turned the default into a pinned choice that no longer
+        // followed the default (audit 3). Now it clears any local choice and
+        // the room falls back to the same default the server applies
+        // (core/NotifyLevel.h).
+        const QString before = m_settings->roomNotificationMode(roomId, isDirectRoom(roomId));
+        m_settings->setRoomNotificationMode(roomId, isDefault ? QString() : level);
+        const QString after = m_settings->roomNotificationMode(roomId, isDirectRoom(roomId));
+        if (after != before) emit notifyLevelChanged(roomId, after);
     });
     connect(m_client, &MatrixClient::roomNotifyLevelError, this,
             [this](const QString& roomId, const QString& error) {
@@ -877,8 +872,10 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         // the server never accepted.
         auto it = m_pendingNotifyLevelRollback.find(roomId);
         if (it != m_pendingNotifyLevelRollback.end()) {
+            // *it is the previous CHOICE, "" for "was following the default".
             if (m_settings) m_settings->setRoomNotificationMode(roomId, *it);
-            const QString restored = *it;
+            const QString restored = m_settings
+                ? m_settings->roomNotificationMode(roomId, isDirectRoom(roomId)) : *it;
             m_pendingNotifyLevelRollback.erase(it);
             emit notifyLevelChanged(roomId, restored);
             // The rollback above is half the message and it used to be all of
@@ -1148,9 +1145,69 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
         emitFeedback(text, QStringLiteral("error"));
     });
 
-    // Handle leave room success
+    // A refused reorder leaves the sidebar in the dragged order until the
+    // next sync restates the server's; say why rather than snap back silently.
+    connect(m_client, &MatrixClient::displayNameUpdateFailed, this,
+            [this](const QString& error) {
+        emitFeedback(error.isEmpty() ? tr("Could not change your display name.")
+                                     : tr("Could not change your display name: %1").arg(error),
+                     QStringLiteral("error"));
+    });
+    connect(m_client, &MatrixClient::presenceUpdateFailed, this,
+            [this](const QString& error) {
+        emitFeedback(error.isEmpty() ? tr("Could not update your status.")
+                                     : tr("Could not update your status: %1").arg(error),
+                     QStringLiteral("error"));
+    });
+    connect(m_client, &MatrixClient::channelOrderFailed, this,
+            [this](const QString&, const QString& error) {
+        emitFeedback(error.isEmpty() ? tr("Could not reorder the channel.")
+                                     : tr("Could not reorder the channel: %1").arg(error),
+                     QStringLiteral("error"));
+    });
+
+    // Handle leave room success. Also the end of a declined invite: the
+    // room was never in the sidebar, so only the invite list changes.
     connect(m_client, &MatrixClient::leaveRoomSuccess, this, [this](const QString& roomId) {
+        if (m_inviteAnswersInFlight.remove(roomId)) {
+            m_pendingInviteIds.remove(roomId);
+            m_pendingInvites.erase(
+                std::remove_if(m_pendingInvites.begin(), m_pendingInvites.end(),
+                               [&](const auto& inv) { return inv.roomId == roomId; }),
+                m_pendingInvites.end());
+            emit pendingInvitesChanged();
+        }
         dropRoomsGoneForMe({roomId}, RoomGoneCause::OwnAction);
+    });
+    // A refused leave used to vanish: the room simply stayed with no word.
+    connect(m_client, &MatrixClient::leaveRoomError, this,
+            [this](const QString& roomId, const QString& error) {
+        const bool wasInvite = m_inviteAnswersInFlight.remove(roomId);
+        if (wasInvite) emit pendingInvitesChanged();
+        const QString what = wasInvite ? tr("Could not decline the invite.")
+                                       : tr("Could not leave.");
+        emitFeedback(error.isEmpty() ? what : what + QLatin1Char(' ') + error,
+                     QStringLiteral("error"));
+    });
+    // Accepted: the joined room arrives in the next sync, which opens it
+    // (onLiveSync). The invite entry stays hidden until the server stops
+    // restating it.
+    connect(m_client, &MatrixClient::joinRoomSuccess, this, [this](const QString& roomId) {
+        if (!m_inviteAnswersInFlight.contains(roomId)) return;
+        m_openAfterJoin = roomId;
+        if (m_roomListModel->hasRoom(roomId)) {
+            m_openAfterJoin.clear();
+            setActiveRoom(roomId);
+        }
+    });
+    connect(m_client, &MatrixClient::joinRoomError, this,
+            [this](const QString& roomId, const QString& error) {
+        const bool wasInvite = m_inviteAnswersInFlight.remove(roomId);
+        if (wasInvite) emit pendingInvitesChanged();
+        const QString what = wasInvite ? tr("Could not accept the invite.")
+                                       : tr("Could not join.");
+        emitFeedback(error.isEmpty() ? what : what + QLatin1Char(' ') + error,
+                     QStringLiteral("error"));
     });
 }
 
@@ -1167,6 +1224,7 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
     m_deviceId = deviceId;
     m_displayName = displayName;
     m_client->setAccessToken(accessToken);
+    loadDirectRoomsForAccount();
 
     // A restored entry with no token is one whose token the homeserver
     // already rejected — ServerManager blanks the stored copy on expiry so a
@@ -1238,6 +1296,7 @@ void ServerConnection::setCredentials(const QString& userId, const QString& acce
             const bool displayNameWasId = (m_displayName == m_userId
                                            || m_displayName == localpartOf(m_userId));
             m_userId = canonicalId;
+            loadDirectRoomsForAccount();
             if (displayNameWasId) {
                 m_displayName = canonicalId;
                 emit displayNameChanged();
@@ -1306,6 +1365,7 @@ void ServerConnection::applyLoginResponse(const bsfchat::LoginResponse& resp)
     const bool switchedAccount = !previousUserId.isEmpty() && newUserId != previousUserId;
 
     m_userId = newUserId;
+    loadDirectRoomsForAccount();
     m_accessToken = QString::fromStdString(resp.access_token);
     m_deviceId = QString::fromStdString(resp.device_id);
     // Only on a first login. Overwriting it on re-auth would replace a real
@@ -1380,6 +1440,7 @@ void ServerConnection::registerUser(const QString& username, const QString& pass
             m_accessToken = QString::fromStdString(resp.access_token);
             m_deviceId = QString::fromStdString(resp.device_id);
             m_displayName = m_userId;
+            loadDirectRoomsForAccount();
             m_client->setAccessToken(m_accessToken);
             m_connected = true;
             m_connectionStatus = 1;
@@ -1431,6 +1492,12 @@ void ServerConnection::forgetLocalData()
     m_cache->close();
     m_cacheWired = false;
     LocalCache::removeFilesFor(m_userId, m_serverUrl);
+    // And this account's DM list (audit 3, #11): it outlived sign-out and was
+    // shown to whoever signed in next.
+    const QString dmGroup = bsfchat::net::directRoomsSettingsGroup(m_serverUrl, m_userId);
+    if (!dmGroup.isEmpty()) QSettings().remove(dmGroup);
+    m_directRooms.clear();
+    m_directRoomsGroup.clear();
     // And the media it served: downloaded attachments and videos are cached
     // per server origin (C2-7). Both the saved address and the homeserver
     // .well-known pointed at, since media URLs are built from either.
@@ -1972,7 +2039,11 @@ void ServerConnection::setActiveRoom(const QString& roomId)
     // the network without the user asking. A restore is not a no-op guard —
     // setActiveRoom is only reached for a channel the user (or a restore)
     // actually opened, and rewriting the same value is harmless.
-    if (m_settings && !roomId.isEmpty() && !m_roomListModel->isVoiceRoom(roomId))
+    // DMs are excluded too (audit 3): the memory is "which of this server's
+    // channels", and a DM written here replaced it, so the server reopened
+    // on the fallback channel after every DM.
+    if (m_settings && !roomId.isEmpty() && !m_roomListModel->isVoiceRoom(roomId)
+        && !isDirectRoom(roomId))
         m_settings->setLastTextRoomFor(m_serverUrl, roomId);
 
     m_messageModel->clear();
@@ -2034,10 +2105,7 @@ void ServerConnection::setActiveRoom(const QString& roomId)
                            bsfchat::client::kHistoryFirstPageLimit);
     }
 
-    // Recalculate hasUnread
-    bool hadUnread = m_hasUnread;
-    m_hasUnread = m_roomListModel->totalUnreadCount() > 0;
-    if (m_hasUnread != hadUnread) emit hasUnreadChanged();
+    refreshUnreadState();
 }
 
 void ServerConnection::setTimelineAtBottom(bool atBottom)
@@ -2061,9 +2129,7 @@ void ServerConnection::markRoomRead(const QString& roomId, qint64 tsMs)
     m_pendingReadMarkers.insert(roomId);
     if (!m_readMarkerTimer->isActive()) m_readMarkerTimer->start();
 
-    const bool hadUnread = m_hasUnread;
-    m_hasUnread = m_roomListModel && m_roomListModel->totalUnreadCount() > 0;
-    if (m_hasUnread != hadUnread) emit hasUnreadChanged();
+    refreshUnreadState();
 }
 
 void ServerConnection::markActiveRoomRead()
@@ -2576,7 +2642,65 @@ void ServerConnection::joinRoom(const QString& roomIdOrAlias)
 
 void ServerConnection::leaveRoom(const QString& roomId)
 {
+    if (roomId.isEmpty()) return;
     m_client->leaveRoom(roomId);
+}
+
+void ServerConnection::acceptInvite(const QString& roomId)
+{
+    if (roomId.isEmpty() || !m_pendingInviteIds.contains(roomId)) return;
+    if (m_inviteAnswersInFlight.contains(roomId)) return;
+    // A DM invite is classified before the room arrives, so it lands in the
+    // @ view and never flashes up among the channels.
+    for (const auto& inv : m_pendingInvites) {
+        if (inv.roomId == roomId && inv.isDirect) recordDirectRoom(roomId, inv.inviterId);
+    }
+    m_inviteAnswersInFlight.insert(roomId);
+    emit pendingInvitesChanged();
+    m_client->joinRoom(roomId);
+}
+
+void ServerConnection::declineInvite(const QString& roomId)
+{
+    if (roomId.isEmpty() || !m_pendingInviteIds.contains(roomId)) return;
+    if (m_inviteAnswersInFlight.contains(roomId)) return;
+    m_inviteAnswersInFlight.insert(roomId);
+    emit pendingInvitesChanged();
+    m_client->leaveRoom(roomId);
+}
+
+void ServerConnection::showChannelInsteadOfDirectRoom()
+{
+    if (m_activeRoomId.isEmpty() || !isDirectRoom(m_activeRoomId)) return;
+    clearActiveRoomView();
+    restoreLastTextRoom();
+}
+
+int ServerConnection::directInviteCount() const
+{
+    int n = 0;
+    for (const auto& inv : m_pendingInvites)
+        if (inv.isDirect && !m_inviteAnswersInFlight.contains(inv.roomId)) ++n;
+    return n;
+}
+
+QVariantList ServerConnection::pendingInvites() const
+{
+    QVariantList out;
+    for (const auto& inv : m_pendingInvites) {
+        if (m_inviteAnswersInFlight.contains(inv.roomId)) continue;
+        QVariantMap m;
+        m[QStringLiteral("roomId")] = inv.roomId;
+        m[QStringLiteral("roomName")] = inv.roomName;
+        m[QStringLiteral("roomType")] = inv.roomType;
+        m[QStringLiteral("inviterId")] = inv.inviterId;
+        m[QStringLiteral("inviterName")] = inv.inviterName.isEmpty()
+            ? m_userDisplayNames.value(inv.inviterId, inv.inviterId)
+            : inv.inviterName;
+        m[QStringLiteral("isDirect")] = inv.isDirect;
+        out.append(m);
+    }
+    return out;
 }
 
 void ServerConnection::deleteChannel(const QString& roomId)
@@ -2590,12 +2714,30 @@ void ServerConnection::deleteChannel(const QString& roomId)
     m_client->deleteRoom(roomId);
 }
 
+void ServerConnection::refreshUnreadState()
+{
+    if (!m_roomListModel) return;
+    // Muted channels neither light the rail nor count; mentions do (a
+    // mention outranks a mute). DMs are counted apart, for the @ chip.
+    const QSet<QString> muted = m_settings ? m_settings->mutedRooms() : QSet<QString>();
+    const int unread = m_roomListModel->totalUnreadCount(muted);
+    const int mentions = m_roomListModel->totalMentionCount();
+    const int direct = m_roomListModel->totalDirectUnreadCount(muted);
+    const bool has = unread > 0 || mentions > 0;
+    if (unread == m_unreadCount && mentions == m_mentionCount
+        && direct == m_directUnreadCount && has == m_hasUnread)
+        return;
+    m_unreadCount = unread;
+    m_mentionCount = mentions;
+    m_directUnreadCount = direct;
+    m_hasUnread = has;
+    emit hasUnreadChanged();
+}
+
 void ServerConnection::resetUnreadForRoom(const QString& roomId)
 {
     m_roomListModel->resetUnreadCount(roomId);
-    bool hadUnread = m_hasUnread;
-    m_hasUnread = m_roomListModel->totalUnreadCount() > 0;
-    if (m_hasUnread != hadUnread) emit hasUnreadChanged();
+    refreshUnreadState();
 }
 
 voice::MicPermission ServerConnection::microphonePermission() const
@@ -2840,7 +2982,7 @@ void ServerConnection::setRoomNotifyLevel(const QString& roomId, const QString& 
     // exactly that case.
     QString previous = level;
     if (m_settings) {
-        previous = m_settings->roomNotificationMode(roomId);
+        previous = m_settings->roomNotificationChoice(roomId);
         m_settings->setRoomNotificationMode(roomId, level);
     }
     m_pendingNotifyLevelRollback.insert(roomId, previous);
@@ -4036,6 +4178,10 @@ void ServerConnection::setSettings(Settings* settings)
         connect(settings, &Settings::showLinkPreviewsChanged, this, [this]() {
             if (m_settings) m_linkPreviews->setEnabled(m_settings->showLinkPreviews());
         });
+        // Muting a channel takes it off the rail at once.
+        connect(settings, &Settings::mutedRoomsChanged,
+                this, &ServerConnection::refreshUnreadState);
+        refreshUnreadState();
         // Refresh the mic gate whenever voice mode flips so a user
         // switching Open-mic → PTT immediately goes silent (and vv).
         connect(settings, &Settings::voiceModeChanged,
@@ -5108,7 +5254,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
                     // badges. Toasts are for messages that arrive live.
                     const qint64 eventTs = static_cast<qint64>(event.origin_server_ts);
                     const qint64 readTs = m_settings ? m_settings->lastReadTs(roomId) : 0;
-                    if (m_firstSyncProcessed && eventTs > readTs) {
+                    if (m_firstSyncProcessed && !m_catchUpSyncPending && eventTs > readTs) {
                         emit messageReceived(roomId, displayName, body, eventId,
                                              mentionsMe);
                     }
@@ -5344,9 +5490,7 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
     refreshMemberSnapshots();
 
     // Recalculate global hasUnread flag from the authoritative per-room counts.
-    bool hadUnread = m_hasUnread;
-    m_hasUnread = m_roomListModel->totalUnreadCount() > 0;
-    if (m_hasUnread != hadUnread) emit hasUnreadChanged();
+    refreshUnreadState();
 
     // First sync of a session. Replaying the local snapshot doesn't count:
     // m_firstSyncProcessed is also what suppresses notifications for the
@@ -5377,6 +5521,8 @@ void ServerConnection::processSyncResponse(const bsfchat::SyncResponse& response
         // absence of one. See the property's comment in the header.
         emit initialSyncCompleteChanged();
     }
+
+    if (!m_hydratingFromCache) m_catchUpSyncPending = false;
 
     // A restore that had to wait for the channel list gets another go now that
     // this batch (and, on the first pass, the prune above) has been folded in.
@@ -5659,6 +5805,17 @@ bool ServerConnection::canManageChannel(const QString& roomId) const {
 bool ServerConnection::canManageRoles(const QString& roomId) const {
     return (myPermissions(roomId) & 0x40ULL) != 0; // MANAGE_ROLES
 }
+bool ServerConnection::canAssignRole(const QString& roleId) const {
+    if ((myPermissions(QString()) & bsfchat::permission::kAdministrator) != 0) return true;
+    int mine = 0;
+    for (const QString& id : m_memberRoles.value(m_userId)) {
+        for (const auto& r : m_roles)
+            if (r.id == id && !r.selfAssignable && r.position > mine) mine = r.position;
+    }
+    for (const auto& r : m_roles)
+        if (r.id == roleId) return r.position < mine;
+    return false;
+}
 // Kicking and banning are SERVER-wide capabilities, like channel creation: the
 // server evaluates both at server scope (RoomHandler::handle_kick / handle_ban /
 // handle_unban) so a per-channel override cannot hand out or take away
@@ -5925,17 +6082,54 @@ void ServerConnection::setSelfStatusMessage(const QString& msg)
 // Which rooms are DMs comes from the server's m.direct (processSyncResponse)
 // and from our own creates, and is mirrored into a QSettings group so every
 // reload has its DM list before the first sync answers — and at all, against
-// a server that predates m.direct.
-static QString dmSettingsGroup(const QString& serverUrl) {
-    return QStringLiteral("dm/") + QUrl(serverUrl).host();
-}
-
+// a server that predates m.direct. One group per account
+// (directRoomsSettingsGroup).
 void ServerConnection::persistDirectRoom(const QString& roomId)
 {
+    const QString group = bsfchat::net::directRoomsSettingsGroup(m_serverUrl, m_userId);
+    if (group.isEmpty()) return;
     QSettings s;
-    s.beginGroup(dmSettingsGroup(m_serverUrl));
+    s.beginGroup(group);
     s.setValue(roomId, m_directRooms.peerOf(roomId));
     s.endGroup();
+}
+
+void ServerConnection::forgetDirectRoom(const QString& roomId)
+{
+    if (!m_directRooms.remove(roomId)) return;
+    const QString group = bsfchat::net::directRoomsSettingsGroup(m_serverUrl, m_userId);
+    if (group.isEmpty()) return;
+    QSettings s;
+    s.beginGroup(group);
+    s.remove(roomId);
+    s.endGroup();
+}
+
+void ServerConnection::loadDirectRoomsForAccount()
+{
+    const QString group = bsfchat::net::directRoomsSettingsGroup(m_serverUrl, m_userId);
+    if (group == m_directRoomsGroup) return;
+    // A different account (or none): nothing of the previous one's list may
+    // be shown to this one.
+    m_directRooms.clear();
+    m_directRoomsGroup = group;
+    QSettings s;
+    // The pre-account group ("dm/<host>") was shared by every account on the
+    // host; it cannot be attributed, and m.direct / is_direct rebuild it.
+    s.remove(QStringLiteral("dm/") + QUrl(m_serverUrl).host());
+    if (!group.isEmpty()) {
+        s.beginGroup(group);
+        for (const auto& rid : s.childKeys()) {
+            if (m_directRooms.record(rid, s.value(rid).toString())) {
+                // Flag it in the model too, so a DM restored from the cached
+                // room snapshot is out of the channel tree from the first
+                // frame rather than from the first sync.
+                m_roomListModel->markDirect(rid);
+            }
+        }
+        s.endGroup();
+    }
+    refreshDirectRooms();
 }
 
 void ServerConnection::recordDirectRoom(const QString& roomId, const QString& peer)
@@ -6382,6 +6576,10 @@ void ServerConnection::onDeactivateResponse(int status, const QJsonObject& body)
     // from. Torn down HERE rather than left to ServerManager's removal so a
     // slow removal cannot leave a poll in flight against a dead account.
     disconnectFromServer();
+    // And what the account left on this device — cache, media, DM list —
+    // exactly as removing the server does. Deactivation skipped it (audit 3,
+    // #12), so a deleted account's messages stayed on disk.
+    forgetLocalData();
     m_accessToken.clear();
     m_client->setAccessToken(QString());
 

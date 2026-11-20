@@ -5185,6 +5185,27 @@ private slots:
                  (ChannelRestoreChoice{Outcome::Fallback, QStringLiteral("!general:t")}));
     }
 
+    // Audit 3: the fallback is the first text channel IN THE SIDEBAR, not
+    // the first room the server happened to send.
+    void testRoomListRestoreFallbackFollowsSidebarOrder()
+    {
+        using namespace bsfchat::client;
+        using Outcome = ChannelRestoreChoice::Outcome;
+        RoomListModel model;
+        model.ensureRoom(QStringLiteral("!random:t"));
+        model.ensureRoom(QStringLiteral("!welcome:t"));
+        model.updateSortOrder(QStringLiteral("!random:t"), 5);
+        model.updateSortOrder(QStringLiteral("!welcome:t"), 1);
+        QCOMPARE(model.restoreChoice(QString(), true),
+                 (ChannelRestoreChoice{Outcome::Fallback, QStringLiteral("!welcome:t")}));
+
+        // Uncategorised channels are listed first, then each category's.
+        model.updateRoomType(QStringLiteral("!cat:t"), QStringLiteral("category"));
+        model.updateParentId(QStringLiteral("!welcome:t"), QStringLiteral("!cat:t"));
+        QCOMPARE(model.restoreChoice(QString(), true),
+                 (ChannelRestoreChoice{Outcome::Fallback, QStringLiteral("!random:t")}));
+    }
+
     // ---- U-M16: the per-room member cache is bounded ------------------
 
     // The defect: m_roomMembers appended every m.room.member event forever, so

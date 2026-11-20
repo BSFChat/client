@@ -64,6 +64,10 @@ class ServerManager : public QObject {
     // a restart (false = no OS keychain; kept for this run only).
     Q_PROPERTY(bool identitySignedIn READ identitySignedIn NOTIFY identityAccountChanged)
     Q_PROPERTY(bool identityRemembered READ identityRemembered NOTIFY identityAccountChanged)
+    // hasIdentityAccount() as a bindable value: "Delete BSFChat ID…" bound
+    // to the invokable stayed hidden until restart after a sign-in (audit 3).
+    Q_PROPERTY(bool identityAccountKnown READ hasIdentityAccount
+               NOTIFY identityAccountKnownChanged)
 
 public:
     explicit ServerManager(Settings* settings, QObject* parent = nullptr);
@@ -221,6 +225,17 @@ public:
     //   serverUrl, serverName, serverIndex, unreadCount
     // }
     Q_INVOKABLE QVariantList allDirectRooms() const;
+    // DM invites from every connection, each tagged with serverIndex /
+    // serverName / serverUrl like allDirectRooms. The @ view lists these.
+    Q_INVOKABLE QVariantList allDirectInvites() const;
+    // Bring `serverIndex` to the front already showing `roomId` — without the
+    // remembered-channel restore a plain setActiveServer does first. For DM
+    // rows, notifications and keyboard cycling.
+    Q_INVOKABLE void openRoom(int serverIndex, const QString& roomId);
+    // Unread DM messages plus pending DM invites across every server: the
+    // @ chip's badge (audit 3, #11).
+    Q_PROPERTY(int directUnreadCount READ directUnreadCount NOTIFY directUnreadCountChanged)
+    int directUnreadCount() const { return m_directUnreadCount; }
 
     // Union of searchKnownUsers across every connection with the
     // hosting server's URL + index stamped on each row so the DM
@@ -336,6 +351,7 @@ signals:
     // (host[:port] or an https URL); joining still needs the user's tap.
     void inviteLinkOpened(const QString& server);
     void identityAccountChanged();
+    void identityAccountKnownChanged();
     // The provider ended this device's BSFChat ID session (expired, revoked).
     void identitySessionEnded(const QString& reason);
     // Once per run, when a sign-in is held in memory only because the
@@ -358,6 +374,11 @@ signals:
     // identityLoginFailed instead (IdentityClient::startLogin).
     void browserOpenFailed(const QString& authUrl);
     void viewingDmsChanged();
+    void directUnreadCountChanged();
+    // A connection learned of a new invite (ServerConnection::inviteReceived),
+    // with its sidebar index. Both shells toast it.
+    void inviteReceived(int serverIndex, const QString& roomId, const QString& roomName,
+                        const QString& inviterName, bool isDirect);
 
 private:
     PttKeyFilter* m_pttKeys = nullptr;
@@ -412,6 +433,9 @@ private:
 
     Settings* m_settings;
     ServerListModel* m_serverListModel;
+    int m_directUnreadCount = 0;
+    bool m_switchingForRoom = false;
+    void recomputeDirectUnread();
     // Connection list + active pointer/index. See ServerRoster.h for why
     // the bookkeeping lives there rather than inline.
     ServerRoster<ServerConnection> m_roster;
