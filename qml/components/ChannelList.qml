@@ -451,7 +451,7 @@ Rectangle {
                                         text: {
                                             var n = modelData.displayName
                                                   || modelData.userId;
-                                            var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                            var s = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                                             return (s.length > 0 ? s.charAt(0) : "?")
                                                 .toUpperCase();
                                         }
@@ -609,7 +609,7 @@ Rectangle {
                                     text: {
                                         var n = modelData.peerDisplayName
                                               || modelData.peerId;
-                                        var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                        var s = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                                         return (s.length > 0 ? s.charAt(0) : "?")
                                             .toUpperCase();
                                     }
@@ -1119,7 +1119,7 @@ Rectangle {
                                             textFormat: Text.PlainText
                                             text: {
                                                 var n = (modelData.peerDisplayName || modelData.peerId || "?");
-                                                var stripped = n.replace(/^[^a-zA-Z0-9]+/, "");
+                                                var stripped = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                                                 return (stripped.charAt(0) || "?").toUpperCase();
                                             }
                                             font.family: Theme.fontSans

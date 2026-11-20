@@ -115,7 +115,7 @@ Popup {
                         if (!serverManager.activeServer) return "?";
                         var n = serverManager.activeServer.displayName
                              || serverManager.activeServer.userId;
-                        var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                        var s = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                         return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
                     }
                     font.family: Theme.fontSans

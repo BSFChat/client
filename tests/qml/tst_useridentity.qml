@@ -182,4 +182,15 @@ TestCase {
         compare(UserIdentity.accountTitle(id, "Josh"), "Josh");
         compare(UserIdentity.accountSubtitle(id), "@josh:bsfchat.com");
     }
+
+    // Audit 3: the avatar-initial strip used by the sidebar, member list and
+    // settings ate every non-ASCII letter. This is the expression they use.
+    function test_initialStripKeepsNonAsciiLetters() {
+        function strip(n) { return n.replace(/^[\s!-\/:-@\[-`{-~]+/, ""); }
+        compare(strip("Émile").charAt(0), "É");
+        compare(strip("张伟").charAt(0), "张");
+        compare(strip("@bob").charAt(0), "b");
+        compare(strip("__ alice").charAt(0), "a");
+        compare(strip("#!?"), "");
+    }
 }

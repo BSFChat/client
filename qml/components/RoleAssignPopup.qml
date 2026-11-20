@@ -87,7 +87,7 @@ Popup {
                         textFormat: Text.PlainText
                         text: {
                             var n = popup.displayName || popup.userId || "?";
-                            var s = n.replace(/^[^a-zA-Z0-9]+/, "");
+                            var s = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
                             return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
                         }
                         font.family: Theme.fontSans
