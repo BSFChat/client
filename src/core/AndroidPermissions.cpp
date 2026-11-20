@@ -90,7 +90,7 @@ void registerNatives()
     static bool registered = false;
     if (registered) return;
 
-    JNINativeMethod methods[] = {
+    const JNINativeMethod methods[] = {
         { const_cast<char*>("nativeOnNewIntent"),
           const_cast<char*>("()V"),
           reinterpret_cast<void*>(nativeOnNewIntent) },

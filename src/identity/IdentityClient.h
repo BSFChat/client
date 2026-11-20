@@ -23,16 +23,18 @@
 //     being serviced the moment the browser takes the foreground.
 //
 //       * iOS suspends the app outright when Safari comes forward.
-//       * Android pauses the activity, and Qt's Android event dispatcher
-//         responds by excluding socket notifiers and timers from
-//         processEvents (QAndroidEventDispatcherStopper), then blocking the
-//         main thread entirely on ApplicationSuspended. The browser's
-//         connection completes into the listen backlog and is never
-//         accepted.
+//       * Android: sign-in was observed to hang there too. This comment
+//         used to blame Qt's Android event dispatcher for excluding socket
+//         notifiers and then blocking the main thread on
+//         ApplicationSuspended; that is Qt 5 behaviour. Since Qt 6.5 the
+//         dispatcher only does it when QT_BLOCK_EVENT_LOOPS_WHEN_SUSPENDED
+//         is set, which this app never sets (the background /sync, push and
+//         voice depend on the loop running; docs/android-release.md). The
+//         claimed https redirect is the right transport on Android anyway:
+//         it is the only one a verified App Link protects.
 //
-//     On both, sign-in hung on "Waiting for browser login…" until the
-//     five-minute timeout — which on Android is itself frozen, so it did not
-//     even time out until the user came back by hand.
+//     On iOS, sign-in hung on "Waiting for browser login…" until the
+//     five-minute timeout.
 //
 //     They differ only in how the page is shown and the redirect collected:
 //       * iOS presents ASWebAuthenticationSession, which keeps the app in

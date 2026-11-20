@@ -58,7 +58,7 @@ void registerSyncNatives()
 {
     static bool registered = false;
     if (registered) return;
-    JNINativeMethod methods[] = {
+    const JNINativeMethod methods[] = {
         { const_cast<char*>("nativeOnSyncServiceStopped"),
           const_cast<char*>("(Ljava/lang/String;)V"),
           reinterpret_cast<void*>(nativeOnSyncServiceStopped) },
@@ -130,7 +130,7 @@ QJniObject buildTapIntent(const QString& deepLink)
     if (!intent.isValid()) return {};
 
     // Set the BSFChatActivity as target so the intent re-enters the
-    // running process (singleTop) and onNewIntent fires.
+    // running instance (singleTask) and onNewIntent fires.
     QJniEnvironment env;
     jclass act = env->FindClass("com/bsfchat/client/BSFChatActivity");
     if (!act) { env->ExceptionClear(); return {}; }
@@ -180,6 +180,16 @@ QJniObject buildTapIntent(const QString& deepLink)
     return pi;
 }
 
+// A Notification.Builder on the chat channel. minSdk is 28, so the channel
+// constructor (API 26) always exists; the channel-less one is deprecated.
+QJniObject chatBuilder(const QJniObject& ctx)
+{
+    return QJniObject("android/app/Notification$Builder",
+        "(Landroid/content/Context;Ljava/lang/String;)V",
+        ctx.object(),
+        QJniObject::fromString(kChannelId).object<jstring>());
+}
+
 // Message text must not be readable on a locked phone (M2-8). VISIBILITY_
 // PRIVATE shows the notification on the lock screen only as its public
 // version, which says that something arrived and nothing else; the full
@@ -191,16 +201,7 @@ void applyLockScreenPrivacy(QJniObject& builder, const QJniObject& ctx)
     builder.callObjectMethod("setVisibility",
         "(I)Landroid/app/Notification$Builder;", kVisibilityPrivate);
 
-    QJniObject pub;
-    if (QNativeInterface::QAndroidApplication::sdkVersion() >= 26) {
-        pub = QJniObject("android/app/Notification$Builder",
-            "(Landroid/content/Context;Ljava/lang/String;)V",
-            ctx.object(),
-            QJniObject::fromString(kChannelId).object<jstring>());
-    } else {
-        pub = QJniObject("android/app/Notification$Builder",
-            "(Landroid/content/Context;)V", ctx.object());
-    }
+    QJniObject pub = chatBuilder(ctx);
     if (!pub.isValid()) return;
     pub.callObjectMethod("setContentTitle",
         "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;",
@@ -371,8 +372,7 @@ void AndroidNotifier::setSyncRunning(bool running)
 void AndroidNotifier::postChatNotification(const QString& tag,
                                            const QString& title,
                                            const QString& body,
-                                           const QString& tapDeepLink,
-                                           const QString& groupKey)
+                                           const QString& tapDeepLink)
 {
 #ifdef Q_OS_ANDROID
     ensureChatChannel();
@@ -382,16 +382,7 @@ void AndroidNotifier::postChatNotification(const QString& tag,
     QJniObject nm = notificationManager();
     if (!nm.isValid()) return;
 
-    QJniObject builder;
-    if (QNativeInterface::QAndroidApplication::sdkVersion() >= 26) {
-        builder = QJniObject("android/app/Notification$Builder",
-            "(Landroid/content/Context;Ljava/lang/String;)V",
-            ctx.object(),
-            QJniObject::fromString(kChannelId).object<jstring>());
-    } else {
-        builder = QJniObject("android/app/Notification$Builder",
-            "(Landroid/content/Context;)V", ctx.object());
-    }
+    QJniObject builder = chatBuilder(ctx);
     if (!builder.isValid()) return;
 
     // Chainable setters — each returns the builder; we ignore the
@@ -417,77 +408,27 @@ void AndroidNotifier::postChatNotification(const QString& tag,
 
     applyLockScreenPrivacy(builder, ctx);
 
-    if (!groupKey.isEmpty()) {
-        builder.callObjectMethod("setGroup",
-            "(Ljava/lang/String;)Landroid/app/Notification$Builder;",
-            QJniObject::fromString(groupKey).object<jstring>());
-    }
-
     QJniObject notification = builder.callObjectMethod(
         "build", "()Landroid/app/Notification;");
     if (!notification.isValid()) return;
 
-    // notify(tag, id, notification) — tag differentiates per-room
-    // streams; id=1 across the board so a single notification per
-    // tag replaces previous.
+    // notify(tag, id=1): one notification per tag, so a newer post for
+    // the room replaces the older one (and the push-posted one, which
+    // uses the same tag and id; see roomTag()).
+    //
+    // No group or group summary: with one notification per room a
+    // per-room group only ever had one child, and its summary was posted
+    // under a different tag that nothing cancelled, so it lingered after
+    // the room was read.
     nm.callMethod<void>("notify",
         "(Ljava/lang/String;ILandroid/app/Notification;)V",
         QJniObject::fromString(tag).object<jstring>(),
         jint(1), notification.object());
-
-    // Summary notification — required by Android for grouped
-    // notifications to actually render as a group in the shade.
-    // Without this, grouped notifications show flat. Setting a
-    // summary (any Notification.Builder with setGroup + setGroupSummary)
-    // tells the platform "these belong together"; the user sees
-    // a collapsible stack. We re-post the summary on every
-    // post — cheap, and ensures it stays alive across system
-    // restarts.
-    if (!groupKey.isEmpty()) {
-        QJniObject sb;
-        if (QNativeInterface::QAndroidApplication::sdkVersion() >= 26) {
-            sb = QJniObject("android/app/Notification$Builder",
-                "(Landroid/content/Context;Ljava/lang/String;)V",
-                ctx.object(),
-                QJniObject::fromString(kChannelId).object<jstring>());
-        } else {
-            sb = QJniObject("android/app/Notification$Builder",
-                "(Landroid/content/Context;)V", ctx.object());
-        }
-        if (sb.isValid()) {
-            sb.callObjectMethod("setContentTitle",
-                "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;",
-                QJniObject::fromString(title).object<jstring>());
-            sb.callObjectMethod("setSmallIcon",
-                "(I)Landroid/app/Notification$Builder;",
-                jint(0x01080088));
-            sb.callObjectMethod("setGroup",
-                "(Ljava/lang/String;)Landroid/app/Notification$Builder;",
-                QJniObject::fromString(groupKey).object<jstring>());
-            sb.callObjectMethod("setGroupSummary",
-                "(Z)Landroid/app/Notification$Builder;",
-                jboolean(true));
-            // The summary's title is the room/server name: private too.
-            applyLockScreenPrivacy(sb, ctx);
-            QJniObject summary = sb.callObjectMethod(
-                "build", "()Landroid/app/Notification;");
-            if (summary.isValid()) {
-                // Summary uses the same tag as the group so
-                // cancelByTag sweeps both. IDs must be unique
-                // within a tag — use 2 for summary, 1 for leaf.
-                nm.callMethod<void>("notify",
-                    "(Ljava/lang/String;ILandroid/app/Notification;)V",
-                    QJniObject::fromString(groupKey).object<jstring>(),
-                    jint(2), summary.object());
-            }
-        }
-    }
 #else
     Q_UNUSED(tag);
     Q_UNUSED(title);
     Q_UNUSED(body);
     Q_UNUSED(tapDeepLink);
-    Q_UNUSED(groupKey);
 #endif
 }
 
@@ -499,6 +440,16 @@ void AndroidNotifier::cancelByTag(const QString& tag)
     nm.callMethod<void>("cancel",
         "(Ljava/lang/String;I)V",
         QJniObject::fromString(tag).object<jstring>(), jint(1));
+    // Builds before 0.0.49 also posted a per-room group summary under
+    // ("bsfchat:room:<roomId>", 2) and never cancelled it. Sweep it with
+    // the room's own notification so an upgrade does not keep the orphan.
+    if (tag.startsWith(QLatin1String("push|"))) {
+        nm.callMethod<void>("cancel",
+            "(Ljava/lang/String;I)V",
+            QJniObject::fromString(QStringLiteral("bsfchat:room:")
+                                   + tag.mid(5)).object<jstring>(),
+            jint(2));
+    }
 #else
     Q_UNUSED(tag);
 #endif

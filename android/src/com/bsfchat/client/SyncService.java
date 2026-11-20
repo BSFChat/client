@@ -136,14 +136,14 @@ public class SyncService extends Service {
         // Qt event loop and returns), so it cannot eat the grace period.
         notifyNativeStopped(REASON_TIMEOUT);
         try {
-            stopForeground(true);
+            stopForeground(STOP_FOREGROUND_REMOVE);
         } catch (Throwable ignored) { }
         stopSelf(startId);
     }
 
     @Override
     public void onDestroy() {
-        stopForeground(true);
+        stopForeground(STOP_FOREGROUND_REMOVE);
         super.onDestroy();
     }
 
@@ -184,12 +184,9 @@ public class SyncService extends Service {
         PendingIntent tapPi = PendingIntent.getActivity(
             this, 0, launch, flags);
 
-        Notification.Builder b;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            b = new Notification.Builder(this, CHANNEL_ID);
-        } else {
-            b = new Notification.Builder(this);
-        }
+        // minSdk 28: the channel constructor always exists, and the
+        // channel-less one is deprecated.
+        Notification.Builder b = new Notification.Builder(this, CHANNEL_ID);
         b.setContentTitle("BSFChat")
          .setContentText("Keeping messages in sync")
          .setOngoing(true)

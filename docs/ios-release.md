@@ -428,7 +428,9 @@ Two honest footnotes worth having ready:
   (`uploadSymbols` in `ios/ExportOptions.plist.in`). That is Apple
   collecting them, not us, and it is not declarable as our collection.
   It is also the *only* diagnostic channel that exists, precisely
-  because the client ships no crash reporter.
+  because the client ships no crash reporter. The dSYM it uploads comes
+  from `DEBUG_INFORMATION_FORMAT=dwarf-with-dsym` on Release (top of
+  `CMakeLists.txt`); the CI job fails if the archive has none.
 
 ---
 

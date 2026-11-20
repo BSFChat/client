@@ -256,7 +256,9 @@ public:
     // Parse a `bsfchat://message/<urlenc-server>/<roomId>/<eventId>` link and
     // navigate the UI to it: switch to the owning server, open the room, and
     // ask MessageView to scroll to the event. Returns false if no matching
-    // server is connected.
+    // server is connected. Also takes `bsfchat://push/…` (push taps) and
+    // `bsfchat://invite/<server>` (core/InviteLink.h): an invite to a server
+    // already in the list switches to it, any other emits inviteLinkOpened.
     Q_INVOKABLE bool openMessageLink(const QString& link);
 
     // The connection a room belongs to: the one whose room list has it, else
@@ -329,6 +331,10 @@ signals:
     // a server by address. Reported as an error it produced the D-M8
     // dead-end wearing different words.
     void identityHasNoServers();
+    // A bsfchat://invite link named a server that is not in the list. The
+    // shells open Add server at the address step with `server` filled in
+    // (host[:port] or an https URL); joining still needs the user's tap.
+    void inviteLinkOpened(const QString& server);
     void identityAccountChanged();
     // The provider ended this device's BSFChat ID session (expired, revoked).
     void identitySessionEnded(const QString& reason);

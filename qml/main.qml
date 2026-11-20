@@ -519,7 +519,13 @@ ApplicationWindow {
     // Straight onto address entry, skipping the chooser. Mirrored in
     // MobileMain.qml — ChannelList's empty state offers it on both shells,
     // and a helper that exists on one is a TypeError on the other.
-    function openJoinByAddress() { loginDialog.openAtAddress(); }
+    function openJoinByAddress(prefill) { loginDialog.openAtAddress(prefill); }
+    // bsfchat://invite/<server> for a server not in the list
+    // (ServerManager::inviteLinkOpened): Add server with the address typed in.
+    Connections {
+        target: serverManager
+        function onInviteLinkOpened(server) { root.openJoinByAddress(server); }
+    }
     // Manual "Check for updates" — surfaced from ClientSettings →
     // About via Window.window.checkForUpdates().
     function checkForUpdates() {

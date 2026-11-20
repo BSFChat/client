@@ -4,7 +4,7 @@ package com.bsfchat.client;
 // the stock QtActivity doesn't forward:
 //
 //   1. onNewIntent  — when the app is already running (launchMode =
-//      singleTop) and receives a new intent (e.g. a Share to BSFChat
+//      singleTask, see AndroidManifest.xml) and receives a new intent (e.g. a Share to BSFChat
 //      while the activity is already on-screen), QtActivity silently
 //      discards it; getIntent() keeps returning the original cold-
 //      start intent. We override, call setIntent(), and emit a

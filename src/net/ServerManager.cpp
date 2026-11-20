@@ -1,4 +1,5 @@
 #include "net/ServerManager.h"
+#include "core/InviteLink.h"
 #include "net/PttKeyFilter.h"
 #include "util/ExternalBrowser.h"
 #include "net/HttpFetch.h"
@@ -1558,6 +1559,30 @@ void ServerManager::openPushTarget(const QString& roomId, const QString& eventId
 
 bool ServerManager::openMessageLink(const QString& link)
 {
+    // bsfchat://invite/<server> — "join this server" (core/InviteLink.h).
+    // Already a member: switch to it. Otherwise the shells open Add server
+    // with the address filled in; nothing is contacted until the user taps
+    // Join there.
+    if (bsfchat::invite::isInviteLink(link)) {
+        const QString server = bsfchat::invite::serverFromLink(link);
+        if (server.isEmpty()) {
+            qWarning() << "[invite] ignored an invite link that names no usable server";
+            return false;
+        }
+        const QUrl wanted(server.contains(QLatin1String("://"))
+                              ? server : QStringLiteral("https://") + server);
+        for (int i = 0; i < m_roster.count(); ++i) {
+            const QUrl have(m_roster.connections()[i]->serverUrl());
+            if (have.host().compare(wanted.host(), Qt::CaseInsensitive) == 0
+                && have.port(443) == wanted.port(443)) {
+                if (i != m_roster.activeIndex()) setActiveServer(i);
+                return true;
+            }
+        }
+        emit inviteLinkOpened(server);
+        return true;
+    }
+
     // bsfchat://push/<roomId>/<eventId> — from a push notification, which
     // knows the room but not the server (PushBridge.java, PushManager).
     const QString pushPrefix = QStringLiteral("bsfchat://push/");

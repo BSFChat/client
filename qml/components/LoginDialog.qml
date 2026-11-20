@@ -167,9 +167,18 @@ Dialog {
     // Window.window.openJoinByAddress() so a shared component can offer
     // "join a server by address" as a first-class action without the user
     // having to find it inside the dialog first.
-    function openAtAddress() {
+    //
+    // `prefill` (optional) is an address from a bsfchat://invite link. It is
+    // only typed in: the probe and the join wait for the user's own tap, so
+    // a link cannot make the app contact a server by itself.
+    function openAtAddress(prefill) {
         dialog.open();
         dialog.mode = "address";
+        if (typeof prefill === "string" && prefill.length > 0
+                && !dialog.attemptInFlight) {
+            urlField.text = prefill;
+            dialog.errorMessage = "";
+        }
         urlField.forceActiveFocus();
     }
 

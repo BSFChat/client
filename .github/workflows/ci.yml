@@ -980,7 +980,7 @@ jobs:
     name: android (arm64-v8a)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history + tags so cmake/Version.cmake's git-describe
           # fallback works for non-tag pushes, exactly as in `build`.
@@ -1026,7 +1026,7 @@ jobs:
 
       # JDK 17: what Qt 6.10 documents for its Gradle/AGP 8.10.1
       # toolchain. The runner's default JDK drifts; pin it.
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
@@ -1303,7 +1303,7 @@ jobs:
                "UNSIGNED and cannot be installed without signing it first."
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: BSFChat-Android-APK
           path: BSFChat-android-arm64*.apk
@@ -1322,12 +1322,21 @@ jobs:
       # docs/store-submission-runbook.md. Automating later uploads means
       # adding a service-account JSON secret; do that once the manual
       # path has worked at least once.
+      #
+      # Gradle's bundleRelease directly, not Qt's bsfchat-app_make_aab
+      # target: androiddeployqt --aab runs `assembleRelease bundle`, and the
+      # bare `bundle` task builds the DEBUG bundle too, which nobody uses
+      # and which cost a full extra packaging pass. The APK step above has
+      # already run androiddeployqt, so the Gradle project (and its
+      # gradle.properties, including the JDK choice) is complete; the
+      # release APK's path locates it whatever Qt names the directory.
       - name: Build AAB
         if: startsWith(github.ref, 'refs/tags/v') || inputs.android_aab
         run: |
           set -euo pipefail
-          export PATH="$HOME/.local/bin:$PATH"
-          cmake --build build-android --config Release --target bsfchat-app_make_aab
+          GRADLE_PROJECT="${APK_PATH%/build/outputs/apk/release/*}"
+          test -x "$GRADLE_PROJECT/gradlew"
+          (cd "$GRADLE_PROJECT" && ./gradlew --no-daemon bundleRelease)
 
       # Hard failure, not a warning: a tag that publishes an unsigned
       # bundle is a release nobody can upload, and it would be noticed
@@ -1347,9 +1356,9 @@ jobs:
                  "see docs/android-release.md."
             exit 1
           fi
-          # RELEASE bundle specifically: the same target also emits a
-          # debug .aab and a much larger intermediary-bundle.aab, and
-          # signing/uploading either of those would be silently wrong.
+          # RELEASE bundle specifically: Gradle also leaves a much larger
+          # intermediary-bundle.aab (and Qt's own target a debug .aab),
+          # and signing/uploading either of those would be silently wrong.
           # Resolved-and-unique, same reasoning as the APK above.
           mapfile -t AABS < <(find build-android \
             -path '*/build/outputs/bundle/release/*.aab' | sort)
@@ -1362,7 +1371,7 @@ jobs:
 
       - name: Upload AAB artifact
         if: startsWith(github.ref, 'refs/tags/v') || inputs.android_aab
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: BSFChat-Android-AAB
           path: BSFChat-android.aab
@@ -1452,7 +1461,7 @@ jobs:
     name: iOS (archive + TestFlight)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -1607,12 +1616,23 @@ jobs:
       # and then failed at the compile step threw it away and paid for
       # it again next time. Saving inline, right after a successful
       # build, keeps it whatever the rest of the job does.
+      #
+      # The key also carries the deployment target (read from CMakeLists.txt,
+      # as the script does) and the Xcode build: either changing must rebuild,
+      # or a cached library built for another floor or SDK gets linked.
+      - name: OpenSSL cache key
+        id: openssl_key
+        run: |
+          MIN=$(sed -n 's/^set(BSFCHAT_IOS_MIN_VERSION "\([0-9.]*\)").*/\1/p' CMakeLists.txt | head -1)
+          XCB=$(xcodebuild -version | awk '/Build version/{print $3}')
+          echo "key=openssl-ios-device-ios${MIN}-xc${XCB}-${{ hashFiles('scripts/build-openssl-ios.sh') }}" >> "$GITHUB_OUTPUT"
+
       - name: Restore vendored OpenSSL for iOS
         id: openssl_cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: deps/openssl-ios-device
-          key: openssl-ios-device-${{ hashFiles('scripts/build-openssl-ios.sh') }}
+          key: ${{ steps.openssl_key.outputs.key }}
 
       - name: Build vendored OpenSSL for iOS
         if: steps.openssl_cache.outputs.cache-hit != 'true'
@@ -1620,10 +1640,10 @@ jobs:
 
       - name: Save vendored OpenSSL for iOS
         if: steps.openssl_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: deps/openssl-ios-device
-          key: openssl-ios-device-${{ hashFiles('scripts/build-openssl-ios.sh') }}
+          key: ${{ steps.openssl_key.outputs.key }}
 
       # === iOS: Import the Apple Distribution certificate ===
       #
@@ -1936,6 +1956,22 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="${{ steps.profile.outputs.uuid }}" \
             OTHER_CODE_SIGN_FLAGS="--keychain $IOS_KEYCHAIN_PATH"
 
+      # uploadSymbols (ios/ExportOptions.plist.in) silently uploads nothing
+      # when the archive has no dSYM, and Apple's "Upload Symbols Failed"
+      # mail is the only sign. CMakeLists.txt sets dwarf-with-dsym for
+      # Release; fail here if that ever stops producing one.
+      - name: Verify the archive carries a dSYM
+        if: steps.profile.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          DSYM="$RUNNER_TEMP/BSFChat.xcarchive/dSYMs/bsfchat-app.app.dSYM"
+          if [ ! -d "$DSYM" ]; then
+            echo "::error::No app dSYM in the archive; App Store Connect could not symbolicate crashes."
+            ls -la "$RUNNER_TEMP/BSFChat.xcarchive/dSYMs" || true
+            exit 1
+          fi
+          dwarfdump --uuid "$DSYM"
+
       # === The loud part ===
       #
       # An archive signed by the wrong certificate is not a cosmetic
@@ -2159,7 +2195,7 @@ jobs:
 
       - name: Upload .ipa artifact
         if: steps.profile.outputs.available == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: BSFChat-iOS
           path: ${{ runner.temp }}/export/*.ipa

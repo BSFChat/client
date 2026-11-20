@@ -36,9 +36,12 @@ ApplicationWindow {
     // whole scene for the keyboard, not a missing inset.
     //
     // It stays because it is right rather than because it repaid itself:
-    // Android does not inset for us the same way, a hardcoded zero cannot
-    // be right on both, and the day anything here goes edge-to-edge these
-    // are the numbers that keep the header out of the cutout.
+    // Android does not inset for us the same way, and a hardcoded zero
+    // cannot be right on both. On Android 15+ the app IS edge-to-edge
+    // whether Qt asks for it or not (targetSdk 36; the platform no longer
+    // honours the opt-out), so there these margins are the status and
+    // navigation bar heights, and they are what keep the header out from
+    // under the status bar. Not yet checked on an Android 15 device.
     //
     // The margins are read off a probe Item rather than off the window,
     // because SafeArea reports the margins OF THE ITEM it is attached to:
@@ -63,9 +66,9 @@ ApplicationWindow {
     readonly property int leftInset:   Math.ceil(safeAreaProbe.SafeArea.margins.left)
     readonly property int rightInset:  Math.ceil(safeAreaProbe.SafeArea.margins.right)
     // Bottom inset for the iOS home indicator / Android gesture bar. The
-    // 16px floor on Android is the old hardcoded value, kept because Qt
-    // there does not draw edge-to-edge and so reports 0: dropping it would
-    // change how the shipping Android build looks for no reason.
+    // 16px floor on Android is the old hardcoded value, kept for Android
+    // 14 and older, where the window is laid out above the bars and this
+    // reports 0: dropping it would change how those devices look.
     readonly property int bottomInset:
         Math.max(Math.ceil(safeAreaProbe.SafeArea.margins.bottom),
                  Qt.platform.os === "android" ? 16 : 0)
@@ -1031,7 +1034,13 @@ ApplicationWindow {
     function openLoginDialog()    { loginDialogGlobal.open(); }
     // The product's central act on a phone: somebody gives you an address,
     // you join their server. Name-for-name with main.qml.
-    function openJoinByAddress() { loginDialogGlobal.openAtAddress(); }
+    function openJoinByAddress(prefill) { loginDialogGlobal.openAtAddress(prefill); }
+    // bsfchat://invite/<server> for a server not in the list
+    // (ServerManager::inviteLinkOpened): Add server with the address typed in.
+    Connections {
+        target: serverManager
+        function onInviteLinkOpened(server) { root.openJoinByAddress(server); }
+    }
     function openClientSettings() { clientSettingsGlobal.open(); }
     function openSearch()         { searchPopupGlobal.open(); }
     function openStatusPicker()   { statusPickerGlobal.open(); }
@@ -1255,12 +1264,33 @@ ApplicationWindow {
         property string targetRoomName: ""
         readonly property bool tooLarge: isFile && sizeBytes > maxBytes
 
+        // A share that arrived before any channel was open — typically a
+        // cold start, where the share intent is read before the session is
+        // restored. Held here rather than refused, and offered as soon as a
+        // channel is active. A newer share replaces it.
+        property var pending: null
+        readonly property string _readyRoomId: serverManager.activeServer
+                                               && serverManager.activeServer.activeRoomId
+                                               ? serverManager.activeServer.activeRoomId : ""
+        on_ReadyRoomIdChanged: {
+            if (pending && _readyRoomId.length > 0 && !opened) {
+                var p = pending;
+                pending = null;
+                // Let the channel switch settle before the sheet pins it.
+                Qt.callLater(function() { offer(p.file, p.value, p.name, p.size); });
+            }
+        }
+
         function offer(file, value, name, size) {
             var s = serverManager.activeServer;
             if (!s || !s.activeRoomId || s.activeRoomId.length === 0) {
-                root.toast("Pick a channel first, then share again.", "info");
+                var first = pending === null;
+                pending = { file: file, value: value, name: name, size: size };
+                if (first)
+                    root.toast(qsTr("Open a channel to send what you shared."), "info");
                 return;
             }
+            pending = null;
             isFile = file;
             payload = value;
             fileName = name && name.length > 0 ? name : (file ? "attachment" : "");
