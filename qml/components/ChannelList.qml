@@ -3510,6 +3510,8 @@ Rectangle {
 
         property string roomId: ""
         property string roomName: ""
+        // Focus on Cancel (audit 3: confirmations had no initial focus).
+        onOpened: deleteCancelBtn.forceActiveFocus()
 
         // Match the rest of the dialog vocabulary: bg1 body + r3 + line
         // border, not the older bg2/bg3/r2 treatment this used to use.
@@ -3521,6 +3523,8 @@ Rectangle {
         }
 
         contentItem: ColumnLayout {
+            Accessible.role: Accessible.Dialog
+            Accessible.name: qsTr("Delete #%1?").arg(deleteChannelConfirm.roomName)
             spacing: Theme.sp.s4
 
             // Danger icon + title, so a destructive confirmation reads at a

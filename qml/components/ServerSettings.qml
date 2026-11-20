@@ -3116,6 +3116,8 @@ Popup {
     // destructive actions, ghost Cancel + filled primary action.
     Popup {
         id: _confirmModDialog
+        // Focus on Cancel (audit 3: no initial focus); Tab reaches the reason.
+        onOpened: cancelModBtn.forceActiveFocus()
         parent: Overlay.overlay
         anchors.centerIn: Overlay.overlay
         width: 420
