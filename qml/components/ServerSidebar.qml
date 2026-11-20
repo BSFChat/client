@@ -187,6 +187,19 @@ Rectangle {
                     serverManager.setViewingDms(false);
                     serverManager.setActiveServer(index);
                 }
+                // Keyboard (audit 3: the rail was mouse-only): Tab to a tile,
+                // Enter/Space opens it, Menu its server menu.
+                activeFocusOnTab: true
+                function activate() {
+                    serverManager.setViewingDms(false);
+                    serverManager.setActiveServer(index);
+                }
+                Keys.onReturnPressed: activate()
+                Keys.onEnterPressed: activate()
+                Keys.onSpacePressed: activate()
+                Keys.onMenuPressed: serverContextMenu.openFor(index)
+                Keys.onUpPressed: nextItemInFocusChain(false).forceActiveFocus()
+                Keys.onDownPressed: nextItemInFocusChain(true).forceActiveFocus()
 
                 // Left-edge active / hover indicator bar. Active = tall,
                 // hover (inactive) = half-height nudge, unread (inactive,
@@ -225,8 +238,8 @@ Rectangle {
                          : row.isHovered ? Theme.bg3
                          : Theme.bg2
                     scale: row.isHovered && !row.isActive ? 1.04 : 1.0
-                    border.width: row.isActive ? 0 : 1
-                    border.color: Theme.line
+                    border.width: row.activeFocus ? 2 : (row.isActive ? 0 : 1)
+                    border.color: row.activeFocus ? Theme.fg0 : Theme.line
 
                     Behavior on radius { NumberAnimation { duration: Theme.motion.normalMs
                                                            easing.type: Easing.BezierSpline
@@ -373,7 +386,7 @@ Rectangle {
                 radius: Theme.r3
                 color: addArea.containsMouse ? Theme.bg3 : "transparent"
                 border.width: 1
-                border.color: addArea.containsMouse ? Theme.accent : Theme.line
+                border.color: addArea.containsMouse || activeFocus ? Theme.accent : Theme.line
                 scale: addArea.containsMouse ? 1.04 : 1.0
 
                 Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
@@ -387,6 +400,10 @@ Rectangle {
                 Accessible.role: Accessible.Button
                 Accessible.name: qsTr("Add server")
                 Accessible.onPressAction: Window.window.openLoginDialog()
+                activeFocusOnTab: true
+                Keys.onReturnPressed: Window.window.openLoginDialog()
+                Keys.onEnterPressed: Window.window.openLoginDialog()
+                Keys.onSpacePressed: Window.window.openLoginDialog()
 
                 Icon {
                     anchors.centerIn: parent

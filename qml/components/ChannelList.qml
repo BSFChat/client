@@ -1038,13 +1038,17 @@ Rectangle {
                         id: dmPlus
                         text: "+"
                         font.pixelSize: Theme.fontSize.xl
-                        color: dmPlusMouse.containsMouse ? Theme.fg0 : Theme.fg2
+                        color: dmPlusMouse.containsMouse || activeFocus ? Theme.accent : Theme.fg2
                         Layout.alignment: Qt.AlignVCenter
                         // A "+" is not a name. This is the control, so it
                         // carries one; the glyph is what it looks like.
                         Accessible.role: Accessible.Button
                         Accessible.name: qsTr("New direct message")
                         Accessible.onPressAction: newDmPrompt.open()
+                        activeFocusOnTab: true
+                        Keys.onReturnPressed: newDmPrompt.open()
+                        Keys.onEnterPressed: newDmPrompt.open()
+                        Keys.onSpacePressed: newDmPrompt.open()
                         MouseArea {
                             id: dmPlusMouse
                             anchors.fill: parent
@@ -1234,7 +1238,7 @@ Rectangle {
                     id: topPlus
                     text: "+"
                     font.pixelSize: Theme.fontSize.xl
-                    color: topPlusMouse.containsMouse ? Theme.fg0 : Theme.fg2
+                    color: topPlusMouse.containsMouse || activeFocus ? Theme.accent : Theme.fg2
                     Layout.alignment: Qt.AlignVCenter
 
                     // Opens the create menu (category / text / voice), the
@@ -1247,6 +1251,15 @@ Rectangle {
                         var p = topPlus.mapToItem(channelListRoot, 0, topPlus.height);
                         channelListRoot.openCreateMenu(p.x, p.y, "");
                     }
+                    // Keyboard reachable (audit 3: the "+" buttons were mouse-only).
+                    activeFocusOnTab: true
+                    function activate() {
+                        var p = topPlus.mapToItem(channelListRoot, 0, topPlus.height);
+                        channelListRoot.openCreateMenu(p.x, p.y, "");
+                    }
+                    Keys.onReturnPressed: activate()
+                    Keys.onEnterPressed: activate()
+                    Keys.onSpacePressed: activate()
 
                     MouseArea {
                         id: topPlusMouse
@@ -1347,6 +1360,10 @@ Rectangle {
                                 channelListRoot.toggleCategoryCollapsed(modelData.categoryId)
                             Accessible.onPressAction:
                                 channelListRoot.toggleCategoryCollapsed(modelData.categoryId)
+                            activeFocusOnTab: true
+                            Keys.onReturnPressed: channelListRoot.toggleCategoryCollapsed(modelData.categoryId)
+                            Keys.onEnterPressed: channelListRoot.toggleCategoryCollapsed(modelData.categoryId)
+                            Keys.onSpacePressed: channelListRoot.toggleCategoryCollapsed(modelData.categoryId)
 
                             // Backdrop click handler — left-click toggles
                             // collapse/expand; right-click opens the
@@ -1433,14 +1450,15 @@ Rectangle {
                                         ? Theme.touchTarget : 22
                                     Layout.alignment: Qt.AlignVCenter
                                     radius: Theme.r1
-                                    color: catPlusMouse.containsMouse
+                                    color: catPlusMouse.containsMouse || activeFocus
                                         ? Theme.bg3 : "transparent"
                                     // Reveal-on-hover keeps the desktop list
                                     // quiet at rest; on touch there is no hover,
                                     // so an opacity-0 control is an absent one.
                                     opacity: Theme.isMobile
                                           || catHeaderMouse.containsMouse
-                                          || catPlusMouse.containsMouse ? 1.0 : 0.0
+                                          || catPlusMouse.containsMouse
+                                          || activeFocus ? 1.0 : 0.0
                                     Behavior on color   { ColorAnimation { duration: Theme.motion.fastMs } }
                                     Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
 
@@ -1457,6 +1475,16 @@ Rectangle {
                                         channelListRoot.openCreateMenu(
                                             p.x, p.y, modelData.categoryId);
                                     }
+                                    activeFocusOnTab: true
+                                    function activate() {
+                                        var p = catPlus.mapToItem(channelListRoot,
+                                                                  0, catPlus.height);
+                                        channelListRoot.openCreateMenu(
+                                            p.x, p.y, modelData.categoryId);
+                                    }
+                                    Keys.onReturnPressed: activate()
+                                    Keys.onEnterPressed: activate()
+                                    Keys.onSpacePressed: activate()
 
                                     Icon {
                                         anchors.centerIn: parent
@@ -1650,9 +1678,9 @@ Rectangle {
                                             if (channelItemMouse.containsMouse) return Theme.bg2;
                                             return "transparent";
                                         }
-                                        border.color: channelDelegate.dragging
+                                        border.color: channelDelegate.dragging || activeFocus
                                             ? Theme.accent : "transparent"
-                                        border.width: 1
+                                        border.width: activeFocus ? 2 : 1
 
                                         Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
                                         Behavior on opacity { NumberAnimation { duration: Theme.motion.fastMs } }
@@ -1718,6 +1746,27 @@ Rectangle {
                                                 srv.showVoiceRoom();
                                             else
                                                 srv.joinVoiceChannel(modelData.roomId);
+                                        }
+                                        // Keyboard: Tab to a channel, Enter/Space opens it,
+                                        // Menu opens its context menu (audit 3: mouse-only).
+                                        // Voice on mobile keeps its tap-only permission
+                                        // chain, as above.
+                                        activeFocusOnTab: true
+                                        function activateFromKeyboard() {
+                                            var srv = serverManager.activeServer;
+                                            if (!srv) return;
+                                            if (!modelData.isVoice) { srv.setActiveRoom(modelData.roomId); return; }
+                                            if (Theme.isMobile) return;
+                                            if (srv.activeVoiceRoomId === modelData.roomId) srv.showVoiceRoom();
+                                            else srv.joinVoiceChannel(modelData.roomId);
+                                        }
+                                        Keys.onReturnPressed: activateFromKeyboard()
+                                        Keys.onEnterPressed: activateFromKeyboard()
+                                        Keys.onSpacePressed: activateFromKeyboard()
+                                        Keys.onMenuPressed: {
+                                            roomContextMenu.roomId = modelData.roomId;
+                                            roomContextMenu.roomName = modelData.displayName;
+                                            roomContextMenu.popup(channelItemBg, 0, channelItemBg.height);
                                         }
 
                                         // Invisible proxy for MouseArea.drag.target. We don't
