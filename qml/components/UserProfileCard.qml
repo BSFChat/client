@@ -522,9 +522,13 @@ Popup {
             visible: serverManager.activeServer !== null
                 && profileCard.userId !== serverManager.activeServer.userId
 
-            readonly property bool canManageRoles: serverManager.activeServer
-                && serverManager.activeServer.canManageRoles(
-                       serverManager.activeServer.activeRoomId)
+            // permissionsGeneration first: canManageRoles is an invokable
+            // and cannot notify (audit 3).
+            readonly property bool canManageRoles: {
+                var s = serverManager.activeServer;
+                if (!s || s.permissionsGeneration < 0) return false;
+                return s.canManageRoles(s.activeRoomId);
+            }
 
             Button {
                 id: messageBtn

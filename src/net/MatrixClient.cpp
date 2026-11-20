@@ -1466,7 +1466,11 @@ void MatrixClient::setDisplayName(const QString& userId, const QString& displayN
     auto* reply = makeRequest("PUT", path, reqBody);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
-        if (reply->error() != QNetworkReply::NoError) return;
+        const QByteArray data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit displayNameUpdateFailed(bsfchat::net::replyFailureText(reply, data));
+            return;
+        }
         emit displayNameUpdated();
     });
 }
@@ -1550,11 +1554,14 @@ void MatrixClient::putPresence(const QString& userId,
     QByteArray reqBody = QByteArray::fromStdString(body.dump());
 
     auto* reply = makeRequest("PUT", path, reqBody);
-    // Fire-and-forget — server-side write failures aren't worth
-    // surfacing as toasts (presence is best-effort), but we still
-    // delete the reply so it doesn't leak.
-    connect(reply, &QNetworkReply::finished, this, [reply]() {
+    // Only ever sent for the user's own choice (status picker), so a refusal
+    // is reported: the picker showed the new state while the server kept the
+    // old one (audit 3).
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
+        const QByteArray data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError)
+            emit presenceUpdateFailed(bsfchat::net::replyFailureText(reply, data));
     });
 }
 

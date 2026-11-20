@@ -794,6 +794,10 @@ public:
     Q_INVOKABLE bool canEmbed(const QString& roomId) const;
     Q_INVOKABLE bool canManageChannel(const QString& roomId) const;
     Q_INVOKABLE bool canManageRoles(const QString& roomId) const;
+    // Whether the server will let us hand out `roleId` (may_assign_roles):
+    // administrators any role; others only roles ranked below their own
+    // highest non-self-assignable role. The popup offers just those.
+    Q_INVOKABLE bool canAssignRole(const QString& roleId) const;
     // Server-wide, as on the server: the room id is accepted for call-site
     // uniformity but ignored. See the definitions.
     Q_INVOKABLE bool canKick(const QString& roomId = QString()) const;

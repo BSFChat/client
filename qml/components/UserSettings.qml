@@ -208,6 +208,9 @@ Popup {
                     // nothing to announce without this.
                     Accessible.role: Accessible.EditableText
                     Accessible.name: qsTr("Display name")
+                    // The server's limit is 256 bytes (InputLimits.h); 64
+                    // characters stays inside it for any script.
+                    maximumLength: 64
                     placeholderText: "Enter display name"
                     placeholderTextColor: Theme.fg3
                     color: Theme.fg0

@@ -59,6 +59,7 @@
 #include <QUrl>
 
 #include <bsfchat/Constants.h>
+#include <bsfchat/Permissions.h>
 #include <nlohmann/json.hpp>
 
 // Every read of event content goes through these (util/JsonSafe.h): the
@@ -1095,6 +1096,18 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
 
     // A refused reorder leaves the sidebar in the dragged order until the
     // next sync restates the server's; say why rather than snap back silently.
+    connect(m_client, &MatrixClient::displayNameUpdateFailed, this,
+            [this](const QString& error) {
+        emitFeedback(error.isEmpty() ? tr("Could not change your display name.")
+                                     : tr("Could not change your display name: %1").arg(error),
+                     QStringLiteral("error"));
+    });
+    connect(m_client, &MatrixClient::presenceUpdateFailed, this,
+            [this](const QString& error) {
+        emitFeedback(error.isEmpty() ? tr("Could not update your status.")
+                                     : tr("Could not update your status: %1").arg(error),
+                     QStringLiteral("error"));
+    });
     connect(m_client, &MatrixClient::channelOrderFailed, this,
             [this](const QString&, const QString& error) {
         emitFeedback(error.isEmpty() ? tr("Could not reorder the channel.")
@@ -5626,6 +5639,17 @@ bool ServerConnection::canManageChannel(const QString& roomId) const {
 }
 bool ServerConnection::canManageRoles(const QString& roomId) const {
     return (myPermissions(roomId) & 0x40ULL) != 0; // MANAGE_ROLES
+}
+bool ServerConnection::canAssignRole(const QString& roleId) const {
+    if ((myPermissions(QString()) & bsfchat::permission::kAdministrator) != 0) return true;
+    int mine = 0;
+    for (const QString& id : m_memberRoles.value(m_userId)) {
+        for (const auto& r : m_roles)
+            if (r.id == id && !r.selfAssignable && r.position > mine) mine = r.position;
+    }
+    for (const auto& r : m_roles)
+        if (r.id == roleId) return r.position < mine;
+    return false;
 }
 // Kicking and banning are SERVER-wide capabilities, like channel creation: the
 // server evaluates both at server scope (RoomHandler::handle_kick / handle_ban /

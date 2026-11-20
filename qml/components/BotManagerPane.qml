@@ -672,7 +672,9 @@ Item {
                         Accessible.description: qsTr("Issues a new token and immediately stops the old one working. Anything running with the old token is signed out.")
                         Accessible.onPressAction: if (rotateBtn.enabled) rotateBtn.clicked()
                         implicitHeight: Theme.controlHeight.sm
+                        // Nothing to rotate for a deactivated bot (audit 3).
                         enabled: !!botPane._model && !botPane._model.busy
+                                 && modelData.deactivated !== true
                         ToolTip.visible: hovered
                         ToolTip.delay: 500
                         ToolTip.text: "Issues a new token and immediately stops the old one working."
@@ -691,7 +693,14 @@ Item {
                             border.color: Theme.line
                             border.width: 1
                         }
-                        onClicked: botPane._model.rotateToken(modelData.userId)
+                        // Confirmed: it signs out whatever runs with the old
+                        // token, at once (audit 3).
+                        onClicked: {
+                            rotateConfirm.payload = modelData.userId;
+                            rotateConfirm.title = qsTr("Rotate the token for %1?")
+                                .arg(modelData.displayName || modelData.userId);
+                            rotateConfirm.open();
+                        }
                     }
 
                     Button {
@@ -875,5 +884,14 @@ Item {
                 }
             }
         }
+    }
+
+    ConfirmDialog {
+        id: rotateConfirm
+        message: qsTr("A new token is issued and the old one stops working immediately. "
+                      + "Anything running with the old token is signed out until you "
+                      + "deploy the new one.")
+        confirmText: qsTr("Rotate token")
+        onConfirmed: (userId) => { if (botPane._model) botPane._model.rotateToken(userId); }
     }
 }

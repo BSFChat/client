@@ -730,6 +730,8 @@ signals:
     void channelMoved();
     void channelOrderSet();
     void channelOrderFailed(const QString& roomId, const QString& error);
+    void displayNameUpdateFailed(const QString& error);
+    void presenceUpdateFailed(const QString& error);
     void roomStateResult(const QString& roomId, const QString& eventType, const QJsonObject& content);
     void displayNameUpdated();
     void avatarUrlUpdated();

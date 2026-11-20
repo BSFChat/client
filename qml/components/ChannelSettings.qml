@@ -698,6 +698,11 @@ Popup {
                             if (checked) deny |= 0x1; else deny &= ~0x1;
                             serverManager.activeServer.setChannelOverride(
                                 channelSettings.roomId, "role:everyone", ov.allow, deny);
+                            // Follow the stored override again rather than
+                            // the click: a refused write (403) left the
+                            // switch showing a privacy the channel did not
+                            // have (audit 3). It flips when the change lands.
+                            checked = Qt.binding(function() { return privateRow.isPrivate; });
                         }
                     }
                 }

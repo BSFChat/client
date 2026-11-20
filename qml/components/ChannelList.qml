@@ -66,6 +66,16 @@ Rectangle {
         }
     }
 
+    // selfPresence()/selfStatusMessage() are invokables; this is the
+    // dependency that makes the user menu's status label follow them
+    // (audit 3: it never updated).
+    property int _presenceGen: 0
+    Connections {
+        target: serverManager.activeServer
+        ignoreUnknownSignals: true
+        function onPresenceChanged() { channelListRoot._presenceGen++; }
+    }
+
     // The server is the authority on per-room notify level now, so its answer
     // can disagree with the local cache (level set from another device) or undo
     // a write it refused. Either way the cached QSettings value has already been
@@ -2868,6 +2878,7 @@ Rectangle {
                 // text label so it doubles as a state indicator.
                 ThemedUserItem {
                     text: {
+                        channelListRoot._presenceGen;  // dep, see above
                         var s = serverManager.activeServer;
                         if (!s) return "Set status…";
                         var msg = s.selfStatusMessage();
