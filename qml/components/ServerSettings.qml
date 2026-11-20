@@ -832,7 +832,7 @@ Popup {
                                 text: {
                                     var n = serverManager.activeServer
                                         ? serverManager.activeServer.serverName : "?";
-                                    var stripped = (n || "?").replace(/^[\s!-\/:-@\[-`{-~]+/, "");
+                                    var stripped = (n || "?").replace(/^[\s!-\/:-@\[-`\x7b-~]+/, "");
                                     return (stripped.charAt(0) || "?").toUpperCase();
                                 }
                                 font.family: Theme.fontSans
@@ -2115,7 +2115,7 @@ Popup {
                                             textFormat: Text.PlainText
                                             text: {
                                                 var n = modelData.displayName || modelData.userId || "?";
-                                                var s = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
+                                                var s = n.replace(/^[\s!-\/:-@\[-`\x7b-~]+/, "");
                                                 return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
                                             }
                                             font.family: Theme.fontSans
@@ -2977,7 +2977,7 @@ Popup {
                                         textFormat: Text.PlainText
                                         text: {
                                             var n = modelData.displayName || modelData.userId || "?";
-                                            var s = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
+                                            var s = n.replace(/^[\s!-\/:-@\[-`\x7b-~]+/, "");
                                             return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
                                         }
                                         font.family: Theme.fontSans

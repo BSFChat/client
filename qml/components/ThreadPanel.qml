@@ -634,16 +634,22 @@ Item {
         onClosed: composerField.forceActiveFocus()
         MenuItem {
             text: qsTr("Add reaction")
+            Accessible.role: Accessible.MenuItem
+            Accessible.name: text
             onTriggered: if (threadPanel._menuRow)
                 threadPanel.reactRequested(threadPanel._menuRow.eventId)
         }
         MenuItem {
             text: qsTr("Copy text")
+            Accessible.role: Accessible.MenuItem
+            Accessible.name: text
             onTriggered: if (threadPanel._menuRow && serverManager)
                 serverManager.copyToClipboard(threadPanel._menuRow.body)
         }
         MenuItem {
             text: qsTr("Edit")
+            Accessible.role: Accessible.MenuItem
+            Accessible.name: text
             visible: !!(threadPanel._menuRow && threadPanel._menuRow.editable)
             height: visible ? implicitHeight : 0
             onTriggered: threadPanel.beginEditing(threadPanel._menuRow.eventId,
@@ -651,6 +657,8 @@ Item {
         }
         MenuItem {
             text: qsTr("Delete")
+            Accessible.role: Accessible.MenuItem
+            Accessible.name: text
             readonly property bool allowed: !!threadPanel._menuRow
                 && (threadPanel._menuRow.own
                     || (serverManager.activeServer

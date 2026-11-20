@@ -327,6 +327,7 @@ Popup {
                     }
                     Button {
                         text: qsTr("Try again")
+                        Accessible.role: Accessible.Button
                         Accessible.name: qsTr("Try loading more results again")
                         onClicked: searchPopup._issue(searchField.text, searchPopup.failedBatch)
                     }

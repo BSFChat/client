@@ -258,7 +258,7 @@ Rectangle {
                         textFormat: Text.PlainText
                         text: {
                             var name = (model.displayName || "?");
-                            var stripped = name.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
+                            var stripped = name.replace(/^[\s!-\/:-@\[-`\x7b-~]+/, "");
                             if (stripped.length === 0) return "?";
                             return stripped.charAt(0).toUpperCase();
                         }

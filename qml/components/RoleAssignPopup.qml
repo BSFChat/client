@@ -87,7 +87,7 @@ Popup {
                         textFormat: Text.PlainText
                         text: {
                             var n = popup.displayName || popup.userId || "?";
-                            var s = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
+                            var s = n.replace(/^[\s!-\/:-@\[-`\x7b-~]+/, "");
                             return (s.length > 0 ? s.charAt(0) : "?").toUpperCase();
                         }
                         font.family: Theme.fontSans

@@ -439,7 +439,7 @@ Rectangle {
                                     textFormat: Text.PlainText
                                     text: {
                                         var n = model.displayName || "?";
-                                        var stripped = n.replace(/^[\s!-\/:-@\[-`{-~]+/, "");
+                                        var stripped = n.replace(/^[\s!-\/:-@\[-`\x7b-~]+/, "");
                                         return (stripped.length > 0
                                                 ? stripped.charAt(0)
                                                 : "?").toUpperCase();

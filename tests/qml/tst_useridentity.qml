@@ -186,7 +186,7 @@ TestCase {
     // Audit 3: the avatar-initial strip used by the sidebar, member list and
     // settings ate every non-ASCII letter. This is the expression they use.
     function test_initialStripKeepsNonAsciiLetters() {
-        function strip(n) { return n.replace(/^[\s!-\/:-@\[-`{-~]+/, ""); }
+        function strip(n) { return n.replace(/^[\s!-\/:-@\[-`\x7b-~]+/, ""); }
         compare(strip("Émile").charAt(0), "É");
         compare(strip("张伟").charAt(0), "张");
         compare(strip("@bob").charAt(0), "b");
