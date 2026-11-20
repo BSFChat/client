@@ -272,4 +272,11 @@ TestCase {
         verify(s.banner.y + s.banner.height <= s.stack.y);
         compare(s.voicePage.height, s.height - 28);
     }
+
+    // Audit 3: "Signing in…" was in both the message and the button.
+    function test_signingInIsNotSaidTwice() {
+        var v = view(Banner.Expired, "Signing in…", true, true);
+        compare(Banner.reauthLabel(v), "Signing in…");
+        verify(Banner.message(v).indexOf("Signing in") < 0);
+    }
 }
