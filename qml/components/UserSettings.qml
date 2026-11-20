@@ -45,9 +45,16 @@ Popup {
         }
     }
 
+    // Take focus on open, so Esc closes it and Tab starts inside it without a
+    // click first (audit 3).
+    focus: true
+    onOpened: displayNameField.forceActiveFocus()
+
     contentItem: ColumnLayout {
         id: contentCol
         spacing: Theme.sp.s7
+        Accessible.role: Accessible.Dialog
+        Accessible.name: qsTr("Profile settings")
 
         // Title — SPEC §3.10 section-header convention (24px semibold +
         // a 1px divider rule below).
