@@ -124,6 +124,7 @@ Rectangle {
         onDropped: (drop) => {
             if (!canUploadHere) { drop.accepted = false; return; }
             var uploaded = 0;
+            var webLinks = [];
             for (var i = 0; i < drop.urls.length; ++i) {
                 var u = drop.urls[i];
                 if (!u) continue;
@@ -134,7 +135,19 @@ Rectangle {
                 if (s.indexOf("file://") === 0) {
                     serverManager.activeServer.sendMediaMessage(s);
                     uploaded++;
+                } else if (/^https?:\/\//i.test(s)) {
+                    // A link dragged from a browser: it was silently
+                    // ignored. Put it in the composer as text instead.
+                    webLinks.push(s);
                 }
+            }
+            if (webLinks.length > 0 && messageInput && messageInput.inputArea) {
+                var ta = messageInput.inputArea;
+                var pos = ta.cursorPosition;
+                var before = ta.text.substring(0, pos);
+                var sep = before.length > 0 && !/\s$/.test(before) ? " " : "";
+                ta.insert(pos, sep + webLinks.join(" "));
+                ta.forceActiveFocus();
             }
             // One per file, so the composer stays locked until the LAST
             // of a multi-file drop lands (U-H6). Counting after the sends
@@ -156,7 +169,7 @@ Rectangle {
             // mixing a readable and an unreadable file counts both, and both
             // report back. tests/test_composer_upload_lock.cpp holds this.
             for (var j = 0; j < uploaded; ++j) messageInput.noteUploadStarted();
-            drop.accepted = uploaded > 0;
+            drop.accepted = uploaded > 0 || webLinks.length > 0;
         }
     }
 
@@ -198,7 +211,7 @@ Rectangle {
             }
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text: "Drop to upload"
+                text: qsTr("Drop to upload")
                 color: Theme.fg0
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.lg
@@ -208,9 +221,14 @@ Rectangle {
             Text {
                 Layout.alignment: Qt.AlignHCenter
                 textFormat: Text.PlainText
-                text: "Files dropped here are sent to #"
-                    + (serverManager.activeServer
-                        ? serverManager.activeServer.activeRoomName : "")
+                // A DM is named after the person, not "#name".
+                text: {
+                    var s = serverManager.activeServer;
+                    if (!s) return "";
+                    return s.isDirectRoom && s.isDirectRoom(s.activeRoomId)
+                        ? qsTr("Files dropped here are sent to %1").arg(s.activeRoomName)
+                        : qsTr("Files dropped here are sent to #%1").arg(s.activeRoomName);
+                }
                 color: Theme.fg2
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
