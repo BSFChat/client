@@ -9,6 +9,7 @@
 #include "core/App.h"
 #include "core/AppProfile.h"
 #include "core/NotificationManager.h"
+#include "core/EnglishPlurals.h"
 #include "core/PushManager.h"
 #include "core/Settings.h"
 #include "core/UrlHandler.h"
@@ -100,6 +101,9 @@ int main(int argc, char *argv[])
     // integration. Everything else continues to use the QGuiApplication
     // API surface via QApplication's inheritance.
     QApplication app(argc, argv);
+    // English plurals for every tr()/qsTr() "%n thing(s)" (core/EnglishPlurals.h).
+    static bsfchat::client::EnglishPluralTranslator englishPlurals;
+    app.installTranslator(&englishPlurals);
     // Both are "BSFChat" unless --profile/$BSFCHAT_PROFILE was given, in
     // which case the application name carries a "-<profile>" suffix. That
     // one suffix namespaces QSettings, QStandardPaths::AppDataLocation

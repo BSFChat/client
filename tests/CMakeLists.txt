@@ -1133,6 +1133,12 @@ target_link_libraries(test_room_removal PRIVATE
 )
 add_test(NAME test_room_removal COMMAND test_room_removal)
 
+# English plural forms for "%n thing(s)" strings (audit 3). Header-only.
+qt_add_executable(test_english_plurals test_english_plurals.cpp)
+target_include_directories(test_english_plurals PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_english_plurals PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME test_english_plurals COMMAND test_english_plurals)
+
 # Notify-level default shared with the server's push rules (audit 3).
 qt_add_executable(test_notify_level test_notify_level.cpp)
 target_include_directories(test_notify_level PRIVATE ${CMAKE_SOURCE_DIR}/src)
