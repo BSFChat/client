@@ -1958,19 +1958,47 @@ jobs:
 
       # uploadSymbols (ios/ExportOptions.plist.in) silently uploads nothing
       # when the archive has no dSYM, and Apple's "Upload Symbols Failed"
-      # mail is the only sign. CMakeLists.txt sets dwarf-with-dsym for
-      # Release; fail here if that ever stops producing one.
-      - name: Verify the archive carries a dSYM
+      # mail is the only sign. Qt (and CMakeLists.txt) set dwarf-with-dsym
+      # for Release, so dsymutil does run, but `xcodebuild archive` only
+      # collects dSYMs from a CONFIGURATION_BUILD_DIR under $(BUILD_DIR),
+      # and CMake's Xcode generator makes it an absolute path into
+      # build-ios. Qt's own workaround (QT_USE_RISKY_DSYM_ARCHIVING_WORKAROUND)
+      # breaks $<TARGET_FILE> and the output directory, so instead copy the
+      # dSYM in ourselves, but only one whose UUID matches the archived
+      # binary: a stale dSYM would symbolicate crashes into nonsense.
+      - name: Collect and verify the app dSYM
         if: steps.profile.outputs.available == 'true'
         run: |
           set -euo pipefail
-          DSYM="$RUNNER_TEMP/BSFChat.xcarchive/dSYMs/bsfchat-app.app.dSYM"
+          ARCHIVE="$RUNNER_TEMP/BSFChat.xcarchive"
+          BIN="$ARCHIVE/Products/Applications/bsfchat-app.app/bsfchat-app"
+          DSYM="$ARCHIVE/dSYMs/bsfchat-app.app.dSYM"
+          want=$(dwarfdump --uuid "$BIN" | awk '{print $2}' | sort)
+          echo "Archived binary UUID(s): $want"
           if [ ! -d "$DSYM" ]; then
-            echo "::error::No app dSYM in the archive; App Store Connect could not symbolicate crashes."
-            ls -la "$RUNNER_TEMP/BSFChat.xcarchive/dSYMs" || true
+            mkdir -p "$ARCHIVE/dSYMs"
+            for cand in $(find build-ios "$HOME/Library/Developer/Xcode/DerivedData" \
+                            -type d -name 'bsfchat-app.app.dSYM' -prune 2>/dev/null); do
+              got=$(dwarfdump --uuid "$cand" | awk '{print $2}' | sort)
+              echo "Candidate $cand: $got"
+              if [ -n "$got" ] && [ "$got" = "$want" ]; then
+                cp -R "$cand" "$DSYM"
+                echo "Copied $cand into the archive"
+                break
+              fi
+            done
+          fi
+          if [ ! -d "$DSYM" ]; then
+            echo "::error::No app dSYM matching the archived binary; App Store Connect could not symbolicate crashes."
+            ls -la "$ARCHIVE/dSYMs" || true
             exit 1
           fi
-          dwarfdump --uuid "$DSYM"
+          got=$(dwarfdump --uuid "$DSYM" | awk '{print $2}' | sort)
+          if [ "$got" != "$want" ]; then
+            echo "::error::The archive's dSYM ($got) does not match its binary ($want)."
+            exit 1
+          fi
+          echo "dSYM matches: $got"
 
       # === The loud part ===
       #
