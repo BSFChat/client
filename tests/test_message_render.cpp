@@ -300,6 +300,33 @@ private slots:
         QVERIFY(!model.data(model.index(0), MessageModel::PlainBodyRole).toBool());
     }
 
+    // A local echo renders exactly as the same message does once it comes
+    // back from the server, so confirming it changes nothing on screen —
+    // and your own markdown shows the moment you send, not after a reload.
+    void testEchoRendersLikeTheReceivedCopy_data()
+    {
+        QTest::addColumn<QString>("body");
+        QTest::addColumn<QString>("msgtype");
+        QTest::newRow("plain") << "hello" << "m.text";
+        QTest::newRow("markdown") << "**bold** and `code`" << "m.text";
+        QTest::newRow("lines") << "one\ntwo\nthree" << "m.text";
+        QTest::newRow("emote") << "*waves* at you" << "m.emote";
+    }
+    void testEchoRendersLikeTheReceivedCopy()
+    {
+        QFETCH(QString, body);
+        QFETCH(QString, msgtype);
+        MessageModel echoed;
+        echoed.appendLocalEcho("l1", body, QString(), "@alice:server", {}, {}, msgtype);
+        MessageModel received;
+        received.appendEvent(makeMessage("$a", body.toStdString(), msgtype.toStdString()),
+                             "@bob:server");
+        QCOMPARE(echoed.data(echoed.index(0), MessageModel::FormattedBodyRole).toString(),
+                 received.data(received.index(0), MessageModel::FormattedBodyRole).toString());
+        QCOMPARE(echoed.data(echoed.index(0), MessageModel::PlainBodyRole).toBool(),
+                 received.data(received.index(0), MessageModel::PlainBodyRole).toBool());
+    }
+
     // Markdown's own path was already correct; pin it so the two promotions
     // cannot drift apart again.
     void testMarkdownPathPreservesLines()
