@@ -517,14 +517,14 @@ Item {
         }
 
         CtxItem {
-            text: "Reply"
+            text: qsTr("Reply")
             iconName: "reply"
             shortcut: Theme.isMobile ? "" : "R"
             onTriggered: bubble.replyRequested(bubble.eventId, bubble.body,
                                                bubble.senderDisplayName)
         }
         CtxItem {
-            text: "Forward"
+            text: qsTr("Forward")
             iconName: "forward"
             onTriggered: bubble.forwardRequested(bubble.eventId, bubble.body,
                                                  bubble.senderDisplayName)
@@ -534,9 +534,9 @@ Item {
             // to its root; otherwise "Reply in Thread" starts a new
             // thread with this message as the root.
             text: bubble.threadRootId !== ""
-                  ? "Open Thread"
-                  : (bubble.threadReplyCount > 0 ? "Open Thread"
-                                                 : "Reply in Thread")
+                  ? qsTr("Open Thread")
+                  : (bubble.threadReplyCount > 0 ? qsTr("Open Thread")
+                                                 : qsTr("Reply in Thread"))
             iconName: "forward"
             onTriggered: {
                 var target = bubble.threadRootId !== ""
@@ -561,7 +561,7 @@ Item {
         }
 
         CtxItem {
-            text: "Show edit history"
+            text: qsTr("Show edit history")
             iconName: "edit"
             visible: bubble.edited
             onTriggered: bubble.editHistoryRequested(bubble.eventId)
@@ -572,13 +572,13 @@ Item {
         // hover bar; we show this on both platforms so the context
         // menu is a complete surface.
         CtxItem {
-            text: "Add reaction"
+            text: qsTr("Add reaction")
             iconName: "smile-plus"
             shortcut: Theme.isMobile ? "" : "+"
             onTriggered: bubble.openReactPicker()
         }
         CtxItem {
-            text: "Copy text"
+            text: qsTr("Copy text")
             iconName: "copy"
             onTriggered: {
                 if (serverManager) serverManager.copyToClipboard(bubble.body);
@@ -590,13 +590,13 @@ Item {
         // a sheet with the message body inside a selectable TextEdit
         // so native copy/share gestures work.
         CtxItem {
-            text: "Select text"
+            text: qsTr("Select text")
             iconName: "annotate"
             visible: Theme.isMobile
             onTriggered: bubble.openTextSelectionSheet()
         }
         CtxItem {
-            text: "Copy message link"
+            text: qsTr("Copy message link")
             iconName: "link"
             onTriggered: bubble.copyLinkRequested(bubble.eventId)
         }
@@ -636,7 +636,7 @@ Item {
         // which is the only case the server would happily accept and no
         // administrator could act on.
         CtxItem {
-            text: "Report message…"
+            text: qsTr("Report message…")
             iconName: "bolt"
             visible: !bubble.senderIsSelf
             onTriggered: Window.window.openReportDialog(
@@ -646,7 +646,7 @@ Item {
         }
 
         CtxItem {
-            text: "Delete message"
+            text: qsTr("Delete message")
             iconName: "x"
             shortcut: Theme.isMobile ? "" : "Del"
             labelColor: Theme.danger
@@ -681,13 +681,13 @@ Item {
         }
 
         CtxItem {
-            text: "View profile"
+            text: qsTr("View profile")
             iconName: "at"
             onTriggered: bubble.senderClicked(bubble.sender,
                                               bubble.senderDisplayName)
         }
         CtxItem {
-            text: "Copy user ID"
+            text: qsTr("Copy user ID")
             iconName: "copy"
             onTriggered: {
                 if (serverManager) serverManager.copyToClipboard(bubble.sender);
@@ -723,7 +723,7 @@ Item {
             }
         }
         CtxItem {
-            text: "Report user…"
+            text: qsTr("Report user…")
             iconName: "bolt"
             visible: !userContextMenu.isSelfUser
             onTriggered: Window.window.openReportDialog(
@@ -739,7 +739,7 @@ Item {
             }
         }
         CtxItem {
-            text: "Manage roles…"
+            text: qsTr("Manage roles…")
             iconName: "shield"
             visible: userContextMenu.canManageRoles
             onTriggered: Window.window.openRoleAssignment(
@@ -817,7 +817,9 @@ Item {
         // The per-button MouseAreas OR'd in (through `anyButtonHovered`)
         // keep the bar up while the cursor has travelled off the bubble
         // onto a button itself.
-        active: bubble.msgtype === "m.text" && (bubble.bubbleHovered
+        // Every message kind, not just m.text: an image or a file can be
+        // replied to, reacted to and forwarded just the same.
+        active: bubble.eventId !== "" && (bubble.bubbleHovered
                  || (hoverActionsLoader.item !== null
                      && hoverActionsLoader.item.anyButtonHovered === true))
         sourceComponent: hoverActionsComponent
@@ -1158,14 +1160,16 @@ Item {
                         var today = new Date();
                         var yesterday = new Date();
                         yesterday.setDate(yesterday.getDate() - 1);
-                        var timeStr = date.toLocaleTimeString(Qt.locale(), "HH:mm");
+                        // The user's locale for both halves: MM/dd/yyyy and a
+                        // 24-hour clock were hard-coded.
+                        var timeStr = date.toLocaleTimeString(Qt.locale(), Locale.ShortFormat);
                         if (date.toDateString() === today.toDateString()) {
-                            return "Today at " + timeStr;
+                            return qsTr("Today at %1").arg(timeStr);
                         }
                         if (date.toDateString() === yesterday.toDateString()) {
-                            return "Yesterday at " + timeStr;
+                            return qsTr("Yesterday at %1").arg(timeStr);
                         }
-                        return date.toLocaleDateString(Qt.locale(), "MM/dd/yyyy") + " " + timeStr;
+                        return date.toLocaleDateString(Qt.locale(), Locale.ShortFormat) + " " + timeStr;
                     }
                     Accessible.ignored: true
                     font.family: Theme.fontMono
@@ -1230,8 +1234,11 @@ Item {
                     Text {
                         textFormat: Text.PlainText
                         text: bubble.replyToSender !== ""
-                              ? bubble.replyToSender : "unknown"
+                              ? bubble.replyToSender : qsTr("unknown")
                         Accessible.ignored: true
+                        // A long display name must not push the quote away.
+                        elide: Text.ElideRight
+                        Layout.maximumWidth: 180
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm
                         font.weight: Theme.fontWeight.semibold
@@ -1242,7 +1249,7 @@ Item {
                         textFormat: Text.PlainText
                         text: bubble.replyPreview !== ""
                               ? bubble.replyPreview
-                              : "(message unavailable)"
+                              : qsTr("(message unavailable)")
                         Accessible.ignored: true
                         font.family: Theme.fontSans
                         font.pixelSize: Theme.fontSize.sm
@@ -1411,7 +1418,7 @@ Item {
                                     Text {
                                         Layout.alignment: Qt.AlignHCenter
                                         Accessible.ignored: true
-                                        text: "Loading…"
+                                        text: qsTr("Loading…")
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.sm
                                         color: Theme.fg2
@@ -1460,7 +1467,7 @@ Item {
                                     Text {
                                         Layout.alignment: Qt.AlignHCenter
                                         Accessible.ignored: true
-                                        text: "Couldn't load image"
+                                        text: qsTr("Couldn't load image")
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.sm
                                         font.weight: Theme.fontWeight.semibold
@@ -1469,7 +1476,9 @@ Item {
                                     Text {
                                         Layout.alignment: Qt.AlignHCenter
                                         Accessible.ignored: true
-                                        text: "Middle-click to open it"
+                                        // No middle button on a phone.
+                                        text: Theme.isMobile ? qsTr("Tap to open it")
+                                                             : qsTr("Middle-click to open it")
                                         font.family: Theme.fontSans
                                         font.pixelSize: Theme.fontSize.xs
                                         color: Theme.fg3
@@ -2025,7 +2034,7 @@ Item {
             Text {
                 Accessible.role: Accessible.StaticText
                 Accessible.name: qsTr("Select text")
-                text: "Select text"
+                text: qsTr("Select text")
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.md
                 font.weight: Theme.fontWeight.semibold
@@ -2060,7 +2069,7 @@ Item {
                 // obvious on first use. An explicit button gives
                 // new users a clear affordance.
                 Button {
-                    text: "Copy"
+                    text: qsTr("Copy")
                     Accessible.role: Accessible.Button
                     Accessible.name: qsTr("Copy")
                     Accessible.description: qsTr("Copies the selection, or the whole message if nothing is selected")
@@ -2096,7 +2105,7 @@ Item {
 
                 Button {
                     id: selectionDoneButton
-                    text: "Done"
+                    text: qsTr("Done")
                     Accessible.role: Accessible.Button
                     Accessible.name: qsTr("Done")
                     Accessible.description: qsTr("Closes the text selection sheet")
