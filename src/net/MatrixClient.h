@@ -11,8 +11,10 @@
 #include <QJsonObject>
 #include <QUrl>
 
+#include <bsfchat/Constants.h>
 #include <bsfchat/MatrixTypes.h>
 
+#include "core/SharePolicy.h"
 #include "net/MatrixFailure.h"
 #include "net/MediaTicketCache.h"
 #include "net/RoomRemoval.h"
@@ -122,6 +124,13 @@ public:
                           const QString& formattedBody,
                           const QStringList& mentionedUserIds);
     void sendRoomEvent(const QString& roomId, const QString& eventType, const QByteArray& content);
+    // sendRoomEvent, but the caller hears the outcome: exactly one of the two
+    // callbacks runs. For sends whose success the caller must know about (an
+    // upload's message event), where a silent failure would look like success.
+    void sendRoomEventChecked(const QString& roomId, const QString& eventType,
+                              const nlohmann::json& content,
+                              std::function<void(const QString& eventId)> onAccepted,
+                              std::function<void(const QString& reason)> onFailed);
     // Same PUT, but the outcome is reported against `token` through
     // callEventSendResult instead of the shared messageSent/
     // sendMessageError pair. Voice signalling needs to know whether ITS
@@ -216,6 +225,23 @@ public:
     bool cancelMediaUpload(const QString& uploadId);
     // GET /_matrix/media/v3/config → mediaConfigResult.
     void getMediaConfig();
+
+    // GET /_matrix/client/versions → the `bsfchat.limits` block, which is the
+    // ceilings this server enforces on a send. Leaves the protocol defaults in
+    // place when the server does not publish them (an older server), and
+    // emits serverLimitsChanged only when a value actually moved.
+    void getServerLimits();
+    // The byte ceilings the composer and the send path check against.
+    int maxMessageBodyBytes() const { return m_maxBodyBytes; }
+    int maxFormattedBodyBytes() const { return m_maxFormattedBytes; }
+    // The largest file the server takes (m.upload.size). A message longer than
+    // a message is sent as a file only up to this size.
+    qint64 maxUploadBytes() const { return m_maxUploadBytes; }
+    // Empty when `content` (an m.room.message) fits both ceilings; otherwise a
+    // sentence a person can act on: what is too big, by how much, and what
+    // the server takes. Checked before the PUT so an oversize send is refused
+    // on this device instead of bouncing off the server.
+    QString messageSizeProblem(const nlohmann::json& content) const;
 
     // The URL to hand an Image/MediaPlayer for an mxc URI, or "" when there is
     // not yet a ticket for it.
@@ -586,6 +612,8 @@ signals:
                                  double progress);
     // Answer to getMediaConfig: the server's m.upload.size, 0 when unknown.
     void mediaConfigResult(qint64 maxUploadBytes);
+    // The server's send ceilings changed (see getServerLimits).
+    void serverLimitsChanged();
 
     void voiceJoined(const QString& roomId, const QJsonArray& members);
     // Same reply, with the server's session token for this membership.
@@ -785,6 +813,11 @@ signals:
     void linkPreviewFailed(const QString& url, const bsfchat::net::MatrixFailure& failure);
 
 private:
+    // Protocol defaults until the server says otherwise.
+    int m_maxBodyBytes = static_cast<int>(bsfchat::limits::kMaxMessageBodyBytes);
+    int m_maxFormattedBytes = static_cast<int>(bsfchat::limits::kMaxFormattedBodyBytes);
+    qint64 m_maxUploadBytes = bsfchat::client::share::kDefaultMaxUploadBytes;
+
     QNetworkReply* makeRequest(const QString& method, const QString& path,
                                 const QByteArray& body = {});
     QUrl buildUrl(const QString& path) const;
@@ -807,6 +840,17 @@ private:
                                const QStringList& mentionedUserIds);
     // PUT one m.room.message under a fresh transaction id (shared generator,
     // msgcontent::nextTxnId) and report it on both signal pairs. Returns the id.
+    // One event PUT with a transaction id. `onAccepted` gets the event id;
+    // `onFailed` gets a sentence a person can read.
+    void putRoomEvent(const QString& roomId, const QString& eventType,
+                      const nlohmann::json& content, const QString& txnId,
+                      std::function<void(const QString& eventId)> onAccepted,
+                      std::function<void(const QString& reason)> onFailed);
+    // A long text message, uploaded as message.txt and sent as an m.file.
+    void sendTextAsFile(const QString& roomId, const nlohmann::json& content,
+                        const QString& txnId,
+                        std::function<void(const QString& eventId)> onAccepted,
+                        std::function<void(const QString& reason)> onFailed);
     QString putRoomMessage(const QString& roomId, const nlohmann::json& content,
                            QStringView txnPrefix);
 

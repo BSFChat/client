@@ -79,6 +79,8 @@ Item {
     property int deliveryState: 0
     // Transaction id of a row this client sent; the handle for Retry/Discard.
     property string localId: ""
+    // Why a failed send was refused; shown beside "Not sent".
+    property string failureReason: ""
     signal retryRequested(string localId)
     signal discardRequested(string localId)
     // Edit is offered only on prose this client sent and the server has.
@@ -2158,13 +2160,19 @@ Item {
         spacing: Theme.sp.s3
         z: 2
         Text {
-            text: qsTr("Not sent")
+            text: bubble.failureReason !== ""
+                ? qsTr("Not sent: %1").arg(bubble.failureReason)
+                : qsTr("Not sent")
             // Already the last clause of the bubble's sentence.
             Accessible.ignored: true
             color: Theme.danger
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.xs
             anchors.verticalCenter: parent.verticalCenter
+            // A long reason must not push Retry and Discard off the bubble.
+            width: Math.min(implicitWidth, bubble.width * 0.6)
+            elide: Text.ElideRight
+            maximumLineCount: 1
         }
         Repeater {
             model: bubble.localId !== "" ? [

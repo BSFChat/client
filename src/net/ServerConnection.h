@@ -91,19 +91,12 @@ class ServerConnection : public QObject {
     // cache will actually fetch.
     Q_PROPERTY(bool linkPreviewsEnabled READ linkPreviewsEnabled NOTIFY linkPreviewsEnabledChanged)
     Q_PROPERTY(QString userId READ userId NOTIFY userIdChanged)
-    // The composer's character... BYTE budget. See messageByteLength() below
-    // for why the composer has to count in bytes, and Constants.h for why the
-    // server does.
-    //
-    // CONSTANT, and the protocol default rather than anything the server told
-    // us: there is no endpoint that publishes an operator's configured
-    // `[limits] max_message_bytes`, so this is the figure the stock server
-    // enforces. On a deployment that has lowered it, the composer lets a
-    // message through that the server then refuses with 413 M_TOO_LARGE —
-    // which is the pre-existing behaviour for every message, so the cap is
-    // strictly an improvement rather than a new failure mode. It must never be
-    // set HIGHER than the protocol default for the same reason.
-    Q_PROPERTY(int maxMessageBytes READ maxMessageBytes CONSTANT)
+    // The composer's BYTE budget for a message body. See messageByteLength()
+    // below for why the composer counts bytes, and Constants.h for why the
+    // server does. Starts at the protocol default and follows what the server
+    // publishes in /versions (bsfchat.limits), so an operator who has changed
+    // `[limits] max_message_bytes` gets the composer's warning at their number.
+    Q_PROPERTY(int maxMessageBytes READ maxMessageBytes NOTIFY maxMessageBytesChanged)
     // The largest attachment this server takes: its m.upload.size from
     // GET /_matrix/media/v3/config when it serves one, else
     // share::kDefaultMaxUploadBytes (the server's own default). Double, not
@@ -298,9 +291,7 @@ public:
     QString serverAvatarUrl() const { return m_serverAvatarUrl; }
     QString userId() const { return m_userId; }
 
-    int maxMessageBytes() const {
-        return static_cast<int>(bsfchat::limits::kMaxMessageBodyBytes);
-    }
+    int maxMessageBytes() const;
     double maxUploadBytes() const { return double(m_maxUploadBytes); }
     int pinnedGeneration() const { return m_pinnedGeneration; }
 
@@ -1219,6 +1210,7 @@ signals:
     void mediaUploadProgressed(const QString& uploadId, const QString& filename,
                                double progress);
     void maxUploadBytesChanged();
+    void maxMessageBytesChanged();
     void maxScreenShareQualityChanged();
     void maxScreenSharePolicyChanged();
     void userIdChanged();

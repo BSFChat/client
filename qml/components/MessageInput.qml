@@ -14,7 +14,7 @@ import "../data/EmojiData.js" as EmojiData
 Rectangle {
     id: inputRoot
     color: Theme.bg1
-    border.color: inputRoot.overLimit
+    border.color: inputRoot.blockedSend
         ? Theme.danger
         : (inputArea.activeFocus ? Theme.accent : Theme.line)
     border.width: 1
@@ -67,6 +67,34 @@ Rectangle {
     }
     readonly property bool overLimit:
         inputRoot.maxBodyBytes > 0 && inputRoot.bodyBytes > inputRoot.maxBodyBytes
+    // The largest file the server takes. Text longer than a message but within
+    // this is sent as message.txt rather than refused (see MatrixClient::planSend),
+    // so only text beyond it is blocked here.
+    readonly property real maxUploadBytes: serverManager.activeServer
+        ? serverManager.activeServer.maxUploadBytes : 0
+    readonly property bool tooLargeToSend:
+        inputRoot.maxUploadBytes > 0 && inputRoot.bodyBytes > inputRoot.maxUploadBytes
+    // An edit cannot become a file (the edited message is the original event),
+    // so an edit over the message limit is blocked, not sent as a file.
+    readonly property bool editOverLimit:
+        inputRoot.overLimit && inputRoot.editingEventId !== ""
+    // What the composer refuses to send. The banner says why, in each case.
+    readonly property bool blockedSend:
+        inputRoot.tooLargeToSend || inputRoot.editOverLimit
+    // Long enough to be a file, and not blocked: the banner says it will go as one.
+    readonly property bool willSendAsFile:
+        inputRoot.overLimit && !inputRoot.blockedSend
+    // Exact bytes with thousands separators, as the client's send path words
+    // them: a rounded "16 KB" hides how far over the limit a message is.
+    function _bytesText(n) {
+        return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",") + " bytes";
+    }
+    readonly property string blockReason: inputRoot.tooLargeToSend
+        ? qsTr("%1 is over the %2 file limit. Shorten it.")
+            .arg(inputRoot._bytesText(inputRoot.bodyBytes))
+            .arg(inputRoot._bytesText(inputRoot.maxUploadBytes))
+        : qsTr("edits can't be sent as a file. Shorten it to %1.")
+            .arg(inputRoot._bytesText(inputRoot.maxBodyBytes))
     // The counter appears only in the last tenth of the budget. Shown always,
     // it is noise on every message anyone actually sends; shown only once the
     // limit is already breached, the user has no warning that they are getting
@@ -771,10 +799,10 @@ Rectangle {
         visible: inputRoot.overLimit
 
         Accessible.role: Accessible.AlertMessage
-        Accessible.name: qsTr("Message is too long")
-        Accessible.description: qsTr("%1 bytes over the %2-byte limit. Shorten it, or attach it as a file.")
-            .arg(inputRoot.bodyBytes - inputRoot.maxBodyBytes)
-            .arg(inputRoot.maxBodyBytes)
+        Accessible.name: inputRoot.blockedSend
+            ? qsTr("Message cannot be sent")
+            : qsTr("Message will be sent as a file")
+        Accessible.description: inputRoot.blockReason
 
         RowLayout {
             anchors.fill: parent
@@ -787,23 +815,23 @@ Rectangle {
             // raise an alarm. Colour and wording carry this one.
             Text {
                 Accessible.ignored: true
-                text: "Message is too long"
-                color: Theme.danger
+                text: inputRoot.blockedSend
+                    ? qsTr("Message cannot be sent")
+                    : qsTr("Sent as a file")
+                color: inputRoot.blockedSend ? Theme.danger : Theme.fg1
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
                 font.weight: Theme.fontWeight.semibold
             }
             Text {
                 Accessible.ignored: true
-                // The numbers, because "too long" on its own gives the user no
-                // idea whether to delete a word or a page. Bytes rather than
-                // characters is what the server counts, and saying so is more
-                // honest than quoting a character figure that is wrong for
-                // anything outside ASCII.
+                // The reason, with the numbers: "too long" alone does not say
+                // whether to cut a word or a page. Sizes are what the server
+                // counts, in bytes.
                 textFormat: Text.PlainText
-                text: "— " + (inputRoot.bodyBytes - inputRoot.maxBodyBytes)
-                      + " bytes over the " + inputRoot.maxBodyBytes
-                      + "-byte limit. Shorten it, or attach it as a file."
+                text: inputRoot.willSendAsFile
+                    ? qsTr("— it is longer than a message can be, so it will go as message.txt.")
+                    : "— " + inputRoot.blockReason
                 color: Theme.fg2
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontSize.sm
@@ -1215,10 +1243,12 @@ Rectangle {
         // which is the difference between "shorten this" and "start again".
         Text {
             Layout.alignment: Qt.AlignVCenter
-            visible: inputRoot.nearLimit
+            // A countdown only while there is still room. Past the limit the
+            // banner says what happens, and a negative count would not.
+            visible: inputRoot.nearLimit && !inputRoot.overLimit
             textFormat: Text.PlainText
             text: (inputRoot.maxBodyBytes - inputRoot.bodyBytes).toString()
-            color: inputRoot.overLimit ? Theme.danger : Theme.fg3
+            color: Theme.fg3
             font.family: Theme.fontSans
             font.pixelSize: Theme.fontSize.xs
             // Bare digits next to a composer read as a countdown; a screen
@@ -1251,11 +1281,11 @@ Rectangle {
             // "nothing to send yet" in front of a composer full of text is
             // actively misleading.
             Accessible.description: sendBtn.armed
-                ? qsTr("Send the typed message")
-                : (inputRoot.overLimit
-                   ? qsTr("Message is %1 bytes over the %2-byte limit and cannot be sent")
-                     .arg(inputRoot.bodyBytes - inputRoot.maxBodyBytes)
-                     .arg(inputRoot.maxBodyBytes)
+                ? (inputRoot.willSendAsFile
+                   ? qsTr("Send the typed message, as a file")
+                   : qsTr("Send the typed message"))
+                : (inputRoot.blockedSend
+                   ? qsTr("Message cannot be sent: %1").arg(inputRoot.blockReason)
                    : qsTr("Nothing to send yet"))
             Accessible.onPressAction: if (sendBtn.armed) sendCurrentMessage()
             // `armed` must include preeditText so Android IMEs (which
@@ -1266,7 +1296,7 @@ Rectangle {
                 (inputArea.text.trim().length > 0
                  || inputArea.preeditText.length > 0)
                 && !inputRoot.uploading
-                && !inputRoot.overLimit
+                && !inputRoot.blockedSend
             color: sendMouse.containsMouse && armed
                 ? Theme.accentDim : Theme.accent
             Behavior on color { ColorAnimation { duration: Theme.motion.fastMs } }
@@ -1985,7 +2015,7 @@ Rectangle {
         // Slash commands are below this line on purpose. "/me <a novel>"
         // becomes an m.emote with the same oversize body and the server
         // refuses it identically.
-        if (inputRoot.overLimit) return;
+        if (inputRoot.blockedSend) return;
 
         // sed-style correction: `s/teh/the/[gi]` edits your last message in
         // this channel instead of posting (util/SedEdit.h has the rules). Only

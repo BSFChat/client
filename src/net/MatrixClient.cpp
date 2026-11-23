@@ -7,6 +7,9 @@
 #include "net/ReplyFields.h"
 #include "net/ReportRequest.h"
 #include "net/RequestTimeout.h"
+#include "net/MatrixFailure.h"
+#include "net/MessageSizeLimit.h"
+#include "core/SharePolicy.h"
 #include "util/MediaUrl.h"
 
 #include <QDateTime>
@@ -15,6 +18,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkRequest>
+#include <QTimer>
 #include <QUrlQuery>
 #include <QUuid>
 
@@ -563,39 +567,181 @@ void MatrixClient::getJoinedRooms(const QString& requestId)
     });
 }
 
+// Human text for a failed media request. The raw body is JSON, and a rate
+// limit's wait is in a field nobody reads, so both are decoded here.
+static QString mediaFailureText(const QNetworkReply* reply, const QByteArray& data)
+{
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const auto failure = bsfchat::net::parseMatrixFailure(status, data, {}, reply->errorString());
+    if (failure.isRateLimited() && failure.retrySeconds() > 0) {
+        return failure.message + QStringLiteral(" Try again in %1 s.").arg(failure.retrySeconds());
+    }
+    return failure.message;
+}
+
 // The one PUT every m.room.message send goes through. Reports the outcome
 // twice: anonymously (messageSent/sendMessageError, for the toast) and against
 // the transaction id (messageSendAccepted/messageSendFailed, for the local
 // echo). Every path now gets both — replies, /me, thread replies and edits used
 // to have neither id nor echo, so a failed send simply lost the text.
+//
+// A message too long for a message is not refused. It is sent as a text file
+// (see planSend), so a long paste still arrives, with its relations and
+// mentions. Only what cannot be sent at all is refused, and it is refused with
+// the reason in the failed row rather than dropped.
 QString MatrixClient::putRoomMessage(const QString& roomId, const json& content,
                                      QStringView txnPrefix)
 {
     const QString txnId = bsfchat::client::msgcontent::nextTxnId(txnPrefix);
+    const auto decision = bsfchat::net::msglimit::planSend(
+        content, m_maxBodyBytes, m_maxFormattedBytes, m_maxUploadBytes);
+
+    const auto reportBoth = [this, txnId](const QString& why) {
+        emit sendMessageError(why);
+        emit messageSendFailed(txnId, why);
+    };
+    const auto reportAccepted = [this, txnId](const QString& eventId) {
+        emit messageSent(eventId);
+        emit messageSendAccepted(txnId, eventId);
+    };
+
+    switch (decision.plan) {
+    case bsfchat::net::msglimit::SendPlan::Refuse:
+        // Deferred to the next event-loop turn: the caller appends the local
+        // echo only after this returns, and a synchronous failure would reach
+        // the model before the row exists.
+        QTimer::singleShot(0, this, [reportBoth, why = decision.reason]() { reportBoth(why); });
+        return txnId;
+
+    case bsfchat::net::msglimit::SendPlan::AsFile:
+        sendTextAsFile(roomId, content, txnId, reportAccepted, reportBoth);
+        return txnId;
+
+    case bsfchat::net::msglimit::SendPlan::InlineWithoutFormatting: {
+        json plain = content;
+        plain.erase("format");
+        plain.erase("formatted_body");
+        putRoomEvent(roomId, QStringLiteral("m.room.message"), plain, txnId, reportAccepted,
+                     reportBoth);
+        return txnId;
+    }
+
+    case bsfchat::net::msglimit::SendPlan::Inline:
+        break;
+    }
+
+    putRoomEvent(roomId, QStringLiteral("m.room.message"), content, txnId, reportAccepted,
+                 reportBoth);
+    return txnId;
+}
+
+// PUT one event with a transaction id, reporting the outcome to the caller.
+// The only path a timeline event takes to the server, so the callbacks are the
+// one place a send's result is known.
+void MatrixClient::putRoomEvent(const QString& roomId, const QString& eventType,
+                                const json& content, const QString& txnId,
+                                std::function<void(const QString& eventId)> onAccepted,
+                                std::function<void(const QString& reason)> onFailed)
+{
     const QString path = QString::fromUtf8(bsfchat::api_path::kRoomPrefix)
                          + QUrl::toPercentEncoding(roomId)
-                         + "/send/m.room.message/" + txnId;
+                         + "/send/" + eventType + "/" + txnId;
     auto* reply = makeRequest("PUT", path, QByteArray::fromStdString(content.dump()));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, txnId]() {
+    connect(reply, &QNetworkReply::finished, this,
+            [reply, onAccepted = std::move(onAccepted), onFailed = std::move(onFailed)]() {
         reply->deleteLater();
         auto data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            const QString why = bsfchat::net::replyFailureText(reply, data);
-            emit sendMessageError(why);
-            emit messageSendFailed(txnId, why);
+            onFailed(mediaFailureText(reply, data));
             return;
         }
         try {
             auto j = json::parse(data.toStdString());
-            const QString eventId = QString::fromStdString(j.value("event_id", ""));
-            emit messageSent(eventId);
-            emit messageSendAccepted(txnId, eventId);
+            onAccepted(QString::fromStdString(j.value("event_id", "")));
         } catch (const std::exception& e) {
-            emit sendMessageError(QString::fromStdString(e.what()));
-            emit messageSendFailed(txnId, QString::fromStdString(e.what()));
+            onFailed(QString::fromStdString(e.what()));
         }
     });
-    return txnId;
+}
+
+// Upload `text` as a plain-text file and send it as an m.file in the same
+// conversation. The event keeps the message's relations (reply, thread) and
+// its m.mentions, so the message still lands where it was meant to and still
+// pings the people it names. Any failure reaches onFailed, which the caller
+// turns into a "Not sent" row with the reason on it.
+void MatrixClient::sendTextAsFile(const QString& roomId, const json& content, const QString& txnId,
+                                  std::function<void(const QString& eventId)> onAccepted,
+                                  std::function<void(const QString& reason)> onFailed)
+{
+    const std::string text = content.value("body", std::string());
+    const QByteArray bytes = QByteArray::fromStdString(text);
+    const QString filename = QStringLiteral("message.txt");
+
+    // Plain-text upload. Its own request rather than uploadMedia: that path
+    // reports through uploadId signals shared with attachments, and this one
+    // must answer exactly one caller, which it can only do with callbacks.
+    QUrl url = buildUrl(QString::fromUtf8(bsfchat::api_path::kMediaUpload));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("filename"), filename);
+    url.setQuery(query);
+    QNetworkRequest request(url);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("text/plain; charset=utf-8"));
+    if (!m_accessToken.isEmpty())
+        request.setRawHeader("Authorization", ("Bearer " + m_accessToken).toUtf8());
+    request.setTransferTimeout(bsfchat::net::kMediaTransferTimeoutMs);
+
+    auto* reply = m_nam.post(request, bytes);
+    watchForTokenRejection(reply);
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, bytes, roomId, content, txnId, filename,
+             onAccepted = std::move(onAccepted), onFailed = std::move(onFailed)]() {
+        reply->deleteLater();
+        const auto data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            onFailed(QStringLiteral("Couldn't send the long message as a file: ")
+                     + mediaFailureText(reply, data));
+            return;
+        }
+        const auto j = json::parse(data.toStdString(), nullptr, false);
+        const QString contentUri = j.is_object()
+            ? QString::fromStdString(j.value("content_uri", std::string()))
+            : QString();
+        if (contentUri.isEmpty()) {
+            onFailed(QStringLiteral("Couldn't send the long message as a file: the server did not "
+                                    "return a file address."));
+            return;
+        }
+
+        json file = {
+            {"msgtype", "m.file"},
+            {"body", filename.toStdString()},
+            {"filename", filename.toStdString()},
+            {"url", contentUri.toStdString()},
+            {"info", {{"mimetype", "text/plain"}, {"size", bytes.size()}}},
+            {"bsfchat.long_message", true},
+        };
+        // Carry the message's own context over to the file event.
+        for (const char* key : {"m.relates_to", "m.mentions"}) {
+            if (content.contains(key)) file[key] = content[key];
+        }
+        putRoomEvent(roomId, QStringLiteral("m.room.message"), file, txnId, onAccepted,
+                     [onFailed](const QString& why) {
+                         onFailed(QStringLiteral("Couldn't send the long message: ") + why);
+                     });
+    });
+}
+
+// Send an event the caller tracks itself (media messages). Each outcome is
+// reported exactly once, through the callbacks, and nothing is emitted for the
+// local echo.
+void MatrixClient::sendRoomEventChecked(const QString& roomId, const QString& eventType,
+                                        const json& content,
+                                        std::function<void(const QString& eventId)> onAccepted,
+                                        std::function<void(const QString& reason)> onFailed)
+{
+    putRoomEvent(roomId, eventType, content,
+                 bsfchat::client::msgcontent::nextTxnId(u"ev"),
+                 std::move(onAccepted), std::move(onFailed));
 }
 
 QString MatrixClient::sendMessage(const QString& roomId, const QString& body)
@@ -799,7 +945,7 @@ void MatrixClient::startMediaUpload(const QString& uploadId, QIODevice* device,
             return;
         }
         if (reply->error() != QNetworkReply::NoError) {
-            emit mediaUploadError(uploadId, bsfchat::net::replyFailureText(reply, data));
+            emit mediaUploadError(uploadId, mediaFailureText(reply, data));
             return;
         }
         try {
@@ -844,8 +990,41 @@ void MatrixClient::getMediaConfig()
                 bytes = std::max<qint64>(0, j["m.upload.size"].get<qint64>());
             }
         }
+        // The limit a long message is checked against before it is uploaded
+        // as a file. Unknown keeps the default, as the attachment path does.
+        m_maxUploadBytes = bytes > 0 ? bytes : bsfchat::client::share::kDefaultMaxUploadBytes;
         emit mediaConfigResult(bytes);
     });
+}
+
+void MatrixClient::getServerLimits()
+{
+    // Unauthenticated, like the discovery probe: the limits are the same for
+    // everyone and the composer needs them before anything else is asked.
+    auto* reply = makeRequest("GET", QStringLiteral("/_matrix/client/versions"));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const auto data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) return;
+        const auto j = json::parse(data.toStdString(), nullptr, false);
+        if (!j.is_object() || !j.contains("bsfchat.limits")) return;
+        const auto& lim = j["bsfchat.limits"];
+
+        // Each value falls back to the protocol default when the server does
+        // not give a usable one, so an older server changes nothing.
+        const int body = bsfchat::net::msglimit::readLimit(lim, "max_message_bytes", m_maxBodyBytes);
+        const int formatted = bsfchat::net::msglimit::readLimit(
+            lim, "max_formatted_body_bytes", m_maxFormattedBytes);
+        if (body == m_maxBodyBytes && formatted == m_maxFormattedBytes) return;
+        m_maxBodyBytes = body;
+        m_maxFormattedBytes = formatted;
+        emit serverLimitsChanged();
+    });
+}
+
+QString MatrixClient::messageSizeProblem(const json& content) const
+{
+    return bsfchat::net::msglimit::messageSizeProblem(content, m_maxBodyBytes, m_maxFormattedBytes);
 }
 
 QString MatrixClient::mediaDownloadUrl(const QString& mxcUri) const

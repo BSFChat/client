@@ -89,6 +89,7 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const
     case DeliveryStateRole: return static_cast<int>(msg.delivery);
     case PlainBodyRole: return rendersAsPlainText(msg.body, msg.formattedBody, msg.msgtype);
     case LocalIdRole: return msg.localId;
+    case FailureReasonRole: return msg.failureReason;
     case BodyRole: return msg.body;
     // Spoilers hidden: Qt's rich text would show a data-mx-spoiler span
     // openly. RevealedBodyRole is the form shown once the user clicks one.
@@ -164,6 +165,7 @@ QHash<int, QByteArray> MessageModel::roleNames() const
         {DeliveryStateRole, "deliveryState"},
         {PlainBodyRole, "plainBody"},
         {LocalIdRole, "localId"},
+        {FailureReasonRole, "failureReason"},
         {RevealedBodyRole, "revealedBody"}
     };
 }
@@ -617,14 +619,15 @@ void MessageModel::confirmLocalEcho(const QString& localId, const QString& event
     adoptEventId(row, eventId);
 }
 
-void MessageModel::failLocalEcho(const QString& localId)
+void MessageModel::failLocalEcho(const QString& localId, const QString& reason)
 {
     const int row = indexOfLocalEcho(localId);
     if (row < 0) return;
     if (!m_messages[row].eventId.isEmpty()) return; // it landed after all
     m_messages[row].delivery = DeliveryFailed;
+    m_messages[row].failureReason = reason;
     auto idx = index(row);
-    emit dataChanged(idx, idx, {DeliveryStateRole});
+    emit dataChanged(idx, idx, {DeliveryStateRole, FailureReasonRole});
 }
 
 void MessageModel::discardLocalEcho(const QString& localId)

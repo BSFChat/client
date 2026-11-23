@@ -1834,6 +1834,7 @@ Rectangle {
                         reactions: model.reactions || []
                         deliveryState: model.deliveryState || 0
                         localId: model.localId || ""
+                        failureReason: model.failureReason || ""
                         onRetryRequested: (lid) => {
                             if (serverManager.activeServer)
                                 serverManager.activeServer.retryLocalEcho(lid);

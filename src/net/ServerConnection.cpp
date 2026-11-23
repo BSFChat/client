@@ -198,8 +198,10 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     // toast and an empty composer — the text was gone and the user could not
     // see WHICH message had not made it.
     connect(m_client, &MatrixClient::messageSendFailed, this,
-        [this](const QString& localId, const QString&) {
-            m_messageModel->failLocalEcho(localId);
+        [this](const QString& localId, const QString& error) {
+            // The reason rides on the row, so "Not sent" says why rather than
+            // leaving the person to guess from a toast that has already gone.
+            m_messageModel->failLocalEcho(localId, error);
             m_pendingForwards.remove(localId);
             // An edit's echo is the target row itself: put it back, and hand
             // the text to the composer so it is not lost.
@@ -213,6 +215,8 @@ ServerConnection::ServerConnection(const QString& serverUrl, QObject* parent)
     connect(m_client, &MatrixClient::mediaUploadProgressById,
             this, &ServerConnection::mediaUploadProgressed);
     // The server's real upload ceiling when it says; otherwise its default.
+    connect(m_client, &MatrixClient::serverLimitsChanged,
+            this, &ServerConnection::maxMessageBytesChanged);
     connect(m_client, &MatrixClient::mediaConfigResult, this, [this](qint64 bytes) {
         const qint64 next = bytes > 0 ? bytes : bsfchat::client::share::kDefaultMaxUploadBytes;
         if (next == m_maxUploadBytes) return;
@@ -1794,9 +1798,15 @@ void ServerConnection::disconnectFromServer()
     emit connectionStatusChanged();
 }
 
+int ServerConnection::maxMessageBytes() const
+{
+    return m_client->maxMessageBodyBytes();
+}
+
 void ServerConnection::startSync()
 {
     m_client->getMediaConfig();
+    m_client->getServerLimits();
     // A new session: no earlier /joined_rooms answer may act on it.
     resetRoomReconcile();
     // Resume where the last session left off when we can. An initial /sync
@@ -2595,9 +2605,14 @@ QString ServerConnection::sendMediaMessage(const QString& fileUrl, const QString
                 {"size", fileSize}
             };
 
-            QByteArray body = QByteArray::fromStdString(content.dump());
-            m_client->sendRoomEvent(roomId, "m.room.message", body);
-            emit mediaSendCompleted();
+            // Completed only when the server has the event. The composer's
+            // in-flight count hangs on exactly one of mediaSendCompleted or
+            // mediaSendFailed, so a refused event must come back as the failure;
+            // a silent refusal used to leave the attachment looking sent.
+            m_client->sendRoomEventChecked(
+                roomId, QStringLiteral("m.room.message"), content,
+                [this](const QString&) { emit mediaSendCompleted(); },
+                [this](const QString& why) { emitMediaSendFailed(why); });
         },
         [this](const QString& error) {
             emitMediaSendFailed(error);
