@@ -1741,3 +1741,15 @@ qt_add_executable(test_push_registrar
 target_include_directories(test_push_registrar PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_push_registrar PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME test_push_registrar COMMAND test_push_registrar)
+
+# The composer's size check against the ceilings the server publishes
+# (bsfchat.limits in /versions). Header-only logic, no GUI or network.
+qt_add_executable(test_message_size_limits
+    test_message_size_limits.cpp
+)
+target_include_directories(test_message_size_limits PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_message_size_limits PRIVATE
+    bsfchat_protocol
+    Qt6::Core Qt6::Test
+)
+add_test(NAME test_message_size_limits COMMAND test_message_size_limits)

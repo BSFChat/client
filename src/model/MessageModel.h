@@ -91,6 +91,9 @@ public:
         // The transaction id of a row this client sent (empty for anything
         // from /sync) — the handle Retry and Discard on a "Not sent" row use.
         LocalIdRole,
+        // Why a "Not sent" row was refused, in words a person can act on
+        // (empty for every row that is not failed). Shown beside "Not sent".
+        FailureReasonRole,
         // formattedBody with its spoilers shown (tinted) rather than hidden
         // behind a click-to-reveal block, which is what FormattedBodyRole
         // gives. See util/HtmlSanitizer.h hideSpoilers.
@@ -393,7 +396,7 @@ public:
     void confirmLocalEcho(const QString& localId, const QString& eventId);
     // The send failed. The row stays, marked Failed, so the text is not lost
     // and the user can see WHICH message did not go.
-    void failLocalEcho(const QString& localId);
+    void failLocalEcho(const QString& localId, const QString& reason = {});
     // Drop a failed echo (the user retried or dismissed it).
     Q_INVOKABLE void discardLocalEcho(const QString& localId);
     // Body of a pending/failed echo, for a retry that re-sends the text.
@@ -618,6 +621,9 @@ private:
         // where /sync beats the PUT reply, by sender+body).
         QString localId;
         DeliveryState delivery = DeliveryConfirmed;
+        // Set with delivery == DeliveryFailed: what the server or the composer
+        // said. Empty otherwise.
+        QString failureReason;
         // origin_server_ts, or 0 while the server has not named this row.
         //
         // A SECOND timestamp because `timestamp` cannot answer this
