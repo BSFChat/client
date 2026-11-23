@@ -19,10 +19,12 @@ namespace platform {
 #ifdef Q_OS_IOS
 // Implemented in src/core/MobileKeyboardIos.mm. Returns how far the iOS
 // platform plugin has translated the Qt scene up, in Qt logical pixels
-// (0 when it has not).
-int iosPlatformScrollOffset();
+// (0 when it has not). `window` is the Qt window whose view the plugin
+// scrolls; reading any other window's root view reports a scroll that is not
+// happening, which doubles the shell's own push.
+int iosPlatformScrollOffset(const QWindow* window);
 #else
-inline int iosPlatformScrollOffset() { return 0; }
+inline int iosPlatformScrollOffset(const QWindow*) { return 0; }
 #endif
 
 // Only iOS needs the window shrunk by hand. Android's
@@ -344,7 +346,7 @@ void MobileKeyboard::settle(const QVariantMap& state)
     // Sampled fresh, not taken from the cached property: the question
     // this line has to answer is whether asking the platform to recompute
     // changed anything, and a stale "before" cannot answer it.
-    const int before = bsfchat::platform::iosPlatformScrollOffset();
+    const int before = bsfchat::platform::iosPlatformScrollOffset(m_window);
 
     // Qt::ImCursorRectangle is the bit QIOSInputContext::update() tests
     // before re-running scrollToCursor(). Everything else in the query
@@ -360,7 +362,7 @@ void MobileKeyboard::settle(const QVariantMap& state)
     // our own request produced. See onCursorRectangleChanged().
     rememberCursorRect();
 
-    const int after = bsfchat::platform::iosPlatformScrollOffset();
+    const int after = bsfchat::platform::iosPlatformScrollOffset(m_window);
     const bool wasAssumed = m_assumedScroll;
     m_assumedScroll = false;
     setPlatformScroll(after);
